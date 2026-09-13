@@ -42,6 +42,55 @@
 //!     (src/node/eviction.cpp:26, used at :188).
 //!   - Heilman et al. 2015, "Eclipse Attacks on Bitcoin's Peer-to-Peer
 //!     Network" — motivational paper for the eviction defense.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `netgroup`** — INVARIANT: keys IPv4 by /16 and IPv6 by /32, and the
+//!   IPv4/IPv6 keyspaces are tagged so they can never collide.
+//!   THREAT: a mis-keyed netgroup would let an attacker's addresses spread
+//!   across "different" groups and evade concentration-based eviction.
+//!   TESTS: `ipv6_netgroup_is_32`.
+//! - **§2 `select_inbound_to_evict` candidate filtering** — INVARIANT: only
+//!   inbound peers older than `MIN_AGE_BEFORE_EVICT` are ever eviction
+//!   candidates; outbound (self-chosen) connections are never touched.
+//!   THREAT: evicting an outbound peer or a still-handshaking inbound peer
+//!   would waste both sides' connection setup work and could be steered by
+//!   an attacker.
+//!   TESTS: `no_candidates_returns_none`, `skips_outbound_peers`,
+//!   `skips_young_peers`.
+//! - **§3 Per-axis protection (age / activity / reputation)** — INVARIANT:
+//!   protection is purely RELATIVE (top-`PROTECT_PER_AXIS` per axis), never
+//!   an absolute reputation floor.
+//!   THREAT: audit M-1 — the former absolute `reputation < 80` floor exempted
+//!   every peer at the default reputation (100), so an all-quiet inbound
+//!   flood produced an empty candidate set and every new honest inbound was
+//!   rejected — the exact eclipse this module exists to prevent.
+//!   TESTS: `all_high_reputation_flood_still_yields_eviction_candidate`.
+//! - **§4 Relay-score protection axis** — INVARIANT: up to
+//!   `PROTECT_PER_AXIS` peers with `relay_scores.score(id) > 0` are
+//!   protected, but this axis can never prevent eviction from a
+//!   netgroup-concentrated flood, even if every flooder has earned score.
+//!   THREAT: an eclipse attacker "buying" eviction-immunity by having every
+//!   flood peer relay a few real blocks.
+//!   TESTS: `relay_scored_flood_is_still_evicted_eclipse_safe`,
+//!   `relay_score_protects_a_good_relayer_when_its_group_is_not_flooded`.
+//! - **§5 Netgroup-concentration selection** — INVARIANT: among the
+//!   unprotected remaining candidates, the netgroup with the most members is
+//!   selected as the eviction target.
+//!   THREAT: without concentration-based grouping, an eclipse attacker
+//!   filling all slots from one /16 would have its members evicted no more
+//!   often than diverse, legitimate peers.
+//!   TESTS: `netgroup_concentration_picks_largest`.
+//! - **§6 Within-group evictee tie-break**  — INVARIANT: within the targeted
+//!   netgroup, the YOUNGEST (largest `connected_at`) peer is evicted first;
+//!   ties break toward lower reputation, then toward keeping the encrypted
+//!   peer (plaintext evicted first).
+//!   THREAT: a LIFO-within-group policy makes churn attacks costly (the
+//!   attacker's newest connections die first, not its oldest); preferring to
+//!   keep encrypted peers biases eviction against low-cost plaintext bots.
+//!   TESTS: `within_attacker_group_picks_youngest`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;

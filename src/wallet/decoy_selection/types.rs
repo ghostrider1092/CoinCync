@@ -1,3 +1,39 @@
+//! Snapshot-bound decoy-selection types whose constructors enforce the ring
+//! invariants required by the next stage.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `SnapshotId`** — INVARIANT: snapshot identity (height, hash, policy
+//!   version) is shared by snapshot, request and response, so all three refer to
+//!   the same chain state. THREAT: mixing metadata from different snapshots.
+//!   TESTS: `covered_request_binds_snapshot_and_policy`,
+//!   `covered_response_rejects_snapshot_order_and_height_mismatches`.
+//! - **§2 `ValidatedDecoySnapshot::eligible_*`** — INVARIANT: eligible height and
+//!   output counts include only heights `<= spend_height - min_age`, via prefix
+//!   cumulative counts. THREAT: an off-by-one admits too-young outputs.
+//!   TESTS: `minimum_age_is_measured_at_the_next_spend_height`,
+//!   `gamma_sampling_is_conditioned_and_unique`.
+//! - **§3 `contains_locator`** — INVARIANT: a locator is in-snapshot only if its
+//!   height exists and its ordinal is below that height's count.
+//!   THREAT: accepting a real locator outside the snapshot.
+//!   TESTS: `covered_request_rejects_a_real_locator_outside_the_snapshot`.
+//! - **§4 `RingPolicy::try_new`** — INVARIANT: ring size must be at least 2, and
+//!   the policy captures ring size and `min_output_age` together.
+//!   THREAT: a degenerate ring size (0 or 1) provides no privacy.
+//!   TESTS: `covered_request_binds_snapshot_and_policy`.
+//! - **§5 `CoveredRequest`** — INVARIANT: constructible only by the sampling
+//!   module; it guarantees a `COVERED_LOOKUP_SIZE` set of unique locators that
+//!   contains every real locator. THREAT: pairing arbitrary locators with an
+//!   unrelated snapshot or policy. TESTS: `covered_request_binds_snapshot_and_policy`,
+//!   `covered_lookup_allocates_transaction_wide_unique_decoys`.
+//! - **§6 `AllocatedRing` / `AllocatedRings`** — INVARIANT: rings are
+//!   constructible only by the allocator, fixing a uniform ring size and the
+//!   real member's secret position. THREAT: hand-built rings bypassing the decoy
+//!   invariants. TESTS: `allocation_places_real_member_at_the_secret_index_in_every_ring`,
+//!   `allocation_uses_no_repeated_decoy_public_key_across_rings`.
+
 use super::error::{DecoySelectionError, DecoySelectionResult};
 use crate::decoy::{
     DecoyDistributionSnapshot, HeightOutputCount, OutputLocator, ResolvedDecoyOutput,

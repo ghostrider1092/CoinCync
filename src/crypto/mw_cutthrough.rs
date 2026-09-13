@@ -48,6 +48,51 @@
 //!   fee_sum * H`. Per Grin, the kernel set's cumulative excess must
 //!   commit to the total fee on the value generator `H`. We use
 //!   `crate::crypto::curve::generator_h()` for H.
+//!
+//! Inert in v1.0.x (CIP-003): the cut-through engine is built and tested but not
+//! yet wired into consensus; these invariants gate its activation.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `verify_cut_through`** — INVARIANT: a cut-through pair matches only if both
+//!   commitments decompress to valid Ristretto points AND those points are equal — a
+//!   point-equality check, never a byte compare. THREAT: two distinct byte encodings of the
+//!   same point (or undecodable bytes) would falsely pass/fail a byte compare, pruning an
+//!   output that was never actually spent. TESTS: `verify_cut_through_same_bytes_pass`,
+//!   `verify_cut_through_different_points_fail`, `verify_cut_through_invalid_bytes_fail`.
+//! - **§2 `compute_kernel_excess`** — INVARIANT: excess = `(Σ r_out − Σ r_in) · G` on the base
+//!   generator, so a balanced blinding set yields identity and the excess equals the manual
+//!   sum. THREAT: a miscomputed excess would make a balanced transaction fail (or an
+//!   unbalanced one pass) kernel-set verification. TESTS: `compute_kernel_excess_zero_when_balanced`,
+//!   `compute_kernel_excess_matches_manual`.
+//! - **§3 `verify_kernel_set`** — INVARIANT: the pruned kernel set is valid only when
+//!   `Σ excess_points == (Σ fees) · H` on the value generator, every excess decompresses, and
+//!   the fee sum does not overflow. THREAT: value inflation (excess encoding more than the
+//!   declared fee) or a stray `G` blinding component would let a pruned set hide unbalanced
+//!   value. TESTS: `verify_kernel_set_rejects_value_inflation_and_stray_blinding`,
+//!   `verify_kernel_set_matching_excess_and_fee_pass`, `verify_kernel_set_zero_fee_pass`,
+//!   `verify_kernel_set_wrong_fee_fail`.
+//! - **§4 `MwKernel::excess_point`** — INVARIANT (R-31): the raw `[u8; 32]` excess is NOT
+//!   validated at deserialization; `excess_point()` is the deferred decompress check that
+//!   returns `None` on non-canonical bytes. THREAT: a kernel with non-canonical excess can
+//!   survive gossip+storage yet fail aggregation on some nodes, risking a partition.
+//!   TESTS: (gap — exercised indirectly through `verify_kernel_set`; no dedicated unit test).
+//! - **§5 `MwKernel::validate` / `ValidatedMwKernel`** — INVARIANT (R-31 surgical fix): the only
+//!   way to obtain a `ValidatedMwKernel` is `validate()`, which proves the excess decodes to a
+//!   canonical point; its `excess_point()` is then infallible. THREAT: per-caller "must call
+//!   excess_point() first" discipline is easy to forget, admitting an unvalidated kernel into a
+//!   consensus path. TESTS: (gap — newtype guard has no dedicated test; decode path covered by §3).
+//! - **§6 `CutThroughEngine::register_spend`** — INVARIANT: a candidate is enqueued only when its
+//!   spent/input commitments actually cut-through-match (`verify_cut_through`), never on a bare
+//!   commitment pair. THREAT: registering a non-matching pair would schedule pruning of an output
+//!   that was never spent. TESTS: (gap — registration guard has no dedicated test).
+//! - **§7 `CutThroughEngine::process`** — INVARIANT: a candidate is pruned only once
+//!   `current_height >= spent_at + MW_CUTTHROUGH_DEPTH`, keeping the kernel behind; others stay
+//!   pending. THREAT: pruning before the reorg-protection depth would delete an output/input pair
+//!   that a reorg could still need, corrupting the UTXO set. TESTS: (gap — depth gating has no
+//!   dedicated test).
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use curve25519_dalek::{
@@ -429,6 +474,54 @@ mod tests {
             height: 1,
         }];
         assert!(CutThroughEngine::verify_kernel_set(&kernels).is_err());
+    }
+
+    /// AUDIT (crypto M3): the kernel-balance check was tested for a fee MISMATCH
+    /// (identity excess vs nonzero fee) but not for value INFLATION — an excess
+    /// that commits to MORE value than the declared fee, or one carrying a
+    /// spurious blinding (`G`) component. `verify_kernel_set` enforces
+    /// `Σ excess == fee_sum·H`, so both must be rejected.
+    #[test]
+    fn verify_kernel_set_rejects_value_inflation_and_stray_blinding() {
+        use crate::crypto::curve::generator_h;
+        let h = generator_h();
+        let mk = |pt: RistrettoPoint, fee: u64| MwKernel {
+            excess: pt.compress().to_bytes(),
+            signature: vec![],
+            fee,
+            height: 1,
+        };
+        let fee = 7u64;
+        // Balanced baseline verifies.
+        assert!(CutThroughEngine::verify_kernel_set(&[mk(h * Scalar::from(fee), fee)]).is_ok());
+
+        // Inflation: excess encodes fee+1 units of value but declares only `fee`.
+        assert!(
+            CutThroughEngine::verify_kernel_set(&[mk(h * Scalar::from(fee + 1), fee)]).is_err(),
+            "excess encoding more value than the declared fee must be rejected (inflation)"
+        );
+
+        // Stray blinding: excess = fee·H + 3·G — a nonzero G component that does
+        // not cancel, so the excess no longer equals fee·H.
+        assert!(
+            CutThroughEngine::verify_kernel_set(&[mk(
+                h * Scalar::from(fee) + G * Scalar::from(3u64),
+                fee
+            )])
+            .is_err(),
+            "an unbalanced blinding component on the excess must be rejected"
+        );
+
+        // A balanced MULTI-kernel set still verifies (aggregate excess == Σfee·H).
+        let (f1, f2) = (3u64, 5u64);
+        assert!(
+            CutThroughEngine::verify_kernel_set(&[
+                mk(h * Scalar::from(f1), f1),
+                mk(h * Scalar::from(f2), f2),
+            ])
+            .is_ok(),
+            "a balanced multi-kernel set must verify"
+        );
     }
 
     #[test]

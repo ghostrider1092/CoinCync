@@ -39,6 +39,40 @@
 //!   shifted by the same amount, so verification re-adds it back.
 //!
 //! [cip]: ../../docs/cip/CIP-004-kernel-offsets.md
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (CIP-004, feature-gated
+//! `sketch-kernel-offsets` — not in the production audit perimeter.)
+//!
+//! - **§1 `generate_with`** — INVARIANT: `generate`/`generate_with` draw 64 CSPRNG bytes and reduce mod
+//!   the ed25519 group order, so every produced offset is a canonical scalar. THREAT: a non-canonical
+//!   or biased offset would fail decode downstream or leak signing-key structure.
+//!   TESTS: `generate_returns_canonical_scalar`.
+//! - **§2 `aggregate`** — INVARIANT: `KernelOffset::aggregate` is scalar addition mod l — commutative
+//!   and equal to the sum of the two operand scalars — returning `None` on any non-canonical operand.
+//!   THREAT: order-dependent or non-canonical aggregation would make block-level offset totals
+//!   irreproducible across nodes, splitting consensus.
+//!   TESTS: `aggregate_of_two_offsets_equals_scalar_sum`, `aggregate_is_commutative`.
+//! - **§3 `add_offset`** — INVARIANT: folding per-tx offsets onto a running `AggregateOffset` is
+//!   associative/commutative, so the block aggregate is independent of tx ordering (`ZERO` is the
+//!   identity element). THREAT: an order-sensitive fold yields a different on-chain aggregate offset
+//!   per node, breaking block validation agreement.
+//!   TESTS: `add_offset_chain_is_commutative`.
+//! - **§4 `verify_against`** — INVARIANT: Schnorr verification accepts `(R,s)` iff it was signed by
+//!   the holder of the unblinded excess given the published offset, re-adding `offset·G`; identity
+//!   excess and identity `R` are rejected (SEC 2026-09-07 defense-in-depth). THREAT: accepting an
+//!   identity point or a wrong-offset signature would let a peer forge a kernel or unblind another's
+//!   excess, defeating the unlinkability layer.
+//!   TESTS: `verify_round_trip_with_offset`, `verify_rejects_wrong_offset`.
+//! - **§5 `as_scalar`** — INVARIANT: decoding an offset/aggregate scalar uses `from_canonical_bytes`
+//!   and returns `None` on non-canonical encodings, so no operation proceeds on malleable input.
+//!   THREAT: accepting non-canonical scalar bytes enables encoding malleability of published offsets.
+//!   TESTS: `generate_returns_canonical_scalar`.
+//! - **§6 `to_point`** — INVARIANT: `AggregateOffset::to_point` maps the aggregate scalar to
+//!   `aggregate·G` for verifiers to add to the aggregate kernel excess, `None` on non-canonical bytes.
+//!   THREAT: a wrong aggregate point would make block-level excess verification reject valid blocks or
+//!   accept invalid ones. TESTS: (gap — feature-gated sketch, no direct `to_point` unit test yet).
 
 use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT as G,

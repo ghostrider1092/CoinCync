@@ -1,3 +1,32 @@
+//! Boundary validation that turns a raw node snapshot into a
+//! [`ValidatedDecoySnapshot`].
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `policy version`** — INVARIANT: a snapshot is rejected unless its
+//!   `policy_version` equals `DECOY_LOCATOR_POLICY_VERSION`. THREAT: sampling
+//!   under a stale or foreign locator policy. TESTS:
+//!   `validated_snapshot_rejects_unsupported_policy`.
+//! - **§2 `spend_height derivation`** — INVARIANT: spend height is
+//!   `snapshot_height + 1` with the increment overflow-guarded. THREAT: an
+//!   overflow or wrong spend height corrupts all age math.
+//!   TESTS: (gap — no test constructs a `u64::MAX` snapshot height).
+//! - **§3 `non-empty buckets`** — INVARIANT: every height bucket must have a
+//!   count greater than zero. THREAT: an empty bucket breaks selection and
+//!   cumulative counts. TESTS: `validated_snapshot_rejects_invalid_height_buckets`.
+//! - **§4 `strictly increasing heights`** — INVARIANT: bucket heights are
+//!   strictly increasing. THREAT: unordered buckets break binary search and the
+//!   cumulative-count index. TESTS: `validated_snapshot_rejects_invalid_height_buckets`.
+//! - **§5 `height <= snapshot`** — INVARIANT: no bucket height exceeds the
+//!   snapshot height. THREAT: future outputs enter the decoy pool.
+//!   TESTS: `validated_snapshot_rejects_invalid_height_buckets`.
+//! - **§6 `cumulative counts`** — INVARIANT: prefix output counts accumulate
+//!   without `usize` overflow (`PoolSizeOverflow` guarded). THREAT: overflow
+//!   miscounts the eligible pool. TESTS: (gap — no test builds a
+//!   usize-overflowing output pool).
+
 use super::error::{DecoySelectionError, DecoySelectionResult};
 use super::types::{SnapshotId, ValidatedDecoySnapshot};
 use crate::decoy::{DecoyDistributionSnapshot, DECOY_LOCATOR_POLICY_VERSION};

@@ -1,6 +1,66 @@
 //! # Peer Management
 //!
 //! P2P peer connection handling.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `generate_peer_id`** — INVARIANT: peer IDs are generated with a
+//!   cryptographically secure RNG (`OsRng`), never a predictable source.
+//!   THREAT: a guessable peer ID could be leveraged to impersonate or
+//!   collide with another peer's identity.
+//!   TESTS: (gap — no test asserts CSPRNG usage; `test_peer_info` only
+//!   checks the resulting `PeerInfo` fields, not ID unpredictability).
+//! - **§2 `PeerState`** — INVARIANT: a peer's state is a strict 3-stage
+//!   progression `Connecting → VersionReceived → Connected`; no other
+//!   transition is reachable in the current codebase.
+//!   THREAT: a stray transition (e.g. skipping version negotiation) would
+//!   let an unauthenticated connection be treated as fully handshaked.
+//!   TESTS: `test_peer_info`.
+//! - **§3 `PeerInfo::adjust_reputation`** — INVARIANT: reputation is always
+//!   clamped to `[-100, 100]`; no update can push it outside that range.
+//!   THREAT: unclamped reputation would let either a sybil flood of positive
+//!   updates make a peer un-bannable, or a single burst of negative updates
+//!   have unbounded lasting effect.
+//!   TESTS: `reputation_clamped_at_bounds`, `mixed_good_and_bad_behavior`.
+//! - **§4 `PeerInfo::should_ban`** — INVARIANT: a peer is banned iff
+//!   `reputation <= -50`, a fixed inclusive threshold.
+//!   THREAT: an off-by-one or non-strict boundary would let a
+//!   just-below-threshold malicious peer keep connecting indefinitely.
+//!   TESTS: `ban_threshold_is_exactly_minus_fifty`,
+//!   `banned_peer_recovers_after_sufficient_decay`,
+//!   `peer_banned_after_many_invalid_blocks`,
+//!   `protocol_violation_causes_fast_ban`.
+//! - **§5 `PeerInfo::decay_reputation`** — INVARIANT: reputation decays
+//!   monotonically toward (never past) the given neutral value, regardless
+//!   of whether it starts above or below neutral.
+//!   THREAT: without decay, a single transient issue (or a single act of
+//!   goodwill) would permanently pin a peer's reputation, defeating the
+//!   purpose of a recoverable trust score.
+//!   TESTS: `reputation_decay_toward_neutral`,
+//!   `banned_peer_recovers_after_sufficient_decay`.
+//! - **§6 `PeerInfo::eclipse_slot`** — INVARIANT: the per-/16 outbound slot's
+//!   lifetime is bound to the `PeerInfo` entry via `Arc`; it is released
+//!   exactly when the entry is removed or overwritten, never leaked or
+//!   double-freed.
+//!   THREAT: a leaked slot lifetime (tied to the spawn task instead of the
+//!   map entry) would let eclipse-defense accounting drift, eventually
+//!   starving legitimate outbound slots on a subnet.
+//!   TESTS: (gap — no test in this crate exercises `eclipse_slot` lifecycle
+//!   directly; `ConnectionTracker` subnet tests in
+//!   `tests/network_adversarial.rs` / `tests/p2p_adversarial.rs` test the
+//!   slot accounting itself, not this field's RAII binding).
+//! - **§7 `PeerConnection::run`** — INVARIANT: inbound bytes are capped by
+//!   both a 10 MB/s rate limit and a rolling 60s / 100 MB window; outbound
+//!   messages over `MAX_MESSAGE_SIZE` are dropped without disconnecting.
+//!   THREAT (H-7): unbounded per-connection throughput allows a single peer
+//!   to exhaust bandwidth/memory; a lifetime-cumulative cap (the pre-fix
+//!   behavior) would instead break legitimate long-running IBD transfers.
+//!   TESTS: (gap — no test in this crate drives `PeerConnection::run`'s
+//!   rate-limit or rolling-window logic directly; `max_message_size_is_reasonable`
+//!   in `tests/network_adversarial.rs` only checks the `MAX_MESSAGE_SIZE`
+//!   constant, not this loop's enforcement).
 
 use crate::error::{Error, Result};
 use crate::primitives::Hash;

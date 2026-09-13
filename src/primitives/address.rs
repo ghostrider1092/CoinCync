@@ -448,4 +448,173 @@ mod tests {
         // Too short
         assert!(Address::from_string("CYNC").is_err());
     }
+
+    /// Build raw address bytes with an explicit network/type byte and a
+    /// correctly-computed checksum, bypassing the `AddressType` constraints
+    /// that `Address::new`/`to_bytes` would otherwise impose. Lets us drive
+    /// `from_bytes` with payloads a normal constructor could not produce.
+    fn raw_address_bytes(
+        network_byte: u8,
+        type_byte: u8,
+        spend: &PublicKey,
+        view: &PublicKey,
+        payment_id: Option<[u8; 8]>,
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.push(network_byte);
+        data.push(type_byte);
+        data.extend_from_slice(spend.as_bytes());
+        data.extend_from_slice(view.as_bytes());
+        if let Some(pid) = payment_id {
+            data.extend_from_slice(&pid);
+        }
+        let checksum = hash_data(&data);
+        data.extend_from_slice(&checksum.as_bytes()[..4]);
+        data
+    }
+
+    #[test]
+    fn mainnet_subaddress_rejected_but_testnet_subaddress_accepted() {
+        let (_s1, spend) = generate_ec_keypair();
+        let (_s2, view) = generate_ec_keypair();
+
+        // W-1/W-B launch-safety gate: a mainnet subaddress must be rejected at
+        // the parse boundary (funds received at one would be permanently
+        // unspendable in this release).
+        let mainnet_sub = Address {
+            network: Network::Mainnet,
+            address_type: AddressType::Subaddress,
+            spend_public_key: spend,
+            view_public_key: view,
+            payment_id: None,
+        };
+        let err = Address::from_bytes(&mainnet_sub.to_bytes()).unwrap_err();
+        assert!(matches!(err, Error::InvalidAddress(_)));
+
+        // The same subaddress on testnet is still accepted — the gate is
+        // mainnet-only so the spend-side fix can be developed/round-tripped.
+        let testnet_sub = Address {
+            network: Network::Testnet,
+            address_type: AddressType::Subaddress,
+            spend_public_key: spend,
+            view_public_key: view,
+            payment_id: None,
+        };
+        let parsed = Address::from_bytes(&testnet_sub.to_bytes()).unwrap();
+        assert_eq!(parsed, testnet_sub);
+    }
+
+    #[test]
+    fn integrated_address_payment_id_bytes_roundtrip() {
+        let (_s1, spend) = generate_ec_keypair();
+        let (_s2, view) = generate_ec_keypair();
+        let pid = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let addr = Address {
+            network: Network::Mainnet,
+            address_type: AddressType::Integrated,
+            spend_public_key: spend,
+            view_public_key: view,
+            payment_id: Some(pid),
+        };
+        let bytes = addr.to_bytes();
+        // 2 header + 32 spend + 32 view + 8 payment_id + 4 checksum = 78.
+        assert_eq!(bytes.len(), 78);
+        let parsed = Address::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, addr);
+        assert_eq!(parsed.payment_id, Some(pid));
+        assert_eq!(parsed.address_type, AddressType::Integrated);
+    }
+
+    #[test]
+    fn integrated_address_too_short_is_rejected() {
+        let (_s1, spend) = generate_ec_keypair();
+        let (_s2, view) = generate_ec_keypair();
+        // Integrated type byte (2) but no 8-byte payment_id → 70 bytes total.
+        // The M-3 exact-length gate (expected 78 for Integrated) fires first,
+        // so an under-length integrated payload is rejected.
+        let bytes = raw_address_bytes(0, AddressType::Integrated.type_byte(), &spend, &view, None);
+        assert_eq!(bytes.len(), 70);
+        let err = Address::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err, Error::InvalidAddress(_)));
+    }
+
+    #[test]
+    fn bad_address_type_byte_in_payload_is_rejected() {
+        let (_s1, spend) = generate_ec_keypair();
+        let (_s2, view) = generate_ec_keypair();
+        // Type byte 3 has no AddressType — rejected before the length check.
+        let bytes = raw_address_bytes(0, 3, &spend, &view, None);
+        let err = Address::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err, Error::InvalidAddress(_)));
+    }
+
+    #[test]
+    fn from_string_rejects_network_prefix_payload_mismatch() {
+        let (_s1, spend) = generate_ec_keypair();
+        let (_s2, view) = generate_ec_keypair();
+        // A valid testnet address body, but advertised with the mainnet prefix.
+        let testnet = Address::new(Network::Testnet, spend, view);
+        let body = bs58::encode(testnet.to_bytes()).into_string();
+        let spoofed = format!("CYNC{}", body);
+        match Address::from_string(&spoofed) {
+            Err(Error::InvalidAddress(msg)) => assert!(msg.contains("network mismatch")),
+            other => panic!("expected network mismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn borsh_deserialize_rejects_identity_public_key() {
+        let (_s1, spend) = generate_ec_keypair();
+        let (_s2, view) = generate_ec_keypair();
+        let addr = Address::new(Network::Mainnet, spend, view);
+
+        // Positive control: a valid address round-trips through Borsh.
+        let good = borsh::to_vec(&addr).unwrap();
+        let restored = Address::try_from_slice(&good).unwrap();
+        assert_eq!(restored, addr);
+
+        // Tamper the spend-key region [2..34] to all-zeros — the Ristretto
+        // identity encoding — and the custom BorshDeserialize must reject it as
+        // a non-identity-point violation. (Layout: byte 0 network, byte 1
+        // address_type, bytes 2..34 spend key, 34..66 view key.)
+        let mut tampered = good.clone();
+        for b in &mut tampered[2..34] {
+            *b = 0;
+        }
+        assert!(Address::try_from_slice(&tampered).is_err());
+    }
+
+    #[test]
+    fn serde_deserialize_routes_through_checked_parsing() {
+        // The human-readable serde path routes through from_string →
+        // from_bytes_checked, so an address whose keys are not valid curve
+        // points is rejected on deserialize. (The non-human-readable/binary
+        // branch also routes through from_bytes_checked, but no binary serde
+        // format is available in this crate's deps to exercise it directly.)
+        let invalid_spend = PublicKey::from_bytes([0xAB; 32]);
+        let invalid_view = PublicKey::from_bytes([0xCD; 32]);
+        let addr = Address::new(Network::Mainnet, invalid_spend, invalid_view);
+        let json = serde_json::to_string(&addr).unwrap();
+        assert!(serde_json::from_str::<Address>(&json).is_err());
+
+        // A valid address still round-trips through JSON.
+        let (_s, spend) = generate_ec_keypair();
+        let (_v, view) = generate_ec_keypair();
+        let good = Address::new(Network::Mainnet, spend, view);
+        let good_json = serde_json::to_string(&good).unwrap();
+        let back: Address = serde_json::from_str(&good_json).unwrap();
+        assert_eq!(back, good);
+    }
+
+    #[test]
+    fn short_truncates_long_addresses() {
+        let (_s, spend) = generate_ec_keypair();
+        let (_v, view) = generate_ec_keypair();
+        let addr = Address::new(Network::Mainnet, spend, view);
+        let full = addr.to_string();
+        assert!(full.len() > 20);
+        let short = addr.short();
+        assert_eq!(short, format!("{}...{}", &full[..12], &full[full.len() - 6..]));
+        assert!(short.starts_with("CYNC"));
+    }
 }

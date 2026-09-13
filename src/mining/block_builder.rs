@@ -16,6 +16,68 @@
 //! and what `validation.rs` re-derives, or the daemon rejects the block. This
 //! code is deliberately a faithful port; do not "improve" it without checking
 //! the validator.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `CandidateBlock::pow_inputs` / `into_block`** — INVARIANT: `pow_inputs`
+//!   exposes `(anchor, tx_root, height)` exactly as the validator re-derives them,
+//!   and `into_block` only stamps the winning nonce, leaving every other field
+//!   untouched. THREAT: miner hashes different inputs than the validator → every
+//!   solved block is rejected. TESTS: `candidate_is_consensus_shaped`,
+//!   `build_mine_submit_roundtrip`.
+//! - **§2 `submit_mined_block`** — INVARIANT: a mined block traverses the SAME
+//!   validated `process_block` path as the `submit_block` RPC, then the mempool is
+//!   realigned (drop confirmed, restore reorg-orphaned, advance height,
+//!   shadow-evict invalid). THREAT: mempool drifts or the miner forks away from
+//!   peers by accepting an unbroadcast local block. TESTS:
+//!   `build_mine_submit_roundtrip`.
+//! - **§3 `search_nonce`** — INVARIANT: threads partition the u64 nonce space
+//!   without gaps and return the first nonce meeting `target`, or `None` once
+//!   `stop` is set so a superseded candidate is abandoned. THREAT: miner spins
+//!   forever, misses a valid nonce, or keeps mining a stale tip. TESTS:
+//!   (gap — `randomx`-gated CPU search, no deterministic unit test).
+//! - **§4 `build_candidate_block` / `build_block_from_template`** — INVARIANT: the
+//!   reconstructed header (version-at-height, anchor, tx_root, magic) is
+//!   byte-for-byte what the validator accepts from a rig-mined block, and every
+//!   malformed template field errors instead of producing an invalid block.
+//!   THREAT: builder/validator divergence → daemon rejects its own block.
+//!   TESTS: `candidate_uses_consensus_header_version_at_activation`,
+//!   `build_block_from_template_missing_height_is_internal_error`,
+//!   `build_block_from_template_missing_prev_hash_is_internal_error`,
+//!   `build_block_from_template_missing_timestamp_is_internal_error`,
+//!   `build_block_from_template_non_hex_prev_hash_is_internal_error`,
+//!   `build_block_from_template_non_hex_target_is_internal_error`,
+//!   `build_block_from_template_falls_back_to_difficulty_string`,
+//!   `build_block_from_template_non_u64_difficulty_is_internal_error`,
+//!   `build_block_from_template_missing_target_and_difficulty_is_internal_error`.
+//! - **§5 `claimable_fees_for_block_size` / `assembled_block_size`** — INVARIANT:
+//!   the coinbase claims only `distribute_fee`'s miner share at the block's
+//!   congestion, sized via the validator's exact block-size formula; pre-activation
+//!   height claims all fees. THREAT: coinbase over-claims fees → block invalid or
+//!   silent over-emission. TESTS: `claimable_fees_zero_fees_returns_zero`,
+//!   `claimable_fees_below_distribution_height_returns_all_fees`,
+//!   `claimable_fees_uncongested_uses_distribute_fee_split`,
+//!   `claimable_fees_congested_uses_distribute_fee_split`,
+//!   `build_block_from_template_coinbase_fee_uses_final_assembled_block_size`.
+//! - **§6 `build_coinbase_with_fees`** — INVARIANT: coinbase pays `reward + fees`
+//!   (saturating) to a fresh stealth address whose ephemeral secret comes from the
+//!   OS CSPRNG (issue #46) — detectable by the view-key holder but not publicly
+//!   linkable. THREAT: a payout-key-derived secret links every coinbase output to
+//!   the miner. TESTS:
+//!   `build_coinbase_with_fees_total_is_reward_plus_fees_and_commitment_correct`,
+//!   `build_coinbase_with_fees_total_saturates`,
+//!   `coinbase_is_detectable_but_not_publicly_linkable`.
+//! - **§7 `resolve_network_magic` / `parse_template_transactions`** — INVARIANT:
+//!   an unknown or cross-network magic and malformed tx hex are rejected/skipped,
+//!   never silently mined into a block. THREAT: cross-network replay or a corrupt
+//!   transaction packed into a candidate. TESTS:
+//!   `resolve_network_magic_non_hex_is_internal_error`,
+//!   `resolve_network_magic_wrong_length_is_internal_error`,
+//!   `resolve_network_magic_unknown_magic_is_internal_error`,
+//!   `resolve_network_magic_missing_falls_back_to_network`,
+//!   `parse_template_transactions_skips_non_hex_and_non_borsh_entries`.
 
 use serde_json::Value;
 
@@ -643,5 +705,345 @@ mod tests {
             !is_output_ours(&stealth1, &outsider_view, &spend_pub, 0),
             "an outsider must not detect the coinbase output"
         );
+    }
+
+    // ---- build_block_from_template error/edge branches (no PoW) ----
+
+    #[test]
+    fn build_block_from_template_missing_height_is_internal_error() {
+        let (spend, view) = test_keys();
+        let template = serde_json::json!({
+            "prev_hash": hex::encode([0x11u8; 32]),
+            "timestamp": 1_700_000_000i64,
+            "target": hex::encode(Hash::from_difficulty(1000).as_bytes()),
+            "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
+            "transactions": [],
+        });
+        let res =
+            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn build_block_from_template_missing_prev_hash_is_internal_error() {
+        let (spend, view) = test_keys();
+        let template = serde_json::json!({
+            "height": 10u64,
+            "timestamp": 1_700_000_000i64,
+            "target": hex::encode(Hash::from_difficulty(1000).as_bytes()),
+            "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
+            "transactions": [],
+        });
+        let res =
+            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn build_block_from_template_missing_timestamp_is_internal_error() {
+        let (spend, view) = test_keys();
+        let template = serde_json::json!({
+            "height": 10u64,
+            "prev_hash": hex::encode([0x11u8; 32]),
+            "target": hex::encode(Hash::from_difficulty(1000).as_bytes()),
+            "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
+            "transactions": [],
+        });
+        let res =
+            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn build_block_from_template_non_hex_prev_hash_is_internal_error() {
+        let (spend, view) = test_keys();
+        let template = serde_json::json!({
+            "height": 10u64,
+            "prev_hash": "not-hex-zz",
+            "timestamp": 1_700_000_000i64,
+            "target": hex::encode(Hash::from_difficulty(1000).as_bytes()),
+            "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
+            "transactions": [],
+        });
+        let res =
+            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn build_block_from_template_non_hex_target_is_internal_error() {
+        let (spend, view) = test_keys();
+        let template = serde_json::json!({
+            "height": 10u64,
+            "prev_hash": hex::encode([0x11u8; 32]),
+            "timestamp": 1_700_000_000i64,
+            "target": "zzzz-not-hex",
+            "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
+            "transactions": [],
+        });
+        let res =
+            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn build_block_from_template_falls_back_to_difficulty_string() {
+        crate::consensus::bind_randomx_genesis_for_network(NetworkType::Regtest);
+        let (spend, view) = test_keys();
+        // No "target" key — the builder must parse the "difficulty" string and
+        // derive the target via Hash::from_difficulty.
+        let template = serde_json::json!({
+            "height": 10u64,
+            "prev_hash": hex::encode([0x11u8; 32]),
+            "timestamp": 1_700_000_000i64,
+            "difficulty": "1000",
+            "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
+            "transactions": [],
+        });
+        let candidate =
+            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0))
+                .expect("difficulty fallback builds a candidate");
+        assert_eq!(
+            candidate.header.target,
+            Hash::from_difficulty(1000),
+            "target derived from 'difficulty' via Hash::from_difficulty"
+        );
+    }
+
+    #[test]
+    fn build_block_from_template_non_u64_difficulty_is_internal_error() {
+        let (spend, view) = test_keys();
+        let template = serde_json::json!({
+            "height": 10u64,
+            "prev_hash": hex::encode([0x11u8; 32]),
+            "timestamp": 1_700_000_000i64,
+            "difficulty": "not-a-number",
+            "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
+            "transactions": [],
+        });
+        let res =
+            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn build_block_from_template_missing_target_and_difficulty_is_internal_error() {
+        let (spend, view) = test_keys();
+        let template = serde_json::json!({
+            "height": 10u64,
+            "prev_hash": hex::encode([0x11u8; 32]),
+            "timestamp": 1_700_000_000i64,
+            "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
+            "transactions": [],
+        });
+        let res =
+            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
+    }
+
+    /// Build a non-coinbase transaction carrying a known fee, encoded exactly the
+    /// way `build_template_json` encodes mempool txs (borsh + hex).
+    fn dummy_fee_tx(fee_atomic: u64) -> Transaction {
+        Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![],
+            fee: Amount::from_atomic(fee_atomic),
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    /// Issue #41: the coinbase fee split is sized off the FINAL assembled block
+    /// (coinbase + mempool + header), and at/after the fee-distribution height a
+    /// non-congested block pays the miner exactly `distribute_fee(fees, false)`.
+    #[test]
+    fn build_block_from_template_coinbase_fee_uses_final_assembled_block_size() {
+        crate::consensus::bind_randomx_genesis_for_network(NetworkType::Regtest);
+        let (spend, view) = test_keys();
+        // Regtest fee-distribution height is 525; pick a height past it so the
+        // split (not "claim all fees") applies.
+        let height = 1000u64;
+        let fee_atomic = 1_000_000u64;
+        let tx = dummy_fee_tx(fee_atomic);
+        let tx_hex = hex::encode(borsh::to_vec(&tx).unwrap());
+        let template = serde_json::json!({
+            "height": height,
+            "prev_hash": hex::encode([0x11u8; 32]),
+            "timestamp": 1_700_000_000i64,
+            "target": hex::encode(Hash::from_difficulty(1000).as_bytes()),
+            "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
+            "transactions": [tx_hex],
+        });
+        let candidate =
+            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0))
+                .expect("build with one fee-paying tx");
+
+        // Coinbase first, mempool tx second.
+        assert_eq!(candidate.transactions.len(), 2);
+        let cb = &candidate.transactions[0];
+        assert_eq!(cb.tx_type, TxType::Coinbase);
+
+        // A single tiny tx keeps the block far below the congestion threshold, so
+        // the split is the non-congested one.
+        let expected_claimable = distribute_fee(Amount::from_atomic(fee_atomic), false)
+            .to_miner
+            .as_atomic();
+        let reward = crate::emission::calculate_block_reward(height).as_atomic();
+        let expected_total = reward.saturating_add(expected_claimable);
+        let paid = u64::from_le_bytes(cb.outputs[0].encrypted_amount[..8].try_into().unwrap());
+        assert_eq!(
+            paid, expected_total,
+            "coinbase = reward + distribute_fee(fees, uncongested).to_miner"
+        );
+    }
+
+    // ---- build_coinbase_with_fees ----
+
+    #[test]
+    fn build_coinbase_with_fees_total_is_reward_plus_fees_and_commitment_correct() {
+        use crate::crypto::{is_output_ours, StealthAddress};
+
+        let spend_secret = crate::primitives::SecretKey::from_bytes([7u8; 32]);
+        let view_secret = crate::primitives::SecretKey::from_bytes([9u8; 32]);
+        let spend_pub = spend_secret.public_key();
+        let view_pub = view_secret.public_key();
+        let height = 50u64;
+        let fees = 123_456u64;
+
+        let cb = build_coinbase_with_fees(height, &spend_pub, &view_pub, fees, SignalBits(0))
+            .expect("coinbase");
+        assert_eq!(cb.tx_type, TxType::Coinbase);
+        assert_eq!(cb.fee, Amount::ZERO);
+        assert_eq!(cb.outputs.len(), 1);
+
+        let reward = crate::emission::calculate_block_reward(height).as_atomic();
+        let expected_total = reward.saturating_add(fees);
+        let paid = u64::from_le_bytes(cb.outputs[0].encrypted_amount[..8].try_into().unwrap());
+        assert_eq!(paid, expected_total, "total = reward + fees");
+
+        // Commitment binds the exact total with a zero blinding factor.
+        let expected_commitment =
+            PedersenCommitment::commit(expected_total, &BlindingFactor::zero()).to_bytes();
+        assert_eq!(cb.outputs[0].commitment, expected_commitment);
+
+        // The canonical view tag makes the output detectable by the payout wallet.
+        let stealth = StealthAddress {
+            public_key: cb.outputs[0].stealth_address,
+            tx_public_key: cb.outputs[0].tx_public_key,
+        };
+        assert!(
+            is_output_ours(&stealth, &view_secret, &spend_pub, 0),
+            "view_tag/stealth address must be detectable by the owner"
+        );
+    }
+
+    #[test]
+    fn build_coinbase_with_fees_total_saturates() {
+        let (spend, view) = test_keys();
+        let cb = build_coinbase_with_fees(10, &spend, &view, u64::MAX, SignalBits(0))
+            .expect("coinbase");
+        let paid = u64::from_le_bytes(cb.outputs[0].encrypted_amount[..8].try_into().unwrap());
+        assert_eq!(paid, u64::MAX, "reward + u64::MAX fees saturates, no wrap");
+    }
+
+    // ---- claimable_fees_for_block_size ----
+
+    #[test]
+    fn claimable_fees_zero_fees_returns_zero() {
+        assert_eq!(
+            claimable_fees_for_block_size(NetworkType::Regtest, 1000, 0, 500),
+            0
+        );
+    }
+
+    #[test]
+    fn claimable_fees_below_distribution_height_returns_all_fees() {
+        // Regtest fee_distribution_height == 525; below it the miner claims all.
+        assert_eq!(
+            claimable_fees_for_block_size(NetworkType::Regtest, 100, 5_000, 500),
+            5_000
+        );
+    }
+
+    #[test]
+    fn claimable_fees_uncongested_uses_distribute_fee_split() {
+        let fees = 1_000_000u64;
+        // Tiny block => congestion ~0% => non-congested split.
+        let got = claimable_fees_for_block_size(NetworkType::Regtest, 1000, fees, 200);
+        let expected = distribute_fee(Amount::from_atomic(fees), false)
+            .to_miner
+            .as_atomic();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn claimable_fees_congested_uses_distribute_fee_split() {
+        let fees = 1_000_000u64;
+        // A block at/above the 80% congestion threshold uses the congested split.
+        let congested_size = crate::constants::MAX_BLOCK_SIZE; // 100% full
+        let got =
+            claimable_fees_for_block_size(NetworkType::Regtest, 1000, fees, congested_size);
+        let expected = distribute_fee(Amount::from_atomic(fees), true)
+            .to_miner
+            .as_atomic();
+        assert_eq!(got, expected);
+        // And it differs from the uncongested split (more is burned when congested).
+        let uncongested = distribute_fee(Amount::from_atomic(fees), false)
+            .to_miner
+            .as_atomic();
+        assert!(got <= uncongested, "congested miner share <= uncongested");
+    }
+
+    // ---- resolve_network_magic ----
+
+    #[test]
+    fn resolve_network_magic_non_hex_is_internal_error() {
+        let template = serde_json::json!({ "network_magic": "zz-not-hex" });
+        let res = resolve_network_magic(&template, NetworkType::Regtest);
+        assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn resolve_network_magic_wrong_length_is_internal_error() {
+        let template = serde_json::json!({ "network_magic": hex::encode([1u8, 2, 3]) });
+        let res = resolve_network_magic(&template, NetworkType::Regtest);
+        assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn resolve_network_magic_unknown_magic_is_internal_error() {
+        // 0xFFFFFFFF matches no network (mainnet/testnet/regtest magics differ).
+        let template = serde_json::json!({ "network_magic": hex::encode([0xFFu8; 4]) });
+        assert!(NetworkType::from_magic_bytes([0xFFu8; 4]).is_none());
+        let res = resolve_network_magic(&template, NetworkType::Regtest);
+        assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn resolve_network_magic_missing_falls_back_to_network() {
+        let template = serde_json::json!({});
+        let magic =
+            resolve_network_magic(&template, NetworkType::Testnet).expect("fallback magic");
+        assert_eq!(magic, NetworkType::Testnet.magic_bytes());
+    }
+
+    // ---- parse_template_transactions ----
+
+    #[test]
+    fn parse_template_transactions_skips_non_hex_and_non_borsh_entries() {
+        let good = dummy_fee_tx(7_777);
+        let good_hex = hex::encode(borsh::to_vec(&good).unwrap());
+        let template = serde_json::json!({
+            "transactions": [
+                "zzzz",                      // not hex → skipped
+                hex::encode([0xFFu8, 0xFF]), // hex but not a valid borsh Transaction → skipped
+                good_hex,                    // valid → kept
+            ],
+        });
+        let txs = parse_template_transactions(&template);
+        assert_eq!(txs.len(), 1, "only the valid borsh tx survives");
+        assert_eq!(txs[0].fee.as_atomic(), 7_777);
     }
 }

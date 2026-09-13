@@ -1036,4 +1036,170 @@ mod tests {
         drop(db);
         tip
     }
+
+    #[test]
+    fn import_refuses_manifest_network_mismatch() {
+        // The manifest declares 'mainnet' but the local node runs testnet — the
+        // network gate must refuse before anything is installed. Genesis is set
+        // to match so the failure is specifically the network check, not genesis.
+        let tmp = scratch("net-mismatch");
+        let chaindata = tmp.join("mainnet");
+        write_file(&chaindata, "b.db", b"x");
+        let out = tmp.join("snap");
+        let g = Hash::from_bytes([3u8; 32]);
+        export(
+            &chaindata,
+            &out,
+            "mainnet",
+            &g.to_hex(),
+            1,
+            "T",
+            "1.0.12",
+            1,
+        )
+        .unwrap();
+
+        let dest = tmp.join("dest");
+        let policy = ImportPolicy {
+            network: NetworkType::Testnet,
+            expected_genesis: &g,
+            checkpoints: &[],
+            trusted_signers: &[],
+            backup_stamp: 2,
+        };
+        let err = import(&out, &dest, &policy).unwrap_err();
+        assert!(matches!(err, Error::InvalidState(_)));
+        assert!(format!("{:?}", err).to_lowercase().contains("network"));
+        assert!(!dest.exists(), "must not install a wrong-network snapshot");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn import_refuses_missing_snapshot_db_dir() {
+        // A snapshot whose manifest is network+genesis-correct but whose db/
+        // payload is absent must be refused (nothing to install).
+        let tmp = scratch("no-db");
+        let chaindata = tmp.join("testnet");
+        write_file(&chaindata, "b.db", b"x");
+        let out = tmp.join("snap");
+        let g = Hash::from_bytes([8u8; 32]);
+        export(
+            &chaindata,
+            &out,
+            "testnet",
+            &g.to_hex(),
+            1,
+            "T",
+            "1.0.12",
+            1,
+        )
+        .unwrap();
+
+        // Remove the db/ payload, keeping the correct manifest.
+        std::fs::remove_dir_all(out.join("db")).unwrap();
+
+        let dest = tmp.join("dest");
+        let policy = ImportPolicy {
+            network: NetworkType::Testnet,
+            expected_genesis: &g,
+            checkpoints: &[],
+            trusted_signers: &[],
+            backup_stamp: 2,
+        };
+        let err = import(&out, &dest, &policy).unwrap_err();
+        assert!(matches!(err, Error::InvalidState(_)));
+        assert!(
+            format!("{:?}", err).to_lowercase().contains("db/ dir missing"),
+            "expected a missing-db/-dir refusal, got: {:?}",
+            err
+        );
+        assert!(
+            !dest.exists(),
+            "must not install when the snapshot payload is missing"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn export_refuses_missing_chaindata_and_preexisting_db_dir() {
+        let tmp = scratch("export-pre");
+        let g = Hash::from_bytes([1u8; 32]);
+
+        // (a) chaindata dir does not exist → InvalidState.
+        let missing = tmp.join("does-not-exist");
+        let out_a = tmp.join("snap-a");
+        let err_a = export(
+            &missing,
+            &out_a,
+            "testnet",
+            &g.to_hex(),
+            0,
+            "T",
+            "1.0.12",
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(err_a, Error::InvalidState(_)));
+        assert!(format!("{:?}", err_a)
+            .to_lowercase()
+            .contains("chaindata directory not found"));
+
+        // (b) out already contains a db/ dir → InvalidState.
+        let chaindata = tmp.join("testnet");
+        write_file(&chaindata, "b.db", b"x");
+        let out_b = tmp.join("snap-b");
+        write_file(&out_b.join("db"), "stale", b"leftover");
+        let err_b = export(
+            &chaindata,
+            &out_b,
+            "testnet",
+            &g.to_hex(),
+            0,
+            "T",
+            "1.0.12",
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(err_b, Error::InvalidState(_)));
+        assert!(format!("{:?}", err_b)
+            .to_lowercase()
+            .contains("already contains a db/"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn recover_interrupted_install_fresh_removes_half_copied_snapshot() {
+        // Fresh install interrupted: a half-copied snapshot is present and the
+        // marker records NO backup (the destination was empty when the install
+        // began). Recovery must drop the untrusted half-copy and clear the marker.
+        let tmp = scratch("recover-fresh");
+        let chaindata = tmp.join("chaindata");
+        std::fs::create_dir_all(&chaindata).unwrap();
+        std::fs::write(chaindata.join("HALF"), b"half-copied-snapshot").unwrap();
+        write_install_marker(&marker_path_for(&chaindata), None).unwrap();
+
+        let recovered = recover_interrupted_install(&chaindata).unwrap();
+        assert!(recovered, "must report a recovery happened");
+        assert!(
+            !chaindata.exists(),
+            "half-copied snapshot must be removed on fresh-install recovery"
+        );
+        assert!(
+            !marker_path_for(&chaindata).exists(),
+            "marker cleared after recovery"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── Deferred (need fault injection not reachable via the real API) ─────────
+    // - import copy-failure → loud rollback of backup: the code renames any
+    //   existing chaindata aside and copies a source it has just verified is
+    //   readable, so a mid-copy failure cannot be staged deterministically on the
+    //   filesystem. Deferred: needs fault injection (no existing pattern for it).
+    // - hash_file_streaming file-grows-during-hash (TOCTOU): declared_len is read
+    //   from metadata and the file is streamed to EOF in one synchronous loop; a
+    //   size change between the two requires a concurrent-writer race, which the
+    //   existing tests have no deterministic pattern for. Deferred: needs fault
+    //   injection.
 }

@@ -16,6 +16,47 @@
 //! As supply grows, rewards decay smoothly.
 //! When the formula drops below 0.6 CYNC, tail emission takes over.
 //! Tail emission + 30% fee burn = self-sustaining forever.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `EmissionPhase` + `name`** — INVARIANT: exactly three display phases
+//!   (Distribution / Mature / Tail), each mapping to a stable string. THREAT:
+//!   an explorer/label drift misreporting monetary regime. TESTS:
+//!   `emission_phase_name_maps_all_variants`.
+//! - **§2 `emission_phase`** — INVARIANT: classifies by the estimated reward at
+//!   height — Tail at ≤ `TAIL_EMISSION`, Mature at ≤ 10·COIN, else Distribution;
+//!   always consistent with the reward the estimate produces. THREAT: a phase
+//!   label inconsistent with the actual subsidy. TESTS: `emission_phase_at_genesis`,
+//!   `emission_phase_mature_and_tail_transitions`.
+//! - **§3 `base_reward_from_supply` (canonical consensus reward)** — INVARIANT:
+//!   `reward = max(TAIL_EMISSION, (cap − supply)/EMISSION_DIVISOR)`; the u128
+//!   `saturating_sub` means supply ≥ cap yields the tail floor, never a wrap or a
+//!   sub-tail value. THREAT: over-emission above the 100M asymptote, or an
+//!   underflow at/above the cap dropping reward below the perpetual 0.6 CYNC floor.
+//!   TESTS: `genesis_reward_is_50_cync`, `reward_at_half_supply`,
+//!   `reward_at_75_percent_supply`, `tail_emission_kicks_in`,
+//!   `reward_never_below_tail`.
+//! - **§4 `base_reward` / `block_reward` (height-based)** — INVARIANT: reward is
+//!   monotone non-increasing in height, starts at 50 CYNC at height 0, and never
+//!   panics for any `u64` height. THREAT: overflow/panic on a large RPC-supplied
+//!   height. TESTS: `height_based_estimate_starts_at_50`, `reward_decays_over_time`,
+//!   `no_overflow_on_large_heights`, `base_reward_u64_max_is_o1_tail_fast_path`;
+//!   external oracle: `tests/emission_reference_oracle.rs` (spec-formula /
+//!   monotonicity / never-over-emit suite).
+//! - **§5 `estimate_supply_at_height` (adaptive-step integrator)** — INVARIANT:
+//!   result never exceeds `cap_atomic` (`.min(cap)`), stays within ~0.1% of a
+//!   block-by-block integration, and the tail fast-path returns in O(1) once the
+//!   asymptotic curve drops below `TAIL_EMISSION`. THREAT: `base_reward(u64::MAX)`
+//!   DoS — a ~1.8e15-iteration loop if a height is routed in unbounded (fixed
+//!   2026-06-03). TESTS: `estimate_supply_adaptive_step_accuracy_across_boundaries`,
+//!   `estimate_supply_never_exceeds_cap`, `base_reward_u64_max_is_o1_tail_fast_path`.
+//! - **§6 `estimate_reward_at_height`** — INVARIANT: mirrors the §3 formula on the
+//!   §5 supply estimate and is likewise floored at `TAIL_EMISSION`; used only for
+//!   phase classification. THREAT: a phase estimate diverging from the reward
+//!   formula. TESTS: `emission_phase_mature_and_tail_transitions` (drives all three
+//!   phase branches through this estimate).
 
 use crate::constants::*;
 use crate::primitives::Amount;
@@ -244,5 +285,144 @@ mod tests {
         let _ = base_reward(10_000_000);
         // Direct supply test with max u128
         let _ = base_reward_from_supply(u128::MAX);
+    }
+
+    /// Independent block-by-block (step=1) reference integrator, mirroring
+    /// `estimate_supply_at_height` exactly but with no adaptive stepping. Used
+    /// to bound the accuracy of the coarse adaptive-step estimate.
+    fn reference_supply_step1(height: u64) -> u128 {
+        if height == 0 {
+            return 0;
+        }
+        let cap_atomic = TOTAL_SUPPLY_TARGET as u128 * COIN as u128;
+        let mut supply: u128 = 0;
+        let mut h: u64 = 0;
+        while h < height {
+            let remaining = cap_atomic.saturating_sub(supply);
+            let asymptotic_reward = remaining / EMISSION_DIVISOR as u128;
+            let reward = asymptotic_reward.max(TAIL_EMISSION as u128);
+            if asymptotic_reward < TAIL_EMISSION as u128 {
+                let remaining_blocks = (height - h) as u128;
+                supply = supply
+                    .saturating_add((TAIL_EMISSION as u128).saturating_mul(remaining_blocks));
+                break;
+            }
+            supply += reward;
+            h += 1;
+        }
+        supply.min(cap_atomic)
+    }
+
+    #[test]
+    fn base_reward_u64_max_is_o1_tail_fast_path() {
+        // 2026-06-03 DoS fix: base_reward(u64::MAX) must NOT iterate ~1.8e15
+        // blocks. The tail fast-path returns in O(1). Assert it both returns
+        // promptly AND equals the tail floor.
+        let start = std::time::Instant::now();
+        let reward = base_reward(u64::MAX);
+        let elapsed = start.elapsed();
+        assert_eq!(
+            reward.as_atomic(),
+            TAIL_EMISSION,
+            "base_reward(u64::MAX) must equal tail emission"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "base_reward(u64::MAX) must return promptly via the tail fast-path, took {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn estimate_supply_adaptive_step_accuracy_across_boundaries() {
+        // The adaptive stepping (10 / 100 / 1000 / 10000 by height band) must
+        // stay within the stated ~0.1% of an exact block-by-block integration,
+        // including just past each step-size boundary (10k / 100k).
+        for &height in &[10_100u64, 50_000, 99_999, 100_500, 250_000] {
+            let est = estimate_supply_at_height(height);
+            let reference = reference_supply_step1(height);
+            let diff = est.abs_diff(reference);
+            // within 0.1%: diff / reference <= 0.001  <=>  diff * 1000 <= reference
+            assert!(
+                diff.saturating_mul(1000) <= reference.max(1),
+                "height {}: estimate {} deviates from reference {} by more than 0.1% (diff {})",
+                height,
+                est,
+                reference,
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn estimate_supply_never_exceeds_cap() {
+        // Invariant: the `.min(cap_atomic)` clamp guarantees the estimate never
+        // exceeds the cap for any height, including the tail-saturating extremes.
+        let cap_atomic = TOTAL_SUPPLY_TARGET as u128 * COIN as u128;
+        for &height in &[
+            0u64,
+            1,
+            10_000,
+            1_000_000,
+            10_000_000,
+            100_000_000,
+            u64::MAX,
+        ] {
+            assert!(
+                estimate_supply_at_height(height) <= cap_atomic,
+                "estimate at height {} exceeded cap {}",
+                height,
+                cap_atomic
+            );
+        }
+    }
+
+    #[test]
+    fn emission_phase_mature_and_tail_transitions() {
+        // Only the Distribution branch is covered elsewhere. Exercise the
+        // Mature (reward <= 10 CYNC) and Tail (reward <= TAIL_EMISSION)
+        // branches, and assert the phase is always consistent with the reward
+        // the estimate produces at that height.
+        let mut saw_mature = false;
+        let mut saw_tail = false;
+        for &height in &[
+            1_000_000u64,
+            3_000_000,
+            4_000_000,
+            6_000_000,
+            9_000_000,
+            12_000_000,
+            20_000_000,
+            50_000_000,
+        ] {
+            let reward = base_reward(height).as_atomic();
+            let phase = emission_phase(height);
+            let expected = if reward <= TAIL_EMISSION {
+                EmissionPhase::Tail
+            } else if reward <= 10 * COIN {
+                EmissionPhase::Mature
+            } else {
+                EmissionPhase::Distribution
+            };
+            assert_eq!(
+                phase, expected,
+                "phase at height {} inconsistent with reward {}",
+                height, reward
+            );
+            match phase {
+                EmissionPhase::Mature => saw_mature = true,
+                EmissionPhase::Tail => saw_tail = true,
+                EmissionPhase::Distribution => {}
+            }
+        }
+        assert!(saw_mature, "expected at least one height to classify as Mature");
+        assert!(saw_tail, "expected at least one height to classify as Tail");
+    }
+
+    #[test]
+    fn emission_phase_name_maps_all_variants() {
+        assert_eq!(EmissionPhase::Distribution.name(), "Distribution");
+        assert_eq!(EmissionPhase::Mature.name(), "Mature");
+        assert_eq!(EmissionPhase::Tail.name(), "Tail");
     }
 }

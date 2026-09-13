@@ -1,6 +1,80 @@
 //! # Network Bootstrap
 //!
 //! DNS seeds, peer discovery, and network bootstrapping.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `BootstrapConfig::for_network`** — INVARIANT: mainnet/testnet/regtest
+//!   each get their own seed list and P2P port; `Default` never leaks the
+//!   testnet seed set onto a mainnet node.
+//!   THREAT: mainnet node dials dead testnet seeds on the wrong port and
+//!   finds zero peers (mainnet launch blocker).
+//!   TESTS: `bootstrap_config_is_network_aware`, `test_bootstrap_config`,
+//!   `test_seed_node_parsing`.
+//! - **§2 `Bootstrapper::get_peers_with_proxy`** — INVARIANT: the OS DNS
+//!   resolver is never queried while `onion_only` or `proxy_active`; when a
+//!   proxy is supplied DNS is instead resolved via DNS-over-TCP through
+//!   SOCKS5, otherwise DNS is skipped entirely.
+//!   THREAT: CRIT-7 (DNS queries bypass SOCKS5/Tor, leaking the user's real
+//!   IP to whoever runs their ISP's DNS resolver).
+//!   TESTS: (gap — no automated test exercises the DNS routing decision
+//!   tree; the fix is covered by manual/integration verification only).
+//! - **§3 `AddressManager::addr_netgroup` / `group_count`** — INVARIANT: the
+//!   netgroup key buckets IPv4 by /16 and IPv6 by /32 in disjoint namespaces,
+//!   and no single netgroup may exceed its quota of the address book.
+//!   THREAT: address-table eclipse attack (flooding the book with one
+//!   netgroup to crowd out honest, diverse peers).
+//!   TESTS: `address_book_netgroup_quota_bounds_flooding`,
+//!   `netgroup_quota_rejects_new_addr_before_evicting_honest_entries`.
+//! - **§4 `AddressManager::add`** — INVARIANT: a known self-address is never
+//!   re-admitted; a new address from an already-quota'd netgroup is rejected
+//!   BEFORE any eviction runs; capacity eviction always removes the oldest
+//!   entry by `last_seen`; operator `manual` peers bypass the netgroup quota.
+//!   THREAT: self-dial waste on restart, and an attacker evicting honest
+//!   diverse peers to seat its own flooded addresses.
+//!   TESTS: `self_address_is_never_dialed_or_readded`,
+//!   `netgroup_quota_rejects_new_addr_before_evicting_honest_entries`,
+//!   `eviction_removes_oldest_by_last_seen_at_capacity`,
+//!   `manual_peers_bypass_netgroup_quota`.
+//! - **§5 `AddressManager::get_next`** — INVARIANT: dial priority is strictly
+//!   manual peers, then anchors, then the discovered book sorted by
+//!   `last_seen`; each tier is skipped once tried this cycle; self-addresses
+//!   are never returned.
+//!   THREAT: a large or stale discovered book starving the operator's manual
+//!   peer or the persisted anchors out of the outbound dialer (2026-08-16
+//!   incident: 0 outbound for 90s+ against an up `--addnode` peer).
+//!   TESTS: `manual_peer_is_dialed_before_discovered_addresses`,
+//!   `anchors_are_dialed_before_general_pool`, `self_address_anchor_is_skipped`,
+//!   `get_next_priority_order_manual_then_anchors_then_book`,
+//!   `manual_and_anchor_not_starved_by_large_fresh_book`.
+//! - **§6 `AddressManager::mark_tried`** — INVARIANT: after
+//!   `FAILURE_PURGE_THRESHOLD` consecutive failures with no intervening
+//!   success, an address is purged from the pool entirely; `manual` peers are
+//!   exempt; purging is not a permanent ban (re-gossip re-adds it fresh).
+//!   THREAT: dead IPs gossiped forever starving outbound dial slots via the
+//!   eclipse-defense subnet counter (2026-06-26 incident).
+//!   TESTS: `peer_aging_purges_after_consecutive_failures`,
+//!   `manual_peer_survives_failure_purge`,
+//!   `discovered_peer_is_purged_after_threshold`,
+//!   `peer_aging_purged_address_can_be_readded`.
+//! - **§7 `AddressManager::mark_success` / tried-set bound** — INVARIANT: a
+//!   successful connect resets the per-address failure counter; the `tried`
+//!   set never exceeds `MAX_TRIED`, evicting the oldest entry first.
+//!   THREAT: M-8 (unbounded memory growth in `tried`, and eventual permanent
+//!   outbound isolation once `get_next` always returns `None`).
+//!   TESTS: `peer_aging_success_resets_failure_count`,
+//!   `tried_eviction_follows_recent_failure_order`.
+//! - **§8 `AddressManager::load_from_file`** — INVARIANT: an address-book
+//!   file larger than `MAX_ADDRBOOK_BYTES` is rejected (and removed) before
+//!   any read; a decoded entry count over `MAX_ADDRBOOK_ENTRIES` is rejected;
+//!   an empty `[]` array loads cleanly with zero entries.
+//!   THREAT: OOM-on-startup DoS via a multi-GB or N-billion-entry address
+//!   book file dropped into the data dir by any actor with filesystem access.
+//!   TESTS: `load_from_file_rejects_oversized_file`,
+//!   `load_from_file_accepts_empty_array`,
+//!   `load_from_file_rejects_too_many_entries`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -1223,6 +1297,145 @@ mod tests {
             "error must surface entry-cap reason, got: {}",
             err
         );
+    }
+
+    /// ANTI-ECLIPSE (explicit): a NEW address whose netgroup is already at its
+    /// quota is rejected BEFORE the capacity-eviction block runs, so an
+    /// attacker flooding one /16 can never evict an honest, diverse entry to
+    /// seat its own. Honest entries here carry OLDER last_seen than the
+    /// flooders, so they'd be the oldest-first eviction victims if eviction
+    /// ever ran — the quota check must prevent that.
+    #[test]
+    fn netgroup_quota_rejects_new_addr_before_evicting_honest_entries() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        // max_addresses = 24 → max_per_group = (24 / 8).max(8) = 8.
+        let mut am = AddressManager::new(24);
+
+        // Saturate one /16 (10.20.0.0/16) up to its group quota (8), with
+        // RECENT last_seen (they'd survive an oldest-first eviction).
+        for i in 0..8u32 {
+            let ip = Ipv4Addr::new(10, 20, 0, i as u8);
+            let mut pa = PeerAddress::new(SocketAddr::new(IpAddr::V4(ip), 28080));
+            pa.last_seen = 9_000 + i as u64;
+            am.add(pa);
+        }
+        // Fill the rest of the book (16 slots) with diverse, distinct /16
+        // honest entries that have OLD last_seen (the eviction victims if
+        // eviction ran).
+        for i in 0..16u32 {
+            let ip = Ipv4Addr::new(172, (16 + i) as u8, 0, 1);
+            let mut pa = PeerAddress::new(SocketAddr::new(IpAddr::V4(ip), 28080));
+            pa.last_seen = 100 + i as u64;
+            am.add(pa);
+        }
+        assert_eq!(am.len(), 24, "book is full");
+
+        // A NEW address in the already-quota'd /16 must be rejected up front —
+        // no honest (older) entry may be evicted to make room for it.
+        let intruder = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 20, 250, 250)), 28080);
+        am.add(PeerAddress::new(intruder));
+
+        assert_eq!(am.len(), 24, "quota rejection must not change book size");
+        let all = am.get_for_exchange(10_000);
+        assert!(
+            !all.iter().any(|a| a.addr == intruder),
+            "over-quota netgroup addr must not be admitted"
+        );
+        for i in 0..16u32 {
+            let ip = Ipv4Addr::new(172, (16 + i) as u8, 0, 1);
+            let honest = SocketAddr::new(IpAddr::V4(ip), 28080);
+            assert!(
+                all.iter().any(|a| a.addr == honest),
+                "honest entry {honest} must not be evicted by an over-quota intruder"
+            );
+        }
+    }
+
+    /// `get_next` priority order across all three tiers in a single scan:
+    /// manual (--addnode) first, then anchors, then the discovered book (by
+    /// last_seen). Each tier is skipped once tried this cycle.
+    #[test]
+    fn get_next_priority_order_manual_then_anchors_then_book() {
+        let mut mgr = AddressManager::new(100);
+        let book: SocketAddr = "198.51.100.5:28080".parse().unwrap();
+        let mut pa = PeerAddress::new(book);
+        pa.last_seen = 5_000_000; // very recent — would sort to the front of the book
+        mgr.add(pa);
+        let anchor: SocketAddr = "192.0.2.10:28080".parse().unwrap();
+        mgr.set_anchors(vec![anchor]);
+        let manual: SocketAddr = "203.0.113.7:28080".parse().unwrap();
+        mgr.add_manual(manual);
+
+        // 1) manual peer first.
+        let first = mgr.get_next().unwrap();
+        assert_eq!(first, manual, "manual peer dialed first");
+        mgr.mark_tried(first);
+        // 2) anchor next.
+        let second = mgr.get_next().unwrap();
+        assert_eq!(second, anchor, "anchor dialed after manual");
+        mgr.mark_tried(second);
+        // 3) discovered book last.
+        let third = mgr.get_next().unwrap();
+        assert_eq!(third, book, "discovered book dialed only after manual + anchors");
+    }
+
+    /// At capacity, `add` evicts the OLDEST entry by `last_seen` to seat a
+    /// newer one (distinct netgroups so the quota isn't the gate here).
+    #[test]
+    fn eviction_removes_oldest_by_last_seen_at_capacity() {
+        use std::net::SocketAddr;
+        let mut mgr = AddressManager::new(3);
+        let mk = |o: u8, seen: u64| {
+            let mut pa =
+                PeerAddress::new(format!("172.{o}.0.1:28080").parse::<SocketAddr>().unwrap());
+            pa.last_seen = seen;
+            pa
+        };
+        let oldest = mk(20, 100);
+        mgr.add(oldest.clone());
+        mgr.add(mk(21, 200));
+        mgr.add(mk(22, 300));
+        assert_eq!(mgr.len(), 3);
+
+        // A 4th (newest) address must evict the oldest-by-last_seen entry.
+        mgr.add(mk(23, 400));
+        assert_eq!(mgr.len(), 3, "book stays at capacity");
+        let all = mgr.get_for_exchange(10_000);
+        assert!(
+            !all.iter().any(|a| a.addr == oldest.addr),
+            "oldest-by-last_seen entry must be the eviction victim"
+        );
+        assert!(
+            all.iter().any(|a| a.addr == mk(23, 400).addr),
+            "newest entry must be admitted"
+        );
+    }
+
+    /// Regression (2026-08-16, 0-outbound for 90s+): a large book of fresh
+    /// discovered addresses must NOT starve the operator's manual peer or the
+    /// persisted anchors out of the dialer. Both must still be handed out first
+    /// despite 200 recently-seen discovered entries crowding the last_seen sort.
+    #[test]
+    fn manual_and_anchor_not_starved_by_large_fresh_book() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let mut mgr = AddressManager::new(1000); // quota 125 per /16
+        for i in 0..200u32 {
+            // Distinct /16 per entry so none hit the netgroup quota.
+            let ip = Ipv4Addr::new(10, (i % 256) as u8, 0, 1);
+            let mut pa = PeerAddress::new(SocketAddr::new(IpAddr::V4(ip), 28080));
+            pa.last_seen = 9_000_000 + i as u64; // all very recent
+            mgr.add(pa);
+        }
+        let anchor: SocketAddr = "192.0.2.10:28080".parse().unwrap();
+        mgr.set_anchors(vec![anchor]);
+        let manual: SocketAddr = "203.0.113.7:28080".parse().unwrap();
+        mgr.add_manual(manual);
+
+        let first = mgr.get_next().unwrap();
+        assert_eq!(first, manual, "manual peer must not be starved by a large book");
+        mgr.mark_tried(first);
+        let second = mgr.get_next().unwrap();
+        assert_eq!(second, anchor, "anchor must not be starved by a large book");
     }
 
     #[test]

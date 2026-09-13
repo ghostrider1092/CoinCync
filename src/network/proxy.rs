@@ -26,6 +26,60 @@
 //! - Amount patterns (mitigated by Bulletproofs)
 //!
 //! For maximum privacy, combine with subaddresses and careful OPSEC.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `connect_peer` onion-only kill switch** — INVARIANT: when
+//!   `proxy.onion_only` is set but the proxy is not active, ALL connection
+//!   attempts are refused — there is no fallback branch that reaches direct
+//!   `TcpStream::connect`. THREAT: CRIT-8 (clearnet fallback silently
+//!   deanonymizing a Tor-only user by leaking their real IP to a peer).
+//!   TESTS: (gap — no test in this module drives `connect_peer` with
+//!   `onion_only: true` and an inactive proxy to assert the refusal; the
+//!   branch is currently exercised only by code inspection).
+//! - **§2 `connect_peer` direct-connection fallthrough (non-onion-only path)**
+//!   — INVARIANT: direct `TcpStream::connect` is only reached when the
+//!   proxy is absent/inactive AND `onion_only` is false, i.e. the user has
+//!   not opted into Tor-only mode. THREAT: unintended clearnet connections
+//!   for a user who believes proxy routing is mandatory. TESTS: (gap — no
+//!   unit test in this module covers `connect_peer`'s direct-connect
+//!   branch; would require a live/mock TCP listener).
+//! - **§3 `connect_via_proxy`** — INVARIANT: only `ProxyType::Socks5` is
+//!   accepted; SOCKS4/HTTP are rejected with `ConfigError` before any
+//!   connection attempt. THREAT: silently downgrading to an unauthenticated
+//!   or unsupported proxy protocol that doesn't provide the expected
+//!   anonymity properties. TESTS: `test_socks5_config` (config-shape only;
+//!   gap — no test exercises `connect_via_proxy` itself with a non-SOCKS5
+//!   `ProxyType` to assert the rejection).
+//! - **§4 `connect_onion`** — INVARIANT: connecting to a `.onion` address
+//!   requires both an active proxy and `ProxyType::Socks5`, and the address
+//!   must literally end in `.onion` before being forwarded. THREAT:
+//!   attempting onion routing over a non-Tor-capable proxy, or forwarding a
+//!   non-onion hostname through the onion-only code path (DNS-leak /
+//!   protocol-confusion risk). TESTS: `test_is_onion_address` (validates the
+//!   suffix-matching helper `connect_onion` relies on); (gap — no test
+//!   drives `connect_onion` end-to-end against a live/mock proxy).
+//! - **§5 `is_onion_address`** — INVARIANT: the `.onion` suffix check
+//!   operates on the hostname portion only (after stripping a trailing
+//!   `:port`), so `notreal.onion.example.com` style strings are not
+//!   misclassified as onion addresses. THREAT: routing decisions (onion
+//!   vs. clearnet) being spoofed by a crafted hostname, potentially
+//!   sending onion-destined traffic clearnet or vice versa. TESTS:
+//!   `test_is_onion_address`.
+//! - **§6 `PeerTarget::parse`** — INVARIANT: `.onion` addresses are parsed
+//!   via `rsplitn` on the LAST colon (correct for `<56-char-onion>.onion:port`,
+//!   which contains no other colons), and non-onion input is parsed as a
+//!   strict `SocketAddr`, with malformed input rejected rather than
+//!   silently defaulting. THREAT: a malformed peer-address string being
+//!   misinterpreted as a different (possibly attacker-chosen) host/port.
+//!   TESTS: `test_peer_target_parse`.
+//! - **§7 `ProxyConfig::url` / `credentials` (credential-leak prevention)**
+//!   — INVARIANT: `url()` never includes the username/password even when
+//!   set; credentials are only obtainable via the separate `credentials()`
+//!   accessor. THREAT: proxy password leaking into logs or diagnostics that
+//!   print the proxy URL. TESTS: `test_proxy_url`.
 
 use crate::config::ProxyConfig;
 use crate::error::{Error, Result};

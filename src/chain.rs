@@ -1,6 +1,155 @@
 //! # Blockchain State Machine
 //!
 //! Core blockchain state management.
+//!
+//! ## Audit map
+//! This file is the audit-critical (non-consensus) state machine: block connect,
+//! fork choice, reorg execution, rollback, load/rebuild, genesis. Each `§` below
+//! names the code element(s), the INVARIANT it guarantees, the THREAT/incident it
+//! defends, and the real TESTS that prove it (or the KNOWN gap). `§N` tags on the
+//! banner comments below point back here. (Renders in `cargo doc`.)
+//!
+//! - **§1 `add_block` extend path** (`commit_block_atomic` call, supply/burn
+//!   `checked_add`) — INVARIANT: on the extend branch the four consensus trees
+//!   (output_index, height_index, state, tx_index) move together via
+//!   `Database::commit_block_atomic`; in-memory tip never lands ahead of a failed
+//!   disk commit (commit failure PANICS rather than diverging). Supply/burn use
+//!   `checked_add` + panic (symmetry with the reorg-rollback `checked_sub`).
+//!   THREAT: torn write leaving height index ahead of state → post-crash
+//!   double-spend / inflation. TESTS: `total_supply_is_conserved_per_block`,
+//!   `total_supply_accumulator_is_u128_and_survives_the_old_u64_ceiling`,
+//!   `add_block_duplicate_in_memory_cache_returns_already_known`,
+//!   `add_block_duplicate_in_db_not_cache_returns_already_known`,
+//!   `commit_block_atomic_writes_all_four_trees_together` (DB-unit).
+//! - **§2 RACE-R7 tip-moved recheck** (`inner.tip.hash != tip_hash` on the extend
+//!   path) — INVARIANT: if the tip advanced between the read and the apply, the
+//!   extend is abandoned and the block falls through to the fork path, never
+//!   double-applied to a stale tip. THREAT: concurrent-writer TOCTOU that applies
+//!   the same block twice / onto the wrong parent. TESTS: (gap — no test drives a
+//!   concurrent tip move through the RACE-R7 branch).
+//! - **§3 Fork choice** (`calculate_fork_cumulative_work`, hash-lex tiebreak) —
+//!   INVARIANT: genesis contributes a fixed base of 1 (not `dft(genesis)`) so an
+//!   equal-work fork is never spuriously heavier; strictly-greater work switches,
+//!   exactly-equal work breaks deterministically by lexicographic tip hash
+//!   (`fork_tip < current_tip` wins) — network-deterministic, no timestamp
+//!   tiebreak. THREAT: selfish-miner / equivocation split from a nondeterministic
+//!   or timestamp-gameable tiebreak. TESTS:
+//!   `total_difficulty_recompute_and_fork_walk_agree_on_genesis_base`,
+//!   `calculate_fork_cumulative_work_parent_not_found_returns_partial`,
+//!   `calculate_fork_cumulative_work_cycle_breaks_at_max_steps`,
+//!   `two_node_partition_heals_to_heavier_chain`,
+//!   `equivocating_miner_does_not_split_honest_nodes` (direct add_block tiebreak
+//!   assertion is a gap).
+//! - **§4 Fork walk helpers** (`find_fork_point`, `collect_fork_chain`,
+//!   `recompute_total_difficulty`) — INVARIANT: fork walks bound their steps and
+//!   return `None`/partial on a cycle or missing parent (never loop forever);
+//!   `recompute_total_difficulty` = `1 + Σ dft(1..=h)` and agrees with the fork
+//!   walk. THREAT: crafted prev_hash cycle → hang / corruption-driven acceptance.
+//!   TESTS: `find_fork_point_returns_common_ancestor_and_genesis`,
+//!   `find_fork_point_detects_cycle_returns_none`,
+//!   `find_fork_point_missing_parent_returns_none`,
+//!   `collect_fork_chain_returns_ascending_and_stops_at_fork_point`,
+//!   `recompute_total_difficulty_missing_mid_range_returns_none`.
+//! - **§5 Reorg execution + `apply_reorg_atomic`** (disconnect loop, re-apply
+//!   loop, `Database::apply_reorg_atomic`) — INVARIANT: the whole switch (output
+//!   removals/adds, height sets/removals, state, tx add/remove) commits atomically
+//!   or not at all; losing-fork work never leaks into `total_difficulty`;
+//!   orphaned non-coinbase txs are returned for mempool restore. THREAT: partial
+//!   reorg commit → hybrid tip / inflation. TESTS:
+//!   `total_difficulty_is_reorg_history_independent`,
+//!   `reorg_does_not_drop_a_re_mined_output_index_entry` (DB-unit),
+//!   `reorg_preserves_oldest_wins_for_non_removed_shared_address` (DB-unit).
+//!   GAP (P0): an ACCEPTED reorg re-applying REAL non-coinbase txs is untested —
+//!   only the *rejected* double-spend reorg is covered (§6).
+//! - **§6 C1 fork-vs-active-UTXO validation + double-spend defense** (contextual
+//!   validation flag; REORG-TIP-VALIDATE recheck) — INVARIANT: a fork sharing a
+//!   real non-coinbase tx / double-spent key image with the active branch is
+//!   rejected; tip unchanged, key image stays unspent, supply unchanged. THREAT:
+//!   reorg-driven double-spend / inflation. TESTS:
+//!   `reorg_tip_double_spend_is_rejected`,
+//!   `ring_size_availability_is_reorg_history_invariant` (storage-level).
+//! - **§7 H3 failed-reorg rollback (path A / path B)** (`reorg_error`,
+//!   `rolled_back` gate) — INVARIANT: when a fork block fails mid-reorg, rollback
+//!   restores pre-reorg tip/stats/UTXO/output_index exactly. H3 FIX: path-A
+//!   removal is now bounded by the highest fork height so a failed reorg no longer
+//!   leaves stale `height_to_hash` entries above the restored tip; path A and
+//!   path B are mutually exclusive (`!rolled_back` fires path B only when path A
+//!   did not, e.g. a triggering-block difficulty recheck failure). THREAT: stale
+//!   height→hash mapping after a rejected reorg → later reads resolve a ghost
+//!   block. TESTS: (gap — the path-A/path-B rollback and the H3 stale-height fix
+//!   have no chain-level regression test).
+//! - **§8 `rollback_to_height`** (finality floor, cache→DB disconnect fallback,
+//!   orphaned-tx return) — INVARIANT: refuses to roll back below the persisted
+//!   `last_checkpoint` (FINALITY VIOLATION → `Err`, no mutation); disconnects
+//!   DB-only blocks past the ~200-block cache window via DB fallback; unwinds
+//!   supply/burn through the same disconnect site as connect (symmetric);
+//!   `target >= height` is a no-op. THREAT: deep rollback past finality; silent
+//!   under-disconnect when the body is only on disk. TESTS:
+//!   `rollback_to_height_rejects_target_below_last_checkpoint`,
+//!   `rollback_to_height_disconnects_db_only_blocks_past_the_cache`,
+//!   `rollback_to_height_unwinds_total_burned_through_the_real_disconnect_site`,
+//!   `rollback_to_height_returns_non_coinbase_txs_as_orphaned`,
+//!   `tier5_rollback_to_current_height_is_noop`,
+//!   `tier5_rollback_beyond_genesis_handled`,
+//!   `total_burned_apply_disconnect_is_symmetric_and_reorg_correct`.
+//! - **§9 Reorg disconnect loop is CACHE-ONLY** (no DB fallback, unlike §8) —
+//!   INVARIANT (intended): every orphaned block on the losing branch is
+//!   disconnected. KNOWN RISK: the reorg disconnect loop reads bodies from the
+//!   in-memory cache only; a reorg whose `fork_point` sits just inside the
+//!   ~200-block cache edge could silently under-disconnect (supply / UTXO /
+//!   phase-2 stores under-counted) where `rollback_to_height` would not. THREAT:
+//!   latent inflation / stuck-spent key image near the cache boundary. TESTS:
+//!   (gap — latent under-disconnect at the cache edge is untested; flagged risk).
+//! - **§10 Supply/burn `checked_sub`/`checked_add` underflow panics + STATS
+//!   INVARIANT floor** — INVARIANT: every supply/burn move uses checked
+//!   arithmetic and PANICS (halts) on under/overflow rather than silently
+//!   clamping — a clamp would mask corruption/inflation; `total_supply` is `u128`
+//!   (survives the old `u64` ~18.4M-CYNC ceiling). L2: `total_burned` and the
+//!   block/tx counters move in lockstep with `total_supply` (`checked_sub`
+//!   None → logs `STATS INVARIANT VIOLATION` and floors, not panic, for the
+//!   telemetry counters). THREAT: silent underflow → phantom supply / inflation
+//!   (ring-size determinism, 1d27d3c8). TESTS:
+//!   `total_supply_accumulator_is_u128_and_survives_the_old_u64_ceiling`,
+//!   `total_burned_apply_disconnect_is_symmetric_and_reorg_correct`,
+//!   `block_fee_burn_matches_validator_burn_split` (the four disconnect-side
+//!   underflow-panic sites themselves are an untested gap).
+//! - **§11 `load_from_database` / `rebuild_utxo_set`** — INVARIANT: a load either
+//!   yields a fully-consistent chain or errors — never a half-state mistaken for
+//!   fresh; genesis/tip/height/network are cross-checked and the UTXO set +
+//!   block/tx counters are reconstructed (not reset to 0) on reopen. THREAT: a
+//!   drifted/partial DB booted as canonical → fork from the network. TESTS:
+//!   `load_from_database_distinguishes_fresh_and_loaded_state`,
+//!   `load_from_database_rejects_blocks_without_chain_state`,
+//!   `load_from_database_rejects_missing_tip_block`,
+//!   `load_from_database_rejects_wrong_network_genesis`,
+//!   `load_from_database_rejects_missing_genesis_height_entry`,
+//!   `load_from_database_rejects_state_height_mismatch_with_tip_block`,
+//!   `db_reopen_reconstructs_identical_state` (rebuild L8 counter reconstruction
+//!   is a gap).
+//! - **§12 `init_genesis` / `verify_tip_integrity`** — INVARIANT: genesis hash
+//!   must equal the expected network genesis (mismatch → `Err`); on init supply =
+//!   `reward(0)`, burned = 0, and genesis+height+state are persisted;
+//!   `verify_tip_integrity` reloads from DB when the in-memory tip disagrees with
+//!   `state.tip_hash`. THREAT: wrong-network / forged genesis silently adopted.
+//!   TESTS: `test_genesis_block`, `tier5_genesis_supply_matches_emission`
+//!   (verify_tip_integrity mismatch-reload branch is a gap).
+//! - **§13 `is_spent` (fail-closed) + `max_reorg_depth`** — INVARIANT: `is_spent`
+//!   returns the in-memory hit, then the DB fallback, and on a DB *error* returns
+//!   `true` (fail-CLOSED) — a lookup failure must never let a key image be treated
+//!   as spendable; `max_reorg_depth` uses the runtime network, not the compile
+//!   feature. THREAT: DB error opening a double-spend window; feature/runtime
+//!   network mismatch loosening the reorg cap. TESTS:
+//!   `is_spent_no_db_false_and_in_memory_hit_true`, `is_spent_db_fallback_true`,
+//!   `f31_blockchain_max_reorg_depth_uses_runtime_network` (the DB-error
+//!   fail-closed→true branch is an untested gap).
+//! - **§14 Phase-2 checkpoint/rewind** (`checkpoint_phase2_stores`,
+//!   `rewind_phase2_stores`; shielded / spark / MW-kernel roots) — INVARIANT: the
+//!   three phase-2 stores checkpoint and rewind together in lockstep with block
+//!   connect/disconnect; a rewind past an empty checkpoint stack hits the loud
+//!   error branch rather than silently desyncing. THREAT: phase-2 root divergence
+//!   across a reorg → shielded/MW state inconsistent with the transparent chain.
+//!   TESTS: `phase2_stores_rewind_together_through_helpers` (rewind-past-restart
+//!   loud-error branch is a gap).
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -203,6 +352,25 @@ impl BlockchainInner {
         }
     }
 }
+
+/// Read-only query getters live in a child module (issue #108). As a descendant
+/// of `chain`, it can read `Blockchain`'s private fields; nothing there takes
+/// `apply_lock` or mutates, so lock scope is unchanged.
+mod queries;
+
+/// Fork-choice + difficulty-window calculation helpers (issue #108). Read-only
+/// `&self` helpers, `pub(super)` so `add_block`/`load` (in this module) and the
+/// tests can call them; none take `apply_lock`, so lock scope is unchanged.
+mod fork_calc;
+
+/// Database load / genesis init / recovery (issue #108). Construction-time only,
+/// never on the live apply path; each takes its own `inner.write()` guard
+/// verbatim and none takes `apply_lock`, so lock scope is unchanged.
+mod recovery;
+
+/// Chain-event ring-buffer methods (issue #108). record_event/get_events; no
+/// apply_lock, so lock scope is unchanged.
+mod events;
 
 /// Blockchain state machine with interior mutability
 pub struct Blockchain {
@@ -603,473 +771,9 @@ impl Blockchain {
             .unwrap_or_default()
     }
 
-    /// Initialize genesis block
-    pub fn init_genesis(&self) -> Result<Hash> {
-        let _state_update = self.begin_state_update();
-        let genesis = create_genesis_block_for(self.network);
-        let hash = genesis.hash();
-
-        // SECURITY: Verify genesis hash matches the hardcoded constant.
-        // This catches accidental genesis block changes that would cause chain forks.
-        let expected = self.expected_genesis_hash();
-        if hash != expected {
-            return Err(Error::InvalidState(format!(
-                "Genesis hash mismatch! Computed {} but expected {}. \
-                 The genesis block definition may have been altered.",
-                hash.to_hex(),
-                expected.to_hex()
-            )));
-        }
-
-        {
-            let mut inner = self.inner.write();
-            inner.blocks.insert(hash, genesis.clone());
-            inner.height_to_hash.insert(0, hash);
-            inner.genesis_hash = Some(hash);
-
-            inner.tip = ChainTip {
-                hash,
-                height: 0,
-                difficulty: 1,
-                timestamp: genesis.header.timestamp,
-            };
-
-            inner.stats.height = 0;
-            inner.stats.total_blocks = 1;
-            inner.stats.total_transactions = genesis.transactions.len() as u64;
-            inner.stats.tip_hash = hash;
-            inner.stats.total_supply = calculate_block_reward(0).as_atomic() as u128;
-            // Genesis carries no fees (height 0 is below FEE_DISTRIBUTION_HEIGHT
-            // and has no non-coinbase txs), so the burn accumulator starts at 0.
-            inner.stats.total_burned = 0;
-
-            // SECURITY (CC-001): Apply genesis block transactions to UTXO set
-            let batch = UtxoSet::batch_from_block(0, &genesis.transactions);
-            inner.utxos.apply_batch(batch);
-        }
-
-        // Persist output index for genesis block
-        self.persist_output_index(&genesis.transactions, 0);
-
-        // Save to database if available
-        if let Some(ref db) = self.db {
-            db.blocks.insert(&genesis)?;
-            db.blocks.set_height_hash(0, &hash)?;
-            db.state.set_genesis_hash(&hash)?;
-            let state = ChainStateData {
-                tip_hash: hash,
-                height: 0,
-                total_difficulty: 1,
-                total_supply: calculate_block_reward(0).as_atomic() as u128,
-                total_burned: 0,
-                last_checkpoint: 0,
-            };
-            db.state.save_state(&state)?;
-
-            // Record genesis as the first checkpoint
-            let _ = db.state.add_checkpoint(0, &hash);
-        }
-
-        tracing::info!("Genesis block initialized: {}", hash.to_hex());
-        Ok(hash)
-    }
-
-    fn expected_genesis_hash(&self) -> Hash {
-        match self.network {
-            NetworkType::Testnet | NetworkType::Regtest => crate::testnet::expected_genesis_hash(),
-            NetworkType::Mainnet => crate::mainnet::expected_genesis_hash(),
-        }
-    }
-
-    /// Verify chain tip integrity after recovering from a poisoned lock.
-    /// Compares in-memory tip hash against the database to detect corruption.
-    /// Can also be called periodically from the maintenance loop as a health check.
-    pub fn verify_tip_integrity(&self) -> Result<()> {
-        if let Some(ref db) = self.db {
-            if let Some(state) = db.state.get_state()? {
-                let inner = self.inner.read();
-                if inner.tip.hash != state.tip_hash && inner.tip.height > 0 {
-                    tracing::error!(
-                        "TIP INTEGRITY MISMATCH: in-memory tip {} (height {}) != DB tip {} (height {}). \
-                         Reloading from database.",
-                        inner.tip.hash.to_hex()[..16].to_string(),
-                        inner.tip.height,
-                        state.tip_hash.to_hex()[..16].to_string(),
-                        state.height,
-                    );
-                    drop(inner);
-                    return self.load_from_database();
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Load chain state from database
-    pub fn load_from_database(&self) -> Result<()> {
-        self.load_from_database_with_outcome().map(|_| ())
-    }
-
-    /// Genesis initialization requires an explicit fresh-database result.
-    pub fn load_from_database_with_outcome(&self) -> Result<ChainLoadOutcome> {
-        let _state_update = self.begin_state_update();
-        if let Some(ref db) = self.db {
-            let state = match db.state.get_state()? {
-                Some(state) => state,
-                None if !db.blocks.has_any_chain_data() => return Ok(ChainLoadOutcome::Fresh),
-                None => {
-                    return Err(Error::DatabaseError(
-                        "persisted block data exists without chain state; refusing to initialize genesis"
-                            .into(),
-                    ));
-                }
-            };
-
-            let actual_genesis = db.blocks.get_hash_by_height(0)?.ok_or_else(|| {
-                Error::DatabaseError(
-                    "chain state exists but the block height index has no genesis entry".into(),
-                )
-            })?;
-            let expected_genesis = self.expected_genesis_hash();
-            if actual_genesis != expected_genesis {
-                return Err(Error::DatabaseError(format!(
-                    "database genesis {} does not match the expected {} genesis {}",
-                    actual_genesis, self.network, expected_genesis,
-                )));
-            }
-
-            return match db.blocks.get(&state.tip_hash)? {
-                Some(tip_block) => {
-                    if tip_block.header.height != state.height {
-                        return Err(Error::DatabaseError(format!(
-                            "chain state height {} does not match tip block height {}",
-                            state.height, tip_block.header.height,
-                        )));
-                    }
-                    let difficulty = calculate_difficulty_from_target(&tip_block.header.target);
-                    {
-                        let mut inner = self.inner.write();
-                        inner.tip = ChainTip {
-                            hash: state.tip_hash,
-                            height: state.height,
-                            difficulty,
-                            timestamp: tip_block.header.timestamp,
-                        };
-                        inner.stats.height = state.height;
-                        inner.stats.total_supply = state.total_supply;
-                        // Load the persisted burn accumulator alongside supply.
-                        // ChainStateData.total_burned is `u64` on disk; the
-                        // in-memory accumulator is `u128` for parity with
-                        // total_supply — widen on load.
-                        inner.stats.total_burned = state.total_burned as u128;
-                        inner.stats.tip_hash = state.tip_hash;
-                        inner.stats.total_difficulty = state.total_difficulty;
-                        // Sync stats.difficulty with the loaded tip. Without this,
-                        // stats.difficulty stays at ChainStats::default() (= 0) until
-                        // a new block lands via the main-chain add path (chain.rs:1490).
-                        // The RPC `get_info` "difficulty" field reads from
-                        // stats.difficulty (src/rpc/server.rs:511), so the bug surfaces
-                        // as `"difficulty":"0"` in get_info after every node restart
-                        // until the first non-fork block arrives. Observed on the
-                        // testnet api box 2026-06-01 after the fleet upgrade.
-                        inner.stats.difficulty = difficulty;
-                    }
-                    tracing::info!(
-                        "Loaded chain state: height={}, tip={}",
-                        state.height,
-                        state.tip_hash.to_hex()
-                    );
-
-                    // Self-heal total_difficulty from the active chain.
-                    //
-                    // The stored value can drift from the deterministic
-                    // `1 + Σ dft(1..=height)` when the node has taken the
-                    // (pre-fix) reorg path, which accumulated against a
-                    // `dft(genesis)` base or stored a partial fork walk. A
-                    // drifted value makes this node advertise a `ChainWorkMessage`
-                    // that disagrees with peers on the SAME tip's work, which
-                    // false-positives their `work_behind` veto and locks their
-                    // (follower) miners out. Recompute the canonical value and
-                    // overwrite in memory; the corrected value persists on the
-                    // next block commit. If any block is missing we keep the
-                    // stored value rather than store a wrong partial.
-                    if let Some(recomputed) = self.recompute_total_difficulty(state.height) {
-                        let mut inner = self.inner.write();
-                        if inner.stats.total_difficulty != recomputed {
-                            tracing::warn!(
-                                "total_difficulty self-heal on load: stored={} recomputed={} delta={} \
-                                 — converging to the deterministic 1 + Σ dft(1..=height)",
-                                inner.stats.total_difficulty,
-                                recomputed,
-                                (recomputed as i128) - (inner.stats.total_difficulty as i128),
-                            );
-                            inner.stats.total_difficulty = recomputed;
-                        }
-                    }
-
-                    // Rebuild UTXO set from stored blocks so that key image
-                    // checks and decoy selection work immediately after restart.
-                    self.rebuild_utxo_set(state.height)?;
-
-                    // Rebuild tx index if empty (migration for existing chains)
-                    if let Some(ref db) = self.db {
-                        if db.tx_index_is_empty() && state.height > 0 {
-                            tracing::info!("Building tx index for {} blocks...", state.height + 1);
-                            let start = std::time::Instant::now();
-                            let mut indexed = 0u64;
-                            let mut failed = 0u64;
-                            for h in 0..=state.height {
-                                if let Some(block) = self.get_block_by_height(h) {
-                                    for (idx, tx) in block.transactions.iter().enumerate() {
-                                        if let Err(e) =
-                                            db.index_tx(tx.hash().as_bytes(), h, idx as u32)
-                                        {
-                                            failed += 1;
-                                            // Log per-failure at DEBUG to avoid log
-                                            // spam during a corrupt-DB rebuild, but
-                                            // a non-zero `failed` count at the end
-                                            // surfaces the issue at WARN.
-                                            tracing::debug!(
-                                                target: "chain::tx_index_rebuild",
-                                                "index_tx failed at h={} idx={}: {}",
-                                                h, idx, e
-                                            );
-                                        } else {
-                                            indexed += 1;
-                                        }
-                                    }
-                                }
-                            }
-                            if failed > 0 {
-                                tracing::warn!(
-                                    "Tx index rebuild: {} indexed, {} FAILED in {:.2}s. \
-                                     Failed lookups will return None until next rebuild.",
-                                    indexed,
-                                    failed,
-                                    start.elapsed().as_secs_f64()
-                                );
-                            } else {
-                                tracing::info!(
-                                    "Tx index built: {} txs in {:.2}s",
-                                    indexed,
-                                    start.elapsed().as_secs_f64()
-                                );
-                            }
-                        }
-                    }
-
-                    // Verify tip integrity after loading (catches poisoned lock corruption)
-                    self.verify_tip_integrity()?;
-
-                    Ok(ChainLoadOutcome::Loaded)
-                }
-                None => Err(Error::DatabaseError(format!(
-                    "chain state references missing tip block {} at height {}",
-                    state.tip_hash, state.height,
-                ))),
-            };
-        }
-        Ok(ChainLoadOutcome::Fresh)
-    }
-
-    /// Rebuild in-memory UTXO set by replaying all blocks from the database.
-    ///
-    /// Called on startup after loading chain state to ensure the UTXO set
-    /// (key images, outputs, height index) is fully populated. Without this,
-    /// `validate_transaction()` would miss pre-restart key images, allowing
-    /// double-spends during the window before re-sync completes.
-    fn rebuild_utxo_set(&self, tip_height: u64) -> Result<()> {
-        let db = match self.db.as_ref() {
-            Some(db) => db,
-            None => return Ok(()),
-        };
-
-        tracing::info!("Rebuilding UTXO set from {} blocks...", tip_height + 1);
-        let start = std::time::Instant::now();
-
-        let mut inner = self.inner.write();
-        inner.utxos = UtxoSet::new();
-        // Wire up on-disk fallback for output_index cache misses
-        if let Some(ref db) = self.db {
-            inner.utxos.set_database(Arc::clone(db));
-        }
-
-        // Also rebuild in-memory block caches for recent blocks (needed by
-        // get_difficulty_blocks, find_fork_point, etc.)
-        let cache_depth = 200u64;
-        let cache_start = tip_height.saturating_sub(cache_depth);
-
-        let mut prev_hash = Hash::zero(); // genesis prev_hash
-        // Reconstruct the block/tx counters from the actual persisted chain.
-        // ChainStateData does NOT persist total_blocks/total_transactions, so
-        // without this they reload as 0 and undercount forever after a restart
-        // (same "stats field not reconstructed on load" class as the difficulty=0
-        // fix above; surfaced by the L8 db-reopen determinism test 2026-08-18).
-        let mut blocks_applied: u64 = 0;
-        let mut txs_applied: u64 = 0;
-        for height in 0..=tip_height {
-            match db.blocks.get_by_height(height) {
-                Ok(Some(block)) => {
-                    // Verify chain link integrity
-                    if height > 0 && block.header.prev_hash != prev_hash {
-                        tracing::error!(
-                            "CHAIN CORRUPTION at height {}: prev_hash {} != expected {}. \
-                             Truncating chain to height {}.",
-                            height,
-                            block.header.prev_hash.to_hex()[..16].to_string(),
-                            prev_hash.to_hex()[..16].to_string(),
-                            height - 1
-                        );
-                        // Fix: truncate the tip to the last good height.
-                        //
-                        // 2026-06-03 bug fix: previously the tip-restore branch
-                        // only ran if `height_to_hash.get(&good_height)`
-                        // returned Some — but that in-memory map is populated
-                        // only for blocks in the cache window (last ~200
-                        // heights, see line ~803-806). For corruption detected
-                        // at any height BELOW the cache window, the lookup
-                        // returned None and `inner.tip` was never reset. The
-                        // node would restart looking healthy (stats.height
-                        // dropped to good_height, but tip.height stayed at the
-                        // state-claimed pre-corruption value), then reject
-                        // every subsequent new block with "invalid height:
-                        // expected <state_tip+1>, got <good_height+1>", and
-                        // the chain would be stuck until manual intervention.
-                        //
-                        // `prev_hash` already holds the hash of the previous
-                        // good block (set at line ~796-797 each iteration), so
-                        // use it directly — no cache dependency. stats.height,
-                        // tip.height, and tip.hash now ALWAYS move together.
-                        let good_height = height - 1;
-                        let good_hash = prev_hash;
-                        inner.stats.height = good_height;
-                        inner.tip.height = good_height;
-                        inner.tip.hash = good_hash;
-                        inner.stats.tip_hash = good_hash;
-                        // Remove broken height entries from DB
-                        for h in height..=tip_height {
-                            let _ = db.blocks.remove_height_hash(h);
-                        }
-                        // Save corrected state
-                        let last_checkpoint = db
-                            .state
-                            .get_state()
-                            .ok()
-                            .flatten()
-                            .map(|s| s.last_checkpoint)
-                            .unwrap_or(0);
-                        let state = crate::db::ChainStateData {
-                            tip_hash: inner.stats.tip_hash,
-                            height: good_height,
-                            total_difficulty: inner.stats.total_difficulty,
-                            total_supply: inner.stats.total_supply,
-                            total_burned: inner.stats.total_burned as u64,
-                            last_checkpoint,
-                        };
-                        if let Err(e) = db.state.save_state(&state) {
-                            // Surfacing this previously-silent error closes the
-                            // audit finding "let _ = save_state drops critical
-                            // persistence error." If save_state fails after a
-                            // truncation, the on-disk tip will be ahead of the
-                            // in-memory truncated state — on restart the chain
-                            // re-loads the stale tip, masking the truncation.
-                            // We can't abort here (we're mid-truncation, the
-                            // in-memory state is correct), but at least the
-                            // operator gets a CRITICAL log line. Reference:
-                            // Bitcoin Core reports comparable post-flush
-                            // failures through `FatalError()` (validation.h:104
-                            // in the master read this session; the previous
-                            // `AbortNode()` identifier was renamed).
-                            tracing::error!(
-                                target: "chain::persistence",
-                                "CRITICAL: save_state failed after truncation to height {} ({}). \
-                                 Restart will reload stale on-disk tip. Manual operator \
-                                 intervention required.",
-                                good_height, e
-                            );
-                        }
-                        tracing::warn!(
-                            "Chain truncated to height {}. Node will re-sync missing blocks.",
-                            good_height
-                        );
-                        break;
-                    }
-
-                    let hash = block.hash();
-                    prev_hash = hash;
-
-                    let batch = UtxoSet::batch_from_block(height, &block.transactions);
-                    inner.utxos.apply_batch(batch);
-
-                    // Count this successfully-applied block toward the
-                    // reconstructed counters (the truncation path `break`s above,
-                    // so post-corruption blocks are correctly excluded).
-                    blocks_applied += 1;
-                    txs_applied += block.transactions.len() as u64;
-
-                    // Cache recent blocks in memory for fast access
-                    if height >= cache_start {
-                        inner.height_to_hash.insert(height, hash);
-                        inner.blocks.insert(hash, block);
-                    }
-
-                    if height > 0 && height % 10000 == 0 {
-                        tracing::info!(
-                            "  UTXO rebuild: {}/{} blocks processed",
-                            height,
-                            tip_height
-                        );
-                    }
-                }
-                Ok(None) => {
-                    tracing::warn!("Block at height {} missing during UTXO rebuild", height);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to read block at height {}: {}", height, e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Reconstruct the counters ChainStateData does not persist, so RPC
-        // get_info / explorer totals are correct immediately after a restart
-        // instead of resetting to 0 (L8 db-reopen finding, 2026-08-18).
-        inner.stats.total_blocks = blocks_applied;
-        inner.stats.total_transactions = txs_applied;
-
-        // Migration: if the persistent output_index sled tree is empty but we
-        // have blocks, bulk-insert from the in-memory output_index that was
-        // populated during the replay above.
-        if let Some(ref db) = self.db {
-            if db.output_index.is_empty() && tip_height > 0 {
-                tracing::info!("Migrating output index to persistent storage...");
-                let mut migrated = 0u64;
-                for (stealth, entry) in inner.utxos.output_index_iter() {
-                    if let Err(e) = db.output_index.insert(stealth, entry) {
-                        tracing::error!("Failed to migrate output index entry: {}", e);
-                    } else {
-                        migrated += 1;
-                    }
-                }
-                tracing::info!("Migrated {} output index entries to sled", migrated);
-            }
-        }
-
-        // Evict old output_index entries to bound memory (~1000 blocks in RAM).
-        // Older entries fall back to the on-disk OutputIndexDb.
-        inner.utxos.evict_old_outputs(tip_height, 1000);
-
-        let elapsed = start.elapsed();
-        tracing::info!(
-            "UTXO set rebuilt: {} outputs, {} spent key images, {} blocks in {:.2}s",
-            inner.utxos.output_count(),
-            inner.utxos.total_outputs_ever(),
-            tip_height + 1,
-            elapsed.as_secs_f64()
-        );
-
-        Ok(())
-    }
+    // init_genesis / expected_genesis_hash / verify_tip_integrity /
+    // load_from_database(_with_outcome) / rebuild_utxo_set moved to
+    // chain::recovery (issue #108).
 
     /// Persist output index entries for a block's transactions to sled.
     ///
@@ -1109,36 +813,8 @@ impl Blockchain {
         }
     }
 
-    /// Get current height
-    pub fn height(&self) -> u64 {
-        self.inner.read().tip.height
-    }
-
-    /// Get current tip
-    pub fn tip(&self) -> ChainTip {
-        self.inner.read().tip.clone()
-    }
-
-    /// Number of unspent outputs currently tracked. Observability only
-    /// (metrics/RPC) — not a consensus value.
-    pub fn utxo_count(&self) -> usize {
-        self.inner.read().utxos.output_count()
-    }
-
-    /// Look up a transaction's block height and index via the tx_index.
-    pub fn get_tx_location(&self, tx_hash: &[u8]) -> Option<(u64, u32)> {
-        self.db.as_ref().and_then(|db| db.get_tx_location(tx_hash))
-    }
-
-    /// Get tip hash
-    pub fn tip_hash(&self) -> Hash {
-        self.inner.read().tip.hash
-    }
-
-    /// Get the number of available (unspent) outputs in the UTXO set
-    pub fn available_output_count(&self) -> usize {
-        self.inner.read().utxos.output_count()
-    }
+    // height / tip / utxo_count / get_tx_location / tip_hash /
+    // available_output_count moved to `chain::queries` (issue #108).
 
     pub fn decoy_distribution_snapshot(&self) -> DecoyDistributionSnapshot {
         let inner = self.inner.read();
@@ -1203,318 +879,10 @@ impl Blockchain {
         })
     }
 
-    /// Validate a transaction against the current UTXO set
-    /// Used by the miner to pre-validate mempool txs before including in blocks.
-    pub fn validate_transaction(&self, tx: &Transaction) -> Result<()> {
-        let inner = self.inner.read();
-        crate::consensus::validate_transaction_for_network(
-            tx,
-            &inner.utxos,
-            inner.tip.height + 1,
-            self.network,
-        )
-    }
-
-    /// Get current difficulty
-    pub fn difficulty(&self) -> u128 {
-        self.inner.read().tip.difficulty
-    }
-
-    /// Get next difficulty (placeholder)
-    pub fn next_difficulty(&self) -> u128 {
-        self.inner.read().tip.difficulty
-    }
-
-    /// Consensus difficulty target for a block at `height`, given its difficulty
-    /// window `blocks` (whose last element is the parent). All networks use
-    /// dual-anchor ASERT (`calculate_difficulty`) EXCEPT regtest, which pins
-    /// difficulty at the parent's target and never retargets — Bitcoin-regtest
-    /// style. That keeps a single CPU producing blocks at a stable, low,
-    /// overshoot-free rate for local functional testing (ASERT's fast-block
-    /// ramp would otherwise spike difficulty on an isolated miner). Regtest is
-    /// an isolated, local-only network (never dials peers, never mainnet/testnet
-    /// genesis), so this branch has ZERO effect on testnet/mainnet consensus.
-    /// A pinned target also trivially satisfies the ±4x/step sanity layer in
-    /// `validate_difficulty_target` (ratio is always 1.0).
-    ///
-    /// SINGLE SOURCE OF THE DIFFICULTY RULE: every expected-target computation
-    /// must go through this — the miner (`next_target`), block validation, fork
-    /// validation, AND header validation (`network::node::dispatch::headers`).
-    /// (Regtest DOES peer via `--addnode`; header validation previously called
-    /// `calculate_difficulty` directly and diverged from this regtest branch,
-    /// rejecting every peer header so regtest nodes could not sync. Hence `pub`.)
-    pub fn expected_next_target(&self, blocks: &[DifficultyBlock], height: u64) -> Hash {
-        if self.network == crate::config::NetworkType::Regtest {
-            // Ease difficulty DOWN toward the MIN_DIFFICULTY floor at <=3x per
-            // block (safely inside the ±4x/step sanity layer), then pin there
-            // and never retarget. Applies from the very first block (parent =
-            // genesis), so a fresh regtest chain drops from the genesis
-            // difficulty to the floor in a few blocks and then produces blocks
-            // at a stable, low, overshoot-free rate — the fast local harness
-            // Bitcoin's regtest provides. (The ease starts at genesis rather
-            // than jumping straight to the floor because the locked ±4x/step
-            // sanity layer would reject a single large drop.)
-            let parent = blocks.last().map(|b| b.target).unwrap_or_else(max_target);
-            let parent_diff = crate::consensus::difficulty::target_to_difficulty(&parent);
-            let floor = crate::consensus::difficulty::MIN_DIFFICULTY;
-            if parent_diff <= floor {
-                return parent;
-            }
-            // next_diff <= parent_diff <= genesis difficulty, so it always fits u64.
-            let next_diff = (parent_diff / 3).max(floor).min(u64::MAX as u128) as u64;
-            return Hash::from_difficulty(next_diff);
-        }
-        if blocks.len() >= 2 {
-            calculate_difficulty(blocks, height)
-        } else {
-            // Only genesis (or nothing): maintain genesis difficulty until ASERT
-            // has a full window. Non-regtest networks rely on a calibrated
-            // genesis difficulty here (see {testnet,mainnet}.rs INITIAL_DIFFICULTY).
-            blocks.last().map(|b| b.target).unwrap_or_else(max_target)
-        }
-    }
-
-    /// Compute the exact target hash for the next block using ASERT difficulty adjustment.
-    /// This is the authoritative target that the validator will enforce.
-    pub fn next_target(&self) -> Hash {
-        let height = self.height() + 1;
-        let diff_blocks = self.get_difficulty_blocks(height);
-        self.expected_next_target(&diff_blocks, height)
-    }
-
-    /// Check if chain is synced (updated by P2P layer via set_sync_info).
-    ///
-    /// Three conditions, any one of which is sufficient:
-    ///   1. The P2P layer flagged us synced explicitly.
-    ///   2. We're at or above the highest peer-advertised height.
-    ///   3. We're within 2 blocks of that target AND the tip itself is
-    ///      recent (younger than 3× the target block time = 6 min).
-    ///
-    /// Condition 3 covers the steady-state case where a peer announces
-    /// a new block (bumping `peer_target_height` by 1) a beat before
-    /// we've ingested it. Without this, a chain producing blocks at the
-    /// target rate is reported as "syncing" forever — which is what
-    /// users of the explorer kept reporting as "the chain stalled".
-    /// A fresh tip + tiny overshoot is the textbook "essentially synced"
-    /// state; reporting it as such matches user reality.
-    pub fn is_synced(&self) -> bool {
-        // Firework Phase 2 (I6): a peer advertising a verifiably-heavier
-        // chain vetoes "synced" regardless of block height — this is what
-        // stops a node on a higher-block/lower-work fork from reporting
-        // synced (and its miner from mining). Inert for height-only peers
-        // (no CAP_CHAINWORK), and cleared by the sync layer's anti-wedge
-        // machinery (expire/ban/prune) once an unsubstantiated claim is
-        // dropped, so it can never wedge us permanently.
-        if self.work_behind.load(std::sync::atomic::Ordering::Relaxed) {
-            return false;
-        }
-        let flag = self.synced.load(std::sync::atomic::Ordering::Relaxed);
-        if flag {
-            return true;
-        }
-        let h = self.height();
-        if h == 0 {
-            return false;
-        }
-        let target = self
-            .peer_target_height
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if h >= target {
-            return true;
-        }
-        // Tolerance for in-flight peer advertisements: ≤2 blocks behind
-        // the peer-advertised target, AND tip is fresh enough that the
-        // chain is clearly producing blocks (not actually stalled).
-        if target.saturating_sub(h) <= 2 {
-            let tip_timestamp = self.inner.read().tip.timestamp;
-            if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                let now_secs = d.as_secs();
-                let age = now_secs.saturating_sub(tip_timestamp);
-                // 3× testnet target block time. Same threshold is fine
-                // for mainnet (also 120s target).
-                const FRESH_TIP_SECS: u64 = 3 * crate::constants::TARGET_BLOCK_TIME;
-                if age <= FRESH_TIP_SECS {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Get chain statistics
-    pub fn stats(&self) -> ChainStats {
-        self.inner.read().stats.clone()
-    }
-
-    /// Get block by hash
-    /// Median-Time-Past of the 11 blocks preceding `prev_hash` ON ITS OWN
-    /// CHAIN — walking the actual parent lineage via `prev_hash`, not the
-    /// active chain by height. Returns `None` if fewer than 11 ancestors are
-    /// reachable (caller then skips the MTP rule, matching the historical
-    /// genesis-window behaviour).
-    ///
-    /// REORG-CORRECTNESS (R-1): validating a competing-fork block against the
-    /// active chain's timestamps at those heights wrongly rejected valid
-    /// heavier forks whose near-fork blocks predated the active chain's MTP —
-    /// and banned the honest peer serving them (InvalidBlockPoW). For a
-    /// main-chain block the parent lineage IS the by-height ancestry, so this
-    /// is behaviour-identical on the common path. `get_block` resolves both
-    /// in-memory side-chain blocks and DB-backed ancestors.
-    fn median_time_past_of_lineage(&self, prev_hash: Hash) -> Option<u64> {
-        let mut timestamps: Vec<u64> = Vec::with_capacity(crate::constants::MTP_WINDOW);
-        let mut cursor = prev_hash;
-        for _ in 0..crate::constants::MTP_WINDOW {
-            match self.get_block(&cursor) {
-                Some(ancestor) => {
-                    timestamps.push(ancestor.header.timestamp);
-                    cursor = ancestor.header.prev_hash;
-                }
-                None => break,
-            }
-        }
-        if timestamps.len() >= crate::constants::MTP_WINDOW {
-            timestamps.sort_unstable();
-            Some(timestamps[timestamps.len() / 2])
-        } else {
-            None
-        }
-    }
-
-    pub fn get_block(&self, hash: &Hash) -> Option<Block> {
-        // Try in-memory first
-        {
-            let inner = self.inner.read();
-            if let Some(block) = inner.blocks.get(hash) {
-                return Some(block.clone());
-            }
-        }
-        // Try database
-        if let Some(ref db) = self.db {
-            if let Ok(Some(block)) = db.blocks.get(hash) {
-                return Some(block);
-            }
-        }
-        None
-    }
-
-    /// Get block hash by height
-    pub fn get_block_hash(&self, height: u64) -> Option<Hash> {
-        // Try in-memory first
-        {
-            let inner = self.inner.read();
-            if let Some(hash) = inner.height_to_hash.get(&height) {
-                return Some(*hash);
-            }
-        }
-        // Try database
-        if let Some(ref db) = self.db {
-            if let Ok(Some(hash)) = db.blocks.get_hash_by_height(height) {
-                return Some(hash);
-            }
-        }
-        None
-    }
-
-    /// Get block by height
-    pub fn get_block_by_height(&self, height: u64) -> Option<Block> {
-        if let Some(hash) = self.get_block_hash(height) {
-            return self.get_block(&hash);
-        }
-        None
-    }
-
-    /// Count blocks in `[window_start, window_end)` whose coinbase signals
-    /// the given BIP-9 deployment bit.
-    ///
-    /// Provides the `signal_count_fn` callback that `ForkSignaler::state()`
-    /// (see `src/consensus/fork_signal.rs`) consumes. Walks the main-chain
-    /// blocks in the half-open range, inspects each block's coinbase
-    /// transaction's `extra` field, decodes the trailing 4 bytes as
-    /// `SignalBits` (via `fork_signal::decode_signal_bits`), and counts the
-    /// blocks where the queried bit is set.
-    ///
-    /// ## Backward compatibility
-    ///
-    /// Blocks mined by a pre-CIP-012 rig binary have an 8-byte coinbase
-    /// `extra` (height only, no trailing signal bytes). `decode_signal_bits`
-    /// returns `SignalBits(0)` for those, so they contribute 0 to the count
-    /// — same as a v1.0.12-aware rig that didn't pass `--signal-v1012`.
-    /// New miners that DO opt in produce 12-byte extras with the bit set,
-    /// and contribute 1 to the count.
-    ///
-    /// ## Performance
-    ///
-    /// `get_block_by_height` is amortized O(1): two `HashMap` lookups in
-    /// the in-memory cache (`blocks` + `height_to_hash`) for blocks within
-    /// the cache window, with a sled-disk fallback for older blocks. The
-    /// signal-window scan is 2016 blocks, which fits well within the
-    /// in-memory cache for any block within `2 × MAX_BLOCK_CACHE` of the
-    /// tip — i.e., the entire BIP-9 window is almost certainly hot. If
-    /// every block in the window were uncached (worst case during a deep
-    /// reorg-replay), each lookup adds ~one sled `get()` of <1 ms, capping
-    /// the full scan at ~2 seconds — still acceptable for a once-per-block
-    /// invocation, but worth noting that the "O(1) per lookup" claim
-    /// assumes hot cache.
-    ///
-    /// No memoization yet; if profiling shows this on a hot path, the
-    /// per-window count is trivially memoizable since it only changes by
-    /// ±1 when a new block lands (or a reorg unwinds + replays). A
-    /// single read-lock-held-across-the-whole-scan variant would also
-    /// shave ~300 µs vs the current per-block acquire pattern. Both
-    /// optimizations are YAGNI right now — BIP-9 query is one-per-block
-    /// at most, dwarfed by the RandomX + Bulletproof costs of validation.
-    ///
-    /// ## Missing-block handling
-    ///
-    /// A height that maps to no block (gap in the chain, e.g. during
-    /// reorg-rollback) is skipped without error — counts as 0 contribution.
-    /// A block whose coinbase is missing (impossible by construction, but
-    /// defensive) is similarly skipped. The point of the BIP-9 state
-    /// machine is to be robust against partial state; an aggressive panic
-    /// here would convert a transient DB-gap into a node halt.
-    ///
-    /// ## Prior art
-    ///
-    /// - **Bitcoin Core `AbstractThresholdConditionChecker::GetStateStatisticsFor`**
-    ///   at versionbits.cpp:119 in the master read this session does the
-    ///   equivalent count by walking `CBlockIndex` pointers. The prior
-    ///   comment misattributed the method to `ThresholdConditionCache`
-    ///   (which is a `std::map` typedef at versionbits.h:33, not the
-    ///   owner of the method).
-    /// - Other BIP-9-derived chains (Bitcoin Cash / Litecoin / Dogecoin)
-    ///   inherit the walk-block-index-counting shape; specific per-fork
-    ///   identifiers UNVERIFIED this session.
-    pub fn count_signaling_blocks_in_window(
-        &self,
-        window_start: u64,
-        window_end: u64,
-        bit: u32,
-    ) -> u64 {
-        use crate::consensus::fork_signal::decode_signal_bits;
-
-        // Early-out on degenerate/inverted ranges. saturating_sub guards
-        // against the (window_end < window_start) case — a caller bug
-        // that shouldn't happen but won't underflow a u64 if it does.
-        // Inlined into the check (no variable) per review feedback —
-        // the value isn't used elsewhere.
-        if window_end.saturating_sub(window_start) == 0 {
-            return 0;
-        }
-
-        let mut count: u64 = 0;
-        for h in window_start..window_end {
-            let Some(block) = self.get_block_by_height(h) else {
-                continue; // gap; contributes 0
-            };
-            let Some(coinbase) = block.coinbase() else {
-                continue; // structurally impossible; defensive
-            };
-            if decode_signal_bits(&coinbase.extra).signals(bit) {
-                count = count.saturating_add(1);
-            }
-        }
-        count
-    }
+    // validate_transaction / difficulty / next_difficulty / expected_next_target /
+    // next_target / is_synced / stats / median_time_past_of_lineage / get_block /
+    // get_block_hash / get_block_by_height / count_signaling_blocks_in_window moved
+    // to chain::queries (issue #108).
 
     /// Restore state from database
     pub fn restore_state(&self, height: u64, tip_hash: Hash, total_difficulty: u128) -> Result<()> {
@@ -1695,6 +1063,21 @@ impl Blockchain {
                             calculate_difficulty_from_target(&orphan_block.header.target);
                         inner.stats.total_difficulty =
                             inner.stats.total_difficulty.saturating_sub(disc_difficulty);
+                        // Telemetry parity with the connect path (which does
+                        // `total_blocks += 1` and `total_transactions += txs.len()`):
+                        // a reorg/rollback MUST unwind these too, or a node that
+                        // reorged reports inflated block/tx totals versus a node that
+                        // built the identical tip linearly — breaking apply/disconnect
+                        // symmetry (caught by the real-PoW e2e
+                        // `apply_disconnect_symmetry_and_supply_conservation`). Not
+                        // consensus-critical (fork choice uses total_difficulty, above,
+                        // which IS unwound), but a correctness bug in reported stats.
+                        // saturating_sub: telemetry never underflows below zero.
+                        inner.stats.total_blocks = inner.stats.total_blocks.saturating_sub(1);
+                        inner.stats.total_transactions = inner
+                            .stats
+                            .total_transactions
+                            .saturating_sub(txs.len() as u64);
                     }
                 }
                 inner.height_to_hash.remove(&h);
@@ -1816,38 +1199,7 @@ impl Blockchain {
         Ok(all_orphaned_txs)
     }
 
-    /// Record a chain event in the ring buffer (bounded, lock-free for readers).
-    fn record_event(
-        &self,
-        event_type: ChainEventType,
-        height: u64,
-        hash: &Hash,
-        details: serde_json::Value,
-    ) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let event = ChainEvent {
-            event_type,
-            height,
-            hash: hash.to_hex(),
-            timestamp: now,
-            details,
-        };
-        let mut inner = self.inner.write();
-        if inner.events.len() >= MAX_CHAIN_EVENTS {
-            inner.events.pop_front();
-        }
-        inner.events.push_back(event);
-    }
-
-    /// Get recent chain events (for explorer).
-    pub fn get_events(&self, limit: usize) -> Vec<ChainEvent> {
-        let inner = self.inner.read();
-        let limit = limit.min(inner.events.len());
-        inner.events.iter().rev().take(limit).cloned().collect()
-    }
+    // record_event / get_events moved to chain::events (issue #108).
 
     /// Process/add block to chain
     pub fn process_block(&self, block: Block) -> Result<BlockStatus> {
@@ -2031,7 +1383,9 @@ impl Blockchain {
                 self.fork_difficulty_window(block.header.prev_hash, block.header.height)
             };
 
-            if difficulty_blocks.len() >= 2 {
+            // `test-fast-pow` (INSECURE test feature) skips the ASERT target
+            // match so the instant-mining harness can use a trivial target.
+            if difficulty_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
                 let expected_target =
                     self.expected_next_target(&difficulty_blocks, block.header.height);
                 if block.header.target != expected_target {
@@ -2811,7 +2165,7 @@ impl Blockchain {
                                 }
                             }
 
-                            if diff_blocks.len() >= 2 {
+                            if diff_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
                                 let expected_target = self
                                     .expected_next_target(&diff_blocks, fork_block.header.height);
                                 if fork_block.header.target != expected_target {
@@ -3040,9 +2394,26 @@ impl Blockchain {
                             }
                         }
 
-                        // Remove fork block height mappings above fork point
-                        for h in (fork_point + 1..=inner.tip.height.max(pre_reorg_tip.height)).rev()
-                        {
+                        // Remove fork block height mappings above fork point.
+                        //
+                        // H3: `inner.tip` has NOT been advanced yet (that happens
+                        // after a successful reorg), so `inner.tip.height ==
+                        // pre_reorg_tip.height` here — bounding the removal by it
+                        // leaves the mappings of any fork block applied at a
+                        // height ABOVE the old tip in place. RPC/sync would then
+                        // report an unapplied fork block as canonical, and a
+                        // follow-up block parented on it could commit a chain
+                        // with an unapplied gap. Bound the removal by the highest
+                        // fork height instead (removing a height that was never
+                        // inserted is a harmless no-op), so every partially
+                        // applied fork mapping is cleaned up.
+                        let highest_fork_height = fork_blocks
+                            .iter()
+                            .map(|b| b.header.height)
+                            .max()
+                            .unwrap_or(pre_reorg_tip.height);
+                        let removal_top = pre_reorg_tip.height.max(highest_fork_height);
+                        for h in (fork_point + 1..=removal_top).rev() {
                             inner.height_to_hash.remove(&h);
                         }
 
@@ -3125,7 +2496,7 @@ impl Blockchain {
                                 }
                             }
 
-                            if diff_blocks.len() >= 2 {
+                            if diff_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
                                 let expected_target =
                                     self.expected_next_target(&diff_blocks, block.header.height);
                                 if block.header.target != expected_target {
@@ -3652,187 +3023,11 @@ impl Blockchain {
     /// hot-cache node, a consensus split). The DB path takes no `inner` lock;
     /// the cache fallback is reached ONLY in no-DB in-memory test mode (where
     /// callers do not hold the lock).
-    fn main_chain_diff_block(&self, height: u64) -> Option<DifficultyBlock> {
-        if let Some(ref db) = self.db {
-            match db.blocks.get_by_height(height) {
-                Ok(Some(b)) => Some(DifficultyBlock {
-                    height,
-                    timestamp: b.header.timestamp,
-                    target: b.header.target,
-                }),
-                _ => None,
-            }
-        } else {
-            let inner = self.inner.read();
-            let hash = inner.height_to_hash.get(&height)?;
-            let b = inner.blocks.get(hash)?;
-            Some(DifficultyBlock {
-                height,
-                timestamp: b.header.timestamp,
-                target: b.header.target,
-            })
-        }
-    }
+    // main_chain_diff_block / fork_difficulty_window moved to chain::fork_calc
+    // (issue #108).
 
-    /// Fork-aware ASERT window for a block whose parent is `parent_hash`, sourced
-    /// from the DB so every node computes the same window (fix for chain.rs:2056).
-    /// Walks the fork's prev_hash chain to the fork point, then assembles
-    /// main-chain-below-fork + fork-above-fork, ascending. DB-sourced in
-    /// production; the in-memory cache is used only in no-DB test mode, and its
-    /// read guard is dropped before the assembly loop so `main_chain_diff_block`
-    /// (which re-reads) can never recursive-read-lock.
-    fn fork_difficulty_window(&self, parent_hash: Hash, block_height: u64) -> Vec<DifficultyBlock> {
-        let window = 144u64; // DIFFICULTY_LONG_WINDOW
-        let start = block_height.saturating_sub(window);
-
-        // (height, timestamp, target) of the above-fork fork blocks, ascending.
-        let mut fork: Vec<(u64, u64, Hash)> = Vec::new();
-        let mut fork_point = 0u64;
-        let mut cursor = parent_hash;
-        let mut visited = std::collections::HashSet::new();
-
-        if let Some(ref db) = self.db {
-            loop {
-                if !visited.insert(cursor) {
-                    break; // prev_hash cycle (corruption) — exact-target check rejects a wrong window
-                }
-                let blk = match db.blocks.get(&cursor) {
-                    Ok(Some(b)) => b,
-                    _ => break, // parent not in DB — can't extend the walk
-                };
-                let h = blk.header.height;
-                if let Ok(Some(main_hash)) = db.blocks.get_hash_by_height(h) {
-                    if main_hash == cursor {
-                        fork_point = h;
-                        break;
-                    }
-                }
-                fork.push((h, blk.header.timestamp, blk.header.target));
-                if h == 0 {
-                    break;
-                }
-                cursor = blk.header.prev_hash;
-            }
-        } else {
-            // No-DB in-memory test mode: walk the cache. Scoped so the read
-            // guard drops before the assembly loop below.
-            let inner = self.inner.read();
-            loop {
-                if !visited.insert(cursor) {
-                    break;
-                }
-                let blk = match inner.blocks.get(&cursor) {
-                    Some(b) => b,
-                    None => break,
-                };
-                let h = blk.header.height;
-                if let Some(main_hash) = inner.height_to_hash.get(&h) {
-                    if *main_hash == cursor {
-                        fork_point = h;
-                        break;
-                    }
-                }
-                fork.push((h, blk.header.timestamp, blk.header.target));
-                if h == 0 {
-                    break;
-                }
-                cursor = blk.header.prev_hash;
-            }
-        }
-        fork.reverse(); // ascending
-
-        let mut out = Vec::new();
-        for h in start..block_height {
-            if h <= fork_point {
-                if let Some(d) = self.main_chain_diff_block(h) {
-                    out.push(d);
-                }
-            } else {
-                let off = (h - fork_point - 1) as usize;
-                if let Some(&(fh, ts, tgt)) = fork.get(off) {
-                    out.push(DifficultyBlock {
-                        height: fh,
-                        timestamp: ts,
-                        target: tgt,
-                    });
-                }
-            }
-        }
-        out
-    }
-
-    pub fn get_difficulty_blocks(&self, up_to_height: u64) -> Vec<DifficultyBlock> {
-        // DB-sourced window (deterministic across nodes) — see
-        // main_chain_diff_block for why the in-memory cache was unsafe here.
-        let window = 144u64; // DIFFICULTY_LONG_WINDOW
-        let start = up_to_height.saturating_sub(window);
-        let mut blocks = Vec::new();
-        for h in start..up_to_height {
-            if let Some(d) = self.main_chain_diff_block(h) {
-                blocks.push(d);
-            }
-        }
-        blocks
-    }
-
-    /// Check if a key image has been spent
-    ///
-    /// Returns true if the key image exists in the spent key images set,
-    /// meaning the associated output has already been spent.
-    ///
-    /// SECURITY (A6-DUAL-UTXO): Check the in-memory UTXO set first, since it
-    /// is always kept up-to-date by add_block(). The persistent DB may not be
-    /// synchronized. Falls back to DB only if in-memory set has no key images
-    /// tracked (fresh startup edge case).
-    pub fn is_spent(&self, key_image: &KeyImage) -> bool {
-        // Primary: check in-memory UTXO set (always up-to-date)
-        let inner = self.inner.read();
-        if inner.utxos.output_count() > 0 || inner.utxos.contains_key_image(key_image) {
-            return inner.utxos.contains_key_image(key_image);
-        }
-        drop(inner);
-
-        // Fallback: check persistent DB (for fresh startup before UTXO rebuild)
-        if let Some(ref db) = self.db {
-            match db.utxos.is_spent(key_image) {
-                Ok(spent) => spent,
-                Err(e) => {
-                    tracing::error!("Failed to check key image: {}", e);
-                    // SECURITY: Fail closed - treat DB errors as "spent" to prevent
-                    // double-spend attacks when database is unavailable
-                    true
-                }
-            }
-        } else {
-            false
-        }
-    }
-
-    /// Get target height (for sync progress, updated by P2P layer)
-    pub fn target_height(&self) -> u64 {
-        let peer_target = self
-            .peer_target_height
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if peer_target > 0 {
-            peer_target
-        } else {
-            self.height()
-        }
-    }
-
-    /// Raw peer-advertised target height (0 = no peer height info yet).
-    ///
-    /// Unlike [`Chain::target_height`], this does NOT fall back to the local
-    /// height when no peer info is available. Callers detecting fork
-    /// divergence must distinguish "no peer height reported yet" (0) from
-    /// "peers agree we're at the tip". Used by the miner's fork-divergence
-    /// gate (2026-07-08 runaway-fork incident): a local tip running far
-    /// ahead of every peer's advertised height means our blocks aren't
-    /// being adopted — we're mining a worthless private fork.
-    pub fn peer_advertised_height(&self) -> u64 {
-        self.peer_target_height
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
+    // get_difficulty_blocks / is_spent / target_height / peer_advertised_height
+    // moved to chain::queries (issue #108).
 
     /// Update sync info from P2P layer
     pub fn set_sync_info(&self, synced: bool, target_height: u64) {
@@ -3863,54 +3058,7 @@ impl Blockchain {
             .store(now, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// FIX #17: single source of truth for tip staleness. Previously
-    /// `AutoHeal::last_tip_change`, `IronConsensus::last_advance`, and the
-    /// phantom-stall timer all tracked this independently and disagreed with
-    /// each other — three stall detectors firing at different times with
-    /// conflicting recovery actions. This method exposes the shared
-    /// `last_block_received_at` atomic so all three can read from the same
-    /// timestamp. Returns `None` if we've never received a block from a peer
-    /// since startup (in which case the caller should use its own clock).
-    pub fn secs_since_last_block(&self) -> Option<u64> {
-        let last = self
-            .last_block_received_at
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if last == 0 {
-            return None;
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Some(now.saturating_sub(last))
-    }
-
-    /// Returns true when the node is in a phantom-advertisement stall:
-    ///   - `synced == false` (miner IBD gate is blocking)
-    ///   - `target_height == local_height + 1` (only one block behind)
-    ///   - no peer block has arrived in the last `stall_secs` seconds
-    ///
-    /// In that state the "missing" block does not exist yet — it needs to be
-    /// mined locally, not fetched. The miner uses this to relax the IBD gate.
-    pub fn is_phantom_stall(&self, stall_secs: u64) -> bool {
-        use std::sync::atomic::Ordering::Relaxed;
-        if self.synced.load(Relaxed) {
-            return false;
-        }
-        let local_h = self.height();
-        let target_h = self.peer_target_height.load(Relaxed);
-        if target_h != local_h + 1 {
-            return false;
-        }
-        let last = self.last_block_received_at.load(Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // If `last` is 0 we have never accepted a peer block since startup;
-        // treat that as "long ago" so a phantom detected at boot still fires.
-        now.saturating_sub(last) >= stall_secs
-    }
+    // secs_since_last_block / is_phantom_stall moved to chain::queries (issue #108).
 
     /// Clear the phantom target — reset `synced=true` and align target_height
     /// with local_height so the miner IBD gate unblocks. If a real peer has
@@ -3924,224 +3072,10 @@ impl Blockchain {
         tracing::info!("Phantom target cleared — synced=true h={}", h);
     }
 
-    // ─── Asset policy helpers ─────────────────────────────────────────────
+    // export_checkpoints moved to chain::queries (issue #108).
 
-    /// Look up a registered asset policy by ID.  Returns `None` if the asset
-    /// has not been issued on this chain (or no database is attached).
-    /// Export all recorded checkpoints (hardcoded + auto-recorded from DB).
-    pub fn export_checkpoints(&self) -> Vec<(u64, Hash)> {
-        let mut checkpoints: Vec<(u64, Hash)> = crate::testnet::testnet_checkpoints()
-            .into_iter()
-            .map(|cp| (cp.height, cp.hash))
-            .collect();
-
-        if let Some(ref db) = self.db {
-            if let Ok(db_checkpoints) = db.state.get_checkpoints() {
-                for (height, hash) in db_checkpoints {
-                    if !checkpoints.iter().any(|(h, _)| *h == height) {
-                        checkpoints.push((height, hash));
-                    }
-                }
-            }
-        }
-
-        checkpoints.sort_by_key(|(h, _)| *h);
-        checkpoints
-    }
-
-    /// Calculate cumulative work for a fork chain ending at the given block.
-    ///
-    /// Walks backwards from the block through its parents, summing difficulty
-    /// until reaching the genesis block or a block not in our storage.
-    ///
-    /// SECURITY: bounded by `block.header.height + 1` (max walk = genesis →
-    /// block, plus the starting block itself). A corrupt DB with a cycle
-    /// in `prev_hash` would otherwise loop forever consuming CPU. Matching
-    /// the visited-set pattern in `find_fork_point` (lines 2533+) would
-    /// also catch cycles but costs an allocation; the height-derived cap
-    /// is allocation-free and serves the same purpose because the walk
-    /// can only legitimately visit at most `block.height` distinct heights.
-    fn calculate_fork_cumulative_work(&self, block: &Block) -> u128 {
-        let mut total_work = calculate_difficulty_from_target(&block.header.target);
-        let mut current_hash = block.header.prev_hash;
-        // +1 covers the starting block; +100 absorbs height-key off-by-one
-        // edge cases and is still vanishingly cheap if exercised.
-        let max_steps = block.header.height.saturating_add(100);
-        let mut steps: u64 = 0;
-
-        loop {
-            steps = steps.saturating_add(1);
-            if steps > max_steps {
-                tracing::error!(
-                    "calculate_fork_cumulative_work walked {} steps from block height {} \
-                     without reaching genesis — possible prev_hash cycle in DB. Returning \
-                     partial work; caller's IronConsensus classifier will reject the fork.",
-                    steps,
-                    block.header.height
-                );
-                break;
-            }
-            if let Some(parent) = self.get_block(&current_hash) {
-                // Genesis contributes the fixed base `1`, NOT its
-                // `dft(genesis_target)`. This matches the extend path, which
-                // starts from `total_difficulty = 1` at construction
-                // (chain.rs genesis init) and does `+= dft(block)` for each
-                // block height ≥ 1. Adding `dft(genesis)` here instead made
-                // this from-scratch fork walk exceed the incrementally
-                // accumulated `current total_difficulty` by
-                // `dft(genesis) - 1`, so an EQUAL-work fork looked heavier and
-                // triggered a spurious reorg — and every reorg then latched
-                // the higher base into the stored value, producing the
-                // fleet-wide `total_difficulty` divergence (nodes on the
-                // identical tip disagreeing on cumulative work) that
-                // false-positived the `work_behind` veto and locked follower
-                // miners out. See recompute_total_difficulty for the canonical
-                // definition this must agree with.
-                if parent.header.height == 0 {
-                    total_work = total_work.saturating_add(1);
-                    break; // Reached genesis
-                }
-                let prev_work = total_work;
-                total_work = total_work
-                    .saturating_add(calculate_difficulty_from_target(&parent.header.target));
-                // SECURITY (H-7): Detect u128 saturation during deep reorgs.
-                // saturating_add silently caps at u128::MAX, which could cause
-                // incorrect chain selection if both forks saturate.
-                if total_work == u128::MAX && prev_work != u128::MAX {
-                    tracing::warn!(
-                        "Cumulative work saturated at u128::MAX during fork calculation at height {}",
-                        parent.header.height
-                    );
-                }
-                current_hash = parent.header.prev_hash;
-            } else {
-                break; // Parent not found
-            }
-        }
-
-        total_work
-    }
-
-    /// Deterministically recompute cumulative chain work for the active chain
-    /// `[0, height]` as `1 + Σ dft(block_h.target)` for `h in 1..=height`.
-    ///
-    /// This is the SINGLE canonical definition of `total_difficulty`, and it
-    /// agrees by construction with:
-    ///   - the extend path (`total_difficulty += dft(block)` from a genesis
-    ///     base of `1`), and
-    ///   - the reorg path (`calculate_fork_cumulative_work`, which now also
-    ///     uses the genesis base `1`).
-    ///
-    /// Called once on load (`load_from_database`) so that a node whose stored
-    /// value drifted — via the pre-fix reorg path that used a `dft(genesis)`
-    /// base, or a partial fork walk — SELF-HEALS to the deterministic value on
-    /// restart. Because `total_difficulty` is advertised to peers in
-    /// `ChainWorkMessage` (feeding the `work_behind` heavier-chain veto),
-    /// converging every node's value is what stops the veto from
-    /// false-positiving followers whose only "sin" was computing the same
-    /// tip's work correctly.
-    ///
-    /// Returns `None` if any block in `[1, height]` is missing from storage
-    /// (caller keeps the existing value rather than storing a wrong partial).
-    ///
-    /// Cost: O(height) DB reads, once per process start. Fine at testnet
-    /// scale (~12k blocks, sub-second). A mainnet-scale chain would want a
-    /// periodically-checkpointed cumulative value instead of a full walk.
-    fn recompute_total_difficulty(&self, height: u64) -> Option<u128> {
-        let mut total: u128 = 1; // genesis base (matches genesis init + fork walk)
-        for h in 1..=height {
-            let block = self.get_block_by_height(h)?;
-            total = total.saturating_add(calculate_difficulty_from_target(&block.header.target));
-        }
-        Some(total)
-    }
-
-    /// Find the common ancestor (fork point) between the current main chain
-    /// and a fork block.
-    ///
-    /// Returns `Some(height)` for a real common ancestor (including the
-    /// legitimate "fork point is genesis" case → `Some(0)`).
-    ///
-    /// Returns `None` when DB corruption is detected:
-    /// - Cycle in `prev_hash` chain (the walk would loop forever
-    ///   without the visited-set guard).
-    /// - A `prev_hash` references a block that isn't in storage.
-    ///
-    /// The caller (chain reorganization in [`Self::add_block`]) MUST
-    /// treat `None` as a corruption-class rejection — not as "fork
-    /// point is genesis". Previously this function returned `0` for
-    /// both genesis and corruption, which masked corruption as a
-    /// legitimate deep-reorg attempt: `evaluate_reorg_acceptability`
-    /// then rejected it as "ReorgTooDeep" with a misleading
-    /// diagnostic. Audit-prep fix 2026-05-23.
-    fn find_fork_point(&self, fork_block: &Block) -> Option<u64> {
-        let mut current_hash = fork_block.header.prev_hash;
-        let mut visited = std::collections::HashSet::new();
-
-        loop {
-            if !visited.insert(current_hash) {
-                tracing::error!(
-                    "DB corruption: cycle detected during fork-point search; \
-                     starting from fork_block height={} hash={}",
-                    fork_block.header.height,
-                    fork_block.hash().to_hex(),
-                );
-                return None;
-            }
-            if let Some(parent) = self.get_block(&current_hash) {
-                let height = parent.header.height;
-                if let Some(main_hash) = self.get_block_hash(height) {
-                    if main_hash == current_hash {
-                        return Some(height);
-                    }
-                }
-                if height == 0 {
-                    return Some(0);
-                }
-                current_hash = parent.header.prev_hash;
-            } else {
-                tracing::error!(
-                    "DB corruption: prev_hash {} not in storage during fork-point search; \
-                     fork_block height={}",
-                    current_hash.to_hex(),
-                    fork_block.header.height,
-                );
-                return None;
-            }
-        }
-    }
-
-    /// Collect the fork chain from fork_point+1 to the given block (exclusive).
-    /// Returns blocks in ascending height order.
-    fn collect_fork_chain(&self, fork_tip: &Block, fork_point: u64) -> Vec<Block> {
-        let mut chain = Vec::new();
-        let mut current_hash = fork_tip.header.prev_hash;
-        let mut visited = std::collections::HashSet::new();
-
-        // Walk back from fork tip to fork point, collecting blocks.
-        // SECURITY: Track visited hashes to detect cycles and prevent infinite loops.
-        loop {
-            if !visited.insert(current_hash) {
-                tracing::error!(
-                    "Cycle detected in fork chain at hash {}",
-                    current_hash.to_hex()
-                );
-                break;
-            }
-            if let Some(block) = self.get_block(&current_hash) {
-                if block.header.height <= fork_point {
-                    break;
-                }
-                current_hash = block.header.prev_hash;
-                chain.push(block.clone());
-            } else {
-                break;
-            }
-        }
-
-        chain.reverse(); // Return in ascending order
-        chain
-    }
+    // calculate_fork_cumulative_work / recompute_total_difficulty /
+    // find_fork_point / collect_fork_chain moved to chain::fork_calc (issue #108).
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -4173,16 +3107,7 @@ impl Blockchain {
         StateUpdate { chain: self }
     }
 
-    /// Return the current generation only while canonical chain state is stable.
-    pub fn stable_generation(&self) -> Option<u64> {
-        use std::sync::atomic::Ordering;
-
-        if self.state_updates_in_progress.load(Ordering::Acquire) != 0 {
-            return None;
-        }
-        let generation = self.state_generation.load(Ordering::Acquire);
-        (self.state_updates_in_progress.load(Ordering::Acquire) == 0).then_some(generation)
-    }
+    // stable_generation moved to chain::queries (issue #108).
 
     /// Async wrapper around [`Blockchain::add_block`]. Runs full block
     /// validation + DB write on `tokio::task::spawn_blocking`.
@@ -4348,7 +3273,7 @@ mod generation_tests {
 }
 
 // =============================================================================
-// Genesis Block
+// §12  Genesis Block
 // =============================================================================
 
 /// Create the genesis block for a specific network (runtime selection).
@@ -4456,6 +3381,100 @@ mod tests {
         assert_eq!(
             reloaded.load_from_database_with_outcome().unwrap(),
             ChainLoadOutcome::Loaded
+        );
+    }
+
+    /// #108 (failure boundary): a failed block application must leave chain state
+    /// byte-for-behavior unchanged. A block whose parent is unknown is rejected
+    /// (Orphan) before any state mutation, so tip, height, cumulative work, block
+    /// count and the UTXO set must all be exactly as they were.
+    #[test]
+    fn failed_block_application_leaves_chain_state_unchanged_108() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        chain.init_genesis().unwrap();
+
+        let tip_before = chain.tip().hash;
+        let height_before = chain.height();
+        let stats_before = chain.stats();
+        let utxo_before = chain.utxo_count();
+
+        // Unknown parent → rejected without touching state.
+        let orphan = walk_block(5, Hash::from_bytes([0xAB; 32]), 99);
+        let status = chain.add_block(orphan).unwrap();
+        assert!(
+            matches!(status, BlockStatus::Orphan | BlockStatus::Invalid(_)),
+            "a bad-parent block must be rejected (Orphan/Invalid), got {status:?}"
+        );
+
+        assert_eq!(chain.tip().hash, tip_before, "tip moved after a failed apply");
+        assert_eq!(chain.height(), height_before, "height moved after a failed apply");
+        assert_eq!(
+            chain.stats().total_difficulty,
+            stats_before.total_difficulty,
+            "total_difficulty moved after a failed apply"
+        );
+        assert_eq!(
+            chain.stats().total_blocks,
+            stats_before.total_blocks,
+            "total_blocks moved after a failed apply"
+        );
+        assert_eq!(chain.utxo_count(), utxo_before, "utxo set changed after a failed apply");
+    }
+
+    /// #108 (reopen): reopening the database restores the expected chain. After
+    /// genesis init, a fresh `Blockchain` over the SAME db must load (not fresh)
+    /// and report the identical tip, height, cumulative work, supply and UTXO
+    /// count via its public getters — i.e. the recovery path (load_from_database
+    /// + rebuild_utxo_set + recompute_total_difficulty + tip restore, now in
+    /// chain::recovery) reconstructs state faithfully.
+    #[test]
+    fn reopening_database_restores_expected_chain_108() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        assert_eq!(
+            chain.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Fresh
+        );
+        chain.init_genesis().unwrap();
+        let tip = chain.tip().hash;
+        let height = chain.height();
+        let supply = chain.stats().total_supply;
+        let total_blocks = chain.stats().total_blocks;
+        let utxos = chain.utxo_count();
+
+        // A freshly initialised node must already carry the canonical genesis
+        // cumulative-work base — identical to what a restart reports below (this
+        // pins the init_genesis total_difficulty fix).
+        assert_eq!(
+            chain.stats().total_difficulty,
+            1,
+            "fresh genesis chain must carry the canonical total_difficulty base"
+        );
+
+        // Reopen over the same DB — must Load and restore the expected chain.
+        let reloaded = Blockchain::with_database(db, NetworkType::Testnet);
+        assert_eq!(
+            reloaded.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Loaded
+        );
+        assert_eq!(reloaded.tip().hash, tip, "tip not restored on reopen");
+        assert_eq!(reloaded.height(), height, "height not restored on reopen");
+        assert_eq!(reloaded.stats().total_supply, supply, "supply not restored on reopen");
+        assert_eq!(
+            reloaded.stats().total_blocks,
+            total_blocks,
+            "block count not restored on reopen"
+        );
+        assert_eq!(reloaded.utxo_count(), utxos, "utxo set not restored on reopen");
+        // Fresh-init and reloaded now agree on the canonical genesis base.
+        assert_eq!(
+            reloaded.stats().total_difficulty,
+            1,
+            "reopened genesis chain must carry the canonical total_difficulty base"
         );
     }
 
@@ -5092,6 +4111,63 @@ mod tests {
         );
     }
 
+    /// Regression for the apply/disconnect-symmetry bug the real-PoW e2e
+    /// `apply_disconnect_symmetry_and_supply_conservation` caught:
+    /// `rollback_to_height` unwound supply/burn/total_difficulty but NOT the
+    /// `total_blocks` / `total_transactions` telemetry counters, so a reorged
+    /// node reported inflated totals versus a linearly-built node on the same
+    /// tip. Fast staged version of that invariant.
+    #[test]
+    fn rollback_to_height_unwinds_total_blocks_and_transactions() {
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        let net = chain.network();
+        let act = net.fee_distribution_height();
+        let h1 = act.max(1);
+        let h2 = h1 + 1;
+        let genesis_hash = chain.tip_hash();
+        let base_blocks = chain.stats().total_blocks;
+        let base_txs = chain.stats().total_transactions;
+
+        let b1 = burn_test_block(h1, 41, &[1_000_000]);
+        let b2 = burn_test_block(h2, 42, &[2_000_000, 3_000_000]);
+        let added_txs = (b1.transactions.len() + b2.transactions.len()) as u64;
+        let burn1 = block_fee_burn(net, &b1);
+        let burn2 = block_fee_burn(net, &b2);
+
+        {
+            let mut inner = chain.inner.write();
+            let h1h = b1.hash();
+            let h2h = b2.hash();
+            inner.blocks.insert(h1h, b1.clone());
+            inner.blocks.insert(h2h, b2.clone());
+            inner.height_to_hash.insert(h1, h1h);
+            inner.height_to_hash.insert(h2, h2h);
+            inner.tip.hash = h2h;
+            inner.tip.height = h2;
+            inner.stats.height = h2;
+            inner.stats.tip_hash = h2h;
+            inner.stats.total_supply = u64::MAX as u128; // headroom for emission subtract
+            inner.stats.total_burned = burn1 + burn2; // headroom for burn subtract
+            // Advance the block/tx counters exactly as the connect path would.
+            inner.stats.total_blocks = base_blocks + 2;
+            inner.stats.total_transactions = base_txs + added_txs;
+        }
+
+        chain.rollback_to_height(0).expect("rollback to genesis");
+        assert_eq!(chain.tip_hash(), genesis_hash, "tip back at genesis");
+        assert_eq!(
+            chain.stats().total_blocks,
+            base_blocks,
+            "total_blocks must unwind to the pre-staging base after a full rollback"
+        );
+        assert_eq!(
+            chain.stats().total_transactions,
+            base_txs,
+            "total_transactions must unwind to the pre-staging base after a full rollback"
+        );
+    }
+
     #[test]
     fn rollback_to_height_disconnects_db_only_blocks_past_the_cache() {
         // Regression (junbyjun1238, PR #48): deep rollbacks target heights below
@@ -5167,5 +4243,347 @@ mod tests {
             base_diff,
             "total_difficulty reverted through the DB-fallback disconnect"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // State-machine gap tests (audit test-plan docs/audit/test-plan/
+    // chain-storage.md). These cover the add_block / fork-choice / rollback /
+    // load / helper branches that are exercisable WITHOUT real PoW mining:
+    // graph-walk helpers (find_fork_point, collect_fork_chain,
+    // calculate_fork_cumulative_work, recompute_total_difficulty), the
+    // AlreadyKnown cache/DB branches, load_from_database error branches, the
+    // rollback finality floor + orphaned-tx return, and is_spent branches.
+    //
+    // The PoW-gated items (accepted reorg re-applying real txs, chain-level
+    // ReorgTooDeep / AcceptedFork / tiebreak) live in
+    // tests/chain_statemachine.rs, marked #[ignore] like the reorg e2e harness.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Clone the genesis block and rewrite only the header identity fields
+    /// (height / prev_hash / nonce) to fabricate a distinct block for the pure
+    /// prev_hash-walk helpers. The body is the real genesis coinbase, which is
+    /// irrelevant to find_fork_point / collect_fork_chain /
+    /// calculate_fork_cumulative_work (they only read header + storage links).
+    fn walk_block(height: u64, prev_hash: Hash, nonce: u64) -> Block {
+        let mut b = create_genesis_block();
+        b.header.height = height;
+        b.header.prev_hash = prev_hash;
+        b.header.nonce = nonce;
+        b
+    }
+
+    #[test]
+    fn add_block_duplicate_in_memory_cache_returns_already_known() {
+        // add_block's first check is the in-memory cache: a hash already present
+        // short-circuits to AlreadyKnown before any parent/validation work.
+        let chain = Blockchain::new();
+        let b = walk_block(5, Hash::from_bytes([0x07; 32]), 42);
+        let h = b.hash();
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(h, b.clone());
+        }
+        assert!(matches!(
+            chain.add_block(b).unwrap(),
+            BlockStatus::AlreadyKnown
+        ));
+    }
+
+    #[test]
+    fn add_block_duplicate_in_db_not_cache_returns_already_known() {
+        // Second AlreadyKnown branch: block absent from the in-memory cache but
+        // present in the DB (db.blocks.contains) — the post-restart replay case.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        let b = walk_block(5, Hash::from_bytes([0x07; 32]), 43);
+        db.blocks.insert(&b).unwrap();
+        // Deliberately NOT inserted into the in-memory cache.
+        assert!(matches!(
+            chain.add_block(b).unwrap(),
+            BlockStatus::AlreadyKnown
+        ));
+    }
+
+    #[test]
+    fn find_fork_point_returns_common_ancestor_and_genesis() {
+        let chain = Blockchain::new();
+        let genesis_hash = chain.init_genesis().unwrap();
+
+        // Main chain m1(h1), m2(h2).
+        let m1 = walk_block(1, genesis_hash, 101);
+        let m2 = walk_block(2, m1.hash(), 102);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(m1.hash(), m1.clone());
+            inner.height_to_hash.insert(1, m1.hash());
+            inner.blocks.insert(m2.hash(), m2.clone());
+            inner.height_to_hash.insert(2, m2.hash());
+        }
+
+        // A competing fork block at height 2 off m1 → common ancestor is m1 (1).
+        let f2 = walk_block(2, m1.hash(), 202);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(f2.hash(), f2.clone());
+        }
+        assert_eq!(chain.find_fork_point(&f2), Some(1));
+
+        // A fork block at height 1 off genesis → fork point is genesis (0).
+        let f1 = walk_block(1, genesis_hash, 201);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(f1.hash(), f1.clone());
+        }
+        assert_eq!(chain.find_fork_point(&f1), Some(0));
+    }
+
+    #[test]
+    fn find_fork_point_detects_cycle_returns_none() {
+        // A prev_hash cycle (corruption) must be reported as None, not masked as
+        // a genesis fork point. Blocks are stored under arbitrary map keys so the
+        // links form a genuine cycle the visited-set guard must catch.
+        let chain = Blockchain::new();
+        let key_a = Hash::from_bytes([0xA1; 32]);
+        let key_b = Hash::from_bytes([0xB2; 32]);
+        let block_a = walk_block(5, key_b, 1); // prev → key_b
+        let block_b = walk_block(4, key_a, 2); // prev → key_a  (cycle)
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(key_a, block_a);
+            inner.blocks.insert(key_b, block_b);
+        }
+        let fork = walk_block(6, key_a, 3); // enters the cycle at key_a
+        assert_eq!(chain.find_fork_point(&fork), None);
+    }
+
+    #[test]
+    fn find_fork_point_missing_parent_returns_none() {
+        // prev_hash references a block that is not in storage → None (corruption),
+        // not a silent genesis fork point.
+        let chain = Blockchain::new();
+        let fork = walk_block(3, Hash::from_bytes([0xCC; 32]), 9);
+        assert_eq!(chain.find_fork_point(&fork), None);
+    }
+
+    #[test]
+    fn collect_fork_chain_returns_ascending_and_stops_at_fork_point() {
+        let chain = Blockchain::new();
+        let genesis_hash = chain.init_genesis().unwrap();
+        let m1 = walk_block(1, genesis_hash, 11);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(m1.hash(), m1.clone());
+            inner.height_to_hash.insert(1, m1.hash());
+        }
+        let f2 = walk_block(2, m1.hash(), 22);
+        let f3 = walk_block(3, f2.hash(), 33);
+        let f4 = walk_block(4, f3.hash(), 44);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(f2.hash(), f2.clone());
+            inner.blocks.insert(f3.hash(), f3.clone());
+            inner.blocks.insert(f4.hash(), f4.clone());
+        }
+        // Collect from fork tip f4 down to fork_point=1. Returns ascending order,
+        // excluding both the tip (f4) and the fork point.
+        let collected = chain.collect_fork_chain(&f4, 1);
+        let heights: Vec<u64> = collected.iter().map(|b| b.header.height).collect();
+        assert_eq!(heights, vec![2, 3]);
+
+        // Missing parent link → the walk breaks immediately, returning empty.
+        let orphan_tip = walk_block(9, Hash::from_bytes([0xEE; 32]), 99);
+        assert!(chain.collect_fork_chain(&orphan_tip, 1).is_empty());
+    }
+
+    #[test]
+    fn calculate_fork_cumulative_work_parent_not_found_returns_partial() {
+        // The walk breaks when a parent is absent, returning only the starting
+        // block's own work (the genesis base +1 is never added).
+        let chain = Blockchain::new();
+        let b = walk_block(3, Hash::from_bytes([0xAB; 32]), 7);
+        let expected = calculate_difficulty_from_target(&b.header.target);
+        assert_eq!(chain.calculate_fork_cumulative_work(&b), expected);
+    }
+
+    #[test]
+    fn calculate_fork_cumulative_work_cycle_breaks_at_max_steps() {
+        // A prev_hash cycle must terminate via the max_steps guard rather than
+        // hang, returning accumulated partial work.
+        let chain = Blockchain::new();
+        let key_a = Hash::from_bytes([0x5A; 32]);
+        let key_b = Hash::from_bytes([0x5B; 32]);
+        let a = walk_block(1, key_b, 1); // height 1 → never treated as genesis
+        let b = walk_block(1, key_a, 2);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(key_a, a);
+            inner.blocks.insert(key_b, b);
+        }
+        let start = walk_block(1, key_a, 3);
+        let work = chain.calculate_fork_cumulative_work(&start);
+        assert!(
+            work >= calculate_difficulty_from_target(&start.header.target),
+            "cycle walk terminates and returns accumulated partial work"
+        );
+    }
+
+    #[test]
+    fn recompute_total_difficulty_missing_mid_range_returns_none() {
+        // A gap anywhere in [1, height] yields None so the caller keeps the
+        // stored value instead of persisting a wrong partial sum.
+        let chain = Blockchain::new();
+        let genesis_hash = chain.init_genesis().unwrap();
+        let m1 = walk_block(1, genesis_hash, 71);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(m1.hash(), m1.clone());
+            inner.height_to_hash.insert(1, m1.hash());
+        }
+        assert_eq!(
+            chain.recompute_total_difficulty(1),
+            Some(1 + calculate_difficulty_from_target(&m1.header.target)),
+        );
+        // Height 2 absent → None.
+        assert_eq!(chain.recompute_total_difficulty(2), None);
+    }
+
+    #[test]
+    fn is_spent_no_db_false_and_in_memory_hit_true() {
+        let chain = Blockchain::new(); // db = None
+        let ki = KeyImage::from_bytes([0x11; 32]);
+        assert!(!chain.is_spent(&ki), "empty set, no DB → not spent");
+        {
+            let mut inner = chain.inner.write();
+            inner.utxos.mark_key_image_spent(ki);
+        }
+        assert!(chain.is_spent(&ki), "in-memory marked key image → spent");
+    }
+
+    #[test]
+    fn is_spent_db_fallback_true() {
+        // Empty in-memory set (output_count 0, key image absent) falls through to
+        // the persistent DB lookup — the fresh-startup-before-rebuild path.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        let ki = KeyImage::from_bytes([0x22; 32]);
+        db.utxos.mark_key_image(&ki).unwrap();
+        assert!(chain.is_spent(&ki), "DB-marked key image found via fallback");
+    }
+
+    #[test]
+    fn load_from_database_rejects_missing_genesis_height_entry() {
+        // Chain state present but the height index has no genesis (height-0)
+        // entry → Err("no genesis entry"), never a spurious Fresh.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        db.blocks.insert(&genesis).unwrap();
+        db.state.save_state(&state_for_genesis(&genesis)).unwrap();
+        // Deliberately NO set_height_hash(0, ..).
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(
+            error.contains("no genesis entry"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn load_from_database_rejects_state_height_mismatch_with_tip_block() {
+        // state.tip_hash resolves to a real block, but state.height disagrees
+        // with that block's header height → Err (guards against a truncated /
+        // corrupt state record silently loading at the wrong height).
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+        let state = ChainStateData {
+            tip_hash: genesis_hash, // resolves to the genesis block (height 0)
+            height: 5,              // …but state claims height 5
+            ..state_for_genesis(&genesis)
+        };
+        db.state.save_state(&state).unwrap();
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(
+            error.contains("does not match tip block height"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rollback_to_height_rejects_target_below_last_checkpoint() {
+        // FINALITY: rollback below the persisted last_checkpoint is refused with
+        // Err(InvalidState) and mutates nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        let genesis = crate::testnet::testnet_genesis();
+        let state = ChainStateData {
+            last_checkpoint: 5,
+            ..state_for_genesis(&genesis)
+        };
+        db.state.save_state(&state).unwrap();
+        // Pretend the live tip sits at height 10.
+        {
+            let mut inner = chain.inner.write();
+            inner.tip.height = 10;
+            inner.stats.height = 10;
+        }
+        let err = chain.rollback_to_height(3).unwrap_err();
+        assert!(matches!(err, Error::InvalidState(_)), "got {err:?}");
+        assert!(err.to_string().contains("finality"), "{err}");
+        assert_eq!(chain.height(), 10, "finality rejection must not mutate the tip");
+    }
+
+    #[test]
+    fn rollback_to_height_returns_non_coinbase_txs_as_orphaned() {
+        // Disconnecting blocks with real non-coinbase txs must return exactly
+        // those txs (for mempool restoration) and never the coinbases.
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        let genesis_hash = chain.tip_hash();
+
+        let b1 = burn_test_block(1, 51, &[1_000_000]);
+        let b2 = burn_test_block(2, 52, &[2_000_000]);
+        let want: Vec<Hash> = [&b1, &b2]
+            .iter()
+            .flat_map(|b| {
+                b.transactions
+                    .iter()
+                    .filter(|t| !t.is_coinbase())
+                    .map(|t| t.hash())
+            })
+            .collect();
+        assert_eq!(want.len(), 2, "each staged block carries one non-coinbase tx");
+
+        {
+            let mut inner = chain.inner.write();
+            for (h, b) in [(1u64, &b1), (2u64, &b2)] {
+                inner.blocks.insert(b.hash(), b.clone());
+                inner.height_to_hash.insert(h, b.hash());
+            }
+            inner.tip.hash = b2.hash();
+            inner.tip.height = 2;
+            inner.stats.height = 2;
+            inner.stats.tip_hash = b2.hash();
+            // Ample headroom so the emission/burn checked_subs never underflow
+            // regardless of the compiled fee-distribution activation height.
+            inner.stats.total_supply = u64::MAX as u128;
+            inner.stats.total_burned = u64::MAX as u128;
+        }
+
+        let orphaned = chain.rollback_to_height(0).unwrap();
+        assert_eq!(orphaned.len(), 2);
+        assert!(orphaned.iter().all(|t| !t.is_coinbase()), "no coinbase returned");
+        let got: Vec<Hash> = orphaned.iter().map(|t| t.hash()).collect();
+        for w in &want {
+            assert!(got.contains(w), "missing an orphaned non-coinbase tx");
+        }
+        assert_eq!(chain.tip_hash(), genesis_hash, "tip reset to genesis");
     }
 }

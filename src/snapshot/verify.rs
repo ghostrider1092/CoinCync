@@ -244,4 +244,71 @@ mod tests {
         let err = verify_chain_binding(&m, 99, &tip, &[], |_| None).unwrap_err();
         assert!(format!("{:?}", err).contains("manifest/DB mismatch"));
     }
+
+    fn scratch_db(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("cync-snap-verify-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn verify_installed_db_refuses_fresh_db_with_no_chain_state() {
+        // A real DB that opens cleanly but was never initialized (no genesis)
+        // carries no chain state — verify must refuse it rather than bind a tip
+        // that does not exist.
+        use crate::chain::Blockchain;
+        use crate::config::NetworkType;
+        use crate::db::Database;
+        use std::sync::Arc;
+
+        let tmp = scratch_db("fresh");
+        let chaindata = tmp.join("testnet");
+        std::fs::create_dir_all(&chaindata).unwrap();
+
+        // Open + close a DB WITHOUT init_genesis: it opens, but loads Fresh.
+        {
+            let db = Arc::new(Database::open(&chaindata).unwrap());
+            let _chain = Blockchain::with_database(db.clone(), NetworkType::Testnet);
+            db.flush().unwrap();
+        } // sled lock released before verify reopens the dir
+
+        let tip = h(0);
+        let m = manifest_at(0, &tip);
+        let err =
+            verify_installed_db(&chaindata, NetworkType::Testnet, &m, &[]).unwrap_err();
+        assert!(matches!(err, Error::InvalidState(_)));
+        assert!(
+            format!("{:?}", err).to_lowercase().contains("no chain state"),
+            "expected a no-chain-state refusal, got: {:?}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn verify_installed_db_reports_db_open_failure_as_invalid_state() {
+        // Point the "chaindata dir" at a regular FILE: Database::open cannot open
+        // it, and that failure must surface as InvalidState (not a panic).
+        use crate::config::NetworkType;
+
+        let tmp = scratch_db("open-fail");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let not_a_db = tmp.join("not-a-db");
+        std::fs::write(&not_a_db, b"i am a file, not a sled directory").unwrap();
+
+        let tip = h(0);
+        let m = manifest_at(0, &tip);
+        let err =
+            verify_installed_db(&not_a_db, NetworkType::Testnet, &m, &[]).unwrap_err();
+        assert!(matches!(err, Error::InvalidState(_)));
+        assert!(
+            format!("{:?}", err)
+                .to_lowercase()
+                .contains("cannot open installed db"),
+            "expected a cannot-open-DB InvalidState, got: {:?}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

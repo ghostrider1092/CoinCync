@@ -1,3 +1,75 @@
+//! # Sync Driver
+//!
+//! Drives the `ChainSync` state machine on a tick loop: issues GetHeaders,
+//! requests block spans across live peers during IBD, and escalates through
+//! tiered stall-recovery when the chain stops advancing.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `SyncDriverState::emergency_recovery_due`** — INVARIANT: emergency
+//!   Tier-3 recovery fires only after `EMERGENCY_T3_NO_PROGRESS_SECS` of no
+//!   height advance, and re-fires at most every `EMERGENCY_T3_REPEAT_SECS`
+//!   thereafter — never every tick.
+//!   THREAT: 2026-06-02 orphan-fetch cascade (coincync-lon, 22+h stuck) where
+//!   the sync engine looked internally busy so `is_stalled` never fired;
+//!   without the repeat-throttle, an unthrottled version would log-flood at
+//!   tick rate.
+//!   TESTS: `emergency_recovery_respects_progress_and_thresholds`.
+//! - **§2 `run_headers_tick` pending-request gate** — INVARIANT: the tick
+//!   loop checks `headers_request_pending()` and returns early rather than
+//!   issuing a second concurrent GetHeaders.
+//!   THREAT: Finding #3 headers-request flood — the pre-fix loop sent
+//!   GetHeaders unconditionally every tick (~4 Hz hammer) while stuck on a
+//!   fork, exhausting CPU.
+//!   TESTS: `regression_finding_03_ibd_loop_gates_on_pending`.
+//! - **§3 EMERGENCY-TIER-3 branch (`spawn_sync_driver` main loop)** —
+//!   INVARIANT: when the chain has not advanced for
+//!   `EMERGENCY_T3_NO_PROGRESS_SECS` despite `is_stalled()` reporting false,
+//!   the driver forces a deep reset (clear tried-list, drop expired
+//!   orphans, reset headers timeout, force `SyncState::Headers`) using the
+//!   max of `target_height` and live connected-peer heights as the
+//!   ground-truth "are we behind" signal.
+//!   THREAT: 2026-07-09 idle/limp-while-behind — `peer_heights`-derived
+//!   `is_synced()`/`target_height` empties under connection churn and every
+//!   recovery path stops firing, leaving the node idle indefinitely.
+//!   TESTS: (gap — the tick loop itself is not unit-tested; only the pure
+//!   `emergency_recovery_due` gating predicate in §1 is covered).
+//! - **§4 Tier-1/2/3 stall escalation (`stall_count`, `tier2_fires_since_progress`,
+//!   `tier3_fires_since_progress`, `N_T3_BEFORE_BACKOFF` backoff)** —
+//!   INVARIANT: escalation counters reset on real progress and only climb
+//!   on consecutive no-progress firings; Tier-3 backoff pauses 30s after
+//!   `N_T3_BEFORE_BACKOFF` consecutive no-progress escalations to stop
+//!   hammering peers and flooding logs.
+//!   THREAT: 2026-06-01/02 (barns1253, coincync-lon) — Tier-2 alone cycled
+//!   thousands of times without ever clearing a stuck sync.
+//!   TESTS: (gap — no unit or integration test drives the tick-loop
+//!   escalation counters directly).
+//! - **§5 `send_block_spans` peer-ahead filter (P-3 fix)** — INVARIANT:
+//!   block-hash spans are only distributed to peers whose advertised
+//!   height is strictly greater than local height.
+//!   THREAT: 2026-08-16 — a same-height stuck follower peer received part
+//!   of the request span, answered empty, and IBD wedged permanently with
+//!   no recovery tier able to clear it.
+//!   TESTS: (gap — no test exercises `send_block_spans`'s peer-height
+//!   filter; would need a peer/sender harness).
+//! - **§6 `live_block_peers` / `remove_dead_senders`** — INVARIANT: only
+//!   peers that are `Connected`, have an open (non-closed) sender channel,
+//!   and are not `GetBlocks`-banned by the scorer are offered as IBD block
+//!   sources; peers with a closed sender are pruned from the map.
+//!   THREAT: sending GetBlocks to a dead or banned peer wastes a download
+//!   slot and delays legitimate catch-up.
+//!   TESTS: (gap — requires a live DashMap/sender/scorer harness not present
+//!   in the test suite).
+//! - **§7 `run_synced_tick` safety net** — INVARIANT: a `Synced` node whose
+//!   `true_best_height` is more than 2 blocks above local (or local is 0
+//!   with peers present) re-triggers a resync rather than sitting idle.
+//!   THREAT: a node that settles into `Synced` prematurely (e.g. after a
+//!   peer_heights reset) would otherwise never re-check for real work.
+//!   TESTS: (gap — exercises `ChainSync::trigger_resync` transitively but no
+//!   test drives `run_synced_tick` itself).
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -170,9 +242,13 @@ pub(super) fn spawn_sync_driver(
                 // TTL runs here for now.
                 let mut s = sync_sync.write().await;
                 s.expire_stale_work_claims(now, super::super::sync::WORK_CLAIM_TTL_SECS);
-                let st = s.stats();
+                // H6: substantiation-gated work-behind veto (see
+                // ChainSync::work_behind_substantiated). Time-box an
+                // unsubstantiated claim so a persistent liar can't wedge the
+                // miner. Computed under the lock with the tick's unix `now`.
+                let work_behind = s.work_behind_substantiated(now);
                 drop(s);
-                sync_chain.set_work_behind(st.best_known_difficulty > st.local_total_difficulty);
+                sync_chain.set_work_behind(work_behind);
             }
 
             // ── PROGRESS-TIME STALL TRACKING (runs every tick) ────

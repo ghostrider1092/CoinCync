@@ -6,6 +6,46 @@
 // `resolve_seeds()`. Keep the two in sync — a refactor that
 // de-duplicates them is a reasonable future cleanup.
 
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `MAINNET_DNS_SEEDS` / `TESTNET_DNS_SEEDS`** — INVARIANT: mainnet
+//!   seeds resolve only under `coincync.org` and testnet seeds only under
+//!   `coincync.network`, so the two hostname sets can never overlap.
+//!   THREAT: a shared/overlapping domain would let a mainnet DNS answer
+//!   satisfy a testnet lookup (or vice versa), crossing network boundaries.
+//!   TESTS: (gap — no direct test in this file; network selection is
+//!   exercised at the `BootstrapConfig::for_network` call site instead).
+//! - **§2 `MAINNET_FALLBACK` / `TESTNET_FALLBACK` parse as `SocketAddr`** —
+//!   INVARIANT: every hardcoded fallback entry parses cleanly as `ip:port`.
+//!   THREAT: a typo'd entry silently shrinks the fallback list at runtime
+//!   (each unparseable entry is dropped rather than failing loud).
+//!   TESTS: `testnet_fallback_entries_parse`, `mainnet_fallback_entries_parse`.
+//! - **§3 `TESTNET_FALLBACK` vs `testnet::TESTNET_SEED_NODES`** — INVARIANT:
+//!   the two parallel constants stay byte-for-byte identical.
+//!   THREAT: drift between them reproduces the 2026-06-03 / 2026-06-21
+//!   incidents (operators bootstrap via a stale list while the other was
+//!   updated).
+//!   TESTS: `testnet_fallback_matches_seed_nodes`.
+//! - **§4 `TESTNET_FALLBACK` vs `scripts/fleet-config.json`** — INVARIANT:
+//!   the fallback list matches the operator-side fleet topology, excluding
+//!   the `api` role (nginx-only, no P2P listener).
+//!   THREAT: a stale fallback list dials a decommissioned fleet while
+//!   fleet-config.json has already moved on.
+//!   TESTS: `testnet_fallback_matches_fleet_config`.
+//! - **§5 `TESTNET_FALLBACK` non-empty** — INVARIANT: the fallback list is
+//!   never empty.
+//!   THREAT: an empty fallback leaves new operators with no bootstrap path
+//!   when DNS fails, defeating the whole subsystem's purpose.
+//!   TESTS: `testnet_fallback_is_non_empty`.
+//! - **§6 `TESTNET_FALLBACK` excludes known-dead IPs** — INVARIANT:
+//!   decommissioned/destroyed IPs from past incidents never silently
+//!   re-enter the fallback list.
+//!   THREAT: re-adding a dead IP wastes a connection slot and regresses a
+//!   previously-fixed incident.
+//!   TESTS: `testnet_fallback_excludes_known_dead_ips`.
+
 // 2026-08-16: mainnet DNS seeds target coincync.ORG (the operator-controlled
 // domain) — the runtime queries THIS constant. Register seed1/2/3 A/AAAA
 // records under coincync.org before launch. (Testnet stays on .network below.)

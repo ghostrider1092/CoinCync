@@ -1,0 +1,77 @@
+name: audit
+
+# Runs the test suite, the fast consensus harnesses, and the section-coverage
+# ratchet on every PR and push. The coverage `--check` gate fails the build if
+# any audited section is RED (a mapped test is failing); the gaps/report steps
+# are informational. Flip `--check` to `--check --strict` once the
+# consensus-critical sections are all green to lock coverage at 100%.
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+env:
+  COINCYNC_RANDOMX_LIGHT_MODE: "1"
+  RUST_MIN_STACK: "268435456"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System deps (clang/llvm for bindgen + RandomX/RocksDB)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libclang-dev cmake build-essential python3
+          echo "LIBCLANG_PATH=$(llvm-config --libdir 2>/dev/null || echo /usr/lib/llvm-14/lib)" >> "$GITHUB_ENV"
+
+      - name: Rust toolchain (honours rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unit test suite
+        run: cargo test --lib --features testnet 2>&1 | tee lib_test.log
+
+      - name: Fast consensus harnesses (multi-node sim, fuzz, params, invariants)
+        run: |
+          cargo test --features "testnet test-fast-pow" --test simkit_demo -- --include-ignored
+          cargo test --features testnet --test consensus_fuzz
+          cargo test --features testnet --test param_calibration
+          cargo test --features testnet --test invariant_pipeline
+
+      - name: Section-coverage ratchet (fails on any RED section)
+        run: python3 docs/audit/tools/build_section_heatmap.py --check --test-log lib_test.log --no-color
+
+      - name: Coverage regression gate (fails if a PR lowers any section's color)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}" || true
+          python3 docs/audit/tools/build_section_heatmap.py \
+            --ratchet "origin/${GITHUB_BASE_REF}" --test-log lib_test.log --no-color
+
+      - name: Audit doctor — health score + ship verdict (informational)
+        if: always()
+        run: python3 docs/audit/tools/build_section_heatmap.py --doctor --test-log lib_test.log --no-color || true
+
+      - name: Incident replay coverage (informational)
+        if: always()
+        run: python3 docs/audit/tools/build_section_heatmap.py --replay --test-log lib_test.log --no-color || true
+
+      - name: Coverage report + gaps (informational)
+        if: always()
+        run: |
+          python3 docs/audit/tools/build_section_heatmap.py --test-log lib_test.log --no-color || true
+          echo "── gaps (consensus-critical first) ──"
+          python3 docs/audit/tools/build_section_heatmap.py --gaps --test-log lib_test.log --no-color || true
+
+      - name: Unmapped public functions (informational)
+        if: always()
+        run: python3 docs/audit/tools/build_section_heatmap.py --lint --no-color || true
+
+      - name: Integrity lock is a clean build (build.rs verifies it)
+        run: cargo build --features testnet --lib

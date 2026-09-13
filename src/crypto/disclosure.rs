@@ -11,6 +11,110 @@
 //! - Non-interactive (Fiat-Shamir transform)
 //! - Domain-separated (no cross-proof forgery)
 //! - Self-contained (verifier only needs proof + public chain data)
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `create_balance_proof`** — INVARIANT: the Schnorr nonce `k` and the
+//!   blinding difference `d = r - r'` never outlive their use — both are wiped
+//!   (R-18/R-19), so no secret material is left on the stack; refuses to prove
+//!   when `value < threshold`.
+//!   THREAT: nonce leakage recovers the blinding/private key (BIP-340 "any
+//!   leakage of k is fatal"; Sony PS3 / MtGox ECDSA nonce disasters).
+//!   TESTS: `test_balance_proof_valid`, `test_balance_proof_exact_threshold`,
+//!   `test_balance_proof_insufficient`.
+//! - **§2 `verify_balance_proof`** — INVARIANT: accepts iff the Schnorr blinding-
+//!   difference proof AND the range proof on `C'` both hold; Schnorr R is decoded
+//!   canonically and non-identity, `s` is a canonical scalar (no mod-order
+//!   reduction), and the final compare is constant-time (C11-FIX).
+//!   THREAT: forged/tampered commitment, non-canonical or identity R nonce, or a
+//!   timing side-channel accepting a value below threshold (SEC 2026-09-07).
+//!   TESTS: `test_balance_proof_wrong_commitment`,
+//!   `balance_verify_rejects_noncanonical_and_identity_schnorr_r`.
+//! - **§3 `create_ownership_proof`** — INVARIANT: rejects a secret that does not
+//!   match the stealth address; the challenge binds `tx_hash`, `output_index`,
+//!   stealth address and `message`.
+//!   THREAT: replay of the bearer token (M1 — freshness rests entirely on a
+//!   verifier-chosen `message`), or attempting to prove under a wrong key.
+//!   TESTS: `test_ownership_proof_valid`, `test_ownership_proof_wrong_key`.
+//! - **§4 `verify_ownership_proof`** — INVARIANT: the Schnorr identity `s*G == R +
+//!   c*P` holds only if the prover knows the one-time secret; R must be
+//!   non-identity; `s` canonically decoded; compare is constant-time (C11-FIX).
+//!   THREAT: a tampered message (challenge changes) or an identity R nonce
+//!   (SEC 2026-09-07) forging ownership.
+//!   TESTS: `test_ownership_proof_different_message`,
+//!   `ownership_verify_rejects_identity_r`.
+//! - **§5 `create_sum_proof`** — INVARIANT: the total is a checked (no-overflow)
+//!   sum, output refs are unique, the height range is well-ordered, and the
+//!   transcript challenge binds every field.
+//!   THREAT: R-20 — `sum_blinding` (r_sum) is transmitted in cleartext, so a
+//!   duplicate output or silent overflow could let a prover misstate a total or
+//!   double-count an output.
+//!   TESTS: `test_sum_proof_valid`,
+//!   `create_sum_proof_rejects_empty_outputs_and_bad_height_range`,
+//!   `test_sum_proof_rejects_duplicate_outputs_and_ref_tampering`.
+//! - **§6 `verify_sum_proof`** — INVARIANT: accepts iff `sum(C_i) ==
+//!   commit(claimed_total, r_sum)` (homomorphic opening) AND the transcript is
+//!   valid (version, ordered height range, unique refs, matching challenge);
+//!   constant-time compare.
+//!   THREAT: a tampered claimed total, mismatched/reordered commitments, or
+//!   duplicate output refs inflating the sum.
+//!   TESTS: `test_sum_proof_wrong_total`, `test_sum_proof_wrong_commitments`.
+//! - **§7 `create_source_proof`** — INVARIANT: rejects unless `P = x*G` AND the
+//!   key image `I = x*H_p(P)` both derive from the given secret; the challenge
+//!   binds R1, R2, P, I and `message`.
+//!   THREAT: producing a source proof for a key image not derived from the
+//!   prover's own key, or an M1 replay of the bearer token.
+//!   TESTS: `test_source_proof_valid`, `test_source_proof_wrong_key`.
+//! - **§8 `verify_source_proof`** — INVARIANT: the dual-base checks `s*G + c*P ==
+//!   R1` AND `s*H_p(P) + c*I == R2` are both constant-time and ANDed WITHOUT
+//!   short-circuit (R-21), proving one secret `x` underlies both P and I; R1/R2
+//!   must be non-identity.
+//!   THREAT: a tampered message, an identity R1/R2 nonce, or a timing leak
+//!   distinguishing which check failed (R-21 / SEC 2026-09-07).
+//!   TESTS: `test_source_proof_tampered_message`,
+//!   `source_verify_rejects_identity_r1_or_r2`.
+//! - **§9 `verify_balance_proof_anchored`** — INVARIANT: returns `Valid` only when
+//!   the crypto holds AND the proof's `original_commitment` equals a `ChainAnchor`
+//!   commitment the verifier resolved from its own trusted chain view.
+//!   THREAT: H1 (issues #252/#253) — a prover produces a sound range proof over a
+//!   commitment they invented; unanchored acceptance is not a sound trust
+//!   decision. Forgery (`CryptoInvalid`) is distinguished from `AnchorMismatch`.
+//!   TESTS: `test_balance_anchored_valid`,
+//!   `test_balance_anchored_mismatch_is_the_253_attack`,
+//!   `test_balance_anchored_crypto_invalid`.
+//! - **§10 `verify_ownership_proof_anchored`** — INVARIANT: returns `Valid` only
+//!   when the crypto holds AND the proof's output ref AND stealth address both
+//!   equal the trusted on-chain anchor.
+//!   THREAT: H1 (#252/#253) — a valid proof for a key the prover controls but that
+//!   was never the on-chain stealth address of that output, or a wrong output ref.
+//!   TESTS: `test_ownership_anchored_valid`,
+//!   `test_ownership_anchored_mismatch_is_the_253_attack`,
+//!   `test_ownership_anchored_rejects_wrong_output_ref`.
+//! - **§11 `verify_sum_proof_anchored`** — INVARIANT: every output ref must
+//!   uniquely resolve to an anchor whose height falls in the declared range and
+//!   whose commitment is a valid curve point, before the homomorphic sum is
+//!   checked against those anchors.
+//!   THREAT: H1 (#252/#253) — a cryptographically sound sum over outputs never
+//!   mined, a missing/duplicate ref, or an out-of-range height.
+//!   TESTS: `test_sum_anchored_valid_and_mismatch`,
+//!   `test_sum_proof_rejects_duplicate_outputs_and_ref_tampering`.
+//! - **§12 `verify_source_proof_anchored`** — INVARIANT: returns `Valid` only if
+//!   the crypto holds AND the key image is actually in the chain's spent set.
+//!   THREAT: H1 (#252/#253) — the prover proved they *could* generate a key image,
+//!   not that a real spend on chain ever used it.
+//!   TESTS: `test_source_anchored_valid_and_mismatch`.
+//! - **§13 `verify_internal_consistency`** — INVARIANT: the deprecated unanchored
+//!   `verify()` entry point hard-fails to force callers onto an anchored verifier;
+//!   `verify_internal_consistency` performs only the offline crypto check and
+//!   errors for Sum (needs on-chain commitments); expiry is advisory only.
+//!   THREAT: H1/H2 — treating unanchored consistency as a trust decision, or
+//!   relying on unauthenticated `expires_at` container metadata as a control.
+//!   TESTS: `disclosure_verify_unanchored_hard_fails`,
+//!   `internal_consistency_errors_for_sum_type`, `test_disclosure_serialization`,
+//!   `test_disclosure_expiry`, `test_proofs_domain_separated`,
+//!   `test_expired_proof_rejected`.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use curve25519_dalek::{ristretto::CompressedRistretto, scalar::Scalar};
@@ -1774,6 +1878,124 @@ mod tests {
         assert_eq!(
             verify_source_proof_anchored(&proof, false).unwrap(),
             AnchorVerdict::AnchorMismatch
+        );
+    }
+
+    // ---- Identity / non-canonical nonce rejects (SEC 2026-09-07) ----
+
+    /// verify_balance_proof must reject a non-canonical OR identity Schnorr R
+    /// (decode_non_identity fails closed for both).
+    #[test]
+    fn balance_verify_rejects_noncanonical_and_identity_schnorr_r() {
+        let value = 1_000_000u64;
+        let blinding = BlindingFactor::random(&mut OsRng);
+        let commitment = PedersenCommitment::commit(value, &blinding);
+        let proof = create_balance_proof(value, &blinding, &commitment, 500_000).unwrap();
+
+        // Non-canonical R: 0xFF..FF does not decompress.
+        let mut noncanon = proof.clone();
+        noncanon.schnorr_r = [0xFFu8; 32];
+        assert!(
+            verify_balance_proof(&noncanon).is_err(),
+            "non-canonical Schnorr R must be rejected"
+        );
+
+        // Identity R: the all-zero Ristretto encoding is the identity point.
+        let mut identity = proof;
+        identity.schnorr_r = [0u8; 32];
+        assert!(
+            verify_balance_proof(&identity).is_err(),
+            "identity Schnorr R must be rejected"
+        );
+    }
+
+    /// verify_ownership_proof must reject an identity Schnorr R point.
+    #[test]
+    fn ownership_verify_rejects_identity_r() {
+        let (sk, pk) = make_test_keys();
+        let tx_hash = Hash::from_bytes([1u8; 32]);
+        let mut proof = create_ownership_proof(&tx_hash, 0, &pk, &sk, b"audit").unwrap();
+
+        proof.schnorr_r = [0u8; 32];
+        assert!(
+            verify_ownership_proof(&proof).is_err(),
+            "identity Schnorr R must be rejected"
+        );
+    }
+
+    /// verify_source_proof must reject identity R1 or identity R2.
+    #[test]
+    fn source_verify_rejects_identity_r1_or_r2() {
+        let secret = CurveSecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let ki = CurveKeyImage::from_secret(&secret);
+        let sk = SecretKey::from_bytes(secret.to_bytes());
+        let pk = PublicKey::from_bytes(public.to_bytes());
+        let proof = create_source_proof(&sk, &pk, &ki, b"compliance").unwrap();
+
+        let mut bad_r1 = proof.clone();
+        bad_r1.r1 = [0u8; 32];
+        assert!(
+            verify_source_proof(&bad_r1).is_err(),
+            "identity R1 must be rejected"
+        );
+
+        let mut bad_r2 = proof;
+        bad_r2.r2 = [0u8; 32];
+        assert!(
+            verify_source_proof(&bad_r2).is_err(),
+            "identity R2 must be rejected"
+        );
+    }
+
+    // ---- create_sum_proof input validation ----
+
+    /// create_sum_proof rejects an empty output set and an inverted height range.
+    #[test]
+    fn create_sum_proof_rejects_empty_outputs_and_bad_height_range() {
+        assert!(
+            create_sum_proof(&[], (0, 100)).is_err(),
+            "empty outputs must be rejected"
+        );
+
+        let b1 = BlindingFactor::random(&mut OsRng);
+        let outputs = vec![(100_000u64, b1, Hash::from_bytes([1u8; 32]), 0u8)];
+        assert!(
+            create_sum_proof(&outputs, (100, 0)).is_err(),
+            "inverted height range (start > end) must be rejected"
+        );
+    }
+
+    // ---- Container hard-fail / consistency ----
+
+    /// The deprecated unanchored `verify()` entry point must hard-fail (Err),
+    /// steering callers to the anchored verifiers.
+    #[test]
+    #[allow(deprecated)]
+    fn disclosure_verify_unanchored_hard_fails() {
+        let (sk, pk) = make_test_keys();
+        let tx_hash = Hash::from_bytes([1u8; 32]);
+        let ownership = create_ownership_proof(&tx_hash, 0, &pk, &sk, b"audit").unwrap();
+        let container = DisclosureProof::from_ownership(&ownership, "test", None).unwrap();
+
+        assert!(
+            container.verify().is_err(),
+            "unanchored verify() must hard-fail"
+        );
+    }
+
+    /// verify_internal_consistency for a Sum proof must Err — sum proofs require
+    /// on-chain commitments and cannot be checked standalone.
+    #[test]
+    fn internal_consistency_errors_for_sum_type() {
+        let b1 = BlindingFactor::random(&mut OsRng);
+        let outputs = vec![(100_000u64, b1, Hash::from_bytes([1u8; 32]), 0u8)];
+        let sum = create_sum_proof(&outputs, (0, 100)).unwrap();
+        let container = DisclosureProof::from_sum(&sum, "sum", None).unwrap();
+
+        assert!(
+            container.verify_internal_consistency().is_err(),
+            "Sum type must Err from verify_internal_consistency (needs commitments)"
         );
     }
 }

@@ -7,6 +7,55 @@
 //! ## Security Properties:
 //! - BlindingFactor is securely zeroized on drop using the zeroize crate
 //! - Commitment operations return Option/Result to handle invalid points
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `verify_commitment`** — INVARIANT: `commit`/`verify_commitment` implement the Monero-convention
+//!   Pedersen commitment `C = v·H + r·G` with an independent value generator `H` (crypto H1), so a
+//!   commitment binds to exactly one `(value, blinding)` opening and is homomorphic under addition.
+//!   THREAT: a corrupted/swapped `H` (≡ G or identity) collapses hiding+binding and lets an
+//!   attacker forge openings; `verify_commitment` uses constant-time compare to deny a timing oracle.
+//!   TESTS: `test_commitment_creation`, `pedersen_commitment_is_homomorphic`, `h_generator_is_canonical_bulletproofs_b_blinding_and_independent_of_g`.
+//! - **§2 `create_range_proof_bp_plus`** — INVARIANT: a proof produced for amount `v` (via BP+
+//!   `create_range_proof_bp_plus`) attests `v ∈ [0, 2^RANGE_BITS)` and is byte-reproducible for
+//!   fixed inputs + RNG seed (KAT, crypto C1). THREAT: without a sound range proof a miner mints
+//!   money via out-of-range / negative amounts (value overflow inflation).
+//!   TESTS: `test_create_and_verify_range_proof`, `range_proof_bp_plus_kat_deterministic_and_golden`, `range_proof_valid_amount_verifies`, `range_proof_large_value_verifies`.
+//! - **§3 `verify_range_proof_bp_plus`** — INVARIANT: verification accepts a proof ONLY against the exact
+//!   commitment it was created for and rejects an empty proof or a wrong/non-canonical commitment.
+//!   THREAT: accepting a proof against a mismatched or malformed commitment breaks binding and admits
+//!   forged/inflated outputs into the chain.
+//!   TESTS: `test_wrong_commitment_fails`, `range_proof_wrong_commitment_fails`, `test_bp_plus_single_proof`.
+//! - **§4 `create_aggregated_range_proof_bp_plus`** — INVARIANT: an aggregated proof over N outputs
+//!   (zero/identity padded to the next power of two) verifies iff every real committed amount is in
+//!   range, for non-power-of-two N too. THREAT: mis-padding or an unsound aggregate lets an
+//!   out-of-range output hide among valid ones, enabling inflation.
+//!   TESTS: `test_aggregated_proof`, `test_aggregated_proof_three_outputs`, `test_power_of_2_padding_boundary`, `aggregated_range_proof_multi_output_verifies`.
+//! - **§5 `verify_range_proofs_dispatch`** — INVARIANT (C-2 FIX): activation-height gating — before
+//!   `BULLETPROOFS_PLUS_HEIGHT` only v2 proofs validate, at/after it only v3 (BP+); the version byte
+//!   alone never bypasses the height gate. THREAT: without gating a miner includes a BP+ proof in a
+//!   pre-fork block (or a stale v2 post-fork), splitting the chain between updated and legacy nodes.
+//!   TESTS: `verify_range_proofs_dispatch_gates_off_wrong_version`, `test_height_dispatch_creation`, `test_bp_plus_aggregated_proof`.
+//! - **§6 `verify_coinbase_output`** — INVARIANT: a coinbase output must commit to the exact expected
+//!   subsidy under a ZERO blinding factor, checked in constant time. THREAT: accepting a
+//!   random-blinded or wrong-amount coinbase commitment lets a miner pay themselves more than the
+//!   consensus subsidy (coinbase inflation).
+//!   TESTS: `verify_coinbase_output_matches_zero_blinding`.
+//! - **§7 `batch_verify_range_proofs` (bounds: `MAX_AGGREGATION`/`RANGE_BITS`)** — INVARIANT:
+//!   `batch_verify_range_proofs` accepts a set iff every `(commitment, proof)` pair verifies, and
+//!   aggregation refuses length mismatch and any batch exceeding `MAX_AGGREGATION`, with `RANGE_BITS`
+//!   fixing the 64-bit proving width. THREAT: an oversized/mismatched batch is a DoS or padding-abuse
+//!   vector, a lenient batch check lets one bad proof slip through, and a wrong bit width would prove
+//!   the wrong range.
+//!   TESTS: `create_aggregated_range_proof_rejects_length_mismatch`, `create_aggregated_range_proof_rejects_over_max_aggregation`, `create_aggregated_range_proof_empty_returns_empty_proof`, `range_proof_at_u64_max`.
+//! - **§8 `from_bytes_checked`** — INVARIANT (R-5 / H7-FIX): the checked constructor decompresses and
+//!   rejects non-canonical bytes, `checked_add`/`checked_sub` return `None` on invalid points, and the
+//!   `Add` operator falls back to identity instead of panicking. THREAT: the `from_bytes_unchecked`
+//!   footgun creates an "invalid but stored" wedge (passes bytewise dedup, fails validation) and an
+//!   unchecked point op panics the node from the consensus path (crash DoS).
+//!   TESTS: `commitment_from_bytes_checked_accepts_valid_rejects_noncanonical`, `checked_add_sub_return_none_on_invalid_point`, `add_operator_returns_identity_on_invalid_point`.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use merlin::Transcript;
@@ -755,6 +804,101 @@ mod tests {
     use super::*;
     use rand::rngs::OsRng;
 
+    /// AUDIT ANCHOR (crypto H1): the value generator `H` is a hardcoded 32-byte
+    /// literal (here and duplicated in `crypto::curve::generator_h`). Every
+    /// commitment and range proof derives from it, so a corrupted/swapped `H`
+    /// is internally self-consistent — all round-trip tests pass — while being
+    /// wrong. This pins it three ways:
+    ///
+    ///  1. Known-answer vector: `H` must equal the canonical dalek-cryptography
+    ///     `bulletproofs::PedersenGens::default().B_blinding` compressed point.
+    ///     That value is declared here as a SEPARATE literal sourced from the
+    ///     upstream crate (not `H_GENERATOR_COMPRESSED`), so editing the real
+    ///     constant fails this test. Note the value cannot be re-derived from
+    ///     scratch with the current toolchain: upstream computes it as
+    ///     `RistrettoPoint::hash_from_bytes::<Sha512>(RISTRETTO_BASEPOINT_COMPRESSED)`
+    ///     under the OLD curve25519-dalek whose Ristretto hash-to-point differs
+    ///     from v4's — which is exactly why the point was frozen as a literal.
+    ///  2. The two independent in-tree copies must be byte-identical.
+    ///  3. `H` must be an independent generator (≠ G, ≠ identity) or the
+    ///     commitment `C = v·H + r·G` collapses (value and blinding share a base
+    ///     / value drops out), breaking hiding+binding.
+    #[test]
+    fn h_generator_is_canonical_bulletproofs_b_blinding_and_independent_of_g() {
+        use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+        use curve25519_dalek::traits::Identity;
+
+        // Canonical dalek bulletproofs `PedersenGens::default().B_blinding`,
+        // compressed. Sourced from upstream; intentionally a distinct literal
+        // from `H_GENERATOR_COMPRESSED` so an accidental edit to the real
+        // constant is caught here.
+        const CANONICAL_B_BLINDING: [u8; 32] = [
+            0x8c, 0x92, 0x40, 0xb4, 0x56, 0xa9, 0xe6, 0xdc, 0x65, 0xc3, 0x77, 0xa1, 0x04, 0x8d,
+            0x74, 0x5f, 0x94, 0xa0, 0x8c, 0xdb, 0x7f, 0x44, 0xcb, 0xcd, 0x7b, 0x46, 0xf3, 0x40,
+            0x48, 0x87, 0x11, 0x34,
+        ];
+        assert_eq!(
+            H_GENERATOR_COMPRESSED, CANONICAL_B_BLINDING,
+            "H must be the canonical bulletproofs B_blinding known-answer vector"
+        );
+        // The two independent hardcoded copies must agree with each other.
+        assert_eq!(
+            H_POINT.compress().to_bytes(),
+            crate::crypto::curve::generator_h().compress().to_bytes(),
+            "the bulletproofs and curve.rs H copies must be byte-identical"
+        );
+        // Independent generator: not G, not identity.
+        assert_ne!(*H_POINT, RISTRETTO_BASEPOINT_POINT, "H must differ from G");
+        assert_ne!(
+            *H_POINT,
+            RistrettoPoint::identity(),
+            "H must not be the identity point"
+        );
+    }
+
+    /// AUDIT KAT (crypto C1): a deterministic, portable BP+ range-proof vector.
+    /// Pins (1) reproducibility for fixed (amount, blinding, RNG seed) — required
+    /// for any golden vector, (2) the proof verifies against its commitment and
+    /// is REJECTED against a different one, and (3) a SHA-256 digest of the
+    /// serialized proof, frozen so any change to the BP+ prover / wire format is
+    /// caught. An auditor can regenerate this from the fixed inputs and
+    /// cross-check the encoding against a reference BP+ implementation.
+    #[test]
+    fn range_proof_bp_plus_kat_deterministic_and_golden() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+        use sha2::{Digest, Sha256};
+
+        let amount = Amount::from_atomic(1_000_000);
+        let blinding = BlindingFactor::from_bytes({
+            let mut b = [0u8; 32];
+            b[0] = 0xAB;
+            b[1] = 0xCD;
+            b
+        });
+        let commitment = PedersenCommitment::commit(amount.as_atomic(), &blinding);
+        let make =
+            || create_range_proof(amount, &blinding, &mut ChaCha20Rng::seed_from_u64(7)).unwrap();
+
+        let proof = make();
+        assert!(
+            verify_range_proof(&commitment, &proof),
+            "KAT range proof must verify against its commitment"
+        );
+        let wrong = PedersenCommitment::commit(amount.as_atomic() + 1, &blinding);
+        assert!(
+            !verify_range_proof(&wrong, &proof),
+            "range proof must NOT verify against a different commitment"
+        );
+        let bytes = borsh::to_vec(&proof).unwrap();
+        assert_eq!(
+            bytes,
+            borsh::to_vec(&make()).unwrap(),
+            "BP+ proof must be byte-reproducible for fixed inputs + RNG seed"
+        );
+        assert_eq!(hex::encode(Sha256::digest(&bytes)), "4dee4016c291c6246c381f509b70f94f94819f81e19bd212018a01bdff239ac0");
+    }
+
     #[test]
     fn test_commitment_creation() {
         let amount = Amount::from_atomic(1_000_000_000);
@@ -1036,5 +1180,163 @@ mod tests {
             .collect();
         let proof_5 = create_aggregated_range_proof(&amounts_5, &blindings_5, &mut OsRng).unwrap();
         assert!(verify_range_proofs(&commitments_5, &proof_5));
+    }
+
+    // ─── Missing-behavior coverage (appended) ───────────────────────────
+
+    #[test]
+    fn commitment_from_bytes_checked_accepts_valid_rejects_noncanonical() {
+        // Valid canonical commitment round-trips through the checked constructor.
+        let (c, _) = commit(&mut OsRng, Amount::from_atomic(123_456));
+        assert!(PedersenCommitment::from_bytes_checked(c.to_bytes()).is_some());
+
+        // Non-canonical 32 bytes that do not decompress to a Ristretto point.
+        assert!(PedersenCommitment::from_bytes_checked([0xFFu8; 32]).is_none());
+    }
+
+    #[test]
+    fn checked_add_sub_return_none_on_invalid_point() {
+        let (valid, _) = commit(&mut OsRng, Amount::from_atomic(7_000));
+        let (valid2, _) = commit(&mut OsRng, Amount::from_atomic(9_000));
+        // Operand whose bytes never decompress to a valid point.
+        let invalid = PedersenCommitment::from_bytes_unchecked([0xFFu8; 32]);
+
+        // Invalid operand on either side yields None (no panic).
+        assert!(valid.checked_add(&invalid).is_none());
+        assert!(invalid.checked_add(&valid).is_none());
+        assert!(valid.checked_sub(&invalid).is_none());
+        assert!(invalid.checked_sub(&valid).is_none());
+
+        // Sanity: two valid commitments still combine.
+        assert!(valid.checked_add(&valid2).is_some());
+        assert!(valid.checked_sub(&valid2).is_some());
+    }
+
+    #[test]
+    fn add_operator_returns_identity_on_invalid_point() {
+        use curve25519_dalek::traits::Identity;
+
+        let (valid, _) = commit(&mut OsRng, Amount::from_atomic(11_000));
+        let invalid = PedersenCommitment::from_bytes_unchecked([0xFFu8; 32]);
+        // The identity fallback the operator uses (H7-FIX).
+        let identity =
+            PedersenCommitment::from_bytes_unchecked(RistrettoPoint::identity().compress().to_bytes());
+
+        // Both the by-value and by-ref Add impls fall back to identity, no panic.
+        assert_eq!(invalid + valid, identity);
+        assert_eq!(valid + invalid, identity);
+        assert_eq!(valid + &invalid, identity);
+    }
+
+    #[test]
+    fn create_aggregated_range_proof_rejects_length_mismatch() {
+        let amounts = vec![Amount::from_atomic(1_000), Amount::from_atomic(2_000)];
+        let blindings = vec![BlindingFactor::random(&mut OsRng)]; // len 1 != 2
+        assert!(create_aggregated_range_proof(&amounts, &blindings, &mut OsRng).is_err());
+    }
+
+    #[test]
+    fn create_aggregated_range_proof_empty_returns_empty_proof() {
+        let proof = create_aggregated_range_proof(&[], &[], &mut OsRng).unwrap();
+        assert!(proof.is_empty());
+        assert_eq!(proof.version, RANGE_PROOF_VERSION_BP_PLUS);
+    }
+
+    #[test]
+    fn create_aggregated_range_proof_rejects_over_max_aggregation() {
+        let count = MAX_AGGREGATION + 1;
+        let amounts: Vec<Amount> = (0..count)
+            .map(|i| Amount::from_atomic((i as u64) + 1))
+            .collect();
+        let blindings: Vec<BlindingFactor> =
+            (0..count).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+        assert!(create_aggregated_range_proof(&amounts, &blindings, &mut OsRng).is_err());
+    }
+
+    #[test]
+    fn verify_range_proofs_empty_commitments_requires_empty_proof() {
+        // Empty commitments accepted only with an empty proof.
+        assert!(verify_range_proofs(&[], &RangeProof::empty()));
+
+        // Empty commitments with a non-empty proof must be rejected.
+        let amount = Amount::from_atomic(5_000);
+        let (_, blinding) = commit(&mut OsRng, amount);
+        let nonempty = create_range_proof(amount, &blinding, &mut OsRng).unwrap();
+        assert!(!nonempty.is_empty());
+        assert!(!verify_range_proofs(&[], &nonempty));
+    }
+
+    #[test]
+    fn verify_range_proofs_dispatch_gates_off_wrong_version() {
+        // Build a real BP+ (v3) aggregated proof + its commitments.
+        let amounts = vec![Amount::from_atomic(100_000), Amount::from_atomic(200_000)];
+        let blindings: Vec<BlindingFactor> =
+            (0..2).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+        let commitments: Vec<PedersenCommitment> = amounts
+            .iter()
+            .zip(blindings.iter())
+            .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
+            .collect();
+        let proof = create_aggregated_range_proof(&amounts, &blindings, &mut OsRng).unwrap();
+
+        // Correct version at a height where BP+ is active verifies.
+        assert!(verify_range_proofs_dispatch(
+            &commitments,
+            &proof,
+            BULLETPROOFS_PLUS_HEIGHT
+        ));
+
+        // C-2: a v2-tagged proof at a BP+-active height is gated off (false),
+        // preventing a pre-fork proof version from validating post-activation.
+        let wrong_version = RangeProof {
+            version: RANGE_PROOF_VERSION,
+            data: proof.data.clone(),
+        };
+        assert!(!verify_range_proofs_dispatch(
+            &commitments,
+            &wrong_version,
+            BULLETPROOFS_PLUS_HEIGHT
+        ));
+    }
+
+    #[test]
+    fn verify_coinbase_output_matches_zero_blinding() {
+        let amount = 1_000_000u64;
+        // Coinbase commitment uses a zero blinding factor.
+        let c = PedersenCommitment::commit(amount, &BlindingFactor::zero());
+        assert!(verify_coinbase_output(&c, amount));
+
+        // Wrong expected amount must not match.
+        assert!(!verify_coinbase_output(&c, amount + 1));
+
+        // A random-blinding commitment to the same amount must not match the
+        // zero-blinding coinbase form.
+        let (random_blinded, _) = commit(&mut OsRng, Amount::from_atomic(amount));
+        assert!(!verify_coinbase_output(&random_blinded, amount));
+    }
+
+    #[test]
+    fn blinding_factor_zeroize_wipes_scalar() {
+        use zeroize::Zeroize;
+        let mut bf = BlindingFactor::from_bytes([7u8; 32]);
+        assert_ne!(bf.to_bytes(), [0u8; 32]);
+        bf.zeroize();
+        assert_eq!(bf.to_bytes(), [0u8; 32]);
+    }
+
+    #[test]
+    fn blinding_factor_scalar_arithmetic() {
+        let a = BlindingFactor::from_bytes([3u8; 32]);
+        let b = BlindingFactor::from_bytes([5u8; 32]);
+
+        // (a + b) - b == a
+        let sum = a.add(&b);
+        let back = sum.sub(&b);
+        assert_eq!(back.to_bytes(), a.to_bytes());
+
+        // zero is the additive identity, and encodes to all-zero bytes.
+        let z = BlindingFactor::zero();
+        assert_eq!(z.to_bytes(), [0u8; 32]);
+        assert_eq!(a.add(&z).to_bytes(), a.to_bytes());
     }
 }

@@ -2,6 +2,74 @@
 //!
 //! Reduces bandwidth by sending only transaction hashes instead of full transactions.
 //! Receivers reconstruct blocks from their mempool.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `ShortTxId::from_tx_hash`** — INVARIANT: the short id is a
+//!   deterministic function of `(tx_hash, nonce)`; distinct hashes under the
+//!   same nonce yield distinct ids with overwhelming probability.
+//!   THREAT: a colliding short id misroutes a mempool lookup onto the wrong
+//!   transaction during reconstruction (see §6).
+//!   TESTS: `test_short_tx_id`, `test_short_id_collision`.
+//! - **§2 `CompactBlock::from_block`** — INVARIANT: the per-block nonce comes
+//!   from the OS CSPRNG (`OsRng`), and the coinbase / index-0 transaction is
+//!   always prefilled while every other transaction is represented only by
+//!   its short id.
+//!   THREAT: a predictable nonce lets an adversary precompute short-id
+//!   collisions against the compact block before it is even sent.
+//!   TESTS: `test_compact_block_creation`.
+//! - **§3 `CompactBlock::savings_estimate`** — INVARIANT: compact size,
+//!   full size, and the fractional savings follow the exact stated formula
+//!   (`header(200) + 6·short_ids + avg·prefilled` vs `header(200) +
+//!   avg·tx_count`).
+//!   THREAT: a drifted estimate misleads bandwidth-mode heuristics elsewhere
+//!   in the peer manager.
+//!   TESTS: `savings_estimate_arithmetic_is_correct`.
+//! - **§4 `BlockReconstructor::reconstruct` (tx-count cap guard)** —
+//!   INVARIANT: `total_txs` is checked against the canonical
+//!   `crate::constants::MAX_TXS_PER_BLOCK` before the per-tx reconstruction
+//!   vector is allocated.
+//!   THREAT: A5-CB-01 — an inflated tx count could either exhaust memory via
+//!   an unbounded allocation, or (if a second, independently-drifted cap were
+//!   used) accept a compact block the validator would reject. FIX #23 removed
+//!   the standalone `MAX_COMPACT_BLOCK_TXS` constant to close the drift.
+//!   TESTS: `reconstruct_rejects_compact_block_exceeding_tx_cap`.
+//! - **§5 `BlockReconstructor::reconstruct` (prefilled index validation)** —
+//!   INVARIANT: every prefilled entry's `index` is `< total_txs`, and no two
+//!   prefilled entries target the same index.
+//!   THREAT: an out-of-bounds index or a silently-overwritten duplicate
+//!   produces a reconstructed block whose ordering cannot match the real
+//!   merkle root, surfacing only as a confusing downstream merkle-root
+//!   mismatch instead of a clear rejection here.
+//!   TESTS: `reconstruct_rejects_out_of_bounds_prefilled_index`,
+//!   `reconstruct_rejects_duplicate_prefilled_index`.
+//! - **§6 `BlockReconstructor::reconstruct` (short-id fill / collision
+//!   fallback)** — INVARIANT: every remaining slot is filled from the mempool
+//!   index by short id or else recorded in `missing`; reconstruction succeeds
+//!   only when `missing` is empty. Reconstruction succeeding is NOT proof the
+//!   filled transactions are the genuine ones — a short-id collision fills
+//!   the slot with whatever mempool tx shares that id.
+//!   THREAT: a short-id collision silently substitutes the wrong transaction
+//!   into the rebuilt block; the header `tx_root` check is the only backstop
+//!   that catches it.
+//!   TESTS: `test_block_reconstruction`, `test_missing_transactions`,
+//!   `short_id_collision_fills_with_colliding_tx_not_the_real_tx`.
+//! - **§7 `BlockReconstructor::add_transaction`** — INVARIANT: a late-arriving
+//!   transaction is indexed under the same nonce the reconstructor was built
+//!   with, so a subsequent `reconstruct` call can resolve it by short id.
+//!   THREAT: indexing under a mismatched nonce would make the transaction
+//!   permanently unreachable by short-id lookup.
+//!   TESTS: (gap — no test calls `add_transaction`).
+//! - **§8 `CompactBlockState` (should_send_compact / pending state)** —
+//!   INVARIANT: compact blocks are only sent to a peer when both `supported`
+//!   and `high_bandwidth` are true; `set_pending`/`clear_pending` keep
+//!   `pending_block` and `missing_txs` in sync with each other.
+//!   THREAT: sending compact blocks to a peer that can't reconstruct them, or
+//!   leaving stale pending/missing state after a clear, wastes bandwidth or
+//!   corrupts reconstruction bookkeeping.
+//!   TESTS: (gap — no test exercises `CompactBlockState`).
 
 use crate::consensus::Block;
 use crate::primitives::Hash;
@@ -512,5 +580,95 @@ mod tests {
             result.unwrap_err().is_empty(),
             "rejection must signal 'unrecoverable compact block' (empty missing-list)"
         );
+    }
+
+    /// Adversarial short-id collision: the reconstructor keys purely on the
+    /// 6-byte short id, so if the mempool holds a DIFFERENT transaction under
+    /// the same short id as a block tx, that colliding tx fills the slot. This
+    /// pins the invariant that reconstruction alone is NOT sufficient — the
+    /// substituted tx is observably the wrong one, and the caller MUST validate
+    /// the rebuilt block against the header `tx_root` (where the collision
+    /// surfaces). It must never silently return the genuine tx by luck.
+    #[test]
+    fn short_id_collision_fills_with_colliding_tx_not_the_real_tx() {
+        let block = make_test_block();
+        let compact = CompactBlock::from_block(&block);
+
+        // Real non-coinbase tx at block index 1 and its short id under the nonce.
+        let real_tx = block.transactions[1].clone();
+        let short_id = ShortTxId::from_tx_hash(&real_tx.hash(), compact.nonce);
+
+        // A different tx that we force to collide by inserting under real_tx's id.
+        let wrong_tx = make_test_tx(200);
+        assert_ne!(real_tx.hash(), wrong_tx.hash(), "control: txs must differ");
+
+        let mut mempool_index = HashMap::new();
+        mempool_index.insert(short_id, wrong_tx.clone());
+        for tx in &block.transactions[2..] {
+            mempool_index.insert(ShortTxId::from_tx_hash(&tx.hash(), compact.nonce), tx.clone());
+        }
+        let reconstructor = BlockReconstructor {
+            mempool_index,
+            nonce: compact.nonce,
+        };
+
+        let rebuilt = reconstructor
+            .reconstruct(&compact)
+            .expect("all short ids resolve to some mempool tx");
+        assert_eq!(
+            rebuilt.transactions[1].hash(),
+            wrong_tx.hash(),
+            "colliding slot is filled by the colliding mempool tx"
+        );
+        assert_ne!(
+            rebuilt.transactions[1].hash(),
+            real_tx.hash(),
+            "collision must not be silently 'correct' — integrity relies on the tx_root check"
+        );
+    }
+
+    /// A malformed CompactBlock whose tx count exceeds the consensus cap
+    /// (MAX_TXS_PER_BLOCK) must be rejected BEFORE the per-tx reconstruction
+    /// vector is allocated — bounded memory, `Err(vec![])` sentinel.
+    #[test]
+    fn reconstruct_rejects_compact_block_exceeding_tx_cap() {
+        let block = make_test_block();
+        let mut compact = CompactBlock::from_block(&block);
+        let cap = crate::constants::MAX_TXS_PER_BLOCK;
+        // Inflate short_ids so tx_count() exceeds the cap. The guard rejects
+        // before allocating vec![None; total_txs].
+        compact.short_ids = vec![ShortTxId([0u8; 6]); cap + 1];
+        assert!(compact.tx_count() > cap);
+
+        let reconstructor = BlockReconstructor::new(&[], compact.nonce);
+        let result = reconstructor.reconstruct(&compact);
+        assert!(result.is_err(), "over-cap compact block must be rejected");
+        assert!(
+            result.unwrap_err().is_empty(),
+            "over-cap rejection signals unrecoverable (empty missing-list)"
+        );
+    }
+
+    /// `savings_estimate` arithmetic: compact size = header(200) + 6·short_ids +
+    /// avg·prefilled; full size = header(200) + avg·tx_count; savings is the
+    /// fractional reduction. Pin the exact formula.
+    #[test]
+    fn savings_estimate_arithmetic_is_correct() {
+        let block = make_test_block();
+        let compact = CompactBlock::from_block(&block);
+        assert_eq!(compact.prefilled_txs.len(), 1);
+        assert_eq!(compact.short_ids.len(), 3);
+
+        let avg = 250usize;
+        let (compact_size, full_size, savings) = compact.savings_estimate(avg);
+
+        let expected_compact = 200 + 3 * 6 + avg; // 1 prefilled tx at avg size
+        let expected_full = 200 + compact.tx_count() * avg;
+        assert_eq!(compact_size, expected_compact);
+        assert_eq!(full_size, expected_full);
+
+        let expected_savings = 1.0 - (expected_compact as f64 / expected_full as f64);
+        assert!((savings - expected_savings).abs() < 1e-9);
+        assert!(savings > 0.0, "compact block must be smaller than the full block");
     }
 }

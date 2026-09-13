@@ -1,3 +1,40 @@
+//! Decoy candidate sampling and covered-request construction.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `sample_candidate_locators`** — INVARIANT: decoy ages are drawn from
+//!   the Gamma(19.28, 1/1.61) log-seconds age distribution (converted to blocks),
+//!   so the real spend's age is statistically indistinguishable from its decoys.
+//!   THREAT: biased age sampling makes the real input identifiable by age;
+//!   ring-selection determinism regressions (incident 1d27d3c8).
+//!   TESTS: `gamma_sampling_is_conditioned_and_unique`,
+//!   `decoy_age_distribution_matches_independent_gamma_reference_wallet_c1`.
+//! - **§2 `min_age eligibility`** — INVARIANT: only outputs at least `min_age`
+//!   blocks old, measured at the next spend height, are eligible as decoys.
+//!   THREAT: too-young decoys shrink the anonymity set and leak spend timing.
+//!   TESTS: `minimum_age_is_measured_at_the_next_spend_height`.
+//! - **§3 `build_covered_request`** — INVARIANT: real locators are padded with
+//!   unique decoys up to `COVERED_LOOKUP_SIZE`, shuffled, and bound to the
+//!   snapshot id and ring policy. THREAT: unbound or duplicated locators reveal
+//!   which ring member is real. TESTS: `covered_request_binds_snapshot_and_policy`,
+//!   `covered_lookup_allocates_transaction_wide_unique_decoys`.
+//! - **§4 `request bounds`** — INVARIANT: real locators must exist in the
+//!   snapshot and required slots must not exceed `COVERED_LOOKUP_SIZE`.
+//!   THREAT: out-of-snapshot or overflowing requests yield malformed rings.
+//!   TESTS: `covered_request_rejects_a_real_locator_outside_the_snapshot`,
+//!   `covered_request_rejects_capacity_overflow`.
+//! - **§5 `pick_nearest_locator`** — INVARIANT: a sampled target age maps to the
+//!   nearest eligible height, breaking ties uniformly at random.
+//!   THREAT: deterministic tie-breaking biases decoy positions.
+//!   TESTS: `gamma_sampling_is_conditioned_and_unique`.
+//! - **§6 `pick_ordinal`** — INVARIANT: every chosen decoy is unique — never a
+//!   real, excluded, or already-selected output. THREAT: duplicate/real reuse
+//!   links the transaction's inputs. TESTS:
+//!   `covered_lookup_allocates_transaction_wide_unique_decoys`,
+//!   `gamma_sampling_is_conditioned_and_unique`.
+
 use super::error::{DecoySelectionError, DecoySelectionResult};
 use super::types::{CoveredRequest, RingPolicy, ValidatedDecoySnapshot};
 use super::{

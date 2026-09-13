@@ -26,6 +26,47 @@
 //!   session; specific stripe-computation identifiers not re-read).
 //! - CKB discovery protocol: `network/src/protocols/discovery/` in the
 //!   CKB source tree (not verified against upstream this session).
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `key_image_stripe`** — INVARIANT: deterministic, uniformly
+//!   distributed stripe assignment — the same key image always maps to the
+//!   same stripe.
+//!   THREAT: non-uniform or non-deterministic sharding would concentrate
+//!   key-image lookups on fewer nodes, weakening the M-13 privacy mitigation
+//!   this module exists to provide.
+//!   TESTS: `test_stripe_deterministic`, `test_stripe_distribution`.
+//! - **§2 `node_stripe`** — INVARIANT: a node's identity deterministically
+//!   maps to exactly one stripe assignment.
+//!   THREAT: a predictable or colliding stripe assignment lets an attacker
+//!   cheaply target the specific node(s) serving a given key image.
+//!   TESTS: `test_node_stripe`.
+//! - **§3 `is_responsible`** — INVARIANT: responsibility for a key image
+//!   agrees exactly with the independent node-stripe and key-image-stripe
+//!   computations.
+//!   THREAT: a mismatched responsibility check silently drops a query at a
+//!   node that doesn't actually serve that stripe (lookup denial).
+//!   TESTS: (gap — no direct test of `is_responsible`; only exercised
+//!   indirectly through `DhtState::is_ours`, which is itself untested).
+//! - **§4 `DhtState::new`** — INVARIANT: an explicit `config.dht_stripe`
+//!   override always wins over the derived hash-based stripe.
+//!   THREAT: a misconfigured/ignored override would silently serve the wrong
+//!   stripe.
+//!   TESTS: `test_dht_state`.
+//! - **§5 `DhtState::add_peer` / `remove_peer`** — INVARIANT: a peer is
+//!   registered at most once per stripe, and fully removed from every
+//!   stripe on disconnect.
+//!   THREAT: duplicate or stale peer entries skew routing decisions and
+//!   coverage statistics.
+//!   TESTS: `test_dht_state`.
+//! - **§6 `DhtState::coverage_stats`** — INVARIANT: `stripes_covered` and
+//!   `total_peers` are derived directly from `peers_by_stripe` (no separate
+//!   counter that can drift).
+//!   THREAT: inaccurate coverage stats mask an under-served stripe as a
+//!   silent liveness gap.
+//!   TESTS: `test_dht_state`.
 
 use crate::config::NetworkTierConfig;
 use crate::network::peer::PeerId;

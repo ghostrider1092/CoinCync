@@ -1,4 +1,40 @@
 //! Block template for mining
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `congestion_pct_for_size`** — INVARIANT: block congestion percentage
+//!   is the validator's exact integer formula (`size·100/MAX_BLOCK_SIZE`, u128
+//!   math, no f64). THREAT: builder/validator congestion drift → poison template
+//!   that fails `validate_block` and stalls the chain. TESTS:
+//!   `congestion_pct_matches_validator_formula`.
+//! - **§2 `dynamic_min_fee`** — INVARIANT: per-tx congestion floor is bit-identical
+//!   to the validator's `checked_mul` chain and returns `None` on the same overflow
+//!   the validator treats as oversized. THREAT: fee-floor drift → assembled block
+//!   rejected at submission. TESTS: `builder_and_validator_use_identical_floor`,
+//!   `floor_is_monotonic_across_buckets`.
+//! - **§3 `build_template_json`** — INVARIANT: emits the full header field set the
+//!   standalone miner reconstructs; only chain-valid txs clearing the congestion
+//!   floor are packed; template timestamp is strictly `> prev.timestamp`.
+//!   THREAT: poison-template stall (same shape as the 2026-05-08
+//!   duplicate-key-image incident) or a same-second timestamp rejection.
+//!   TESTS: `build_template_json_emits_expected_fields`.
+//! - **§4 fixpoint congestion pass** — INVARIANT: recomputing the floor at the
+//!   FINAL block size and dropping under-paying txs converges (each pass strictly
+//!   shrinks the set). THREAT: early tx clears a low bucket but the final block
+//!   crosses a higher bucket → template fails the block-level floor. TESTS:
+//!   `floor_is_monotonic_across_buckets`, `build_template_json_emits_expected_fields`.
+//! - **§5 `BlockTemplate::new`** — INVARIANT: copies every header sub-field
+//!   verbatim and flattens `checkpoint_vote` `(height, Hash)` to the `Hash`.
+//!   THREAT: an external miner sees a template with defaulted/dropped commitment
+//!   roots and mines an invalid block. TESTS:
+//!   `block_template_new_copies_header_sub_fields`,
+//!   `block_template_new_checkpoint_vote_none_maps_to_none`.
+//! - **§6 `BlockTemplate::update_nonce` / `update_timestamp`** — INVARIANT: mutate
+//!   the retained header's `nonce`/`timestamp` fields in place. THREAT: nonce/time
+//!   rolling silently no-ops → miner cannot search the space. TESTS:
+//!   `block_template_update_nonce_and_timestamp_mutate_header`.
 
 use crate::consensus::BlockHeader;
 use crate::primitives::{Amount, Hash};
@@ -233,7 +269,10 @@ pub fn build_template_json(
 
 #[cfg(test)]
 mod congestion_packing_tests {
-    use super::{congestion_pct_for_size, dynamic_min_fee};
+    use super::{build_template_json, congestion_pct_for_size, dynamic_min_fee, BlockTemplate};
+    use crate::config::NetworkType;
+    use crate::consensus::BlockHeader;
+    use crate::primitives::{Amount, Hash, SecretKey};
 
     /// Drift guard: the builder's per-tx floor must be bit-identical to the
     /// validator's expression (consensus/validation.rs) across every congestion
@@ -277,5 +316,99 @@ mod congestion_packing_tests {
         assert!(f(74) <= f(75));
         assert!(f(75) <= f(89));
         assert!(f(89) <= f(90));
+    }
+
+    /// A header whose sub-fields are all distinct so we can prove `BlockTemplate::new`
+    /// copies each one out of the header (rather than defaulting).
+    fn make_header() -> BlockHeader {
+        BlockHeader {
+            network_magic: NetworkType::Regtest.magic_bytes(),
+            version: 3,
+            height: 7,
+            timestamp: 1_700_000_000,
+            prev_hash: Hash::from_bytes([1u8; 32]),
+            tx_root: Hash::from_bytes([2u8; 32]),
+            anchor: Hash::from_bytes([5u8; 32]),
+            algorithm: 0,
+            nonce: 0,
+            target: Hash::from_difficulty(1000),
+            miner_pubkey: SecretKey::from_bytes([1u8; 32]).public_key(),
+            supply_commitment: [7u8; 32],
+            checkpoint_vote: Some((42, Hash::from_bytes([6u8; 32]))),
+            spark_set_root: [8u8; 32],
+            mw_kernel_root: [9u8; 32],
+        }
+    }
+
+    #[test]
+    fn block_template_new_copies_header_sub_fields() {
+        let header = make_header();
+        let template =
+            BlockTemplate::new(header, Vec::new(), Amount::from_atomic(11), Amount::from_atomic(22));
+
+        assert_eq!(template.supply_commitment, [7u8; 32]);
+        assert_eq!(template.spark_set_root, [8u8; 32]);
+        assert_eq!(template.mw_kernel_root, [9u8; 32]);
+        assert_eq!(template.version, 3);
+        assert_eq!(template.anchor, Hash::from_bytes([5u8; 32]));
+        // checkpoint_vote flattens (u64, Hash) → the Hash only.
+        assert_eq!(template.checkpoint_vote, Some(Hash::from_bytes([6u8; 32])));
+        assert_eq!(template.total_fees, Amount::from_atomic(11));
+        assert_eq!(template.expected_reward, Amount::from_atomic(22));
+        // Header is retained verbatim.
+        assert_eq!(template.header.height, 7);
+    }
+
+    #[test]
+    fn block_template_new_checkpoint_vote_none_maps_to_none() {
+        let mut header = make_header();
+        header.checkpoint_vote = None;
+        let template = BlockTemplate::new(header, Vec::new(), Amount::ZERO, Amount::ZERO);
+        assert_eq!(template.checkpoint_vote, None);
+    }
+
+    #[test]
+    fn block_template_update_nonce_and_timestamp_mutate_header() {
+        let mut template = BlockTemplate::new(make_header(), Vec::new(), Amount::ZERO, Amount::ZERO);
+        assert_eq!(template.header.nonce, 0);
+
+        template.update_nonce(99);
+        assert_eq!(template.header.nonce, 99);
+
+        template.update_timestamp(1_800_000_123);
+        assert_eq!(template.header.timestamp, 1_800_000_123);
+    }
+
+    /// HAPPY: `build_template_json` emits the full field set the standalone miner
+    /// reconstructs a header from. Built against a fresh genesis chain + empty
+    /// mempool (no PoW involved).
+    #[test]
+    fn build_template_json_emits_expected_fields() {
+        let chain: crate::chain::SharedBlockchain =
+            std::sync::Arc::new(crate::chain::Blockchain::new());
+        let genesis_hash = chain.init_genesis().expect("genesis");
+        let mempool = crate::mempool::SharedMempool::new();
+
+        let tmpl = build_template_json(&chain, &mempool);
+
+        assert_eq!(tmpl["height"].as_u64(), Some(1), "next block is height 1");
+        assert_eq!(
+            tmpl["prev_hash"].as_str().unwrap(),
+            hex::encode(genesis_hash.as_bytes()),
+            "prev_hash is the genesis tip"
+        );
+        assert!(tmpl["timestamp"].as_u64().is_some(), "timestamp present");
+        assert_eq!(
+            tmpl["network_magic"].as_str().unwrap(),
+            hex::encode(chain.network().magic_bytes()),
+            "network_magic matches the chain's network"
+        );
+        assert!(tmpl["target"].as_str().is_some(), "target present");
+        assert!(tmpl["difficulty"].as_str().is_some(), "difficulty present");
+        assert_eq!(
+            tmpl["transactions"].as_array().map(|a| a.len()),
+            Some(0),
+            "empty mempool → no transactions"
+        );
     }
 }

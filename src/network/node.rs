@@ -28,6 +28,92 @@
 //! - `super::node::sync_driver` — sync scheduling and recovery (extracted)
 //! - `super::node::maintenance` — the periodic background tasks
 //!   (reputation decay, mempool expiry, stale-entry cleanup; extracted)
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `P2PNode::new` (identity load)** — INVARIANT: if the identity file
+//!   exists but fails to load, the node logs loudly and still starts rather
+//!   than halting; only a genuinely missing file takes the silent fresh-install
+//!   path.
+//!   THREAT: silent ephemeral fallback on a transient read error changes our
+//!   peer_id, losing accumulated peer reputation and presenting as a Sybil
+//!   twin (P5-N1).
+//!   TESTS: `test_node_creation` (gap — the load-fails-but-file-exists branch
+//!   itself is not separately exercised).
+//! - **§2 `query_key_images_via_dht`** — INVARIANT: the `parking_lot::Mutex`
+//!   guard over DHT stripe state is dropped before any `.await`; sends clone
+//!   the `mpsc::Sender` out of the peer `DashMap` before awaiting it.
+//!   THREAT: holding a sync lock or a DashMap shard guard across an `.await`
+//!   deadlocks every other task touching the same state (P5-N2).
+//!   TESTS: (gap — no test drives `query_key_images_via_dht` directly;
+//!   `broadcast_snapshot_pattern_releases_shard_locks_before_await` proves the
+//!   same DashMap-snapshot-before-await pattern elsewhere in this file).
+//! - **§3 `publish_chain_state`** — INVARIANT: chain-tip publication is
+//!   serialized under `chain_publication` and only the highest-sequence
+//!   `ChainUpdateToken` commits; no `.await` occurs between the shadow commit
+//!   and the sync-state update, so cancellation cannot leave `ChainState`
+//!   ahead of `ChainSync`.
+//!   THREAT: an out-of-order or cancelled publication could regress the
+//!   node's advertised height/tip and desynchronize sync progress (issue
+//!   #249).
+//!   TESTS: `set_chain_state_preserves_sequence_contract_at_facade`,
+//!   `stale_processed_block_task_cannot_regress_sync_state`.
+//! - **§4 `notify_block_invalid`** — INVARIANT: `MissingParent` never scores
+//!   or bans a peer; every other classified offense is scored and, past
+//!   threshold, bans.
+//!   THREAT: scoring `MissingParent` as misbehavior banned our own miner
+//!   during a legitimate deep reorg and partitioned the fleet for ~20 hours
+//!   (2026-07-04 incident).
+//!   TESTS: (gap — no unit/integration test drives `notify_block_invalid`;
+//!   `peer_banned_after_many_invalid_blocks` in `tests/network_security.rs`
+//!   exercises `PeerInfo::adjust_reputation`/`should_ban` directly, not this
+//!   method or its `MissingParent` short-circuit).
+//! - **§5 `notify_block_orphan`** — INVARIANT: orphan rate-tracking
+//!   (`orphan_flood`) is recorded for observability only and is never fed to
+//!   the peer scorer.
+//!   THREAT: scoring orphan floods as misbehavior banned our own miner
+//!   sending legitimate blocks from a heavier chain, causing an 18-hour
+//!   partition (2026-06-22 incident).
+//!   TESTS: (gap — no test drives `notify_block_orphan`).
+//! - **§6 `notify_block_accepted`** — INVARIANT: draining orphans of a
+//!   connected hash re-emits each via `NodeEvent::BlockReceived` exactly
+//!   once, terminating the cascade rather than looping.
+//!   THREAT: undrained orphans stalled sync for up to the 30-minute orphan
+//!   TTL on out-of-order/reorg delivery.
+//!   TESTS: (gap — no test drives `notify_block_accepted`).
+//! - **§7 `start`** — INVARIANT: all fallible resource acquisition (address
+//!   book/ban list load, bootstrap, socket bind/listen) completes before
+//!   `running` becomes visible or any task is spawned; a failed `start` can
+//!   be retried, but a successful one is one-shot.
+//!   THREAT: publishing `running = true` before resource acquisition
+//!   succeeds would let callers observe a half-started node; allowing a
+//!   second start after success would double-spawn tasks over the same
+//!   state.
+//!   TESTS: `start_resource_failure_does_not_publish_running_state`,
+//!   `bind_failure_keeps_first_start_retryable`,
+//!   `start_then_stop_updates_lifecycle_state`.
+//! - **§8 `stop`** — INVARIANT: `running` flips false and all runtime tasks
+//!   are joined/aborted before address book, ban list and anchors are
+//!   persisted, so no in-flight task can mutate state after it's saved.
+//!   THREAT: persisting before shutdown could race a still-running task's
+//!   writes, corrupting the on-disk address book or ban list.
+//!   TESTS: `start_then_stop_updates_lifecycle_state`.
+//! - **§9 broadcast snapshot pattern (`broadcast_context`, `broadcast_block`,
+//!   `send_to`)** — INVARIANT: any DashMap iteration used to build a send
+//!   fan-out is collected into a `Vec` (dropping the iterator/shard locks)
+//!   before the per-peer `.await`.
+//!   THREAT: holding a DashMap shard lock across an await blocks every other
+//!   task touching that shard — a runtime-wide futex-park cascade.
+//!   TESTS: `broadcast_snapshot_pattern_releases_shard_locks_before_await`.
+//! - **§10 `ConnectionTracker` / `NodeConfig` basics** — INVARIANT: per-IP
+//!   connection limits are enforced and released correctly; default
+//!   `NodeConfig` matches the documented peer-count constants.
+//!   THREAT: an unenforced per-IP cap enables connection-slot exhaustion by a
+//!   single host.
+//!   TESTS: `test_node_config_default`, `test_connection_tracker_per_ip_limit`,
+//!   `test_peer_count_and_connected_peers`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -478,6 +564,12 @@ impl P2PNode {
         // the right baseline (and stale lower-work peer claims get pruned).
         sync.set_local_total_difficulty(chain_stats.total_difficulty);
         let stats = sync.stats();
+        // H6: only veto mining while the work-behind claim is substantiated
+        // (fresh, or backed by our own cumulative work actually rising). A
+        // persistent liar who re-advertises a bogus ChainWork claim delivers no
+        // such progress, so this returns false past the grace and the miner
+        // resumes. Computed under the lock, before the guard is dropped.
+        let work_behind = sync.work_behind_now();
         drop(sync);
         self.chain.set_sync_info(
             stats.local_height >= stats.best_known_height,
@@ -485,10 +577,10 @@ impl P2PNode {
         );
         // Firework Phase 2 (I6): veto "synced" while a peer advertises more
         // cumulative work than us — a heavier chain — even when we are taller
-        // in block height. Anti-wedge (expire/ban/prune) clears the claim if
-        // it can't be substantiated, so this can't pin us permanently.
-        self.chain
-            .set_work_behind(stats.best_known_difficulty > stats.local_total_difficulty);
+        // in block height. Anti-wedge (expire/ban/prune + H6 substantiation
+        // gate) clears the veto if it can't be substantiated, so this can't pin
+        // us permanently.
+        self.chain.set_work_behind(work_behind);
         // Firework Phase 2: tell CAP_CHAINWORK peers our new cumulative work
         // so a peer on a lighter (possibly higher) chain can discover ours.
         broadcast::announce_chain_work(

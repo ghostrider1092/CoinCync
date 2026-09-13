@@ -1,6 +1,42 @@
 //! # BIP39 Mnemonic Implementation
 //!
 //! Proper mnemonic generation and seed derivation for CoinCync wallets.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `WalletMnemonic::generate`** — INVARIANT: produces a valid 24-word
+//!   (256-bit entropy) BIP39 mnemonic that re-parses successfully.
+//!   THREAT: a malformed generated phrase would be un-restorable, orphaning the
+//!   wallet. TESTS: `test_mnemonic_generation`, `tier7_mnemonic_generation_valid`.
+//! - **§2 `WalletMnemonic::from_phrase` / `validate`** — INVARIANT: the BIP39
+//!   checksum and wordlist are enforced — a bad-checksum, out-of-wordlist, or
+//!   empty phrase is rejected, never silently accepted.
+//!   THREAT: accepting a corrupt phrase derives a wrong wallet and silently loses
+//!   funds. TESTS: `test_invalid_mnemonic`, `test_invalid_word_detection`,
+//!   `tier7_invalid_mnemonic_rejected`.
+//! - **§3 `WalletMnemonic::to_seed`** — INVARIANT: seed derivation is
+//!   deterministic — same phrase + passphrase → same 64-byte seed; a different
+//!   passphrase → a different seed.
+//!   THREAT: non-deterministic seeds break reproducible recovery.
+//!   TESTS: `test_seed_derivation`, `tier7_mnemonic_to_seed_deterministic`.
+//! - **§4 `WalletSeed::from_bytes` / `master_key` / `chain_code`** — INVARIANT:
+//!   a seed is exactly 64 bytes and splits into a 32-byte master key + 32-byte
+//!   chain code; non-64-byte input is a flagged corruption path (R-78).
+//!   THREAT: silent zero-pad/truncate would derive wrong keys with no error.
+//!   TESTS: (gap — no unit test exercises the non-64-byte `from_bytes` path).
+//! - **§5 `DerivationPath` (`coincync` / `view_key` / `spend_key` / `from_string`
+//!   / `to_string`)** — INVARIANT: all path components are hardened, and parse ↔
+//!   render is faithful (`m/44'/888'/…`).
+//!   THREAT: M-6 — an unhardened or mis-rendered path misleads external BIP32
+//!   tools and diagnostics.
+//!   TESTS: `test_derivation_path_parse`, `test_derivation_path_to_string`.
+//! - **§6 `derive_child_key` / `derive_from_seed`** — INVARIANT: HD derivation is
+//!   deterministic and path-sensitive — distinct paths from one seed yield
+//!   distinct child keys.
+//!   THREAT: path collisions would reuse addresses / cross-link accounts.
+//!   TESTS: `test_key_derivation`.
 
 use crate::error::{Error, Result};
 use bip39::{Language, Mnemonic};

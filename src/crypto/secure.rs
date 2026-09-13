@@ -1,6 +1,44 @@
 //! # Secure Memory and Constant-Time Operations
 //!
 //! Security hardening utilities for cryptographic code.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `ct_eq`** — INVARIANT: byte-equality via the `subtle` crate (CR-002), running in
+//!   time independent of where the first difference lies; unequal lengths return false. THREAT:
+//!   a data-dependent early-exit comparison leaks MAC/hash/secret bytes through timing.
+//!   TESTS: `test_ct_eq`, `test_verify_hash`, `tier9_ct_eq_returns_correct_results`,
+//!   `tier9_ct_eq_timing_consistent`.
+//! - **§2 `ct_cmp`** — INVARIANT: returns the correct three-way `Ordering` for equal-length
+//!   inputs with no secret-dependent branch; the `1 + gt - lt` index maps the three reachable
+//!   (gt,lt) states to {Less,Equal,Greater} without a clamp (R-26 fix of the buggy `2*gt+(1-lt)`
+//!   formula; R-25 documents the hand-rolled slice compare). THREAT: an off-by-one index or a
+//!   timing-variable compare corrupts canonicity ordering (used by `PeerScalar::decode`) or leaks
+//!   bytes. TESTS: `test_ct_cmp`.
+//! - **§3 `ct_select_u8` / `ct_select_u64` / `ct_select_slice`** — INVARIANT: selection is by
+//!   arithmetic mask, not a branch — `true` yields `a`, `false` yields `b`, in constant time.
+//!   THREAT: a branch on the condition bit leaks which secret operand was chosen.
+//!   TESTS: `test_ct_select_u8`, `test_ct_select_u64`, `test_ct_select_slice`.
+//! - **§4 `ct_copy_if`** — INVARIANT: conditionally copies `src` into `dst` via an arithmetic
+//!   mask (no if/else), constant time regardless of the condition. THREAT: a branchy copy leaks
+//!   whether the guarded write happened. TESTS: `test_ct_copy_if`.
+//! - **§5 `is_zero`** — INVARIANT: reports all-zero by OR-accumulating every byte, so timing is
+//!   independent of contents; empty input is zero. THREAT: an early-exit zero check leaks the
+//!   position of the first nonzero byte of a secret. TESTS: `test_is_zero`.
+//! - **§6 `secure_random` / `secure_random_32` / `secure_random_64`** — INVARIANT: output is
+//!   drawn from `OsRng` OS entropy, fills the whole buffer, and is non-zero / distinct across draws.
+//!   THREAT: a short-filled or predictable buffer yields guessable keys/nonces. TESTS:
+//!   `test_secure_random`, `test_secure_random_64_fills_all_bytes`.
+//! - **§7 `secure_zero` + `SecureBytes`/`SecureArray` zeroization** — INVARIANT: sensitive
+//!   buffers are wiped (with a compiler fence for `secure_zero`) and the secure wrappers zeroize on
+//!   drop; Debug never prints contents. THREAT: leftover key material in freed memory is recoverable
+//!   by a later read or a crash dump. TESTS: `test_secure_zero`, `test_secure_bytes_zeroize`,
+//!   `test_secure_array_zeroize`, `test_zeroize_on_drop`.
+//! - **§8 `verify_hash` / `verify_mac`** — INVARIANT: authentication tags are compared with the
+//!   constant-time `ct_eq`, never `==`. THREAT: a timing-variable tag compare enables a byte-by-byte
+//!   MAC forgery. TESTS: `test_verify_hash`, `test_verify_mac`.
 
 use std::cmp::Ordering;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -413,6 +451,67 @@ mod tests {
         assert!(
             secure.as_bytes().iter().all(|&b| b == 0),
             "All bytes must be zero after zeroize"
+        );
+    }
+
+    #[test]
+    fn test_ct_select_u8() {
+        // true selects a, false selects b.
+        assert_eq!(ct_select_u8(true, 0xAA, 0x55), 0xAA);
+        assert_eq!(ct_select_u8(false, 0xAA, 0x55), 0x55);
+    }
+
+    #[test]
+    fn test_ct_select_u64() {
+        assert_eq!(ct_select_u64(true, 0xDEAD_BEEF, 0x0BAD_F00D), 0xDEAD_BEEF);
+        assert_eq!(ct_select_u64(false, 0xDEAD_BEEF, 0x0BAD_F00D), 0x0BAD_F00D);
+    }
+
+    #[test]
+    fn test_ct_select_slice() {
+        let a = [1u8, 2, 3, 4];
+        let b = [9u8, 8, 7, 6];
+        let mut dst = [0u8; 4];
+
+        ct_select_slice(true, &mut dst, &a, &b);
+        assert_eq!(dst, a, "true must select a");
+
+        ct_select_slice(false, &mut dst, &a, &b);
+        assert_eq!(dst, b, "false must select b");
+    }
+
+    #[test]
+    fn test_secure_random_64_fills_all_bytes() {
+        let a = secure_random_64();
+        let b = secure_random_64();
+
+        // 64 bytes wide, non-zero, and distinct across draws (overwhelmingly likely).
+        assert_eq!(a.as_bytes().len(), 64);
+        assert!(!is_zero(a.as_bytes()), "output must not be all zeros");
+        assert!(
+            !ct_eq(a.as_bytes(), b.as_bytes()),
+            "two draws must differ"
+        );
+    }
+
+    #[test]
+    fn test_verify_mac() {
+        let a = [0x11u8, 0x22, 0x33, 0x44];
+        let equal = [0x11u8, 0x22, 0x33, 0x44];
+        let unequal = [0x11u8, 0x22, 0x33, 0x45];
+
+        assert!(verify_mac(&a, &equal), "equal MACs must verify true");
+        assert!(!verify_mac(&a, &unequal), "unequal MACs must verify false");
+    }
+
+    #[test]
+    fn test_secure_zero() {
+        let mut buf = [0xABu8; 32];
+        assert!(buf.iter().any(|&b| b != 0));
+        secure_zero(&mut buf);
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "secure_zero must zeroize the buffer"
         );
     }
 }

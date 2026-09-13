@@ -1,3 +1,35 @@
+//! # Wallet-side fee estimation
+//!
+//! Estimates transaction size and fee so the wallet charges exactly what the
+//! block validator will require. Divergence here rejects otherwise-honest txs.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `estimate_tx_size`** — INVARIANT: size is a deterministic, conservative
+//!   (`×2` margin) function of input/output/ring counts, monotonic in each.
+//!   THREAT: under-estimate → fee too low → validator rejects the tx.
+//!   TESTS: `estimate_tx_size_is_within_expected_range`,
+//!   `scaled_fee_is_monotonic_in_input_output_and_ring_counts`.
+//! - **§2 `scaled_fee`** — INVARIANT: `fee == size·MIN_FEE_PER_BYTE·mult/100` with
+//!   saturating integer math (no overflow, no f64 drift) and monotone in size.
+//!   THREAT: wallet estimate vs validator divergence → honest txs rejected.
+//!   TESTS: `scaled_fee_is_monotonic_in_input_output_and_ring_counts`.
+//! - **§3 `FeeMultiplier::from_f64`** — INVARIANT: multiplier is clamped to
+//!   `[1.0, 100.0]`; NaN and negatives collapse to the neutral 1.0 floor.
+//!   THREAT: NaN/negative multiplier panics or produces a zero/absurd fee.
+//!   TESTS: `fee_multiplier_nan_falls_back_to_neutral_one`,
+//!   `fee_multiplier_negative_zero_and_huge_are_clamped`.
+//! - **§4 `calculate_fee`** — INVARIANT: unscaled fee at a height is
+//!   `size·MIN_FEE_PER_BYTE` and always strictly positive for a real tx.
+//!   THREAT: zero fee → tx rejected as underpaying. TESTS: `calculate_fee_is_non_zero`.
+//! - **§5 `estimate_fee_with_multiplier`** — INVARIANT: ring size is bound to
+//!   `ring_size_at_height`, so the estimate matches what the validator charges.
+//!   THREAT: stale/wrong ring size → fee mismatch → rejection.
+//!   TESTS: `fee_multiplier_nan_falls_back_to_neutral_one`,
+//!   `fee_multiplier_negative_zero_and_huge_are_clamped`.
+
 use crate::constants::{ring_size_at_height, MIN_FEE_PER_BYTE};
 use crate::primitives::Amount;
 

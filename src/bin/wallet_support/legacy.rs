@@ -3091,3 +3091,318 @@ async fn cmd_show_memo(
     }
     Ok(())
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Tests for the legacy wallet-CLI helpers (wallet_support/legacy.rs).
+//
+// Included into `mod app`, so this module is `app::legacy_support_tests`
+// and reaches the private CLI types / helpers via `super::*`. A distinct
+// name avoids clashing with v2.rs's `#[cfg(test)]` module in the same
+// parent module.
+//
+// Local, node-free coverage: pure helpers (resolve_home / resolve_seed /
+// resolve_password literal / network parsing / network_label) and the
+// commands that only touch a wallet file + local crypto (Restore,
+// Subaddress create/list, the FROST multisig file round-trip, and the
+// scoped-view-key export). Async commands run on a bare current-thread
+// runtime (no timer/IO drivers needed — none of these do network I/O).
+//
+// Deferred (documented, not implemented):
+//   * resolve_password stdin `-` branch and the `None` interactive-prompt
+//     (missing-password) branch — need a piped stdin / a real TTY, which
+//     the harness cannot supply. Only the literal `Some(s)` branch and the
+//     clap-layer env/flag precedence are exercised here.
+//   * resolve_seed stdin `-` branch and `None` prompt branch — same TTY/
+//     stdin limitation. Literal-branch trimming/empty-reject is tested.
+//   * Command::Send insufficient-funds clean-error path — selection and the
+//     insufficient-funds check happen only AFTER a live RPC round-trip
+//     (get_decoy_distribution) against a funded wallet; needs a node.
+// ═══════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod legacy_support_tests {
+    use super::*;
+    use clap::Parser as _;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serializes tests that mutate process-global environment variables.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Run an async command helper on a minimal current-thread runtime.
+    /// None of the covered commands use timers or network I/O, so the
+    /// default (driver-less) runtime is sufficient and avoids depending on
+    /// tokio's "macros"/"time"/"net" features.
+    fn run<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build current-thread runtime")
+            .block_on(fut)
+    }
+
+    // ── resolve_home ────────────────────────────────────────────────────
+    #[test]
+    fn resolve_home_expands_tilde_slash_and_leaves_other_paths_untouched() {
+        if let Some(home) = dirs_next::home_dir() {
+            assert_eq!(
+                resolve_home(&PathBuf::from("~/.coincync/x.wallet")),
+                home.join(".coincync/x.wallet")
+            );
+        }
+        // Relative path — returned unchanged.
+        let rel = PathBuf::from("wallets/default.wallet");
+        assert_eq!(resolve_home(&rel), rel);
+        // `~` WITHOUT a following slash is not the home-expansion prefix.
+        let tilde_no_slash = PathBuf::from("~nothome");
+        assert_eq!(resolve_home(&tilde_no_slash), tilde_no_slash);
+    }
+
+    // ── resolve_password (literal branch only; stdin/prompt deferred) ────
+    #[test]
+    fn resolve_password_literal_branch_returns_the_value() {
+        let pw = resolve_password(Some("hunter2".to_string()), false).expect("literal password");
+        assert_eq!(pw.as_str(), "hunter2");
+    }
+
+    #[test]
+    fn resolve_password_env_and_flag_precedence_through_clap() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("COINCYNC_WALLET_PASSWORD", "envpw");
+
+        // No --password flag: clap fills the field from the env var.
+        let cli = Cli::try_parse_from(["coincync-wallet", "open"]).expect("open parses");
+        let Command::Open { password } = cli.command else {
+            panic!("expected Open");
+        };
+        assert_eq!(password.as_deref(), Some("envpw"));
+
+        // Explicit --password overrides the env var (flag wins).
+        let cli = Cli::try_parse_from(["coincync-wallet", "open", "--password", "flagpw"])
+            .expect("open parses");
+        let Command::Open { password } = cli.command else {
+            panic!("expected Open");
+        };
+        assert_eq!(password.as_deref(), Some("flagpw"));
+
+        std::env::remove_var("COINCYNC_WALLET_PASSWORD");
+    }
+
+    // ── resolve_seed (literal branch; invalid-seed reject) ──────────────
+    #[test]
+    fn resolve_seed_literal_trims_whitespace_and_rejects_empty() {
+        let seed = resolve_seed(Some("  word-a word-b  ".to_string())).expect("literal seed");
+        assert_eq!(seed.as_str(), "word-a word-b");
+        assert!(resolve_seed(Some("    ".to_string())).is_err());
+        assert!(resolve_seed(Some(String::new())).is_err());
+    }
+
+    #[test]
+    fn invalid_mnemonic_is_rejected_and_valid_one_round_trips() {
+        // The reject path the CLI relies on (cmd_restore -> mnemonic_to_seed).
+        assert!(
+            coincync::wallet::mnemonic_to_seed("definitely not a valid bip39 phrase").is_err()
+        );
+        // A generated phrase decodes back to the same seed bytes.
+        let (phrase, seed) = coincync::wallet::generate_mnemonic();
+        assert_eq!(coincync::wallet::mnemonic_to_seed(&phrase).unwrap(), seed);
+    }
+
+    // ── network parsing ─────────────────────────────────────────────────
+    #[test]
+    fn network_label_maps_each_variant() {
+        assert_eq!(network_label(Network::Mainnet), "mainnet");
+        assert_eq!(network_label(Network::Testnet), "testnet");
+        assert_eq!(network_label(Network::Regtest), "regtest");
+    }
+
+    #[test]
+    fn unknown_network_string_is_rejected_by_clap() {
+        assert!(
+            Cli::try_parse_from(["coincync-wallet", "--network", "bogusnet", "open"]).is_err(),
+            "unknown --network value must be rejected"
+        );
+        for net in ["mainnet", "testnet", "regtest"] {
+            assert!(
+                Cli::try_parse_from(["coincync-wallet", "--network", net, "open"]).is_ok(),
+                "{net} must be accepted"
+            );
+        }
+    }
+
+    // ── Command::Restore wiring ─────────────────────────────────────────
+    #[test]
+    fn cmd_restore_wires_seed_and_network_into_saved_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restored.wallet");
+        let (phrase, seed) = coincync::wallet::generate_mnemonic();
+
+        run(cmd_restore(
+            &path,
+            Some(phrase.clone()),
+            Some("pw".to_string()),
+            Network::Regtest,
+        ))
+        .expect("restore succeeds");
+
+        let data = coincync::wallet::load_wallet(&path, Some("pw")).expect("reload restored wallet");
+        assert_eq!(data.seed, seed, "restored seed must match the phrase's seed");
+        assert_eq!(data.network, "regtest", "chosen network must be persisted");
+        assert_eq!(data.mnemonic_phrase.as_deref(), Some(phrase.as_str()));
+    }
+
+    // ── Command::Subaddress (Create/List/Label) ─────────────────────────
+    #[test]
+    fn cmd_subaddress_create_generates_labels_and_persists() {
+        use coincync::wallet::subaddress::SubaddressManager;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub.wallet");
+
+        run(cmd_create(&path, Some("pw".to_string()), false, false, Network::Testnet))
+            .expect("create wallet");
+        run(cmd_subaddress_create(
+            &path,
+            Some("pw".to_string()),
+            0,
+            Some("acct-0-label".to_string()),
+            Network::Testnet,
+        ))
+        .expect("create subaddress");
+
+        // Persisted to the wallet file.
+        let data = coincync::wallet::load_wallet(&path, Some("pw")).expect("reload wallet");
+        let saved = data.subaddresses.as_ref().expect("subaddresses persisted");
+
+        let keys = WalletKeys::from_seed(data.seed);
+        let epoch = keys.current().unwrap();
+        let mut mgr =
+            SubaddressManager::new(epoch.view_secret.clone(), epoch.spend_public, epoch.view_public);
+        mgr.import(saved);
+        assert!(mgr.count() > 1, "main + at least one generated subaddress");
+        assert!(
+            mgr.all().iter().any(|s| s.label == "acct-0-label"),
+            "the label must round-trip through persistence"
+        );
+
+        // The List command reads it back without error.
+        run(cmd_subaddress_list(&path, Some("pw".to_string()), Network::Testnet))
+            .expect("subaddress list succeeds");
+    }
+
+    // ── Multisig share-file round-trip through the CLI helpers ───────────
+    #[test]
+    fn cmd_multisig_round_trips_share_files_through_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = dir.path().to_str().unwrap().to_string();
+
+        // Generate a 2-of-2 group; both participants must sign.
+        run(cmd_multisig_gen(2, 2, &out_dir, Network::Testnet)).expect("keygen");
+
+        let mut share_files: Vec<PathBuf> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with("multisig-share-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        share_files.sort();
+        assert_eq!(share_files.len(), 2, "2-of-2 keygen writes two share files");
+
+        let message = "11".repeat(32); // 32-byte hex tx-hash stand-in.
+
+        // Round 1 for each participant -> commitment + `<commit>.nonces`.
+        let mut commit_files = Vec::new();
+        for (i, share) in share_files.iter().enumerate() {
+            let commit = dir.path().join(format!("r1-commit-{i}.json"));
+            run(cmd_multisig_round1(
+                share.to_str().unwrap(),
+                commit.to_str().unwrap(),
+            ))
+            .expect("round1");
+            commit_files.push(commit);
+        }
+        let commit_strs: Vec<String> =
+            commit_files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+
+        // Round 2 for each participant -> signature share (consumes nonces).
+        let mut sig_share_files = Vec::new();
+        for (i, share) in share_files.iter().enumerate() {
+            let nonce = format!("{}.nonces", commit_files[i].to_string_lossy());
+            let sig_out = dir.path().join(format!("r2-share-{i}.json"));
+            run(cmd_multisig_round2(
+                share.to_str().unwrap(),
+                &nonce,
+                &commit_strs,
+                &message,
+                sig_out.to_str().unwrap(),
+            ))
+            .expect("round2");
+            sig_share_files.push(sig_out);
+        }
+        let sig_strs: Vec<String> =
+            sig_share_files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let key_share_strs: Vec<String> =
+            share_files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+
+        // Aggregate combines the shares into a final signature.
+        run(cmd_multisig_aggregate(
+            &commit_strs,
+            &sig_strs,
+            &key_share_strs,
+            &message,
+        ))
+        .expect("aggregate combines the signature shares");
+    }
+
+    // ── Disclose scoped-view-key export honors the height range ─────────
+    #[test]
+    fn cmd_disclose_scoped_view_key_rejects_inverted_range() {
+        // The from>to guard fires before any wallet I/O — no file needed.
+        let missing = PathBuf::from("does-not-exist.wallet");
+        assert!(
+            run(cmd_disclose_scoped_view_key(
+                &missing,
+                Some("pw".to_string()),
+                200,
+                100
+            ))
+            .is_err(),
+            "from_height > to_height must be rejected"
+        );
+    }
+
+    #[test]
+    fn cmd_disclose_scoped_view_key_exports_over_valid_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("disclose.wallet");
+        run(cmd_create(&path, Some("pw".to_string()), false, false, Network::Testnet))
+            .expect("create wallet");
+        run(cmd_disclose_scoped_view_key(
+            &path,
+            Some("pw".to_string()),
+            100,
+            200,
+        ))
+        .expect("valid scoped-view-key export");
+    }
+
+    #[test]
+    fn scoped_view_key_from_epoch_honors_inclusive_height_range() {
+        let (_phrase, seed) = coincync::wallet::generate_mnemonic();
+        let keys = WalletKeys::from_seed(seed);
+        let epoch = keys.current().unwrap();
+        let scoped = coincync::wallet::ScopedViewKey::from_epoch(epoch, 100, 200);
+        assert!(scoped.covers_height(100), "lower bound inclusive");
+        assert!(scoped.covers_height(200), "upper bound inclusive");
+        assert!(!scoped.covers_height(99), "below range excluded");
+        assert!(!scoped.covers_height(201), "above range excluded");
+        let json = scoped.to_json();
+        assert!(
+            json.contains("100") && json.contains("200"),
+            "exported JSON carries the disclosed height scope"
+        );
+    }
+}

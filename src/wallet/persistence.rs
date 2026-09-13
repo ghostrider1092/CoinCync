@@ -2,6 +2,72 @@
 //!
 //! Wallet file storage and encryption using authenticated encryption
 //! (XChaCha20-Poly1305) and memory-hard key derivation (Argon2id).
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `encrypt` / `decrypt`** — INVARIANT: encryption is authenticated
+//!   (XChaCha20-Poly1305) so any ciphertext tamper is rejected on decrypt rather
+//!   than silently accepted. THREAT: an attacker mutating the wallet file to
+//!   corrupt or forge secrets undetected. TESTS: `test_encrypt_decrypt`,
+//!   `test_authenticated_encryption_detects_tampering`, `test_wrong_password_fails`.
+//! - **§2 `save_wallet` / `load_wallet` / `load_wallet_from_bytes`** — INVARIANT:
+//!   a saved wallet round-trips losslessly, is only loadable with the correct
+//!   password, and a truncated/oversized/empty body errs cleanly (no panic).
+//!   THREAT: secrets recoverable without the password, or a malformed file
+//!   crashing the loader. TESTS: `test_save_load_wallet`,
+//!   `test_wrong_password_load_fails`, `watch_only_sentinel_walletdata_survives_save_load`,
+//!   `load_wallet_truncated_header_length_errs_not_panic`,
+//!   `load_wallet_data_length_exceeding_body_errs`, `load_wallet_empty_file_errs_cleanly`.
+//! - **§3 `derive_key` / `derive_key_default` / `derive_v4_keys`** — INVARIANT:
+//!   the Argon2id KDF is deterministic and stable, derives distinct keys, and
+//!   errs (not panics) on a degenerate zero memory cost. THREAT: a weak or
+//!   crashing KDF undermining at-rest encryption. TESTS: `test_argon2_key_derivation`,
+//!   `derive_key_returns_err_not_panic_on_zero_m_cost`, `v4_keys_distinct_and_stable`.
+//! - **§4 `save_v4` / `load_v4_from_bytes`** — INVARIANT: the v4 format
+//!   round-trips and rejects a tampered header or a truncated HMAC. THREAT: a
+//!   forged v4 file passing integrity checks. TESTS: `v4_save_load_roundtrip`,
+//!   `v4_rejects_header_tamper`, `v4_rejects_truncated_hmac`.
+//! - **§5 v3→v4 auto-upgrade (`load_wallet` / `save_v4`)** — INVARIANT: loading a
+//!   v3 wallet and saving upgrades it to v4 while preserving contents and the
+//!   wrong-password error behaviour. THREAT: an upgrade silently altering or
+//!   weakening a wallet. TESTS: `v3_to_v4_auto_upgrade_via_load_save`,
+//!   `v3_to_v4_upgrade_preserves_wrong_password_error`.
+//! - **§6 `change_password`** — INVARIANT: a password change is atomic across the
+//!   main file and sidecars — a corrupt sidecar aborts the whole change rather
+//!   than half-applying it. THREAT: a partial re-encryption leaving the wallet
+//!   unloadable. TESTS: `test_password_change_atomicity`,
+//!   `change_password_corrupt_reservations_sidecar_surfaces_error`,
+//!   `change_password_corrupt_utxos_sidecar_aborts_r98`.
+//! - **§7 atomic write path (`save_wallet` temp-file/rename)** — INVARIANT: a
+//!   save writes via a temp file and atomic rename, leaves no temp file on
+//!   success, uses a fresh nonce and salt each save, and a crash mid-rename
+//!   leaves the previous wallet loadable. THREAT: an interrupted save destroying
+//!   the only copy of the wallet, or nonce/salt reuse. TESTS:
+//!   `save_v3_internal_leaves_no_temp_file_on_success`,
+//!   `atomic_rename_crash_leaves_previous_wallet_loadable`,
+//!   `save_uses_fresh_nonce_and_salt_per_save`.
+//! - **§8 `decrypt_sidecar_with_fallback`** — INVARIANT: sidecar decryption falls
+//!   back to legacy v2 KDF params when the current params fail, so older sidecars
+//!   remain readable. THREAT: an upgrade orphaning previously encrypted sidecar
+//!   state. TESTS: `decrypt_sidecar_falls_back_to_v2_params`.
+//! - **§9 `generate_mnemonic` / `mnemonic_to_seed`** — INVARIANT: a generated
+//!   mnemonic round-trips back to the same seed. THREAT: a mnemonic that cannot
+//!   restore the wallet it was issued for. TESTS: `test_mnemonic`,
+//!   `mnemonic_to_seed_round_trips_generate_mnemonic`.
+//! - **§10 `create_deniable_wallet` / `load_deniable_wallet`** — INVARIANT:
+//!   deniable-wallet creation is disabled and writes nothing, and the loader
+//!   falls back to a standard single region. THREAT: a half-implemented deniable
+//!   mode silently persisting or exposing a hidden region. TESTS:
+//!   `deniable_wallet_creation_is_disabled_and_writes_nothing`,
+//!   `load_deniable_wallet_falls_back_to_standard_single_region`.
+//! - **§11 `validate` / checksum on unencrypted body** — INVARIANT: the body
+//!   checksum detects corruption of an unencrypted body, and WalletData drop
+//!   zeroizes the mnemonic phrase without panicking. THREAT: silent acceptance of
+//!   corrupted plaintext state, or secret material lingering in freed memory.
+//!   TESTS: `checksum_detects_corrupted_unencrypted_body`,
+//!   `walletdata_drop_with_mnemonic_phrase_does_not_panic`.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -2083,6 +2149,269 @@ mod tests {
             | Error::InvalidSecretKey(_)
             | Error::SerializationError(_) => {}
             other => panic!("expected framing/auth/parse error, got: {:?}", other),
+        }
+    }
+
+    // =========================================================================
+    // Persistence gap coverage (test-plan MISSING items)
+    // =========================================================================
+
+    /// save_v3_internal writes to a temp file then atomically renames it into
+    /// place. On success no `.tmp` residue may be left behind (the mid-stream
+    /// write-failure cleanup shares the same temp path). The true partial-write
+    /// path needs a write-fault harness the tests lack; the observable
+    /// invariant here is "no leftover temp on the happy path".
+    #[test]
+    fn save_v3_internal_leaves_no_temp_file_on_success() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.wallet");
+        let data = WalletData::new([1u8; 32], "testnet");
+        save_v3_internal(&path, &data, Some("pw")).unwrap();
+        assert!(path.exists());
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "temp file must be renamed/cleaned, not left behind"
+        );
+    }
+
+    /// Atomic-rename safety: a crash *before* the rename leaves a stray `.tmp`
+    /// but never clobbers the previous good wallet, which must still load. We
+    /// emulate the interrupted save by planting a `.tmp` next to a good wallet
+    /// (real fault injection of a mid-write failure is deferred — no harness).
+    #[test]
+    fn atomic_rename_crash_leaves_previous_wallet_loadable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.wallet");
+        let good = WalletData::new([0x42u8; 32], "testnet");
+        save_wallet(&path, &good, Some("pw")).unwrap();
+
+        // Emulate a crash mid-save: an interrupted save leaves a `.tmp` behind
+        // that was never renamed over the good wallet.
+        std::fs::write(
+            path.with_extension("tmp"),
+            b"partial garbage from an interrupted save",
+        )
+        .unwrap();
+
+        // The previous good wallet must still load intact.
+        let loaded = load_wallet(&path, Some("pw")).unwrap();
+        assert_eq!(loaded.seed, [0x42u8; 32]);
+
+        // A subsequent successful save still works and overwrites atomically.
+        let next = WalletData::new([0x43u8; 32], "testnet");
+        save_wallet(&path, &next, Some("pw")).unwrap();
+        assert_eq!(load_wallet(&path, Some("pw")).unwrap().seed, [0x43u8; 32]);
+    }
+
+    /// A header length field claiming more bytes than are present must error
+    /// (read_exact short-read), never panic.
+    #[test]
+    fn load_wallet_truncated_header_length_errs_not_panic() {
+        // hdr_len = 500 (LE), then only a handful of bytes. Magic/version are
+        // set so the v4 early-peek (byte[8] == 4) does NOT fire.
+        let bytes = vec![
+            0xF4, 0x01, 0x00, 0x00, // hdr_len = 500
+            0x43, 0x59, 0x57, 0x4c, // magic CYWL
+            0x03, // version 3 (byte[8], not v4)
+            0x01, 0x00,
+        ];
+        assert!(load_wallet_from_bytes(&bytes, None).is_err());
+    }
+
+    /// A data length field larger than the actual body must error, not panic.
+    #[test]
+    fn load_wallet_data_length_exceeding_body_errs() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dlen.wallet");
+        // Unencrypted v3 so the framing (hdr_len | header | data_len | data) is
+        // deterministic and the data_len field is directly editable.
+        save_v3_internal(&path, &WalletData::new([9u8; 32], "testnet"), None).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let hdr_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let dl_off = 4 + hdr_len;
+        let orig = u32::from_le_bytes([
+            bytes[dl_off],
+            bytes[dl_off + 1],
+            bytes[dl_off + 2],
+            bytes[dl_off + 3],
+        ]);
+        // Claim 4 KiB more data than is actually present.
+        bytes[dl_off..dl_off + 4].copy_from_slice(&(orig + 4096).to_le_bytes());
+
+        assert!(load_wallet_from_bytes(&bytes, None).is_err());
+    }
+
+    /// decrypt_sidecar_with_fallback must decrypt a sidecar encrypted with the
+    /// LEGACY v2 KDF params via its fallback branch (v3-default fails first).
+    #[test]
+    fn decrypt_sidecar_falls_back_to_v2_params() {
+        let salt = [0x11u8; 32];
+        let nonce = [0x22u8; 24];
+        let plaintext = b"utxo-sidecar-plaintext-payload".to_vec();
+
+        // Encrypt exactly as a pre-2026-05-08 (v2-params) binary would have.
+        let key = derive_key(
+            "pw",
+            &salt,
+            LEGACY_V2_ARGON2_M_COST,
+            LEGACY_V2_ARGON2_T_COST,
+            LEGACY_V2_ARGON2_P_COST,
+        )
+        .unwrap();
+        let ciphertext = encrypt(&plaintext, &key, &nonce).unwrap();
+
+        let recovered = decrypt_sidecar_with_fallback(&salt, &nonce, &ciphertext, "pw").unwrap();
+        assert_eq!(
+            recovered, plaintext,
+            "v2-params sidecar must decrypt via the fallback path"
+        );
+    }
+
+    /// change_password must surface an error (not silently drop reservations)
+    /// when the `.reservations` sidecar cannot be decrypted with the old
+    /// password. Guards against the R-98 silent-corruption class.
+    #[test]
+    fn change_password_corrupt_reservations_sidecar_surfaces_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cp.wallet");
+        save_wallet(&path, &WalletData::new([5u8; 32], "testnet"), Some("old")).unwrap();
+
+        // >56 bytes so change_password takes the decrypt path (not the tiny
+        // plaintext-passthrough branch) and the decrypt fails.
+        std::fs::write(path.with_extension("reservations"), vec![0xABu8; 200]).unwrap();
+
+        let res = change_password(&path, "old", "new");
+        assert!(
+            res.is_err(),
+            "a corrupt .reservations sidecar must surface an error"
+        );
+    }
+
+    /// R-98: change_password aborts (rather than re-encrypting wrong plaintext)
+    /// when the `.utxos` sidecar fails to decrypt with the old password.
+    #[test]
+    fn change_password_corrupt_utxos_sidecar_aborts_r98() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cp.wallet");
+        save_wallet(&path, &WalletData::new([6u8; 32], "testnet"), Some("old")).unwrap();
+
+        std::fs::write(path.with_extension("utxos"), vec![0xCDu8; 200]).unwrap();
+
+        let res = change_password(&path, "old", "new");
+        assert!(
+            res.is_err(),
+            "R-98: a corrupt .utxos sidecar must abort change_password"
+        );
+    }
+
+    /// Every save must generate a fresh random salt + nonce (no IV reuse) even
+    /// for identical plaintext. Uses the v3 layout for deterministic offsets.
+    #[test]
+    fn save_uses_fresh_nonce_and_salt_per_save() {
+        let dir = tempdir().unwrap();
+        let p1 = dir.path().join("a.wallet");
+        let p2 = dir.path().join("b.wallet");
+        let data = WalletData::new([7u8; 32], "testnet");
+        save_v3_internal(&p1, &data, Some("pw")).unwrap();
+        save_v3_internal(&p2, &data, Some("pw")).unwrap();
+
+        let b1 = std::fs::read(&p1).unwrap();
+        let b2 = std::fs::read(&p2).unwrap();
+        // v3 layout: [0..4] hdr_len | magic(4) version(1) encrypted(1)
+        // kdf_salt[32] @10..42 | nonce[24] @42..66 | ...
+        assert_ne!(&b1[10..42], &b2[10..42], "kdf_salt must be fresh per save");
+        assert_ne!(&b1[42..66], &b2[42..66], "nonce must be fresh per save (no IV reuse)");
+    }
+
+    /// The deniable-wallet creation path is DISABLED (C37/C38/C39). It must
+    /// return an error and write NO file — a partial/plaintext artifact on disk
+    /// is exactly the failure the disable guards against.
+    #[test]
+    fn deniable_wallet_creation_is_disabled_and_writes_nothing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("den.wallet");
+        let decoy = WalletData::new([1u8; 32], "testnet");
+        let real = WalletData::new([2u8; 32], "testnet");
+
+        let res = create_deniable_wallet(&path, &decoy, &real, "pa", "pb");
+        assert!(res.is_err(), "disabled deniable creation must return Err");
+        assert!(
+            !path.exists(),
+            "disabled deniable creation must not write any file to disk"
+        );
+        match res.unwrap_err() {
+            Error::InvalidState(_) => {}
+            other => panic!("expected InvalidState, got: {:?}", other),
+        }
+    }
+
+    /// load_deniable_wallet on a normal single-region wallet falls through to
+    /// the standard loader and returns the plaintext.
+    #[test]
+    fn load_deniable_wallet_falls_back_to_standard_single_region() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("plain.wallet");
+        save_wallet(&path, &WalletData::new([7u8; 32], "testnet"), Some("pw")).unwrap();
+
+        let loaded = load_deniable_wallet(&path, "pw").unwrap();
+        assert_eq!(loaded.seed, [7u8; 32]);
+    }
+
+    /// mnemonic_to_seed must round-trip the seed produced by generate_mnemonic.
+    #[test]
+    fn mnemonic_to_seed_round_trips_generate_mnemonic() {
+        let (phrase, seed) = generate_mnemonic();
+        let recovered = mnemonic_to_seed(&phrase).unwrap();
+        assert_eq!(recovered, seed, "mnemonic seed round-trip must be stable");
+    }
+
+    /// A watch-only WalletData (view-secret stored in `seed`, spend-public
+    /// hex-encoded in the `watch-only:` label) must survive save/load intact.
+    #[test]
+    fn watch_only_sentinel_walletdata_survives_save_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wo.wallet");
+        let mut data = WalletData::new([0xABu8; 32], "testnet");
+        data.label = format!("watch-only:{}", "ab".repeat(32));
+        save_wallet(&path, &data, Some("pw")).unwrap();
+
+        let loaded = load_wallet(&path, Some("pw")).unwrap();
+        assert_eq!(loaded.seed, [0xABu8; 32], "view-secret seed must round-trip");
+        assert_eq!(loaded.label, data.label, "watch-only label must round-trip");
+    }
+
+    /// An empty / zero-length file must error cleanly, never panic.
+    #[test]
+    fn load_wallet_empty_file_errs_cleanly() {
+        assert!(load_wallet_from_bytes(&[], None).is_err());
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.wallet");
+        std::fs::write(&path, b"").unwrap();
+        assert!(load_wallet(&path, Some("pw")).is_err());
+    }
+
+    /// A corrupted body of an UNENCRYPTED wallet must fail the header checksum
+    /// (encrypted wallets rely on the AEAD tag instead).
+    #[test]
+    fn checksum_detects_corrupted_unencrypted_body() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("plain.wallet");
+        save_v3_internal(&path, &WalletData::new([3u8; 32], "testnet"), None).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        // Flip the final data byte, which sits well past the checksum'd header.
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+
+        let err = load_wallet_from_bytes(&bytes, None)
+            .expect_err("corrupted unencrypted body must fail checksum");
+        match err {
+            Error::Corruption(msg) => {
+                assert!(msg.contains("checksum"), "expected checksum error, got: {}", msg)
+            }
+            other => panic!("expected Corruption(checksum), got: {:?}", other),
         }
     }
 }

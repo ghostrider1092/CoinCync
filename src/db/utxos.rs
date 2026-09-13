@@ -1,6 +1,49 @@
 //! # UTXO Database
 //!
 //! Persistent storage for unspent transaction outputs.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `add_output`** — INVARIANT: the two UTXO-visible writes (`outputs` +
+//!   `utxo_by_height`) land in ONE atomic batch, so a durable output is always
+//!   reachable by its height prefix and vice-versa; the `height_counts` bump runs
+//!   post-commit (at worst under-by-one on crash — a stat drift, never a
+//!   UTXO-visibility bug, and it logs loudly). THREAT: R-43 — the pre-fix three
+//!   sequential writes could crash mid-way, hiding an output from the height scan
+//!   or skewing ring-decoy distribution. TESTS:
+//!   `add_output_commits_outputs_and_height_index_atomically`,
+//!   `test_utxo_storage`, `test_utxo_store_retrieve`.
+//!   (gap: commit-failure → neither-tree-written needs an injectable tx fault.)
+//! - **§2 `spend_output`** — INVARIANT: a single-key `compare_and_swap` on the key
+//!   image is the atomic double-spend gate (exactly one caller wins); the 3-tree
+//!   cleanup (`outputs` + `utxo_by_height` + `height_counts`, counter removed at
+//!   zero) runs in ONE transaction after the CAS. THREAT: TOCTOU double-spend if
+//!   check-then-set weren't atomic; if the cleanup tx fails the CAS still stands,
+//!   so the chain stays consensus-consistent (key image spent) with only a stale
+//!   entry. TESTS: `spend_output_clears_height_index`,
+//!   `spend_output_decrements_and_removes_zero_height_count`,
+//!   `spend_output_second_attempt_returns_false`,
+//!   `concurrent_double_spend_only_one_cas_wins`.
+//!   (gap: cleanup-tx-fails-after-CAS needs an injectable tx fault.)
+//! - **§3 `is_spent` / `mark_key_image`** — INVARIANT: `is_spent` reflects the key
+//!   image set; `mark_key_image` records a key image WITHOUT removing a UTXO (for
+//!   checkpoint persistence) and is idempotent; no accidental cross-marking.
+//!   THREAT: a mismarked/unmarked key image admitting a double-spend or dropping a
+//!   valid spend. TESTS: `is_spent_and_mark_key_image_round_trip`.
+//! - **§4 `get_output` / `has_output` / `count` / `spent_count` /
+//!   `get_outputs_at_height` / `increment_height_count` / `get_height_count`** —
+//!   INVARIANT: `get_outputs_at_height` uses the BE-keyed `utxo_by_height` prefix
+//!   scan (O(k), not a full table scan) and agrees with `get_height_count`; a
+//!   malformed (non-8-byte) counter is treated as 0 with a loud corruption log,
+//!   never silently overwriting the true count. THREAT: BUG-20 — LE height keys
+//!   sorting wrong above 255; a corrupt counter destroying the true count.
+//!   TESTS: `get_outputs_at_height_and_height_count_are_consistent`.
+//! - **§5 `clear`** — INVARIANT: empties the `outputs`, `key_images`, and
+//!   `height_counts` trees so counts/height lookups all read zero afterward.
+//!   THREAT: a partial reset leaving phantom UTXOs or spent markers.
+//!   TESTS: `clear_empties_outputs_key_images_and_counts`.
 
 use super::{deserialize, serialize};
 use crate::db::shim::{transaction::Transactional, Db, Tree};
@@ -634,5 +677,172 @@ mod tests {
         assert!(utxo_db.is_spent(&key_image).unwrap());
         assert!(!utxo_db.has_output(&tx_hash, 0).unwrap());
         assert_eq!(utxo_db.get_height_count(200).unwrap(), 0);
+    }
+
+    /// Build a throwaway output with a distinct stealth address per `id`.
+    fn make_output(id: u8) -> TxOutput {
+        TxOutput {
+            stealth_address: PublicKey::from_bytes([id; 32]),
+            tx_public_key: PublicKey::from_bytes([id.wrapping_add(1); 32]),
+            commitment: [id.wrapping_add(2); 32],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        }
+    }
+
+    /// mark_key_image records a key image as spent without touching the UTXO
+    /// set, and is_spent reflects both marked and unmarked images.
+    #[test]
+    fn is_spent_and_mark_key_image_round_trip() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let utxo_db = UtxoDb::new(&db).unwrap();
+
+        let ki = KeyImage::from_bytes([61u8; 32]);
+        let other = KeyImage::from_bytes([62u8; 32]);
+
+        // Nothing spent initially.
+        assert!(!utxo_db.is_spent(&ki).unwrap());
+
+        utxo_db.mark_key_image(&ki).unwrap();
+        assert!(utxo_db.is_spent(&ki).unwrap());
+        // Unrelated key image is still unspent — no accidental cross-marking.
+        assert!(!utxo_db.is_spent(&other).unwrap());
+
+        // mark_key_image does not create or remove any UTXO.
+        assert_eq!(utxo_db.count(), 0);
+        // Marking again is idempotent.
+        utxo_db.mark_key_image(&ki).unwrap();
+        assert!(utxo_db.is_spent(&ki).unwrap());
+    }
+
+    /// get_outputs_at_height must return exactly the outputs added at that
+    /// height, and get_height_count must agree with the number added.
+    #[test]
+    fn get_outputs_at_height_and_height_count_are_consistent() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let utxo_db = UtxoDb::new(&db).unwrap();
+
+        let tx_a = Hash::from_bytes([70u8; 32]);
+        let tx_b = Hash::from_bytes([71u8; 32]);
+
+        // Two outputs at height 500, one at height 501.
+        utxo_db.add_output(tx_a, 0, make_output(1), 500, false).unwrap();
+        utxo_db.add_output(tx_a, 1, make_output(2), 500, false).unwrap();
+        utxo_db.add_output(tx_b, 0, make_output(3), 501, false).unwrap();
+
+        assert_eq!(utxo_db.get_outputs_at_height(500).unwrap().len(), 2);
+        assert_eq!(utxo_db.get_outputs_at_height(501).unwrap().len(), 1);
+        assert_eq!(utxo_db.get_outputs_at_height(999).unwrap().len(), 0);
+
+        assert_eq!(utxo_db.get_height_count(500).unwrap(), 2);
+        assert_eq!(utxo_db.get_height_count(501).unwrap(), 1);
+        assert_eq!(utxo_db.get_height_count(999).unwrap(), 0);
+
+        // Every returned entry actually carries the queried height.
+        for entry in utxo_db.get_outputs_at_height(500).unwrap() {
+            assert_eq!(entry.height, 500);
+        }
+    }
+
+    /// clear() empties the primary outputs, key_images, and height_counts
+    /// trees so a fresh count/spent-count reads as zero.
+    #[test]
+    fn clear_empties_outputs_key_images_and_counts() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let utxo_db = UtxoDb::new(&db).unwrap();
+
+        let tx_hash = Hash::from_bytes([80u8; 32]);
+        utxo_db.add_output(tx_hash, 0, make_output(4), 600, false).unwrap();
+        utxo_db.mark_key_image(&KeyImage::from_bytes([81u8; 32])).unwrap();
+
+        assert_eq!(utxo_db.count(), 1);
+        assert_eq!(utxo_db.spent_count(), 1);
+        assert_eq!(utxo_db.get_height_count(600).unwrap(), 1);
+
+        utxo_db.clear().unwrap();
+
+        assert_eq!(utxo_db.count(), 0);
+        assert_eq!(utxo_db.spent_count(), 0);
+        assert_eq!(utxo_db.get_height_count(600).unwrap(), 0);
+        // With the primary tree empty, height lookups surface nothing.
+        assert_eq!(utxo_db.get_outputs_at_height(600).unwrap().len(), 0);
+        assert!(!utxo_db.has_output(&tx_hash, 0).unwrap());
+    }
+
+    /// add_output must land in BOTH the primary `outputs` tree and the
+    /// `utxo_by_height` secondary index in one commit — a durable output is
+    /// always reachable by its height prefix (and vice-versa), and the
+    /// post-commit height_count bump is reflected too.
+    ///
+    /// Note: the negative half ("commit failure → neither tree written")
+    /// requires injecting a transaction fault the shim/temp-DB harness can't
+    /// produce, so only the positive atomicity property is asserted here.
+    #[test]
+    fn add_output_commits_outputs_and_height_index_atomically() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let utxo_db = UtxoDb::new(&db).unwrap();
+
+        let tx_hash = Hash::from_bytes([90u8; 32]);
+        utxo_db.add_output(tx_hash, 0, make_output(5), 700, false).unwrap();
+
+        // Primary tree sees it.
+        assert!(utxo_db.has_output(&tx_hash, 0).unwrap());
+        let entry = utxo_db.get_output(&tx_hash, 0).unwrap().unwrap();
+        assert_eq!(entry.height, 700);
+
+        // Secondary height index sees the SAME output (committed together).
+        let at_height = utxo_db.get_outputs_at_height(700).unwrap();
+        assert_eq!(at_height.len(), 1);
+        assert_eq!(at_height[0].tx_hash, tx_hash);
+
+        // Post-commit height_count bump is durable.
+        assert_eq!(utxo_db.get_height_count(700).unwrap(), 1);
+    }
+
+    /// TOCTOU: two threads racing to spend the SAME key image against the
+    /// same output — the single-key compare_and_swap must let exactly one
+    /// win. No double-spend, no lost update.
+    #[test]
+    fn concurrent_double_spend_only_one_cas_wins() {
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let utxo_db = Arc::new(UtxoDb::new(&db).unwrap());
+
+        let tx_hash = Hash::from_bytes([100u8; 32]);
+        utxo_db.add_output(tx_hash, 0, make_output(6), 800, false).unwrap();
+
+        let key_image = KeyImage::from_bytes([101u8; 32]);
+
+        let db_a = Arc::clone(&utxo_db);
+        let db_b = Arc::clone(&utxo_db);
+        let h_a = std::thread::spawn(move || db_a.spend_output(&tx_hash, 0, key_image).unwrap());
+        let h_b = std::thread::spawn(move || db_b.spend_output(&tx_hash, 0, key_image).unwrap());
+        let won_a = h_a.join().unwrap();
+        let won_b = h_b.join().unwrap();
+
+        // Exactly one winner.
+        assert!(
+            won_a ^ won_b,
+            "exactly one thread must win the CAS (a={}, b={})",
+            won_a,
+            won_b
+        );
+
+        // Final state is consistent: key image spent, output gone.
+        assert!(utxo_db.is_spent(&key_image).unwrap());
+        assert!(!utxo_db.has_output(&tx_hash, 0).unwrap());
+        // A third serial attempt still loses.
+        assert!(!utxo_db.spend_output(&tx_hash, 0, key_image).unwrap());
+
+        // Keep the temp dir alive until all threads have finished.
+        drop(dir);
     }
 }

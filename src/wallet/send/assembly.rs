@@ -1,3 +1,39 @@
+//! # Privacy transaction assembly
+//!
+//! Turns a `PreparedPrivacyTransaction` plus its allocated rings into a signed
+//! `Transaction`, applying the per-shape change/dummy/fee rules.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `build_prepared_privacy_transaction`** — INVARIANT: value is conserved —
+//!   `sum(inputs) == sum(payment outputs) + change + fee` exactly for every shape.
+//!   THREAT: value silently created or destroyed at assembly → fund loss / inflation.
+//!   TESTS: `prepare_uniform_standard_satisfies_inputs_equal_payments_plus_change_plus_fee`,
+//!   `build_prepared_legacy_shape_adds_change_and_up_to_two_dummies`.
+//! - **§2 `UniformDripPair` branch** — INVARIANT: two equal outputs, NO change output,
+//!   excess folds into the fee to preserve output uniformity.
+//!   THREAT: a change output breaks drip-pair uniformity and links the spend.
+//!   TESTS: `build_prepared_uniform_drip_pair_emits_two_outputs_no_change`.
+//! - **§3 `UniformStandard` branch** — INVARIANT: change ≥ `MIN_OUTPUT_AMOUNT` becomes a
+//!   real change output; below it, a dummy is emitted and the change folds into the fee.
+//!   THREAT: dust change output degrades privacy / is unspendable.
+//!   TESTS: `build_prepared_uniform_standard_change_below_min_adds_dummy_and_folds_to_fee`.
+//! - **§4 `Legacy` branch** — INVARIANT: change ≥ MIN is its own output (fee unchanged),
+//!   plus 0..=2 random dummy outputs; conservation still holds.
+//!   THREAT: pre-activation path miscomputes change/fee → rejected or lossy tx.
+//!   TESTS: `build_prepared_legacy_shape_adds_change_and_up_to_two_dummies`.
+//! - **§5 ring binding (`add_prepared_inputs`)** — INVARIANT: rings are consumed only when
+//!   their count, size and real-output identities match the prepared inputs (one snapshot).
+//!   THREAT: recombining rings across snapshots → unprovable / rejected ring signatures.
+//!   TESTS: `add_prepared_inputs_rejects_ring_count_mismatch`.
+//! - **§6 `drip_pair_final_fee`** — INVARIANT: excess folds to fee only while `change ≤ total_send`;
+//!   a larger excess fails closed rather than burning more to fee than is sent.
+//!   THREAT: silent catastrophic fund loss (burn-to-fee footgun).
+//!   TESTS: `small_excess_flows_to_fee`, `excess_equal_to_send_is_allowed_boundary`,
+//!   `large_excess_is_rejected_not_silently_burned`.
+
 use super::super::decoy_selection::AllocatedRings;
 use super::inputs::add_prepared_inputs;
 use super::types::{PreparedPrivacyTransaction, TransferShape};

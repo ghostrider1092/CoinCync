@@ -6,6 +6,45 @@
 //! encoding. Sled sorts keys lexicographically, so little-endian u64 keys
 //! produce wrong ordering for heights > 255. Big-endian preserves numeric
 //! ordering under byte comparison.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `get_state` / `save_state` / `read_schema_v1_state_for_migration`
+//!   (`ChainStateData`, `ChainStateDataLegacyV1`)** — INVARIANT: `total_supply` is
+//!   `u128` (MAX_SUPPLY 10^20 exceeds `u64::MAX`); `get_state` decodes ONLY the
+//!   current layout — the schema stamp, not trial decoding, selects the format, so
+//!   a legacy (u64-supply) record is REJECTED by `get_state` and read only by the
+//!   registered v1→v2 migration path. THREAT: the old u64 aggregate overflowed and
+//!   panicked `checked_add` at ~18.4M CYNC (height ~408k); a mis-stamped DB
+//!   selecting the wrong record layout by luck. TESTS: `test_state_storage`,
+//!   `get_state_rejects_schema_v1_layout_without_open_time_migration`,
+//!   `get_state_returns_none_on_empty_db`.
+//! - **§2 `get_genesis_hash` / `set_genesis_hash`** — INVARIANT: genesis hash
+//!   starts unset and round-trips through set/get; overwrite is honored.
+//!   THREAT: a missing/wrong genesis identifier defeating the network-match gate.
+//!   TESTS: `genesis_hash_get_set_round_trip`.
+//! - **§3 `add_checkpoint` / `get_checkpoint` / `get_checkpoints`** — INVARIANT:
+//!   checkpoints are BE-keyed so iteration yields numeric-sorted heights (correct
+//!   above 255); a malformed (non-8-byte) checkpoint key surfaces as
+//!   `DatabaseError`, never a silent coercion to height 0. THREAT: A6 — a corrupted
+//!   checkpoint attributed to genesis and then trusted by reorg validation.
+//!   TESTS: `test_checkpoints`, `test_checkpoint_ordering_above_255`.
+//! - **§4 `store_undo` / `get_undo` / `remove_undo` / `prune_undo`** — INVARIANT:
+//!   undo data is BE-keyed; `prune_undo` removes every entry strictly below
+//!   `keep_from_height` and returns the count; DB read errors and malformed keys
+//!   propagate rather than being silently dropped. THREAT: A6-DB-CORRUPT — a
+//!   silently-coerced height-0 key queuing every genesis-height entry for deletion,
+//!   or corrupt entries never cleaned → incomplete reorgs. TESTS:
+//!   `test_undo_data_ordering`, `store_get_remove_undo_round_trip`,
+//!   `prune_undo_removes_below_keep_from_height`.
+//! - **§5 generic `put` / `get` / `delete`** — INVARIANT: put/delete structurally
+//!   REFUSE the reserved keys `chain_state` and `genesis_hash` (typed setters only);
+//!   reads pass through for debugging. THREAT: R-41 — a raw write/delete to a
+//!   reserved key corrupting the persisted `ChainStateData`/genesis, wedging the DB
+//!   on next open (or making the loader treat it as a fresh install and wipe the
+//!   chain). TESTS: `put_get_delete_generic_kv_and_reserved_key_guard`.
 
 use super::{deserialize, serialize};
 use crate::db::shim::{Db, Tree};
@@ -442,5 +481,129 @@ mod tests {
         assert!(state_db.get_undo(256).unwrap().is_none());
         assert!(state_db.get_undo(512).unwrap().is_some());
         assert!(state_db.get_undo(1000).unwrap().is_some());
+    }
+
+    /// store_undo → get_undo returns the exact bytes; remove_undo deletes it.
+    #[test]
+    fn store_get_remove_undo_round_trip() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let state_db = StateDb::new(&db).unwrap();
+
+        // Nothing stored yet.
+        assert!(state_db.get_undo(42).unwrap().is_none());
+
+        let payload = vec![9u8, 8, 7, 6, 5];
+        state_db.store_undo(42, &payload).unwrap();
+        assert_eq!(state_db.get_undo(42).unwrap(), Some(payload.clone()));
+
+        // Overwrite at the same height replaces the value.
+        let payload2 = vec![1u8, 2, 3];
+        state_db.store_undo(42, &payload2).unwrap();
+        assert_eq!(state_db.get_undo(42).unwrap(), Some(payload2));
+
+        // Remove leaves nothing behind.
+        state_db.remove_undo(42).unwrap();
+        assert!(state_db.get_undo(42).unwrap().is_none());
+        // Removing a missing height is a no-op, not an error.
+        state_db.remove_undo(42).unwrap();
+    }
+
+    /// prune_undo removes every entry strictly below keep_from_height and
+    /// returns the number removed; entries at or above the floor survive.
+    #[test]
+    fn prune_undo_removes_below_keep_from_height() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let state_db = StateDb::new(&db).unwrap();
+
+        for &h in &[0u64, 5, 9, 10, 11, 100] {
+            state_db.store_undo(h, &[h as u8]).unwrap();
+        }
+
+        // keep_from_height = 10 → heights 0, 5, 9 are removed (3 entries).
+        let removed = state_db.prune_undo(10).unwrap();
+        assert_eq!(removed, 3);
+
+        assert!(state_db.get_undo(0).unwrap().is_none());
+        assert!(state_db.get_undo(5).unwrap().is_none());
+        assert!(state_db.get_undo(9).unwrap().is_none());
+        // The floor height itself is kept (strictly-below semantics).
+        assert!(state_db.get_undo(10).unwrap().is_some());
+        assert!(state_db.get_undo(11).unwrap().is_some());
+        assert!(state_db.get_undo(100).unwrap().is_some());
+
+        // Pruning again with the same floor removes nothing.
+        assert_eq!(state_db.prune_undo(10).unwrap(), 0);
+    }
+
+    /// Genesis hash starts unset and round-trips through set/get.
+    #[test]
+    fn genesis_hash_get_set_round_trip() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let state_db = StateDb::new(&db).unwrap();
+
+        assert!(state_db.get_genesis_hash().unwrap().is_none());
+
+        let genesis = Hash::from_bytes([0xABu8; 32]);
+        state_db.set_genesis_hash(&genesis).unwrap();
+        assert_eq!(state_db.get_genesis_hash().unwrap(), Some(genesis));
+
+        // Overwrite is honored.
+        let genesis2 = Hash::from_bytes([0xCDu8; 32]);
+        state_db.set_genesis_hash(&genesis2).unwrap();
+        assert_eq!(state_db.get_genesis_hash().unwrap(), Some(genesis2));
+    }
+
+    /// A brand-new database has no chain state — get_state returns None
+    /// rather than a defaulted record.
+    #[test]
+    fn get_state_returns_none_on_empty_db() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let state_db = StateDb::new(&db).unwrap();
+
+        assert!(state_db.get_state().unwrap().is_none());
+    }
+
+    /// Generic put/get/delete round-trips for non-reserved keys, and refuses
+    /// to touch the reserved chain-state / genesis keys (R-41).
+    #[test]
+    fn put_get_delete_generic_kv_and_reserved_key_guard() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let state_db = StateDb::new(&db).unwrap();
+
+        // Non-reserved key round-trips.
+        assert!(state_db.get(b"custom_key").unwrap().is_none());
+        state_db.put(b"custom_key", b"custom_value").unwrap();
+        assert_eq!(
+            state_db.get(b"custom_key").unwrap(),
+            Some(b"custom_value".to_vec())
+        );
+        state_db.delete(b"custom_key").unwrap();
+        assert!(state_db.get(b"custom_key").unwrap().is_none());
+
+        // Reserved keys are structurally rejected on put/delete so a
+        // mis-typed caller cannot corrupt the persisted chain state.
+        assert!(state_db.put(StateDb::KEY_CHAIN_STATE, b"junk").is_err());
+        assert!(state_db.put(StateDb::KEY_GENESIS_HASH, b"junk").is_err());
+        assert!(state_db.delete(StateDb::KEY_CHAIN_STATE).is_err());
+        assert!(state_db.delete(StateDb::KEY_GENESIS_HASH).is_err());
+
+        // A real state written via the typed setter survives the rejected
+        // raw writes intact.
+        let state = ChainStateData {
+            tip_hash: Hash::from_bytes([3u8; 32]),
+            height: 7,
+            total_difficulty: 11,
+            total_supply: 123,
+            total_burned: 4,
+            last_checkpoint: 0,
+        };
+        state_db.save_state(&state).unwrap();
+        let _ = state_db.put(StateDb::KEY_CHAIN_STATE, b"junk");
+        assert_eq!(state_db.get_state().unwrap().unwrap().height, 7);
     }
 }

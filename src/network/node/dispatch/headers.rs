@@ -1,3 +1,67 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `header_history`** — INVARIANT: walks parent hashes back at most
+//!   `DIFFICULTY_LONG_WINDOW` blocks and errors on a missing ancestor rather
+//!   than silently truncating.
+//!   THREAT: an unbounded or silently-short ancestor walk feeds a wrong
+//!   difficulty window into validation, letting forged targets slip through.
+//!   TESTS: `accepts_connected_header_with_valid_pow`,
+//!   `rejects_header_without_known_parent`.
+//! - **§2 `validate_header_batch` (magic / sequencing / contiguity)** —
+//!   INVARIANT: every header must match the chain's network magic, connect to
+//!   a known parent, increment height by exactly one, and chain
+//!   `prev_hash`-to-hash contiguously within the batch.
+//!   THREAT: cross-network replay or a disjoint/forked batch being accepted
+//!   as a valid extension of the chain.
+//!   TESTS: `rejects_non_contiguous_header_batch`,
+//!   `rejects_header_without_known_parent`.
+//! - **§3 `validate_header_batch` (version / timestamp / MTP)** — INVARIANT:
+//!   header version never regresses below the height-activation floor or the
+//!   parent's version; timestamp strictly advances past the parent and, once
+//!   `MTP_WINDOW` history exists, past the median-time-past.
+//!   THREAT: timestamp manipulation to bias difficulty retargeting or
+//!   replay stale headers.
+//!   TESTS: (gap — no dedicated unit test exercises the version/MTP branches
+//!   directly; only covered incidentally via the accept/reject paths above).
+//! - **§4 `validate_header_batch` (checkpoint + difficulty target)** —
+//!   INVARIANT: a hardcoded checkpoint mismatch rejects the header outright;
+//!   otherwise the header's `target` must equal the chain's own
+//!   `expected_next_target` for that history (single-sourced, not
+//!   recomputed ad hoc).
+//!   THREAT: a peer claiming an easier-than-valid target once difficulty is
+//!   active, or a checkpoint-violating alternate history.
+//!   TESTS: `rejects_self_declared_easy_target_after_difficulty_activates`.
+//! - **§5 `validate_header_batch` (proof-of-work)** — INVARIANT: `verify_pow`
+//!   must succeed against the header's bound anchor/nonce/tx_root/target
+//!   before a header is accepted into `hashes`.
+//!   THREAT: a structurally-valid header with forged or missing PoW being
+//!   queued for sync.
+//!   TESTS: `accepts_connected_header_with_valid_pow`.
+//! - **§6 `handle_get_headers`** — INVARIANT: oversized `GetHeaders` payloads
+//!   are dropped and scored before parsing; the response is bounded to
+//!   `MAX_HEADERS_RESPONSE` headers starting from the first locator match.
+//!   THREAT: a giant or unbounded GetHeaders request driving unbounded disk
+//!   reads or an oversized response.
+//!   TESTS: (gap — no dedicated unit test for `handle_get_headers` in this
+//!   file; only its sibling `handle_headers` inbound path is unit-tested).
+//! - **§7 `handle_headers` (nonce validation)** — INVARIANT: an inbound
+//!   `Headers` response is honored only for the peer it was issued to, and a
+//!   nonce is consumed on first (even empty) use, never on a cross-peer or
+//!   replayed attempt.
+//!   THREAT: eclipse-style cross-peer nonce spoofing or nonce replay
+//!   poisoning `ChainSync` state.
+//!   TESTS: `handle_headers_cross_peer_nonce_is_rejected_without_consuming`,
+//!   `handle_headers_valid_nonce_is_single_use`,
+//!   `handle_headers_unsolicited_nonce_zero_is_ignored`.
+//! - **§8 `handle_headers` (deserialization + batch-reject scoring)** —
+//!   INVARIANT: malformed borsh and rejected header batches both score the
+//!   peer via `record_misbehavior` with the classified offense, and a
+//!   rejected batch never reaches `queue_headers_from_peer`.
+//!   THREAT: unscored garbage or invalid-header spam from a misbehaving peer.
+//!   TESTS: `handle_headers_borsh_garbage_scores_protocol_violation`.
+
 use std::collections::HashMap;
 
 use dashmap::DashMap;
@@ -505,4 +569,128 @@ pub(super) async fn handle_headers(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod handle_headers_tests {
+    use super::*;
+    use crate::chain::Blockchain;
+    use crate::network::protocol::HeadersMessage;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    fn genesis_chain() -> SharedBlockchain {
+        let chain: SharedBlockchain = Arc::new(Blockchain::new());
+        chain.init_genesis().expect("genesis");
+        chain
+    }
+
+    fn addr_for(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{port}").parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn handle_headers_cross_peer_nonce_is_rejected_without_consuming() {
+        // Jun #2: a nonce issued to peer A must not be honoured from peer B, and
+        // rejecting B's attempt must NOT consume the nonce (A can still respond).
+        let peer_a = [10u8; 32];
+        let peer_b = [11u8; 32];
+        let peers = DashMap::new();
+        peers.insert(peer_b, PeerInfo::new(peer_b, addr_for(31001), false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let nonce = sync
+            .write()
+            .await
+            .begin_headers_request(peer_a, 123)
+            .expect("nonce issued to A");
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: vec![],
+            nonce,
+        })
+        .unwrap();
+        handle_headers(peer_b, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert!(
+            sync.read().await.headers_request_pending(),
+            "A's nonce not consumed by B's cross-peer response"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_headers_valid_nonce_is_single_use() {
+        let peer = [12u8; 32];
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr_for(31002), false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let nonce = sync.write().await.begin_headers_request(peer, 123).unwrap();
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: vec![],
+            nonce,
+        })
+        .unwrap();
+        // First (empty but valid) response consumes the nonce.
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+        assert!(
+            !sync.read().await.headers_request_pending(),
+            "nonce consumed after first response"
+        );
+
+        // Replay with the same nonce: rejected (already consumed), no re-queue.
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+        assert!(!sync.read().await.headers_request_pending());
+    }
+
+    #[tokio::test]
+    async fn handle_headers_unsolicited_nonce_zero_is_ignored() {
+        // nonce 0 is never allocated → unsolicited Headers rejected (anti-eclipse).
+        let peer = [13u8; 32];
+        let addr = addr_for(31003);
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr, false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: vec![],
+            nonce: 0,
+        })
+        .unwrap();
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert!(scorer.read().await.get(&addr).is_none(), "no scoring");
+        assert!(!sync.read().await.headers_request_pending());
+    }
+
+    #[tokio::test]
+    async fn handle_headers_borsh_garbage_scores_protocol_violation() {
+        let peer = [14u8; 32];
+        let addr = addr_for(31004);
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr, false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = vec![0u8; 2]; // too short to decode a HeadersMessage
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert!(scorer.read().await.get(&addr).unwrap().reputation < 100);
+    }
 }

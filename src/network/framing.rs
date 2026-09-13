@@ -19,6 +19,76 @@
 //! wrap the same logic but would not reduce complexity meaningfully, and any change
 //! to the wire-level framing risks breaking compatibility with already-deployed nodes.
 //! If a protocol v2 is introduced, consider migrating to a codec-based design then.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `MessageFramer::read_message` (header/payload accumulation)** —
+//!   INVARIANT: payload bytes are only ever grown incrementally (starting at
+//!   a ≤64 KB initial allocation) rather than pre-allocated to the header's
+//!   claimed length. THREAT: an attacker claiming a huge payload but never
+//!   sending it would otherwise force large up-front memory commitment
+//!   per connection. TESTS: `fragmented_header_and_payload_reassemble_across_reads`,
+//!   `connection_closed_mid_header_is_connection_failed`,
+//!   `connection_closed_mid_payload_is_connection_failed`.
+//! - **§2 `validate_wire_header`** — INVARIANT: a frame is rejected before
+//!   its payload is read if the magic bytes mismatch, the wire length
+//!   exceeds `MAX_MESSAGE_SIZE` or the per-type limit, or (when
+//!   normalization is enabled) the size isn't a canonical bucket.
+//!   THREAT: oversized/forged frames causing unbounded allocation or
+//!   protocol confusion. TESTS: `unnormalized_reader_rejects_oversized_wire_length`,
+//!   `normalized_reader_enforces_semantic_type_limit`,
+//!   `normalized_reader_rejects_unmarked_payload`.
+//! - **§3 `decode_payload` (checksum + semantic size re-check)** — INVARIANT:
+//!   the payload's checksum must verify and its *decoded* (post-denormalize)
+//!   length must still respect `MAX_MESSAGE_SIZE` and the per-type cap, even
+//!   though the wire length already passed `validate_wire_header`.
+//!   THREAT: A6 (denormalize inflating an accepted small wire frame into an
+//!   oversized logical payload) plus generic bit-flip corruption.
+//!   TESTS: `checksum_failure_releases_payload_reservation`.
+//! - **§4 `read_message_with_inactivity_timeout_inner` (cancellation safety)**
+//!   — INVARIANT: header and payload bytes already pulled off the reader
+//!   survive a dropped/cancelled future on `self.header_buf` /
+//!   `self.payload_buf`, so a resumed call completes the same logical
+//!   message instead of losing bytes and desyncing the stream.
+//!   THREAT: `tokio::select!`-driven cancellation (e.g. outbound `rx.recv()`
+//!   firing mid-read during IBD) silently dropping in-flight bytes, corrupting
+//!   all subsequent frame parsing ("invalid magic" cascade). TESTS:
+//!   `cancellation_preserves_partial_payload_reservation`,
+//!   `cancellation_mid_header_preserves_partial_bytes`,
+//!   `repeated_cancellation_mid_payload_preserves_bytes`.
+//! - **§5 memory-budget reservation lifecycle (`read_budgeted_message_timeout`,
+//!   `MemoryReservation`)** — INVARIANT: a payload byte is only ever counted
+//!   against the connection's memory budget once, the reservation grows in
+//!   step with bytes actually buffered, and it is released exactly once
+//!   (on success, on budget-exceeded rejection, or on connection close) —
+//!   never leaked and never double-counted across a cancellation.
+//!   THREAT: per-connection memory-budget bypass / accounting drift leading
+//!   to unbounded memory growth (DoS). TESTS:
+//!   `budgeted_message_holds_reservation_until_drop`,
+//!   `payload_growth_over_budget_is_rejected_without_leak`,
+//!   `empty_payload_uses_no_budget`.
+//! - **§6 `write_message`** — INVARIANT: an outbound payload is rejected
+//!   before any bytes reach the wire if it exceeds `MAX_MESSAGE_SIZE`, the
+//!   per-type cap, or names an undefined message-type discriminant.
+//!   THREAT: a local bug emitting an oversized or malformed frame that a
+//!   remote peer's own header validation would otherwise have to catch.
+//!   TESTS: `write_message_rejects_payload_over_type_max_size`,
+//!   `write_message_rejects_unknown_msg_type_byte`.
+//! - **§7 traffic-shaping normalization round-trip (`normalize_size_with_overhead`
+//!   / `TrafficShaper::denormalize`)** — INVARIANT: normalizing a payload to a
+//!   fixed bucket size and later denormalizing it recovers the exact original
+//!   bytes, including at every bucket-size boundary. THREAT: size-based
+//!   traffic-analysis leakage if normalization is skipped, or payload
+//!   corruption if the round-trip isn't exact. TESTS:
+//!   `normalized_framers_round_trip_payload`,
+//!   `normalized_framer_round_trips_bucket_edge_payload_sizes`.
+//! - **§8 Slowloris / stalled-peer bound (`read_message_with_inactivity_timeout`)**
+//!   — INVARIANT: a peer that stops sending mid-message (rather than closing
+//!   the connection) is bounded by a per-chunk inactivity timer, not an
+//!   unbounded wait. THREAT: Slowloris-style connection-slot exhaustion.
+//!   TESTS: `header_claims_large_payload_but_none_sent_times_out`.
 
 use crate::error::{Error, Result};
 use crate::network::connection_tracker::{ConnectionTracker, MemoryReservation};
@@ -919,5 +989,287 @@ mod tests {
             framer.read_message_timeout().await,
             Err(Error::InvalidMessage(_))
         ));
+    }
+
+    // ── Audit test-plan additions ───────────────────────────────────────
+
+    /// Build just the 13-byte header (no payload) with an arbitrary length /
+    /// zero checksum, for tests that exercise the header-validation path
+    /// before any payload is read.
+    fn header_only_wire(magic: [u8; 4], msg_type: MessageType, length: u32) -> Vec<u8> {
+        let header = MessageHeader {
+            magic,
+            msg_type: msg_type as u8,
+            length,
+            checksum: [0u8; 4],
+        };
+        borsh::to_vec(&header).unwrap()
+    }
+
+    /// A full message whose header and payload each arrive split across
+    /// multiple reads must reassemble into the original payload. The duplex
+    /// capacity (64 B) is smaller than the 213-byte frame, forcing the writer
+    /// to block and the reader to perform several partial reads.
+    #[tokio::test]
+    async fn fragmented_header_and_payload_reassemble_across_reads() {
+        let magic = [1, 2, 3, 4];
+        let payload: Vec<u8> = (0u8..200).collect();
+        let wire = wire_message(magic, &payload);
+        let (mut peer, local) = tokio::io::duplex(64);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new(reader, writer, magic);
+
+        let wire_for_task = wire.clone();
+        let writer_task = tokio::spawn(async move {
+            // Header split across two writes.
+            peer.write_all(&wire_for_task[..5]).await.unwrap();
+            tokio::task::yield_now().await;
+            peer.write_all(&wire_for_task[5..HEADER_SIZE]).await.unwrap();
+            tokio::task::yield_now().await;
+            // Payload split across two writes.
+            peer.write_all(&wire_for_task[HEADER_SIZE..HEADER_SIZE + 50])
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+            peer.write_all(&wire_for_task[HEADER_SIZE + 50..])
+                .await
+                .unwrap();
+        });
+
+        let (msg_type, got) = framer
+            .read_message_with_inactivity_timeout(Duration::from_secs(5))
+            .await
+            .unwrap();
+        writer_task.await.unwrap();
+        assert_eq!(msg_type, MessageType::Blocks as u8);
+        assert_eq!(got, payload);
+    }
+
+    /// Connection closed (read returns 0) while only part of the header has
+    /// arrived → ConnectionFailed.
+    #[tokio::test]
+    async fn connection_closed_mid_header_is_connection_failed() {
+        let magic = [1, 2, 3, 4];
+        let wire = wire_message(magic, &[9u8; 40]);
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new(reader, writer, magic);
+        peer.write_all(&wire[..5]).await.unwrap();
+        drop(peer);
+        assert!(matches!(
+            framer.read_message().await,
+            Err(Error::ConnectionFailed(_))
+        ));
+    }
+
+    /// Connection closed while only part of the payload has arrived →
+    /// ConnectionFailed.
+    #[tokio::test]
+    async fn connection_closed_mid_payload_is_connection_failed() {
+        let magic = [1, 2, 3, 4];
+        let wire = wire_message(magic, &[9u8; 100]);
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new(reader, writer, magic);
+        peer.write_all(&wire[..HEADER_SIZE + 10]).await.unwrap();
+        drop(peer);
+        assert!(matches!(
+            framer.read_message().await,
+            Err(Error::ConnectionFailed(_))
+        ));
+    }
+
+    /// write_message rejects a payload larger than the message type's
+    /// per-command cap (Ping.max_size() == 256).
+    #[tokio::test]
+    async fn write_message_rejects_payload_over_type_max_size() {
+        let magic = [1, 2, 3, 4];
+        let (_peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new(reader, writer, magic);
+        let too_big = vec![0u8; MessageType::Ping.max_size() + 1];
+        assert!(matches!(
+            framer.write_message(MessageType::Ping as u8, &too_big).await,
+            Err(Error::MessageTooLarge)
+        ));
+    }
+
+    /// write_message rejects an unknown message-type byte via `try_from`
+    /// before any bytes reach the wire.
+    #[tokio::test]
+    async fn write_message_rejects_unknown_msg_type_byte() {
+        let magic = [1, 2, 3, 4];
+        let (_peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new(reader, writer, magic);
+        // 200 is not a defined discriminant.
+        assert!(matches!(
+            framer.write_message(200u8, &[]).await,
+            Err(Error::InvalidMessage(_))
+        ));
+    }
+
+    /// Unnormalized reader rejects a wire length above MAX_MESSAGE_SIZE at
+    /// header validation, before reading (or allocating) the payload.
+    #[tokio::test]
+    async fn unnormalized_reader_rejects_oversized_wire_length() {
+        let magic = [1, 2, 3, 4];
+        let header = header_only_wire(magic, MessageType::Blocks, (MAX_MESSAGE_SIZE + 1) as u32);
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new(reader, writer, magic);
+        peer.write_all(&header).await.unwrap();
+        assert!(matches!(
+            framer.read_message().await,
+            Err(Error::MessageTooLarge)
+        ));
+    }
+
+    /// Normalized framer denormalize recovers the exact payload across a
+    /// sweep of sizes straddling every bucket edge (256/512/1024/2048/4096),
+    /// plus the empty and near-empty cases.
+    #[tokio::test]
+    async fn normalized_framer_round_trips_bucket_edge_payload_sizes() {
+        let magic = [1, 2, 3, 4];
+        let shaper = Arc::new(TrafficShaper::default_enabled());
+        let (left, right) = tokio::io::duplex(1 << 16);
+        let (lr, lw) = tokio::io::split(left);
+        let (rr, rw) = tokio::io::split(right);
+        let mut sender = MessageFramer::new_normalized(lr, lw, magic, Arc::clone(&shaper));
+        let mut receiver = MessageFramer::new_normalized(rr, rw, magic, shaper);
+
+        let mut sizes = vec![0usize, 1, 2];
+        for b in [256usize, 512, 1024, 2048, 4096] {
+            // A payload of `b - HEADER_SIZE - NORMALIZATION_PREFIX_SIZE(4)`
+            // exactly fills bucket `b`; straddle that edge.
+            let edge = b - HEADER_SIZE - 4;
+            sizes.push(edge - 1);
+            sizes.push(edge);
+            sizes.push(edge + 1);
+        }
+
+        for size in sizes {
+            let payload: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+            let (sent, received) = tokio::join!(
+                sender.write_message(MessageType::Txs as u8, &payload),
+                receiver.read_message_timeout(),
+            );
+            sent.unwrap();
+            let (msg_type, got) = received.unwrap();
+            assert_eq!(msg_type, MessageType::Txs as u8);
+            assert_eq!(got, payload, "round-trip mismatch at payload size {}", size);
+        }
+    }
+
+    /// Cancelling the read while only part of the HEADER has arrived must
+    /// preserve those bytes on `self` so a resumed read completes the message
+    /// (no "invalid magic" from lost bytes). No reservation is taken until the
+    /// header is fully parsed.
+    #[tokio::test]
+    async fn cancellation_mid_header_preserves_partial_bytes() {
+        let magic = [1, 2, 3, 4];
+        let tracker = Arc::new(ConnectionTracker::new(8));
+        let wire = wire_message(magic, &[1, 2, 3, 4]);
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new_budgeted(
+            reader,
+            writer,
+            magic,
+            tracker.clone(),
+            unnormalized_shaper(),
+        );
+        // Fewer than HEADER_SIZE bytes, then cancel the in-flight read.
+        peer.write_all(&wire[..5]).await.unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(50),
+            framer.read_message_with_inactivity_timeout_inner(Duration::from_secs(5)),
+        )
+        .await
+        .is_err());
+        // Header phase reserves nothing.
+        assert_eq!(tracker.memory_usage(), 0);
+        // Deliver the rest; the 5 buffered header bytes must have survived.
+        peer.write_all(&wire[5..]).await.unwrap();
+        let message = framer.read_budgeted_message_timeout().await.unwrap();
+        assert_eq!(message.payload, vec![1, 2, 3, 4]);
+        assert_eq!(tracker.memory_usage(), 4);
+        drop(message);
+        assert_eq!(tracker.memory_usage(), 0);
+    }
+
+    /// Multiple cancellations mid-payload (churn) must not lose bytes or
+    /// double-count the reservation; the reassembled payload is exact.
+    #[tokio::test]
+    async fn repeated_cancellation_mid_payload_preserves_bytes() {
+        let magic = [1, 2, 3, 4];
+        let tracker = Arc::new(ConnectionTracker::new(8));
+        let wire = wire_message(magic, &[10, 20, 30, 40]);
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new_budgeted(
+            reader,
+            writer,
+            magic,
+            tracker.clone(),
+            unnormalized_shaper(),
+        );
+        // Header + 1 payload byte, then cancel.
+        peer.write_all(&wire[..HEADER_SIZE + 1]).await.unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(50),
+            framer.read_message_with_inactivity_timeout_inner(Duration::from_secs(5)),
+        )
+        .await
+        .is_err());
+        assert_eq!(tracker.memory_usage(), 1);
+        // One more byte, cancel again.
+        peer.write_all(&wire[HEADER_SIZE + 1..HEADER_SIZE + 2])
+            .await
+            .unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(50),
+            framer.read_message_with_inactivity_timeout_inner(Duration::from_secs(5)),
+        )
+        .await
+        .is_err());
+        assert_eq!(tracker.memory_usage(), 2);
+        // Remainder; the read now completes with the full payload.
+        peer.write_all(&wire[HEADER_SIZE + 2..]).await.unwrap();
+        let message = framer.read_budgeted_message_timeout().await.unwrap();
+        assert_eq!(message.payload, vec![10, 20, 30, 40]);
+        assert_eq!(tracker.memory_usage(), 4);
+        drop(message);
+        assert_eq!(tracker.memory_usage(), 0);
+    }
+
+    /// A header that claims a large payload but whose peer then sends nothing
+    /// is bounded by the per-chunk inactivity timeout: the read fails with a
+    /// "stalled" ConnectionFailed rather than blocking on / pre-allocating the
+    /// claimed size. Uses a short (100 ms) inactivity window — the read MUST
+    /// time out because no payload byte ever arrives, so this is deterministic
+    /// and does not sleep on the success path.
+    #[tokio::test]
+    async fn header_claims_large_payload_but_none_sent_times_out() {
+        let magic = [1, 2, 3, 4];
+        // 1 MiB is well under Blocks' cap (MAX_MESSAGE_SIZE), so the header is
+        // accepted and the framer proceeds to await the payload.
+        let header = header_only_wire(magic, MessageType::Blocks, 1 << 20);
+        let (mut peer, local) = tokio::io::duplex(1024);
+        let (reader, writer) = tokio::io::split(local);
+        let mut framer = MessageFramer::new(reader, writer, magic);
+        peer.write_all(&header).await.unwrap();
+        // Keep `peer` alive (not dropped) so the read stalls rather than
+        // seeing a closed connection.
+        let result = framer
+            .read_message_with_inactivity_timeout(Duration::from_millis(100))
+            .await;
+        match result {
+            Err(Error::ConnectionFailed(msg)) => {
+                assert!(msg.contains("stalled"), "expected stall, got: {}", msg)
+            }
+            other => panic!("expected stalled ConnectionFailed, got {:?}", other),
+        }
+        drop(peer);
     }
 }

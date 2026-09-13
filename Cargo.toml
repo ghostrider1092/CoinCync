@@ -76,6 +76,10 @@ test-utilities  = []
 # feature gate. See feedback_snapshot_procedure.md / H2 in the 2026-06-30
 # audit for rationale.
 insecure-fast-sync = []
+# TEST-ONLY: skip RandomX PoW + ASERT difficulty-target enforcement so the
+# multi-node simkit harness mines instantly. INSECURE — never enable in a real
+# build. Off by default → production is byte-identical after cfg-strip.
+test-fast-pow = []
 # Sketch features â€” implementations reserved for post-mainnet CIPs.
 # All gated modules are off by default and not part of the production
 # audit perimeter. See docs/cip/.

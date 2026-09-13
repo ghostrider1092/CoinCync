@@ -31,6 +31,13 @@ const CRITICAL_FILES: &[&str] = &[
     "src/consensus/pow.rs",
     "src/consensus/validation.rs",
     "src/emission/curve.rs",
+    // Added 2026-09-12: consensus-critical files that were missing from the lock.
+    "src/mainnet.rs",
+    "src/emission/mod.rs",
+    "src/consensus/header.rs",
+    "src/consensus/block.rs",
+    "src/primitives/hash.rs",
+    "src/consensus/finality.rs",
 ];
 
 fn main() {

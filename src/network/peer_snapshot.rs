@@ -53,6 +53,64 @@
 //!   peer discovery is authoritative once the mesh is established.
 //! - **Onion transport**: gateway URLs are clearnet HTTPS. Tor-mode
 //!   nodes would need to add .onion IPFS gateway URLs; deferred.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `verify_signature_with`** — INVARIANT: the signature must be
+//!   exactly 64 raw Ed25519 bytes and must verify over
+//!   `SIGNATURE_NAMESPACE || snapshot_bytes`, not over the bare snapshot
+//!   bytes.
+//!   THREAT: without domain separation, a signature the maintainer produced
+//!   for another artifact (release tag, checkpoint) could be replayed as a
+//!   fake peer snapshot.
+//!   TESTS: `signature_verifies_over_namespaced_payload`,
+//!   `signature_rejects_wrong_key`, `signature_rejects_tampered_payload`,
+//!   `signature_domain_separation_blocks_cross_context_replay`,
+//!   `verify_signature_rejects_wrong_length`.
+//! - **§2 `validate_snapshot` (network match)** — INVARIANT: a snapshot is
+//!   accepted only if `snapshot.network == expected_network`.
+//!   THREAT: a mainnet snapshot accepted on testnet (or vice versa) would
+//!   hand a node peer addresses for the wrong chain.
+//!   TESTS: `validate_snapshot_rejects_network_mismatch`.
+//! - **§3 `validate_snapshot` (clock skew)** — INVARIANT: a snapshot claiming
+//!   a timestamp more than 5 minutes in the future is rejected.
+//!   THREAT: an unbounded future timestamp would let a malicious or
+//!   compromised producer make a stale/poisoned snapshot always look freshest.
+//!   TESTS: `validate_snapshot_rejects_far_future_ts`.
+//! - **§4 `validate_snapshot` (replay defence)** — INVARIANT: on a non-fresh
+//!   cold start, the snapshot's `unix_ts` must be strictly newer than
+//!   `last_seen_snapshot_ts`.
+//!   THREAT: without strict-newer replay defence, an attacker who once
+//!   captured a valid signed snapshot could keep re-serving it indefinitely.
+//!   TESTS: `validate_snapshot_rejects_replayed_stale_ts`,
+//!   `validate_snapshot_accepts_matching_network_and_fresh_ts`.
+//! - **§5 `maintainer_pubkey_from_env`** — INVARIANT: an unset, empty, or
+//!   non-32-byte-hex env value returns `None` (snapshot fallback disabled),
+//!   never a partially-decoded or defaulted key.
+//!   THREAT: falling back to a wrong-length or garbage key would either
+//!   panic downstream or silently accept snapshots nothing actually signed.
+//!   TESTS: `maintainer_pubkey_from_env_returns_none_when_unset`,
+//!   `maintainer_pubkey_from_env_rejects_wrong_length_hex`,
+//!   `maintainer_pubkey_from_env_accepts_valid_32byte_hex`.
+//! - **§6 `fetch_bounded`** — INVARIANT: a response is rejected (via
+//!   `Content-Length` when present, and always via a post-read length check)
+//!   once its size exceeds the caller-supplied `max_bytes` cap, before the
+//!   full body is used.
+//!   THREAT: an unbounded gateway response (malicious or misconfigured IPFS
+//!   gateway) could exhaust memory or smuggle an oversized payload past
+//!   `MAX_SNAPSHOT_BYTES`.
+//!   TESTS: (gap — no test in this crate drives `fetch_bounded` against a
+//!   real or mocked oversized HTTP response).
+//! - **§7 `fetch_from_gateways`** — INVARIANT: gateways are tried in a fixed
+//!   order and the function only errors (`AllGatewaysFailed`) after every
+//!   configured gateway has failed to serve both the snapshot and signature
+//!   bytes.
+//!   THREAT: giving up after a single gateway failure would let one
+//!   compromised or offline gateway effectively deny the bootstrap fallback.
+//!   TESTS: (gap — no test in this crate exercises multi-gateway fallback;
+//!   coverage here is limited to the pure signature/validation helpers).
 
 use std::net::SocketAddr;
 use std::time::Duration;

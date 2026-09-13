@@ -1,3 +1,42 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `unix_now`** — INVARIANT: returns whole seconds since the Unix
+//!   epoch and never panics under a normal system clock.
+//!   THREAT: a `duration_since` panic (clock set before the epoch) crashing
+//!   the router on every message that needs a timestamp (e.g. Dandelion
+//!   routing).
+//!   TESTS: (gap — no dedicated unit test in this file for `unix_now`).
+//! - **§2 `process_message` (Padding short-circuit)** — INVARIANT: a
+//!   `Padding` message is discarded before peer activity/byte accounting or
+//!   scoring ever sees it.
+//!   THREAT: cover-traffic packets polluting peer stats or being misrouted
+//!   into a real handler.
+//!   TESTS: `padding_is_discarded_before_peer_accounting`.
+//! - **§3 `process_message` (light-query payload gate)** — INVARIANT:
+//!   `GetFilters`/`GetOutputDigests`/`GetFilterCheckpoints`/
+//!   `GetKeyImageStatus` payloads over `MAX_LIGHT_QUERY_PAYLOAD` are dropped
+//!   and scored `OversizedMessage` before reaching the per-handler backstop
+//!   in `query.rs`.
+//!   THREAT: DoS amplification via oversized DHT/light-client queries on a
+//!   path with no framing-level per-type cap (audit R3-4).
+//!   TESTS: `oversized_light_query_payloads_are_dropped_and_scored`.
+//! - **§4 `process_message` (pre-handshake gate)** — INVARIANT: any message
+//!   type other than the handshake set (`Version`/`Verack`/`Ping`/`Pong`/
+//!   `Flare`) is ignored for a peer that hasn't reached `PeerState::Connected`.
+//!   THREAT: pre-auth attack surface exploitation by an unauthenticated peer
+//!   (H-3).
+//!   TESTS: (gap — no dedicated unit test in this file for the
+//!   pre-handshake reject branch).
+//! - **§5 `process_message` (message routing dispatch)** — INVARIANT: every
+//!   known `MessageType` discriminant routes to exactly one handler, and an
+//!   unrecognized discriminant fails via `MessageType::try_from` rather than
+//!   panicking or falling through.
+//!   THREAT: an unhandled or misrouted message type crashing the connection
+//!   loop or reaching the wrong handler.
+//!   TESTS: `unknown_msg_type_returns_err_without_crashing`.
+
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::trace;
@@ -272,4 +311,102 @@ pub(super) async fn process_message(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod router_tests {
+    use super::*;
+    use crate::chain::Blockchain;
+    use crate::primitives::Hash;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    /// Drive `process_message` end-to-end against real state; returns the router
+    /// result and the peer's post-call reputation (None if never scored).
+    async fn run_one(
+        peer_id: PeerId,
+        addr: SocketAddr,
+        msg_type_id: u8,
+        payload: Vec<u8>,
+    ) -> (Result<()>, Option<i32>) {
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let dandelion = RwLock::new(DandelionRouter::new());
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let (event_tx, _event_rx) = broadcast::channel(8);
+        let chain: SharedBlockchain = Arc::new(Blockchain::new());
+        chain.init_genesis().unwrap();
+        let mempool = SharedMempool::new();
+        let addresses = RwLock::new(AddressManager::new(1000));
+        let scorer = RwLock::new(PeerScorer::new());
+        let cache = parking_lot::RwLock::new(TxAbsenceCache::new());
+        let relay = RwLock::new(RelayScoreMap::new());
+
+        let res = process_message(
+            peer_id,
+            msg_type_id,
+            &payload,
+            [1, 2, 3, 4],
+            0,
+            &peers,
+            &senders,
+            &dandelion,
+            &sync,
+            &event_tx,
+            &chain,
+            &mempool,
+            &addresses,
+            &scorer,
+            &cache,
+            &relay,
+        )
+        .await;
+        let rep = scorer.read().await.get(&addr).map(|s| s.reputation);
+        (res, rep)
+    }
+
+    #[tokio::test]
+    async fn unknown_msg_type_returns_err_without_crashing() {
+        // 200 falls in an unused discriminant gap → try_from errors → the
+        // processor loop logs and continues (it doesn't panic).
+        let (res, rep) = run_one([9u8; 32], "127.0.0.1:34001".parse().unwrap(), 200, vec![]).await;
+        assert!(res.is_err());
+        assert!(rep.is_none());
+    }
+
+    #[tokio::test]
+    async fn padding_is_discarded_before_peer_accounting() {
+        let (res, rep) = run_one(
+            [9u8; 32],
+            "127.0.0.1:34002".parse().unwrap(),
+            MessageType::Padding as u8,
+            vec![],
+        )
+        .await;
+        assert!(res.is_ok());
+        assert!(rep.is_none(), "padding never reaches scoring");
+    }
+
+    #[tokio::test]
+    async fn oversized_light_query_payloads_are_dropped_and_scored() {
+        let oversized = vec![0u8; 8 * 1024 + 1]; // > MAX_LIGHT_QUERY_PAYLOAD
+        for (i, ty) in [
+            MessageType::GetFilters,
+            MessageType::GetOutputDigests,
+            MessageType::GetFilterCheckpoints,
+            MessageType::GetKeyImageStatus,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let addr: SocketAddr = format!("127.0.0.1:{}", 34100 + i as u16).parse().unwrap();
+            let (res, rep) = run_one([9u8; 32], addr, ty as u8, oversized.clone()).await;
+            assert!(res.is_ok(), "{ty:?} dropped cleanly");
+            assert!(
+                rep.is_some_and(|r| r < 100),
+                "{ty:?} oversized payload scored OversizedMessage"
+            );
+        }
+    }
 }

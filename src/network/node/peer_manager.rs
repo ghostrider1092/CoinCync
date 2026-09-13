@@ -1,3 +1,77 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `spawn_listener_acceptor` in-flight handshake semaphore** —
+//!   INVARIANT: concurrent inbound connection *tasks* (including those still
+//!   mid-Noise-handshake) are bounded at `MAX_INBOUND + INBOUND_HANDSHAKE_SLACK`
+//!   via an owned permit taken at accept time, independent of the
+//!   post-handshake `MAX_INBOUND` peer count.
+//!   THREAT: an IP-diverse half-open flood spawning unbounded handshake
+//!   tasks (each holding ~64 KiB buffers) that `MAX_INBOUND` alone can't see.
+//!   TESTS: (gap — no test drives concurrent half-open connections past the
+//!   permit cap).
+//! - **§2 `spawn_listener_acceptor` inbound eviction at saturation** —
+//!   INVARIANT: when inbound is at `MAX_INBOUND`, a new connection is only
+//!   admitted if `select_inbound_to_evict` names a more-evictable existing
+//!   peer to drop first; otherwise the newcomer is rejected.
+//!   THREAT: an attacker filling all inbound slots from one /16 to pin the
+//!   node and block honest inbound peers (eclipse via slot exhaustion).
+//!   TESTS: (gap in this file — the eviction algorithm itself is proven by
+//!   `all_high_reputation_flood_still_yields_eviction_candidate` and
+//!   `relay_scored_flood_is_still_evicted_eclipse_safe` in
+//!   src/network/eviction.rs, but no test exercises it through this
+//!   acceptor's call site).
+//! - **§3 `spawn_outbound_connector` dedupe/self-dial/backoff gating**
+//!   (`is_self_dial`, `connection_attempt_deferred`, the already-connected
+//!   check) — INVARIANT: the connector never dials its own listen port, never
+//!   redials an address with a live peer, and honors both the 30s
+//!   min-reconnect-delay and per-address exponential backoff.
+//!   THREAT: without these gates the connector self-connects, thrashes a
+//!   single peer in a connect/disconnect loop, or burns Noise handshake
+//!   slots retrying too fast — starving real address-book progress.
+//!   TESTS: (gap — no unit test for `is_self_dial` or
+//!   `connection_attempt_deferred` in isolation).
+//! - **§4 `spawn_outbound_connector` per-/16 eclipse cap
+//!   (`try_track_outbound_subnet_owned`, RAII `outbound_slot`)** —
+//!   INVARIANT: an attacker controlling one /16 cannot hold more than
+//!   `MAX_OUTBOUND_PER_SUBNET` of our outbound slots, and the slot always
+//!   releases on task exit (clean, error, or panic) via `Drop`.
+//!   THREAT: eclipse attack via subnet-concentrated outbound peers.
+//!   TESTS: (gap in this file — subnet-cap enforcement is proven at the
+//!   `ConnectionTracker` level by
+//!   `subnet_diversity_limits_connections_from_same_subnet` in
+//!   tests/network_adversarial.rs, not through this connector).
+//! - **§5 `save_anchors_to_disk`/`load_anchors_from_disk`** — INVARIANT: only
+//!   `Connected` outbound peers are persisted as anchors; a missing or
+//!   malformed anchor file falls back to an empty list rather than erroring.
+//!   THREAT: losing all outbound peers on a hard kill (SIGKILL/OOM/power
+//!   loss) would force a slow full re-bootstrap instead of fast reconnect.
+//!   TESTS: `anchor_round_trip_keeps_only_connected_outbound_peers`.
+//! - **§6 `ban_peer`** — INVARIANT: banning commits scorer + tracker state
+//!   (address ban, connection untrack) before the peer/sender map entries are
+//!   removed, so a reconnect racing the cleanup still observes the ban.
+//!   THREAT: a reconnect slipping through during ban teardown would let a
+//!   banned peer re-establish before the ban becomes visible.
+//!   TESTS: `ban_updates_scorer_and_removes_peer_state`.
+//! - **§7 `disconnect_peer`/`disconnect_all`** — INVARIANT: a normal
+//!   disconnect removes tracker/peer/sender/dandelion/sync state and emits
+//!   `PeerDisconnected` without applying the reputation penalty `ban_peer`
+//!   applies.
+//!   THREAT: conflating normal disconnects with bans would over-penalize
+//!   honest peers that merely dropped connection (e.g. restart, network blip).
+//!   TESTS: (gap — no direct test for `disconnect_peer` or `disconnect_all`
+//!   distinguishing them from the banned path).
+//! - **§8 `pick_scored_peer`/`pick_random_peer`** — INVARIANT: weighted
+//!   selection uses each connected peer's composite score (floor 0.05) so no
+//!   connected peer is ever mathematically unreachable, with a uniform
+//!   fallback if the scorer lock can't be acquired or all weights are zero.
+//!   THREAT: a scoring bug that zeroes out weights entirely would make
+//!   relay/target selection silently starve, biasing propagation or making
+//!   Dandelion routing predictable.
+//!   TESTS: (gap — no test drives `pick_scored_peer`'s weighted-random
+//!   selection or its zero-weight/lock-contention fallback path).
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;

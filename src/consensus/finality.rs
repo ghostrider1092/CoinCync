@@ -34,6 +34,52 @@
 //! A separate voted-finality module will be added pre-mainnet only if the
 //! post-public-testnet attack-surface review shows the layers above leave
 //! residual rental-hashrate risk above what the audit accepts.
+//!
+//! ## Audit map
+//! Each `§` is a code element below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. This module owns only the
+//! **pure reorg-acceptance policy** (depth caps + MESS work-multiplier); the
+//! other reorg-defense layers (per-node/hardcoded checkpoints, chain mutation)
+//! live elsewhere as noted in the header prose. (Renders in `cargo doc`.)
+//!
+//! - **§1 `max_reorg_depth_for`** — INVARIANT: the hard-finality cap is chosen
+//!   from the RUNTIME `NetworkType` (Testnet/Regtest = 1000, Mainnet = 100),
+//!   never from a compile-time feature. THREAT: F31 (SEV-A) — a testnet-configured
+//!   binary built without `--features testnet` using the mainnet 100-cap, the
+//!   2026-07-04 partition trap. TESTS: `test_reorg_acceptability_hard_depth_cap`,
+//!   `test_reorg_acceptability_mainnet_vs_testnet_cap_differential`.
+//! - **§2 `max_reorg_depth` (deprecated)** — INVARIANT: the legacy no-arg form
+//!   falls back to the SAFER Testnet=1000 interpretation, so a pre-audit caller
+//!   never silently gets the tighter mainnet cap. THREAT: cfg/runtime divergence
+//!   re-introducing the F31 trap. TESTS: `test_deprecated_max_reorg_depth_defaults_to_testnet_1000`.
+//! - **§3 Tier-3 hard cap (`evaluate_reorg_acceptability`, `depth > max_depth`)**
+//!   — INVARIANT: any depth strictly beyond the network cap is rejected outright
+//!   (absolute finality); depth == max_depth is still accepted (off-by-one
+//!   guarded). The error cites the cap. THREAT: deep-reorg double-spend past
+//!   finality (ETC/BTG/Horizen-class). TESTS: `test_reorg_acceptability_hard_depth_cap`,
+//!   `test_reorg_acceptability_depth_equal_to_max_is_accepted`,
+//!   `test_reorg_acceptability_mainnet_vs_testnet_cap_differential`.
+//! - **§4 Tier-1 unconditional (`depth <= REORG_UNCONDITIONAL_DEPTH`)** —
+//!   INVARIANT: shallow reorgs (≤ 10) accept EQUAL-or-more work (`>=`) — the
+//!   monotonic hash-lex tiebreak upstream makes equal-work acceptance a
+//!   deterministic convergence rule; strictly-less work is rejected; depth 11 is
+//!   the first to enter MESS. THREAT: normal jitter mis-rejected, or a low-work
+//!   fork accepted. TESTS: `test_reorg_acceptability_shallow_accepts_equal_or_more_work`,
+//!   `test_reorg_acceptability_tier1_boundary_at_unconditional_depth`.
+//! - **§5 Tier-2 MESS (exponential work multiplier)** — INVARIANT: a fork at
+//!   depth d needs `2^((d-10)/20)` more work; the exponent is capped at 40 so the
+//!   `1u128 << e` shift cannot overflow, and `required_work` uses `saturating_mul`
+//!   so honest_work near `u128::MAX` cannot wrap. THREAT: rented-hashrate deep
+//!   reorg made economically infeasible; overflow/wrap defeating the gate.
+//!   TESTS: `test_reorg_acceptability_mess_multiplier`,
+//!   `test_reorg_acceptability_mess_exponent_capped_at_40`,
+//!   `test_reorg_acceptability_honest_work_near_u128_max_saturates`.
+//! - **§6 bootstrap bypass (`current_height < BOOTSTRAP_MESS_HEIGHT`)** —
+//!   INVARIANT: below the bootstrap height MESS is skipped (plain longest-chain,
+//!   equal work accepted) so independently-booted young forks can converge; the
+//!   Tier-3 hard cap is STILL enforced during bootstrap. THREAT: parallel young
+//!   forks permanently locked by an unsatisfiable multiplier. TESTS:
+//!   `test_reorg_acceptability_bootstrap_bypass`.
 
 use crate::config::NetworkType;
 
@@ -84,7 +130,7 @@ pub fn max_reorg_depth() -> u64 {
     max_reorg_depth_for(NetworkType::Testnet)
 }
 
-// ═══ HYBRID REORG DEFENSE (H-16 FIX) ═══════════════════════════════════════
+// ═══ §3-§6 HYBRID REORG DEFENSE (H-16 FIX) ═════════════════════════════════
 //
 // Three-tier defense against deep chain reorganizations:
 //
@@ -308,5 +354,120 @@ mod tests {
         assert!(err.contains("bootstrap phase"));
         // Tier-3 hard cap still enforced during bootstrap.
         assert!(evaluate_reorg_acceptability(max + 1, u128::MAX, 1, bootstrap_h, max).is_err());
+    }
+
+    #[test]
+    fn test_reorg_acceptability_tier1_boundary_at_unconditional_depth() {
+        // depth == REORG_UNCONDITIONAL_DEPTH (10) is still unconditional Tier-1:
+        // equal-or-more work accepted, strictly-less rejected (no MESS). depth 11
+        // is the FIRST depth that enters MESS, where equal work is no longer
+        // enough (MESS requires strictly-greater than the multiplied threshold).
+        let h = BOOTSTRAP_MESS_HEIGHT + 1;
+        let max = max_reorg_depth_for(NetworkType::Testnet);
+
+        // depth 10: unconditional
+        assert!(evaluate_reorg_acceptability(REORG_UNCONDITIONAL_DEPTH, 100, 100, h, max).is_ok());
+        assert!(evaluate_reorg_acceptability(REORG_UNCONDITIONAL_DEPTH, 99, 100, h, max).is_err());
+
+        // depth 11: MESS, exponent (11-10)/20 = 0 => multiplier 1 => strict >
+        assert!(
+            evaluate_reorg_acceptability(REORG_UNCONDITIONAL_DEPTH + 1, 100, 100, h, max).is_err(),
+            "depth 11 enters MESS; equal work must no longer be accepted"
+        );
+        assert!(
+            evaluate_reorg_acceptability(REORG_UNCONDITIONAL_DEPTH + 1, 101, 100, h, max).is_ok()
+        );
+    }
+
+    #[test]
+    fn test_reorg_acceptability_depth_equal_to_max_is_accepted() {
+        // Off-by-one on the hard cap: depth == max_depth must be ACCEPTED (the
+        // Tier-3 reject is `depth > max_depth`), while depth == max_depth + 1 is
+        // rejected. Give overwhelming work so only the cap boundary decides.
+        let h = BOOTSTRAP_MESS_HEIGHT + 1;
+        let max = max_reorg_depth_for(NetworkType::Testnet); // 1000
+        assert!(
+            evaluate_reorg_acceptability(max, u128::MAX, 1, h, max).is_ok(),
+            "depth exactly == max_depth must be accepted"
+        );
+        assert!(
+            evaluate_reorg_acceptability(max + 1, u128::MAX, 1, h, max).is_err(),
+            "depth == max_depth + 1 must be rejected by the hard cap"
+        );
+    }
+
+    #[test]
+    fn test_reorg_acceptability_mess_exponent_capped_at_40() {
+        // Very deep reorgs must cap the MESS exponent at 40 so the `1u128 <<
+        // exponent` shift can never overflow. Use a large max_depth so the depth
+        // isn't rejected by the Tier-3 cap first, and a depth whose raw exponent
+        // exceeds 40: (910 - 10) / 20 = 45 -> capped to 40.
+        let h = BOOTSTRAP_MESS_HEIGHT + 1;
+        let max = 100_000u64;
+        let depth = 910u64;
+
+        // Insufficient work: error message must cite the capped 2^40 exponent.
+        let err = evaluate_reorg_acceptability(depth, 0, 1, h, max).unwrap_err();
+        assert!(
+            err.contains("2^40"),
+            "MESS exponent must cap at 40, got error: {}",
+            err
+        );
+
+        // With work just above the 2^40 threshold it accepts — no shift overflow
+        // or panic on the deep-depth path.
+        let two_pow_40: u128 = 1u128 << 40;
+        assert!(evaluate_reorg_acceptability(depth, two_pow_40 + 1, 1, h, max).is_ok());
+    }
+
+    #[test]
+    fn test_reorg_acceptability_honest_work_near_u128_max_saturates() {
+        // honest_work * multiplier must use saturating_mul: honest_work near
+        // u128::MAX must not wrap. required_work saturates to u128::MAX, so even
+        // a fork with u128::MAX work cannot exceed it and is rejected.
+        let h = BOOTSTRAP_MESS_HEIGHT + 1;
+        let max = 100_000u64;
+        let depth = 50u64; // exponent (50-10)/20 = 2 => multiplier 4
+        let honest = u128::MAX - 5;
+        let err = evaluate_reorg_acceptability(depth, u128::MAX, honest, h, max).unwrap_err();
+        assert!(
+            err.contains("MESS rejection"),
+            "saturating required_work must reject the fork, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_reorg_acceptability_mainnet_vs_testnet_cap_differential() {
+        // Between depth 101 and 1000 the network cap alone decides: mainnet
+        // (cap 100) hard-rejects while testnet (cap 1000) admits it to MESS,
+        // where sufficient work is accepted.
+        let h = BOOTSTRAP_MESS_HEIGHT + 1;
+        let mainnet_max = max_reorg_depth_for(NetworkType::Mainnet); // 100
+        let testnet_max = max_reorg_depth_for(NetworkType::Testnet); // 1000
+        let depth = 500u64;
+
+        let err = evaluate_reorg_acceptability(depth, u128::MAX, 1, h, mainnet_max).unwrap_err();
+        assert!(
+            err.contains("exceeds absolute maximum"),
+            "mainnet must hard-reject depth {} beyond its 100-cap: {}",
+            depth,
+            err
+        );
+
+        assert!(
+            evaluate_reorg_acceptability(depth, u128::MAX, 1, h, testnet_max).is_ok(),
+            "testnet must admit depth {} to MESS and accept overwhelming work",
+            depth
+        );
+    }
+
+    #[test]
+    fn test_deprecated_max_reorg_depth_defaults_to_testnet_1000() {
+        // The deprecated free function falls back to the safer Testnet=1000
+        // interpretation (F31 post-fix behavior).
+        #[allow(deprecated)]
+        let d = max_reorg_depth();
+        assert_eq!(d, 1000, "deprecated max_reorg_depth() must default to 1000");
     }
 }
