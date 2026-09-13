@@ -2,21 +2,6 @@
 //!
 //! JSON-RPC service discovery following the `rpc.discover` convention.
 //! Returns a catalog of all available methods, their parameters, and return types.
-//!
-//! ## Audit map
-//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
-//! THREAT it defends, and the TESTS that prove it. (Single self-contained doc
-//! generator, so it has genuinely few logical areas.)
-//!
-//! - **§1 `rpc_methods_doc` (document validity)** — INVARIANT: the discovery
-//!   document is well-formed JSON with the `rpc.discover` info/methods shape.
-//!   THREAT: a malformed discovery doc breaks clients that introspect via
-//!   `rpc.discover`. TESTS: `test_discovery_doc_is_valid_json`.
-//! - **§2 method catalog coverage** — INVARIANT: each entry documents a method's
-//!   name, parameters, and return type. THREAT: the published catalog drifts from
-//!   the server's actual registered surface. TESTS: (gap — no test pins this
-//!   catalog against the registered method set; `explorer.rs`'s
-//!   `explorer_js_calls_only_registered_methods` pins only the explorer's subset).
 
 use serde_json::json;
 
