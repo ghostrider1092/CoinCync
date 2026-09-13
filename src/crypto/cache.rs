@@ -9,6 +9,62 @@
 //! - Only positive verification results are cached
 //! - Cache is thread-safe using DashMap
 //! - LRU eviction prevents unbounded memory growth
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `check_bulletproof`** — INVARIANT: presence in the cache means "verified
+//!   valid" (only positive results are inserted), and both hit and miss paths do
+//!   the same `Instant::now()` + atomic bump so wall-clock time is uniform (R-28).
+//!   THREAT: R-28 — an attacker timing RPC latency across a targeted `proof_hash`
+//!   learns a cache-hit oracle ("we've seen this proof before"), leaking a hit-map
+//!   of a private-mempool/RPC operator's prior work.
+//!   TESTS: `test_cache_bulletproof`.
+//! - **§2 `cache_bulletproof`** — INVARIANT: only `valid == true` results are
+//!   stored; negatives are dropped before insertion.
+//!   THREAT: cache poisoning — seeding `false` for a proof that would verify, so a
+//!   later honest check short-circuits to a wrong negative verdict.
+//!   TESTS: `test_cache_invalid_not_stored`, `test_cache_bulletproof`.
+//! - **§3 `check_ring_sig`** — INVARIANT: presence == valid for the ring-sig map,
+//!   mirroring `check_bulletproof`; a hit bumps `last_access` for LRU.
+//!   THREAT: treating an absent entry as valid would let an unverified ring
+//!   signature skip verification during block sync (note: this path lacks the
+//!   R-28 uniform-timing hardening applied to `check_bulletproof`).
+//!   TESTS: (gap — no ring-sig-specific unit test; shares the exercised
+//!   bulletproof check logic).
+//! - **§4 `cache_ring_sig`** — INVARIANT: only `valid == true` ring-sig results are
+//!   inserted; negatives dropped, and eviction fires at `MAX_CACHE_SIZE`.
+//!   THREAT: cache poisoning — seeding `false` for a ring signature that would
+//!   verify, forcing a later wrong negative verdict.
+//!   TESTS: (gap — no ring-sig-specific unit test; mirrors `cache_bulletproof`,
+//!   covered by `test_cache_invalid_not_stored`).
+//! - **§5 `evict_old` (LRU eviction)** — INVARIANT: entry count never grows
+//!   unbounded — an age pass drops >1h-old entries and a size pass drops the 10%
+//!   oldest, keeping the cap; the age pass uses `checked_sub` so it cannot panic.
+//!   THREAT: unbounded memory growth (DoS) under proof flooding, or an
+//!   "overflow when subtracting duration from instant" panic when the process has
+//!   been alive < 1h on a process-start-origin monotonic clock.
+//!   TESTS: `test_cache_eviction`.
+//! - **§6 `proof_cache_key`** — INVARIANT: the key is a domain-separated BLAKE3
+//!   hash binding both the proof bytes and the commitment bytes; distinct proofs
+//!   yield distinct keys, identical inputs yield identical keys.
+//!   THREAT: a key collision would return a cached verdict for the wrong proof,
+//!   accepting an unverified proof as valid.
+//!   TESTS: `test_proof_cache_key`.
+//! - **§7 `ring_sig_cache_key`** — INVARIANT: domain-separated BLAKE3 over message
+//!   plus signature bytes produces the ring-sig cache key.
+//!   THREAT: cross-domain key reuse or collision returning a cached verdict for a
+//!   different (message, signature) pair.
+//!   TESTS: (gap — no direct unit test; superseded by the length-prefixed
+//!   statement key in §7 for generic callers).
+//! - **§8 `ring_sig_statement_cache_key`** — INVARIANT: the key length-prefixes and
+//!   commits to every CLSAG verification input — message, signature, ring, and
+//!   pseudo-output — so no two distinct statements collide.
+//!   THREAT: a generic caller whose `message` does not already commit to the ring
+//!   and pseudo-output could otherwise share a cache slot across distinct
+//!   statements, accepting a ring signature verified against different inputs.
+//!   TESTS: `ring_sig_statement_cache_key_commits_to_every_field`.
 
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

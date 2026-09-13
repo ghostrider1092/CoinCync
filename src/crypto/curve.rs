@@ -2,6 +2,63 @@
 //!
 //! Real elliptic curve cryptography using curve25519-dalek.
 //! This module provides the foundational EC operations for CoinCync.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `generator`** — INVARIANT: `generator()` (Ristretto basepoint) and
+//!   `generator_h()` (the hardcoded bulletproofs value generator) are fixed,
+//!   independent, and never the identity, so `C = v*H + r*G` is binding.
+//!   THREAT: a swapped/identity generator makes commitments non-binding or lets
+//!   a forged `H` cancel the value term (inflation).
+//!   TESTS: `generators_are_not_identity`.
+//! - **§2 `hash_to_point`** — INVARIANT: a deterministic, domain-separated map
+//!   (`from_uniform_bytes(Sha3-512("CoinCync_hash_to_point_v1"||data))`) whose
+//!   output is a valid non-identity point pinned by a frozen golden vector.
+//!   THREAT: a drifted/undomain-separated hash breaks key-image `Hp(P)` and lets
+//!   two contexts collide.
+//!   TESTS: `hash_to_point_kat_matches_spec_and_golden`,
+//!   `hash_to_point_is_deterministic`, `hash_to_point_different_inputs_different_points`,
+//!   `hash_to_point_with_empty_input`.
+//! - **§3 `hash_to_scalar`** — INVARIANT: deterministic, domain-separated, and
+//!   unbiased (`from_bytes_mod_order_wide` over Sha3-512), pinned by a golden
+//!   vector. THREAT: biased or non-domain-separated challenges weaken Fiat-Shamir
+//!   soundness.
+//!   TESTS: `hash_to_scalar_kat_matches_spec_and_golden`,
+//!   `hash_to_scalar_is_deterministic_and_domain_separated`.
+//! - **§4 `SecretScalar`** — INVARIANT: `from_bytes` reduces mod the group order
+//!   `l` (documented reducing constructor) while `from_canonical_bytes` rejects
+//!   non-canonical input; entropy is zeroized and `Debug` is redacted.
+//!   THREAT: treating a `>= l` encoding as canonical enables scalar malleability;
+//!   raw entropy in a crash dump enables cold-boot key recovery.
+//!   TESTS: `scalar_from_group_order_wraps_to_zero`,
+//!   `scalar_from_group_order_minus_one_is_valid`, `test_secret_to_public`,
+//!   `test_child_derivation`.
+//! - **§5 `PublicPoint`** — INVARIANT: every decode path (`from_bytes`, serde,
+//!   Borsh) accepts only canonical, on-curve Ristretto encodings and round-trips
+//!   exactly; identity is representable but never smuggled in as a valid key.
+//!   THREAT: small-subgroup / non-canonical / identity-point decode enables
+//!   point-forgery and equality-confusion attacks.
+//!   TESTS: `public_point_deserialize_rejects_invalid_point_bytes`,
+//!   `public_point_serde_human_readable_roundtrip_and_bad_length`,
+//!   `identity_point_not_accepted_as_valid_public_key`,
+//!   `all_ff_not_valid_compressed_point`, `public_point_zeroize_wipes_underlying_point`.
+//! - **§6 `KeyImage`** — INVARIANT: `I = x*Hp(P)` with `P = x*G`, deterministic
+//!   per secret and pinned to the Monero construction by a golden vector; decode
+//!   rejects non-curve bytes. THREAT: zero/identity or non-canonical key images
+//!   enable double-spend / key-image forgery (Monero 2017 zero-key-image class).
+//!   TESTS: `key_image_kat_matches_monero_spec_and_golden`, `test_key_image`,
+//!   `key_image_from_bytes_rejects_invalid_point`, `keyimage_from_zero_scalar_handled`,
+//!   `monero_2017_zero_key_image_rejected`.
+//! - **§7 `Commitment`** — INVARIANT: `C = v*H + r*G` (Monero convention) is
+//!   binding and additively homomorphic (`commit(v1,b1)+commit(v2,b2) ==
+//!   commit(v1+v2,b1+b2)`); `from_bytes` rejects invalid points.
+//!   THREAT: a non-homomorphic or non-binding commitment breaks the balance
+//!   equation and enables value inflation.
+//!   TESTS: `test_commitment`, `test_commitment_homomorphic`,
+//!   `pedersen_commitment_is_homomorphic`, `commitment_from_bytes_rejects_invalid_point`,
+//!   `commitment_to_zero_with_zero_blinding_is_identity`.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use curve25519_dalek::{
@@ -453,6 +510,68 @@ mod tests {
     use super::*;
     use rand::rngs::OsRng;
 
+    // ── AUDIT KAT vectors (crypto C1) ──────────────────────────────────────
+    // Every other crypto test is a self-round-trip, so a self-consistent-but-
+    // nonstandard construction (wrong domain tag, swapped hash, wrong curve op)
+    // survives. These pin the EXACT construction two ways: (1) a spec-derivation
+    // that recomputes the documented formula independently of the production
+    // code path, and (2) a frozen golden hex vector — a portable test vector an
+    // external auditor can regenerate / cross-check against a reference impl.
+
+    #[test]
+    fn hash_to_point_kat_matches_spec_and_golden() {
+        use sha3::{Digest, Sha3_512};
+        for input in [b"".as_slice(), b"coincync-kat".as_slice(), &[0xFFu8; 40][..]] {
+            let mut h = Sha3_512::new();
+            h.update(b"CoinCync_hash_to_point_v1");
+            h.update(input);
+            let expected = RistrettoPoint::from_uniform_bytes(&h.finalize().into());
+            assert_eq!(
+                hash_to_point(input).compress(),
+                expected.compress(),
+                "hash_to_point must be from_uniform_bytes(Sha3-512(\"CoinCync_hash_to_point_v1\"||data))"
+            );
+        }
+        // Golden vector, empty input.
+        assert_eq!(
+            hex::encode(hash_to_point(b"").compress().to_bytes()),
+            "70f2a90bf2118f38498db1c6a9f710ca715ae3a118208da68bceeff2ca91672d"
+        );
+    }
+
+    #[test]
+    fn hash_to_scalar_kat_matches_spec_and_golden() {
+        use sha3::{Digest, Sha3_512};
+        for input in [b"".as_slice(), b"coincync-kat".as_slice()] {
+            let mut h = Sha3_512::new();
+            h.update(b"CoinCync_hash_to_scalar_v1");
+            h.update(input);
+            let expected = Scalar::from_bytes_mod_order_wide(&h.finalize().into());
+            assert_eq!(
+                hash_to_scalar(input),
+                expected,
+                "hash_to_scalar must be from_bytes_mod_order_wide(Sha3-512(\"CoinCync_hash_to_scalar_v1\"||data))"
+            );
+        }
+        assert_eq!(hex::encode(hash_to_scalar(b"").to_bytes()), "cb3465a369bed0c953d7585c3a6eef35bd405c3bc57730808921fa957a229f0d");
+    }
+
+    #[test]
+    fn key_image_kat_matches_monero_spec_and_golden() {
+        // Monero key image: I = x·Hp(P), P = x·G. Fixed secret for determinism.
+        let x = SecretScalar::from_bytes([0x11u8; 32]);
+        let p = x.to_public();
+        let hp = hash_to_point(&p.to_bytes());
+        let expected = *x.as_scalar() * hp; // x·Hp(x·G)
+        let ki = KeyImage::from_secret(&x);
+        assert_eq!(
+            ki.to_bytes(),
+            expected.compress().to_bytes(),
+            "key image must equal x·Hp(x·G)"
+        );
+        assert_eq!(hex::encode(ki.to_bytes()), "147a351de17f404f9e7f382c538622dcb7b844fac3dd607cef25d1873b515616");
+    }
+
     #[test]
     fn test_secret_to_public() {
         let secret = SecretScalar::random(&mut OsRng);
@@ -551,5 +670,86 @@ mod tests {
         let bytes = identity.to_bytes();
         let recovered = PublicPoint::from_bytes(bytes).unwrap();
         assert!(recovered.is_identity());
+    }
+
+    #[test]
+    fn commitment_from_bytes_rejects_invalid_point() {
+        // 32 bytes that do not decompress to a valid Ristretto point.
+        assert!(Commitment::from_bytes([0xFF; 32]).is_none());
+    }
+
+    #[test]
+    fn key_image_from_bytes_rejects_invalid_point() {
+        // 32 bytes that do not decompress to a valid Ristretto point.
+        assert!(KeyImage::from_bytes([0xFF; 32]).is_none());
+    }
+
+    #[test]
+    fn hash_to_scalar_is_deterministic_and_domain_separated() {
+        use curve25519_dalek::scalar::Scalar;
+        use sha3::{Digest, Sha3_512};
+
+        let data = b"coincync-domain-sep-input";
+
+        // Deterministic: identical input yields identical scalar.
+        assert_eq!(hash_to_scalar(data), hash_to_scalar(data));
+
+        // Input-sensitive: different input yields a different scalar.
+        assert_ne!(hash_to_scalar(data), hash_to_scalar(b"other-input"));
+
+        // Domain-separated: the same bytes hashed under a different domain
+        // prefix produce a different scalar than hash_to_scalar's fixed
+        // "CoinCync_hash_to_scalar_v1" domain.
+        let mut h = Sha3_512::new();
+        h.update(b"CoinCync_some_other_domain_v1");
+        h.update(data);
+        let other_domain = Scalar::from_bytes_mod_order_wide(&h.finalize().into());
+        assert_ne!(hash_to_scalar(data), other_domain);
+    }
+
+    #[test]
+    fn public_point_deserialize_rejects_invalid_point_bytes() {
+        use borsh::BorshDeserialize;
+
+        // Borsh (binary codec): 32 bytes that are not a valid point => Err.
+        let borsh_res = PublicPoint::try_from_slice(&[0xFF; 32]);
+        assert!(borsh_res.is_err());
+
+        // Serde (human-readable): a valid-length hex string whose bytes are not
+        // a valid curve point => Err.
+        let bad_point_hex = format!("\"{}\"", hex::encode([0xFF; 32]));
+        let serde_res: std::result::Result<PublicPoint, _> = serde_json::from_str(&bad_point_hex);
+        assert!(serde_res.is_err());
+    }
+
+    #[test]
+    fn public_point_serde_human_readable_roundtrip_and_bad_length() {
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+
+        // Round-trip through serde_json (human-readable => hex string).
+        let json = serde_json::to_string(&public).unwrap();
+        let recovered: PublicPoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(public, recovered);
+
+        // A hex string of the wrong length is rejected.
+        let short: std::result::Result<PublicPoint, _> = serde_json::from_str("\"00\"");
+        assert!(short.is_err());
+    }
+
+    #[test]
+    fn public_point_zeroize_wipes_underlying_point() {
+        let secret = SecretScalar::random(&mut OsRng);
+        let mut public = secret.to_public();
+        assert!(!public.is_identity());
+
+        let before = public;
+        let before_bytes = public.to_bytes();
+
+        public.zeroize();
+
+        // After zeroize the point no longer holds its original value.
+        assert_ne!(public, before);
+        assert_ne!(public.to_bytes(), before_bytes);
     }
 }

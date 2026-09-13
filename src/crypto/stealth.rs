@@ -57,6 +57,78 @@
 //! - Sensitive keys are zeroized on drop (prevents memory disclosure)
 //! - Domain-separated hashing (prevents cross-protocol attacks)
 //! - Proper ECDH using curve25519-dalek (not hash-based approximation)
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `generate_stealth_address_checked_ext`** — INVARIANT: the one-time key
+//!   is `P = H(r·view_pub ‖ idx)·G + spend_pub`; main addresses publish `R = r·G`
+//!   and subaddresses publish `R = r·D_i` so `a·R` matches the recipient's
+//!   published view key, keeping every output detectable and spendable.
+//!   THREAT: wrong tx-pubkey form yields unspendable outputs or cross-output
+//!   address reuse / linkage. TESTS: `generated_address_is_detected_by_recipient`,
+//!   `generate_stealth_address_for_selects_form_by_address_type`,
+//!   `test_stealth_address_roundtrip`.
+//! - **§2 `is_output_ours`** — INVARIANT: ownership detection validates every
+//!   curve point, computes `a·R` ECDH, compares in constant time, and zeroizes
+//!   the shared-secret buffer (R-7 class). THREAT: timing side-channel leaking
+//!   which outputs are ours, plus invalid-point / small-subgroup attacks on
+//!   malformed inputs. TESTS: `is_output_ours_is_deterministic`,
+//!   `is_output_ours_rejects_non_curve_tx_public`,
+//!   `is_output_ours_rejects_noncurve_stealth_public_key`,
+//!   `is_output_ours_rejects_noncurve_spend_pub`.
+//! - **§3 `owns`** — INVARIANT (R-8): the cached scan path runs the full
+//!   ECDH+hash+compare pipeline in uniform wall-clock time even for malformed
+//!   `tx_public_key` (identity substitution), and carries decode validity into
+//!   the final result so an identity-derived point cannot authenticate ownership.
+//!   THREAT: R-8 latency distinguisher ("was that output well-formed?") and
+//!   forged-tx-public ownership claims. TESTS:
+//!   `recipient_owns_rejects_malformed_tx_public_forgery`,
+//!   `test_recipient_keys_scanning`, `test_batch_scanning`.
+//! - **§4 `compute_one_time_secret`** — INVARIANT: the spend key
+//!   `x = H(shared ‖ idx) + spend_secret` satisfies `P = x·G`; the ECDH
+//!   `scalar_input` buffer is zeroized after derivation. THREAT: derivation
+//!   mismatch producing unspendable outputs, or ECDH secret residue on the heap.
+//!   TESTS: `one_time_secret_satisfies_spending_equation`,
+//!   `compute_one_time_secret_is_deterministic`, `test_one_time_secret_derivation`,
+//!   `compute_one_time_secret_rejects_invalid_tx_public_key`.
+//! - **§5 `subaddress_scalar`** — INVARIANT: `m = hash_domain("COINCYNC_SUBADDR_v1",
+//!   view_secret ‖ account_le ‖ index_le)` is the single, account-aware,
+//!   domain-separated source of truth shared by wallet and audit derivation, and
+//!   the raw-view_secret input buffer is zeroized before drop (R-10, R-11, #26).
+//!   THREAT: audit vs wallet derivation divergence so the audit key cannot scan
+//!   wallet subaddresses (#26); unversioned-domain collisions (R-11); view_secret
+//!   heap residue (R-10). TESTS:
+//!   `subaddress_scalar_is_deterministic_and_domain_separated`,
+//!   `test_subaddress_generation`,
+//!   `subaddress_view_keys_are_unlinkable_and_output_is_detectable`,
+//!   `subaddress_generate_rejects_invalid_spend_public`.
+//! - **§6 `coinbase_stealth_address`** — INVARIANT: `tx_secret =
+//!   H(miner_secret ‖ height)` is unique per height and unpredictable to
+//!   outsiders, and the buffer holding `miner_secret` is zeroized. THREAT:
+//!   precomputable `H(height)` coinbase linkage (anyone with the view key links
+//!   all future coinbases) and stealth_index collisions breaking maturity
+//!   validation. TESTS: `test_regression_coinbase_stealth_uniqueness`,
+//!   `coinbase_stealth_address_rejects_invalid_view_and_spend`.
+//! - **§7 `to_scanner`** — INVARIANT (R-9 / #26): the audit scanner enumerates
+//!   the full `(0..=max_account, 0..=max_index)` subaddress grid through the
+//!   wallet-shared `subaddress_scalar`, so every subaddress output is detected
+//!   and audit keys always match wallet keys. THREAT: R-9 audit blind spot
+//!   (outputs to subaddresses go undetected) and the #26 multi-account gap.
+//!   TESTS: `audit_key_multi_account_scan_finds_nonzero_account_subaddress`,
+//!   `test_regression_subaddress_scanner_detection`, `test_audit_key`.
+//! - **§8 `generate_stealth_outputs`** — INVARIANT (A4-CR-03): rejects more than
+//!   255 recipients so the `idx as u8` cast cannot wrap. THREAT: index wraparound
+//!   produces duplicate output indices, breaking one-time-key uniqueness. TESTS:
+//!   `generate_stealth_outputs_rejects_more_than_255_recipients`.
+//! - **§9 `from_bytes_checked`** — INVARIANT (M1): hex/byte decoding accepts a
+//!   stealth address only after validating both `public_key` and `tx_public_key`
+//!   as canonical Ristretto points. THREAT: invalid-point attacks feeding
+//!   non-curve bytes into downstream ECDH. TESTS:
+//!   `stealth_from_hex_rejects_noncurve_point`,
+//!   `stealth_from_bytes_checked_rejects_invalid_point`,
+//!   `stealth_from_hex_rejects_wrong_length`, `stealth_to_bytes_from_bytes_roundtrip`.
 
 use super::curve::{hash_to_scalar, PublicPoint, SecretScalar};
 use super::secure::ct_eq;
@@ -1723,5 +1795,260 @@ mod tests {
         assert_ne!(sub0.spend_public.as_bytes(), sub1.spend_public.as_bytes());
         assert_ne!(sub1.spend_public.as_bytes(), sub2.spend_public.as_bytes());
         assert_ne!(sub0.spend_public.as_bytes(), sub2.spend_public.as_bytes());
+    }
+
+    // ------------------------------------------------------------------
+    // Additional coverage: input-validation / error paths and derivation
+    // helpers. `[0xFF; 32]` is intentionally NOT a valid compressed
+    // Ristretto point (asserted where relevant), so it exercises the
+    // "invalid curve point" branches.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn is_output_ours_rejects_noncurve_stealth_public_key() {
+        // Valid tx_public_key (so we get past the tx_point check) but a
+        // non-curve one-time public_key must be rejected as not-ours.
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (view_secret, view_public) = generate_ec_keypair();
+
+        assert!(PublicPoint::from_bytes([0xFF; 32]).is_none());
+        let stealth = StealthAddress {
+            public_key: PublicKey::from_bytes([0xFF; 32]),
+            tx_public_key: view_public, // any valid curve point
+        };
+
+        assert!(
+            !is_output_ours(&stealth, &view_secret, &spend_public, 0),
+            "non-curve stealth.public_key must be rejected"
+        );
+    }
+
+    #[test]
+    fn is_output_ours_rejects_noncurve_spend_pub() {
+        // Fully valid stealth address, but the caller's spend_pub is a
+        // non-curve point => must return false (not ours).
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (view_secret, view_public) = generate_ec_keypair();
+        let (stealth, _) = generate_stealth_address(&spend_public, &view_public, 0, &mut OsRng);
+
+        let bad_spend = PublicKey::from_bytes([0xFF; 32]);
+        assert!(PublicPoint::from_bytes([0xFF; 32]).is_none());
+
+        assert!(
+            !is_output_ours(&stealth, &view_secret, &bad_spend, 0),
+            "non-curve spend_pub must be rejected"
+        );
+    }
+
+    #[test]
+    fn compute_one_time_secret_rejects_invalid_tx_public_key() {
+        let (spend_secret, spend_public) = generate_ec_keypair();
+        let (view_secret, _view_public) = generate_ec_keypair();
+
+        let stealth = StealthAddress {
+            public_key: spend_public, // valid point, unused before the failure
+            tx_public_key: PublicKey::from_bytes([0xFF; 32]),
+        };
+        assert!(PublicPoint::from_bytes([0xFF; 32]).is_none());
+
+        assert!(
+            compute_one_time_secret(&stealth, &view_secret, &spend_secret, 0).is_err(),
+            "invalid tx_public_key must produce Err"
+        );
+    }
+
+    #[test]
+    fn recipient_keys_new_rejects_invalid_spend_public() {
+        let (view_secret, _view_public) = generate_ec_keypair();
+        let bad_spend = PublicKey::from_bytes([0xFF; 32]);
+        assert!(PublicPoint::from_bytes([0xFF; 32]).is_none());
+
+        assert!(
+            RecipientKeys::new(&view_secret, &bad_spend).is_err(),
+            "invalid spend public must produce Err"
+        );
+    }
+
+    #[test]
+    fn stealth_from_hex_rejects_wrong_length() {
+        // 32 bytes = 64 hex chars, but a stealth address must be 64 bytes.
+        let short = hex::encode([0u8; 32]);
+        assert!(
+            StealthAddress::from_hex(&short).is_err(),
+            "wrong-length hex must be rejected"
+        );
+    }
+
+    #[test]
+    fn stealth_from_hex_rejects_noncurve_point() {
+        // Correct length (64 bytes) but the bytes are not valid curve points.
+        let bad = hex::encode([0xFF; 64]);
+        assert!(PublicPoint::from_bytes([0xFF; 32]).is_none());
+        assert!(
+            StealthAddress::from_hex(&bad).is_err(),
+            "non-curve point in hex must be rejected"
+        );
+    }
+
+    #[test]
+    fn stealth_from_bytes_checked_rejects_invalid_point() {
+        // Non-curve bytes => None. (Note: the Ristretto identity encoding is a
+        // VALID point and is therefore accepted, so we assert on invalid bytes
+        // rather than identity.)
+        let bytes = [0xFF; 64];
+        assert!(PublicPoint::from_bytes([0xFF; 32]).is_none());
+        assert!(
+            StealthAddress::from_bytes_checked(&bytes).is_none(),
+            "invalid curve point must yield None"
+        );
+        // from_bytes delegates to from_bytes_checked, so it must reject too.
+        assert!(StealthAddress::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn stealth_to_bytes_from_bytes_roundtrip() {
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (_view_secret, view_public) = generate_ec_keypair();
+        let (stealth, _) = generate_stealth_address(&spend_public, &view_public, 0, &mut OsRng);
+
+        let bytes = stealth.to_bytes();
+        let restored = StealthAddress::from_bytes(&bytes).expect("valid points round-trip");
+
+        assert_eq!(stealth.public_key.as_bytes(), restored.public_key.as_bytes());
+        assert_eq!(
+            stealth.tx_public_key.as_bytes(),
+            restored.tx_public_key.as_bytes()
+        );
+    }
+
+    #[test]
+    fn coinbase_stealth_address_rejects_invalid_view_and_spend() {
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (_view_secret, view_public) = generate_ec_keypair();
+        let miner_secret = [7u8; 32];
+        let bad = PublicKey::from_bytes([0xFF; 32]);
+        assert!(PublicPoint::from_bytes([0xFF; 32]).is_none());
+
+        // Invalid view public (checked first in the fn).
+        assert!(
+            coinbase_stealth_address(&spend_public, &bad, 1, 0, &miner_secret).is_err(),
+            "invalid view public must produce Err"
+        );
+        // Invalid spend public (with a valid view public).
+        assert!(
+            coinbase_stealth_address(&bad, &view_public, 1, 0, &miner_secret).is_err(),
+            "invalid spend public must produce Err"
+        );
+    }
+
+    #[test]
+    fn subaddress_generate_rejects_invalid_spend_public() {
+        let (view_secret, _view_public) = generate_ec_keypair();
+        let bad_spend = PublicKey::from_bytes([0xFF; 32]);
+        assert!(PublicPoint::from_bytes([0xFF; 32]).is_none());
+
+        assert!(
+            Subaddress::generate(&bad_spend, &view_secret, 0, 0).is_err(),
+            "invalid spend public must produce Err"
+        );
+    }
+
+    #[test]
+    fn subaddress_scalar_is_deterministic_and_domain_separated() {
+        let (view_secret, _view_public) = generate_ec_keypair();
+
+        // Deterministic: identical inputs => identical scalar.
+        let a = subaddress_scalar(&view_secret, 0, 1);
+        let b = subaddress_scalar(&view_secret, 0, 1);
+        assert_eq!(
+            a.to_bytes(),
+            b.to_bytes(),
+            "same inputs must yield the same scalar"
+        );
+
+        // Different index => different scalar.
+        let diff_index = subaddress_scalar(&view_secret, 0, 2);
+        assert_ne!(
+            a.to_bytes(),
+            diff_index.to_bytes(),
+            "different index must yield a different scalar"
+        );
+
+        // Different account => different scalar (account-aware derivation).
+        let diff_account = subaddress_scalar(&view_secret, 1, 1);
+        assert_ne!(
+            a.to_bytes(),
+            diff_account.to_bytes(),
+            "different account must yield a different scalar"
+        );
+    }
+
+    #[test]
+    fn generate_stealth_address_checked_rejects_invalid_keys() {
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (_view_secret, view_public) = generate_ec_keypair();
+        let bad = PublicKey::from_bytes([0xFF; 32]);
+        assert!(PublicPoint::from_bytes([0xFF; 32]).is_none());
+
+        // Invalid spend public (checked first).
+        assert!(
+            generate_stealth_address_checked(&bad, &view_public, 0, &mut OsRng).is_err(),
+            "invalid spend public must produce Err"
+        );
+        // Invalid view public (with a valid spend public).
+        assert!(
+            generate_stealth_address_checked(&spend_public, &bad, 0, &mut OsRng).is_err(),
+            "invalid view public must produce Err"
+        );
+    }
+
+    #[test]
+    fn generate_stealth_outputs_rejects_more_than_255_recipients() {
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (_view_secret, view_public) = generate_ec_keypair();
+        let address = Address::new(Network::Testnet, spend_public, view_public);
+
+        // 256 recipients trips the `idx as u8` wraparound guard.
+        let too_many: Vec<&Address> = std::iter::repeat(&address).take(256).collect();
+        assert!(
+            generate_stealth_outputs(&too_many, &mut OsRng).is_err(),
+            ">255 recipients must be rejected"
+        );
+
+        // A modest count within the limit still succeeds.
+        let ok: Vec<&Address> = std::iter::repeat(&address).take(2).collect();
+        let outputs = generate_stealth_outputs(&ok, &mut OsRng).expect("<=255 recipients allowed");
+        assert_eq!(outputs.len(), 2);
+    }
+
+    #[test]
+    fn subaddress_manager_next_and_get_or_generate_cache_and_increment() {
+        let (_spend_secret, spend_public) = generate_ec_keypair();
+        let (view_secret, _view_public) = generate_ec_keypair();
+        let mut mgr = SubaddressManager::new(spend_public, view_secret.clone());
+
+        // next() hands out increasing indices starting from 0.
+        let i0 = mgr.next().unwrap().index;
+        let i1 = mgr.next().unwrap().index;
+        assert_eq!(i0, 0);
+        assert_eq!(i1, 1);
+
+        // get_or_generate caches: the same index yields byte-identical keys
+        // across calls (second call is served from the cache).
+        let first = mgr.get_or_generate(5).unwrap().spend_public;
+        let second = mgr.get_or_generate(5).unwrap().spend_public;
+        assert_eq!(
+            first.as_bytes(),
+            second.as_bytes(),
+            "get_or_generate must return the cached subaddress"
+        );
+
+        // Re-fetching an index produced by next() also hits the cache and
+        // matches the deterministic derivation for (account 0, index 0).
+        let cached0 = mgr.get_or_generate(0).unwrap().spend_public;
+        let expected0 = Subaddress::generate(&spend_public, &view_secret, 0, 0)
+            .unwrap()
+            .spend_public;
+        assert_eq!(cached0.as_bytes(), expected0.as_bytes());
     }
 }

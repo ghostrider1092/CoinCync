@@ -1,6 +1,47 @@
 //! Parallel Bulletproofs verification
 //!
 //! Verifies multiple range proofs in parallel for faster block validation.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `ProofTask`** — INVARIANT: a task carries the commitment bytes and raw
+//!   proof bytes intact, and `cache_key` is a pure function of both so identical
+//!   proofs hit the same cache slot. THREAT: a mismatched or mutable cache key
+//!   would let a poisoned/aliased result stand in for a different proof.
+//!   TESTS: `test_proof_task`.
+//! - **§2 `verify_all`** — INVARIANT: the parallel batch result agrees byte-for-byte
+//!   with the per-proof (`verify_single`) ground truth and reports exactly the invalid
+//!   indices; it also CONSUMES the pending queue (R-30) so a second call sees an empty
+//!   set rather than silently re-reporting success. THREAT: a batch that accepted a
+//!   proof the single verifier rejects (crypto M2) would let an inflating output pass
+//!   block validation; the R-30 side effect could mask an unverified re-submission.
+//!   TESTS: `parallel_batch_agrees_with_single_and_flags_the_invalid_proof`,
+//!   `test_parallel_verifier_empty`, `test_empty_batch`.
+//! - **§3 `verify_single`** — INVARIANT: a proof is valid only if its range proof parses
+//!   AND its commitment passes checked Ristretto decode (A6-COMMITMENT) AND the range
+//!   proof verifies against that commitment. THREAT: unchecked point decode would accept
+//!   non-Ristretto bytes, breaking the homomorphic balance equation and enabling inflation.
+//!   TESTS: `parallel_batch_agrees_with_single_and_flags_the_invalid_proof`.
+//! - **§4 `ParallelVerifyResult`** — INVARIANT: `all_valid()` is true iff `invalid == 0`,
+//!   and `invalid_indices` lists precisely the failing positions. THREAT: an all-valid
+//!   verdict that hid a failing proof would admit an invalid output into a block.
+//!   TESTS: `test_empty_batch`, `parallel_batch_agrees_with_single_and_flags_the_invalid_proof`.
+//! - **§5 `verify_block_proofs`** — INVARIANT: every (tx_hash, idx, commitment, proof)
+//!   output in a block is verified through the same parallel engine and gated on the
+//!   aggregate result. THREAT: an unverified block output would let an inflating tx confirm.
+//!   TESTS: (gap — covered indirectly via `verify_all`/`verify_single` batch tests; no
+//!   dedicated block-level test).
+//! - **§6 `AggregatedProofVerifier`** — INVARIANT: a single aggregated proof verifies only
+//!   when a proof is set, the commitment list is non-empty, and every commitment passes
+//!   checked decode (A6-COMMITMENT) before `verify_range_proofs`. THREAT: accepting an
+//!   empty set or a non-canonical commitment would forge a balanced-looking aggregate.
+//!   TESTS: (gap — no dedicated aggregated-verifier test in this crate).
+//! - **§7 `VerifierStats`** — INVARIANT: total-verified / cache-hit / time counters are
+//!   monotonic atomic accumulators, correct under the parallel `par_iter` path. THREAT:
+//!   torn or racy counters would corrupt operational telemetry, not consensus.
+//!   TESTS: (gap — telemetry only; not consensus-critical).
 
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -435,5 +476,57 @@ mod tests {
         assert_eq!(result.valid, 0);
         assert_eq!(result.invalid, 0);
         assert!(result.all_valid(), "Empty batch should be considered valid");
+    }
+
+    /// AUDIT (crypto M2): the parallel verifier was only tested on empty input.
+    /// This is the property that actually matters — a batch containing one
+    /// invalid range proof must (a) AGREE with the per-proof (`verify_single`)
+    /// ground truth and (b) report exactly that proof's index. A batch that
+    /// silently accepted a proof the single verifier rejects would let an
+    /// inflating output through block validation (`verify_block_proofs`).
+    #[test]
+    fn parallel_batch_agrees_with_single_and_flags_the_invalid_proof() {
+        use crate::crypto::{create_range_proof, BlindingFactor, PedersenCommitment};
+        use crate::primitives::Amount;
+        use rand::rngs::OsRng;
+
+        let mk_valid = |v: u64| -> ProofTask {
+            let amount = Amount::from_atomic(v);
+            let blinding = BlindingFactor::random(&mut OsRng);
+            let proof = create_range_proof(amount, &blinding, &mut OsRng).unwrap();
+            let commitment = PedersenCommitment::commit(v, &blinding).to_bytes();
+            ProofTask::new(commitment, proof.try_to_bytes().unwrap())
+        };
+
+        // Invalid: a well-formed range proof paired with a VALID but MISMATCHED
+        // commitment → verify_range_proof rejects (exercises the real check, not
+        // just point decoding).
+        let invalid = {
+            let bad_commitment =
+                PedersenCommitment::commit(999, &BlindingFactor::random(&mut OsRng)).to_bytes();
+            ProofTask::new(bad_commitment, mk_valid(500).proof_data)
+        };
+        let tasks = vec![mk_valid(1000), mk_valid(2_000_000), invalid, mk_valid(42)];
+
+        // Per-proof ground truth — the batch must agree with this exactly.
+        let singles: Vec<bool> = tasks
+            .iter()
+            .map(ParallelProofVerifier::verify_single)
+            .collect();
+        assert_eq!(singles, vec![true, true, false, true], "single-proof ground truth");
+
+        let mut verifier = ParallelProofVerifier::new();
+        verifier.use_cache = false; // deterministic; independent of global cache state
+        verifier.add_all(tasks);
+        let result = verifier.verify_all();
+        assert_eq!(result.total, 4);
+        assert_eq!(result.valid, 3);
+        assert_eq!(result.invalid, 1);
+        assert_eq!(
+            result.invalid_indices,
+            vec![2],
+            "batch must flag exactly the invalid proof — never accept one the single verifier rejects"
+        );
+        assert!(!result.all_valid());
     }
 }
