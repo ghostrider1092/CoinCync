@@ -71,10 +71,12 @@
 //!   `rpc_public_bind_redacts_real_peer_fixture_fields`,
 //!   `rpc_loopback_exposes_peer_fixture_fields_when_not_minimized`,
 //!   `rpc_loopback_env_override_forces_metadata_minimization`.
-//! - **§6 `rpc_clamp_audit_range` (range-scan bounds)** — INVARIANT: audit/range
-//!   RPCs clamp the span to the max audit block span and reject inverted or oversized
-//!   ranges, saturating near `u64::MAX`. THREAT: a resource-exhaustion DoS via an
-//!   enormous range scan. TESTS: `get_block_range_span_capped_at_100`,
+//! - **§6 `rpc_clamp_audit_range` (range-scan bounds)** — [moved to
+//!   `rpc::handlers::audit` with the chain-audit handlers, issue #107] INVARIANT:
+//!   audit/range RPCs clamp the span to the max audit block span and reject
+//!   inverted or oversized ranges, saturating near `u64::MAX`. THREAT: a
+//!   resource-exhaustion DoS via an enormous range scan.
+//!   TESTS: `get_block_range_span_capped_at_100`,
 //!   `get_block_range_u64_max_bounds_saturate`, `rpc_get_block_range_inverted`,
 //!   `check_zero_commitments_in_range_span_too_large_rejected`,
 //!   `check_zero_commitments_in_range_inverted_rejected`,
@@ -226,18 +228,18 @@ impl RpcServer {
 
 /// Shared state passed to every RPC method handler.
 #[derive(Clone)]
-struct RpcState {
-    chain: SharedBlockchain,
-    mempool: SharedMempool,
-    p2p: Option<Arc<P2PNode>>,
-    network_name: String,
-    auth_enabled: bool,
-    minimize_metadata: bool,
-    stratum_public_bind_requested: bool,
-    stratum_public_bind_ack: bool,
-    stratum_native_tls_enabled: bool,
-    stratum_tls_proxy_ack: bool,
-    stratum_transport_hardened: bool,
+pub(crate) struct RpcState {
+    pub(crate) chain: SharedBlockchain,
+    pub(crate) mempool: SharedMempool,
+    pub(crate) p2p: Option<Arc<P2PNode>>,
+    pub(crate) network_name: String,
+    pub(crate) auth_enabled: bool,
+    pub(crate) minimize_metadata: bool,
+    pub(crate) stratum_public_bind_requested: bool,
+    pub(crate) stratum_public_bind_ack: bool,
+    pub(crate) stratum_native_tls_enabled: bool,
+    pub(crate) stratum_tls_proxy_ack: bool,
+    pub(crate) stratum_transport_hardened: bool,
 }
 
 /// JSON numbers cannot portably carry all u128 values. Aggregate atomic supply
@@ -287,9 +289,6 @@ fn serialize_peer_info(peer: &crate::network::peer::PeerInfo, minimize_metadata:
 /// Maximum inclusive block span for CPU-heavy audit RPCs (`*_in_range`, `full_chain_audit`).
 pub const MAX_RPC_AUDIT_BLOCK_SPAN: u64 = 128;
 
-/// Refuse unbounded `verify_keyimage_uniqueness` scans on very long chains (local DoS mitigation).
-const MAX_RPC_KEYIMAGE_SCAN_CHAIN_HEIGHT: u64 = 25_000;
-
 fn rpc_listen_is_loopback(addr: SocketAddr) -> bool {
     match addr.ip() {
         std::net::IpAddr::V4(v4) => v4.is_loopback(),
@@ -302,31 +301,6 @@ fn rpc_env_bool(name: &str) -> Option<bool> {
         let t = v.trim();
         t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
     })
-}
-
-fn rpc_clamp_audit_range(
-    start: u64,
-    end: u64,
-) -> std::result::Result<(u64, u64), ErrorObjectOwned> {
-    if start > end {
-        return Err(ErrorObjectOwned::owned(
-            -32602,
-            "audit range: start must be <= end",
-            None::<()>,
-        ));
-    }
-    let span = end.saturating_sub(start).saturating_add(1);
-    if span > MAX_RPC_AUDIT_BLOCK_SPAN {
-        return Err(ErrorObjectOwned::owned(
-            -32602,
-            format!(
-                "audit range too large ({} blocks); max {} blocks per call",
-                span, MAX_RPC_AUDIT_BLOCK_SPAN
-            ),
-            None::<()>,
-        ));
-    }
-    Ok((start, end))
 }
 
 /// HTTP-layer Bearer check.
@@ -2371,285 +2345,46 @@ pub async fn start_rpc_server(
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
-    // ── verify_keyimage_uniqueness ──────────────────────────────
-    module.register_blocking_method("verify_keyimage_uniqueness", |_params, state, _ext| {
-        let chain_height = state.chain.height();
-        if chain_height > MAX_RPC_KEYIMAGE_SCAN_CHAIN_HEIGHT {
-            return Err(ErrorObjectOwned::owned(
-                -32003,
-                format!(
-                    "verify_keyimage_uniqueness refused: chain height {} exceeds built-in limit {} (CPU DoS mitigation; use range audit RPCs or raise limit after ops review)",
-                    chain_height, MAX_RPC_KEYIMAGE_SCAN_CHAIN_HEIGHT
-                ),
-                None::<()>,
-            ));
-        }
-        let mut seen = std::collections::HashSet::new();
-        let mut duplicates: Vec<String> = Vec::new();
+    // ── chain-audit RPCs (handlers live in rpc::handlers::audit) ────────
+    // CPU-heavy full/range scans, kept on the blocking pool via
+    // register_blocking_method exactly as before; each closure just forwards to
+    // the extracted handler (issue #107).
+    module
+        .register_blocking_method("verify_keyimage_uniqueness", |_params, state, _ext| {
+            crate::rpc::handlers::audit::verify_keyimage_uniqueness(&state)
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
-        for h in 0..=chain_height {
-            if let Some(block) = state.chain.get_block_by_height(h) {
-                for tx in &block.transactions {
-                    if tx.is_coinbase() { continue; }
-                    for input in &tx.inputs {
-                        let ki_hex = hex::encode(input.key_image.as_bytes());
-                        if !seen.insert(ki_hex.clone()) {
-                            duplicates.push(ki_hex);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok::<_, ErrorObjectOwned>(json!({
-            "valid": duplicates.is_empty(),
-            "duplicates": duplicates.len(),
-            "duplicate_images": &duplicates[..duplicates.len().min(10)],
-            "total_checked": seen.len(),
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
-
-    // ── check_zero_commitments_in_range ─────────────────────────
     module
         .register_blocking_method("check_zero_commitments_in_range", |params, state, _ext| {
-            let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-                ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
-            })?;
-            let (start, end) = rpc_clamp_audit_range(start, end)?;
-            let mut zero_count = 0u64;
-            let mut locations = Vec::new();
-
-            for h in start..=end {
-                if let Some(block) = state.chain.get_block_by_height(h) {
-                    for tx in &block.transactions {
-                        for (idx, output) in tx.outputs.iter().enumerate() {
-                            if output.commitment == [0u8; 32] {
-                                zero_count += 1;
-                                locations.push(json!({
-                                    "height": h,
-                                    "tx_hash": tx.hash().to_hex(),
-                                    "output_index": idx,
-                                    "issue": "zero_commitment",
-                                }));
-                            }
-                            if output.stealth_address.as_bytes() == &[0u8; 32] {
-                                zero_count += 1;
-                                locations.push(json!({
-                                    "height": h,
-                                    "tx_hash": tx.hash().to_hex(),
-                                    "output_index": idx,
-                                    "issue": "zero_stealth_address",
-                                }));
-                            }
-                        }
-                    }
-                }
-            }
-
-            Ok::<_, ErrorObjectOwned>(json!({
-                "zero_count": zero_count,
-                "locations": locations,
-            }))
+            crate::rpc::handlers::audit::check_zero_commitments_in_range(params, &state)
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
-    // ── verify_signatures_in_range ──────────────────────────────
     module
         .register_blocking_method("verify_signatures_in_range", |params, state, _ext| {
-            let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-                ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
-            })?;
-            let (start, end) = rpc_clamp_audit_range(start, end)?;
-            let mut checked = 0u64;
-            let mut failures = 0u64;
-            let mut findings = Vec::new();
-
-            for h in start..=end {
-                if let Some(block) = state.chain.get_block_by_height(h) {
-                    for tx in &block.transactions {
-                        if tx.is_coinbase() {
-                            continue;
-                        }
-                        for (idx, input) in tx.inputs.iter().enumerate() {
-                            checked += 1;
-                            if !crate::consensus::verify_ring_signature(&tx, input, idx) {
-                                failures += 1;
-                                findings.push(format!(
-                                    "Invalid CLSAG at h={} tx={} input={}",
-                                    h,
-                                    tx.hash().to_hex()[..16].to_string(),
-                                    idx
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-
-            Ok::<_, ErrorObjectOwned>(json!({
-                "valid": failures == 0,
-                "checked": checked,
-                "failures": failures,
-                "findings": &findings[..findings.len().min(50)],
-            }))
+            crate::rpc::handlers::audit::verify_signatures_in_range(params, &state)
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
-    // ── verify_range_proofs_in_range ────────────────────────────
     module
         .register_blocking_method("verify_range_proofs_in_range", |params, state, _ext| {
-            let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-                ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
-            })?;
-            let (start, end) = rpc_clamp_audit_range(start, end)?;
-            let mut checked = 0u64;
-            let mut failures = 0u64;
-            let mut findings = Vec::new();
-
-            for h in start..=end {
-                if let Some(block) = state.chain.get_block_by_height(h) {
-                    for tx in &block.transactions {
-                        if tx.is_coinbase() {
-                            continue;
-                        }
-                        checked += 1;
-                        if !crate::consensus::verify_output_range_proofs(&tx, h) {
-                            failures += 1;
-                            findings.push(format!(
-                                "Invalid range proof at h={} tx={}",
-                                h,
-                                tx.hash().to_hex()[..16].to_string()
-                            ));
-                        }
-                    }
-                }
-            }
-
-            Ok::<_, ErrorObjectOwned>(json!({
-                "valid": failures == 0,
-                "checked": checked,
-                "failures": failures,
-                "findings": &findings[..findings.len().min(50)],
-            }))
+            crate::rpc::handlers::audit::verify_range_proofs_in_range(params, &state)
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
-    // ── verify_commitment_balance_in_range ──────────────────────
     module
         .register_blocking_method(
             "verify_commitment_balance_in_range",
             |params, state, _ext| {
-                let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-                    ErrorObjectOwned::owned(
-                        -32602,
-                        format!("params: [start, end]: {}", e),
-                        None::<()>,
-                    )
-                })?;
-                let (start, end) = rpc_clamp_audit_range(start, end)?;
-                let mut checked = 0u64;
-                let mut failures = 0u64;
-                let mut findings = Vec::new();
-
-                for h in start..=end {
-                    if let Some(block) = state.chain.get_block_by_height(h) {
-                        for tx in &block.transactions {
-                            if tx.is_coinbase() {
-                                continue;
-                            }
-                            checked += 1;
-                            if !crate::consensus::verify_balance_proof(&tx) {
-                                failures += 1;
-                                findings.push(format!(
-                                    "Commitment imbalance at h={} tx={}",
-                                    h,
-                                    tx.hash().to_hex()[..16].to_string()
-                                ));
-                            }
-                        }
-                    }
-                }
-
-                Ok::<_, ErrorObjectOwned>(json!({
-                    "valid": failures == 0,
-                    "checked": checked,
-                    "failures": failures,
-                    "findings": &findings[..findings.len().min(50)],
-                }))
+                crate::rpc::handlers::audit::verify_commitment_balance_in_range(params, &state)
             },
         )
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
-    // ── full_chain_audit ────────────────────────────────────────
     module
         .register_blocking_method("full_chain_audit", |params, state, _ext| {
-            let (start, end): (u64, u64) = params.parse().map_err(|e: ErrorObjectOwned| {
-                ErrorObjectOwned::owned(-32602, format!("params: [start, end]: {}", e), None::<()>)
-            })?;
-            let (start, end) = rpc_clamp_audit_range(start, end)?;
-            let mut blocks_checked = 0u64;
-            let mut txs_checked = 0u64;
-            let mut findings = Vec::new();
-
-            for h in start..=end {
-                if let Some(block) = state.chain.get_block_by_height(h) {
-                    blocks_checked += 1;
-                    txs_checked += block.transactions.len() as u64;
-
-                    // Verify merkle root
-                    let tx_hashes: Vec<_> = block.transactions.iter().map(|tx| tx.hash()).collect();
-                    let computed_root = crate::primitives::merkle_root(&tx_hashes);
-                    if computed_root != block.header.tx_root {
-                        findings.push(format!("h={}: merkle root mismatch", h));
-                    }
-
-                    // Verify block reward
-                    let _expected_reward = crate::emission::calculate_block_reward(h);
-                    if let Some(coinbase) = block.transactions.first() {
-                        // Basic check: coinbase exists and is coinbase type
-                        if !coinbase.is_coinbase() {
-                            findings.push(format!("h={}: first tx is not coinbase", h));
-                        }
-                    }
-
-                    // Verify all transactions
-                    for tx in &block.transactions {
-                        if tx.is_coinbase() {
-                            continue;
-                        }
-
-                        // Structural validation
-                        if let Err(e) = crate::consensus::validate_transaction_basic(&tx) {
-                            findings.push(format!("h={}: structural: {}", h, e));
-                        }
-
-                        // Ring signatures
-                        for (idx, input) in tx.inputs.iter().enumerate() {
-                            if !crate::consensus::verify_ring_signature(&tx, input, idx) {
-                                findings.push(format!("h={}: CLSAG invalid input {}", h, idx));
-                            }
-                        }
-
-                        // Range proofs
-                        if !crate::consensus::verify_output_range_proofs(&tx, h) {
-                            findings.push(format!("h={}: range proof invalid", h));
-                        }
-
-                        // Balance
-                        if !crate::consensus::verify_balance_proof(&tx) {
-                            findings.push(format!("h={}: commitment imbalance", h));
-                        }
-                    }
-                }
-            }
-
-            Ok::<_, ErrorObjectOwned>(json!({
-                "valid": findings.is_empty(),
-                "blocks_checked": blocks_checked,
-                "txs_checked": txs_checked,
-                "findings": findings.len(),
-                "details": &findings[..findings.len().min(100)],
-            }))
+            crate::rpc::handlers::audit::full_chain_audit(params, &state)
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 

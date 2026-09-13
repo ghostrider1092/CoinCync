@@ -9,6 +9,7 @@
 //! yet, and the minimal method set for a live node lives directly in
 //! `server::start_rpc_server`.
 
+mod handlers;
 mod ratelimit;
 mod server;
 pub mod tls;
