@@ -10,6 +10,8 @@ pub mod background_sync;
 pub mod balance;
 pub mod churn;
 pub mod decoy_selection;
+#[cfg(feature = "hardware")]
+pub mod hardware;
 pub mod history;
 pub mod key_epoch;
 pub mod keys;
