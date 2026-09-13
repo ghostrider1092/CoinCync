@@ -357,3 +357,147 @@ impl Blockchain {
         count
     }
 }
+
+// ── sync-state + misc read-only getters (issue #108, queries expansion) ──
+// Interleaved in chain.rs with their sibling setters (set_sync_info,
+// set_work_behind, record_block_received, clear_phantom_target) which stay put;
+// only these read-only getters move.
+impl Blockchain {
+    pub fn get_difficulty_blocks(&self, up_to_height: u64) -> Vec<DifficultyBlock> {
+        // DB-sourced window (deterministic across nodes) — see
+        // main_chain_diff_block for why the in-memory cache was unsafe here.
+        let window = 144u64; // DIFFICULTY_LONG_WINDOW
+        let start = up_to_height.saturating_sub(window);
+        let mut blocks = Vec::new();
+        for h in start..up_to_height {
+            if let Some(d) = self.main_chain_diff_block(h) {
+                blocks.push(d);
+            }
+        }
+        blocks
+    }
+
+    /// Check if a key image has been spent
+    ///
+    /// SECURITY (A6-DUAL-UTXO): Check the in-memory UTXO set first, since it
+    /// is always kept up-to-date by add_block(). Falls back to DB only if the
+    /// in-memory set has no key images tracked (fresh startup edge case).
+    pub fn is_spent(&self, key_image: &KeyImage) -> bool {
+        // Primary: check in-memory UTXO set (always up-to-date)
+        let inner = self.inner.read();
+        if inner.utxos.output_count() > 0 || inner.utxos.contains_key_image(key_image) {
+            return inner.utxos.contains_key_image(key_image);
+        }
+        drop(inner);
+
+        // Fallback: check persistent DB (for fresh startup before UTXO rebuild)
+        if let Some(ref db) = self.db {
+            match db.utxos.is_spent(key_image) {
+                Ok(spent) => spent,
+                Err(e) => {
+                    tracing::error!("Failed to check key image: {}", e);
+                    // SECURITY: Fail closed - treat DB errors as "spent" to prevent
+                    // double-spend attacks when database is unavailable
+                    true
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Get target height (for sync progress, updated by P2P layer)
+    pub fn target_height(&self) -> u64 {
+        let peer_target = self
+            .peer_target_height
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if peer_target > 0 {
+            peer_target
+        } else {
+            self.height()
+        }
+    }
+
+    /// Raw peer-advertised target height (0 = no peer height info yet).
+    ///
+    /// Unlike [`Blockchain::target_height`], this does NOT fall back to the local
+    /// height when no peer info is available — callers detecting fork divergence
+    /// must distinguish "no peer height reported yet" (0) from "peers agree we're
+    /// at the tip".
+    pub fn peer_advertised_height(&self) -> u64 {
+        self.peer_target_height
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// FIX #17: single source of truth for tip staleness — exposes the shared
+    /// `last_block_received_at` atomic. Returns `None` if we've never received a
+    /// block from a peer since startup.
+    pub fn secs_since_last_block(&self) -> Option<u64> {
+        let last = self
+            .last_block_received_at
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if last == 0 {
+            return None;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Some(now.saturating_sub(last))
+    }
+
+    /// Returns true when the node is in a phantom-advertisement stall (synced
+    /// false, target == local+1, no peer block within `stall_secs`). The miner
+    /// uses this to relax the IBD gate for a block that must be mined locally.
+    pub fn is_phantom_stall(&self, stall_secs: u64) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.synced.load(Relaxed) {
+            return false;
+        }
+        let local_h = self.height();
+        let target_h = self.peer_target_height.load(Relaxed);
+        if target_h != local_h + 1 {
+            return false;
+        }
+        let last = self.last_block_received_at.load(Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // If `last` is 0 we have never accepted a peer block since startup;
+        // treat that as "long ago" so a phantom detected at boot still fires.
+        now.saturating_sub(last) >= stall_secs
+    }
+
+    /// Export all recorded checkpoints (hardcoded + auto-recorded from DB).
+    pub fn export_checkpoints(&self) -> Vec<(u64, Hash)> {
+        let mut checkpoints: Vec<(u64, Hash)> = crate::testnet::testnet_checkpoints()
+            .into_iter()
+            .map(|cp| (cp.height, cp.hash))
+            .collect();
+
+        if let Some(ref db) = self.db {
+            if let Ok(db_checkpoints) = db.state.get_checkpoints() {
+                for (height, hash) in db_checkpoints {
+                    if !checkpoints.iter().any(|(h, _)| *h == height) {
+                        checkpoints.push((height, hash));
+                    }
+                }
+            }
+        }
+
+        checkpoints.sort_by_key(|(h, _)| *h);
+        checkpoints
+    }
+
+    /// Return the current generation only while canonical chain state is stable.
+    pub fn stable_generation(&self) -> Option<u64> {
+        use std::sync::atomic::Ordering;
+
+        if self.state_updates_in_progress.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        let generation = self.state_generation.load(Ordering::Acquire);
+        (self.state_updates_in_progress.load(Ordering::Acquire) == 0).then_some(generation)
+    }
+}

@@ -368,6 +368,10 @@ mod fork_calc;
 /// verbatim and none takes `apply_lock`, so lock scope is unchanged.
 mod recovery;
 
+/// Chain-event ring-buffer methods (issue #108). record_event/get_events; no
+/// apply_lock, so lock scope is unchanged.
+mod events;
+
 /// Blockchain state machine with interior mutability
 pub struct Blockchain {
     /// Coarse serialization lock for the ENTIRE block-application operation
@@ -1195,38 +1199,7 @@ impl Blockchain {
         Ok(all_orphaned_txs)
     }
 
-    /// Record a chain event in the ring buffer (bounded, lock-free for readers).
-    fn record_event(
-        &self,
-        event_type: ChainEventType,
-        height: u64,
-        hash: &Hash,
-        details: serde_json::Value,
-    ) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let event = ChainEvent {
-            event_type,
-            height,
-            hash: hash.to_hex(),
-            timestamp: now,
-            details,
-        };
-        let mut inner = self.inner.write();
-        if inner.events.len() >= MAX_CHAIN_EVENTS {
-            inner.events.pop_front();
-        }
-        inner.events.push_back(event);
-    }
-
-    /// Get recent chain events (for explorer).
-    pub fn get_events(&self, limit: usize) -> Vec<ChainEvent> {
-        let inner = self.inner.read();
-        let limit = limit.min(inner.events.len());
-        inner.events.iter().rev().take(limit).cloned().collect()
-    }
+    // record_event / get_events moved to chain::events (issue #108).
 
     /// Process/add block to chain
     pub fn process_block(&self, block: Block) -> Result<BlockStatus> {
@@ -3053,78 +3026,8 @@ impl Blockchain {
     // main_chain_diff_block / fork_difficulty_window moved to chain::fork_calc
     // (issue #108).
 
-    pub fn get_difficulty_blocks(&self, up_to_height: u64) -> Vec<DifficultyBlock> {
-        // DB-sourced window (deterministic across nodes) — see
-        // main_chain_diff_block for why the in-memory cache was unsafe here.
-        let window = 144u64; // DIFFICULTY_LONG_WINDOW
-        let start = up_to_height.saturating_sub(window);
-        let mut blocks = Vec::new();
-        for h in start..up_to_height {
-            if let Some(d) = self.main_chain_diff_block(h) {
-                blocks.push(d);
-            }
-        }
-        blocks
-    }
-
-    /// Check if a key image has been spent
-    ///
-    /// Returns true if the key image exists in the spent key images set,
-    /// meaning the associated output has already been spent.
-    ///
-    /// SECURITY (A6-DUAL-UTXO): Check the in-memory UTXO set first, since it
-    /// is always kept up-to-date by add_block(). The persistent DB may not be
-    /// synchronized. Falls back to DB only if in-memory set has no key images
-    /// tracked (fresh startup edge case).
-    pub fn is_spent(&self, key_image: &KeyImage) -> bool {
-        // Primary: check in-memory UTXO set (always up-to-date)
-        let inner = self.inner.read();
-        if inner.utxos.output_count() > 0 || inner.utxos.contains_key_image(key_image) {
-            return inner.utxos.contains_key_image(key_image);
-        }
-        drop(inner);
-
-        // Fallback: check persistent DB (for fresh startup before UTXO rebuild)
-        if let Some(ref db) = self.db {
-            match db.utxos.is_spent(key_image) {
-                Ok(spent) => spent,
-                Err(e) => {
-                    tracing::error!("Failed to check key image: {}", e);
-                    // SECURITY: Fail closed - treat DB errors as "spent" to prevent
-                    // double-spend attacks when database is unavailable
-                    true
-                }
-            }
-        } else {
-            false
-        }
-    }
-
-    /// Get target height (for sync progress, updated by P2P layer)
-    pub fn target_height(&self) -> u64 {
-        let peer_target = self
-            .peer_target_height
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if peer_target > 0 {
-            peer_target
-        } else {
-            self.height()
-        }
-    }
-
-    /// Raw peer-advertised target height (0 = no peer height info yet).
-    ///
-    /// Unlike [`Chain::target_height`], this does NOT fall back to the local
-    /// height when no peer info is available. Callers detecting fork
-    /// divergence must distinguish "no peer height reported yet" (0) from
-    /// "peers agree we're at the tip". Used by the miner's fork-divergence
-    /// gate (2026-07-08 runaway-fork incident): a local tip running far
-    /// ahead of every peer's advertised height means our blocks aren't
-    /// being adopted — we're mining a worthless private fork.
-    pub fn peer_advertised_height(&self) -> u64 {
-        self.peer_target_height
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
+    // get_difficulty_blocks / is_spent / target_height / peer_advertised_height
+    // moved to chain::queries (issue #108).
 
     /// Update sync info from P2P layer
     pub fn set_sync_info(&self, synced: bool, target_height: u64) {
@@ -3155,54 +3058,7 @@ impl Blockchain {
             .store(now, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// FIX #17: single source of truth for tip staleness. Previously
-    /// `AutoHeal::last_tip_change`, `IronConsensus::last_advance`, and the
-    /// phantom-stall timer all tracked this independently and disagreed with
-    /// each other — three stall detectors firing at different times with
-    /// conflicting recovery actions. This method exposes the shared
-    /// `last_block_received_at` atomic so all three can read from the same
-    /// timestamp. Returns `None` if we've never received a block from a peer
-    /// since startup (in which case the caller should use its own clock).
-    pub fn secs_since_last_block(&self) -> Option<u64> {
-        let last = self
-            .last_block_received_at
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if last == 0 {
-            return None;
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Some(now.saturating_sub(last))
-    }
-
-    /// Returns true when the node is in a phantom-advertisement stall:
-    ///   - `synced == false` (miner IBD gate is blocking)
-    ///   - `target_height == local_height + 1` (only one block behind)
-    ///   - no peer block has arrived in the last `stall_secs` seconds
-    ///
-    /// In that state the "missing" block does not exist yet — it needs to be
-    /// mined locally, not fetched. The miner uses this to relax the IBD gate.
-    pub fn is_phantom_stall(&self, stall_secs: u64) -> bool {
-        use std::sync::atomic::Ordering::Relaxed;
-        if self.synced.load(Relaxed) {
-            return false;
-        }
-        let local_h = self.height();
-        let target_h = self.peer_target_height.load(Relaxed);
-        if target_h != local_h + 1 {
-            return false;
-        }
-        let last = self.last_block_received_at.load(Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // If `last` is 0 we have never accepted a peer block since startup;
-        // treat that as "long ago" so a phantom detected at boot still fires.
-        now.saturating_sub(last) >= stall_secs
-    }
+    // secs_since_last_block / is_phantom_stall moved to chain::queries (issue #108).
 
     /// Clear the phantom target — reset `synced=true` and align target_height
     /// with local_height so the miner IBD gate unblocks. If a real peer has
@@ -3216,30 +3072,7 @@ impl Blockchain {
         tracing::info!("Phantom target cleared — synced=true h={}", h);
     }
 
-    // ─── Asset policy helpers ─────────────────────────────────────────────
-
-    /// Look up a registered asset policy by ID.  Returns `None` if the asset
-    /// has not been issued on this chain (or no database is attached).
-    /// Export all recorded checkpoints (hardcoded + auto-recorded from DB).
-    pub fn export_checkpoints(&self) -> Vec<(u64, Hash)> {
-        let mut checkpoints: Vec<(u64, Hash)> = crate::testnet::testnet_checkpoints()
-            .into_iter()
-            .map(|cp| (cp.height, cp.hash))
-            .collect();
-
-        if let Some(ref db) = self.db {
-            if let Ok(db_checkpoints) = db.state.get_checkpoints() {
-                for (height, hash) in db_checkpoints {
-                    if !checkpoints.iter().any(|(h, _)| *h == height) {
-                        checkpoints.push((height, hash));
-                    }
-                }
-            }
-        }
-
-        checkpoints.sort_by_key(|(h, _)| *h);
-        checkpoints
-    }
+    // export_checkpoints moved to chain::queries (issue #108).
 
     // calculate_fork_cumulative_work / recompute_total_difficulty /
     // find_fork_point / collect_fork_chain moved to chain::fork_calc (issue #108).
@@ -3274,16 +3107,7 @@ impl Blockchain {
         StateUpdate { chain: self }
     }
 
-    /// Return the current generation only while canonical chain state is stable.
-    pub fn stable_generation(&self) -> Option<u64> {
-        use std::sync::atomic::Ordering;
-
-        if self.state_updates_in_progress.load(Ordering::Acquire) != 0 {
-            return None;
-        }
-        let generation = self.state_generation.load(Ordering::Acquire);
-        (self.state_updates_in_progress.load(Ordering::Acquire) == 0).then_some(generation)
-    }
+    // stable_generation moved to chain::queries (issue #108).
 
     /// Async wrapper around [`Blockchain::add_block`]. Runs full block
     /// validation + DB write on `tokio::task::spawn_blocking`.
