@@ -247,8 +247,12 @@ def run_cargo_for(test_fns, spark=False):
     feats = "testnet sketch-lelantus-spark" if spark else "testnet"
     cmd = ["cargo", "test", "--lib", "--features", feats, "--", "--include-ignored", *sorted(set(test_fns))]
     try:
-        p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800)
-        return parse_test_text(p.stdout + "\n" + p.stderr)
+        # decode as UTF-8 with replacement: cargo/RandomX can emit bytes the
+        # Windows default (cp1252) can't decode, which otherwise kills the
+        # stdout reader thread and leaves p.stdout = None.
+        p = subprocess.run(cmd, env=env, capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=1800)
+        return parse_test_text((p.stdout or "") + "\n" + (p.stderr or ""))
     except Exception as e:
         sys.stderr.write(f"cargo run failed: {e}\n")
         return {}
@@ -661,8 +665,11 @@ def run_mutation(files, query, max_mutants, timeout, spark, use_color):
             out.append(f"  {col('yellow','—')} {f['path']} §{s['num']} {s['name']}: no mapped test to run")
             continue
         p = Path(f["path"])
-        original = p.read_text(encoding="utf-8", errors="replace")
-        lines = original.splitlines(keepends=True)
+        # Byte-exact: read/restore raw bytes so we never translate line endings
+        # (Path.write_text would rewrite \n->\r\n on Windows and leave the file
+        # showing as "modified" with a pure line-ending diff).
+        original_bytes = p.read_bytes()
+        lines = original_bytes.decode("utf-8", "replace").splitlines(keepends=True)
         span = _section_span(f, s, f["sections"])
         mutants = _gen_mutants(lines, *span)
         if not mutants:
@@ -678,7 +685,7 @@ def run_mutation(files, query, max_mutants, timeout, spark, use_color):
             for (li, cols, orig_tok, new_tok) in picked:
                 ln = lines[li]
                 lines[li] = ln[:cols] + new_tok + ln[cols + len(orig_tok):]
-                p.write_text("".join(lines), encoding="utf-8")
+                p.write_bytes("".join(lines).encode("utf-8"))
                 verdict = _run_mutant(s["tests"], timeout, spark)
                 lines[li] = ln  # restore this line before the next mutant
                 loc = f"{f['path']}:{li+1}"
@@ -690,7 +697,7 @@ def run_mutation(files, query, max_mutants, timeout, spark, use_color):
                     survived += 1
                     surv_detail.append((loc, orig_tok, new_tok))
         finally:
-            p.write_text(original, encoding="utf-8")  # ALWAYS restore the file
+            p.write_bytes(original_bytes)  # ALWAYS restore the exact original bytes
         scored = killed + survived
         rate = (100 * killed // scored) if scored else 0
         color = "green" if survived == 0 and scored else "red" if survived else "yellow"
@@ -712,6 +719,12 @@ def _run_mutant(test_fns, timeout, spark):
     env.setdefault("LIBCLANG_PATH", "C:/Program Files/LLVM/bin")
     env.setdefault("COINCYNC_RANDOMX_LIGHT_MODE", "1")
     env.setdefault("RUST_MIN_STACK", "268435456")
+    # Mutation deliberately edits source. If we mutate a hash-locked consensus
+    # file, build.rs's integrity gate would reject every mutant as a lock
+    # mismatch (→ all 'unviable'). REGEN_LOCK=1 downgrades that gate to a warning
+    # for THIS build only; it never rewrites the lock (only update-critical-hashes
+    # does), so the committed lock is untouched.
+    env["COINCYNC_REGEN_LOCK"] = "1"
     llvm = "C:/Program Files/LLVM/bin"
     if llvm not in env.get("PATH", ""):
         env["PATH"] = llvm + os.pathsep + env.get("PATH", "")
@@ -719,13 +732,17 @@ def _run_mutant(test_fns, timeout, spark):
     cmd = ["cargo", "test", "--lib", "--features", feats, "--",
            "--include-ignored", *sorted(set(test_fns))]
     try:
-        p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, env=env, capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return "killed"  # a mutant that hangs the tests is caught, too
     except Exception:
         return "unviable"
-    blob = p.stdout + "\n" + p.stderr
-    if "error[" in blob or "error:" in blob and "test result" not in blob:
+    blob = (p.stdout or "") + "\n" + (p.stderr or "")
+    # A mutant that didn't compile never produces a `test result:` summary — that
+    # is the clean signal for 'unviable' (excluded from the kill-rate), robust to
+    # panic messages that happen to contain the word 'error'.
+    if "test result:" not in blob:
         return "unviable"
     res = parse_test_text(blob)
     if not res:
