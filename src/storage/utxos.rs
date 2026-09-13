@@ -1,4 +1,67 @@
 //! UTXO set storage with height indexing for fast decoy selection
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `add_output` / `add_output_ext`** — INVARIANT: every output lands in
+//!   all five indexes (primary, height, locator, stealth, output_index); the
+//!   stealth/output indexes keep the OLDEST output per stealth address
+//!   (`or_insert` oldest-wins), so an immature/colliding coinbase can never
+//!   displace a mature entry; `is_coinbase` is carried for maturity checks.
+//!   THREAT: CRIT-5/HIGH-4 — a ring member bypasses coinbase maturity, or a
+//!   later output steals an earlier one's index slot.
+//!   TESTS: `test_height_index`, `canonical_locators_ignore_insertion_order`.
+//! - **§2 `spend_output`** — INVARIANT: key-image insert is check-then-set
+//!   atomic under the caller's write lock (second attempt ⇒ `false`); removing
+//!   the output also clears its height and stealth entries — no dangling
+//!   references. THREAT: A6-STEALTH-IDX — a stale stealth entry lets a spent
+//!   coinbase satisfy a maturity check. TESTS: `canonical_locators_survive_output_spends`.
+//! - **§3 `mark_key_image_spent` / `contains_key_image` / `remove_key_image`**
+//!   — INVARIANT: ring-sig chains record only the key image (output stays in
+//!   the set as a decoy); double-mark ⇒ `false`; removal un-marks for
+//!   disconnect. THREAT: double-spend admitted, or a reorg leaves an input
+//!   permanently unspendable. TESTS: `batch_from_block_and_disconnect_are_exact_inverses`,
+//!   `ring_size_availability_is_reorg_history_invariant`.
+//! - **§4 `remove_output` (disconnect / reorg)** — INVARIANT: the stealth /
+//!   output_index entry is cleared ONLY when it actually references the removed
+//!   key (`stealth_index.get == Some(&key)`), and the removal is propagated to
+//!   the on-disk `output_index`. THREAT: **H2** cross-node divergence + frozen
+//!   funds — a colliding coinbase disconnect erasing the victim's oldest-wins
+//!   entry makes the victim's output vanish on reorged nodes and splits the
+//!   chain; **R-68** — an on-disk entry surviving a reorg lets a disconnected
+//!   UTXO act as a valid decoy on other nodes. TESTS:
+//!   `remove_output_preserves_a_shared_stealth_entry_it_does_not_own_h2`,
+//!   `reorg_batches_replace_orphaned_outputs_in_decoy_catalog`.
+//! - **§5 canonical locators (`locator_index` / `locator_outputs` /
+//!   `resolve_output_locators` / `output_distribution`)** — INVARIANT: `(height,
+//!   ordinal)` is stable and insertion-order-independent (BTreeSet ordering);
+//!   entries survive spends and are dropped only on disconnect; duplicate or
+//!   out-of-range locators are rejected. THREAT: decoy set diverges between
+//!   nodes ⇒ ring-member validation forks the chain. TESTS:
+//!   `canonical_locators_ignore_insertion_order`, `canonical_locators_survive_output_spends`,
+//!   `locator_resolution_rejects_out_of_range_ordinal`, `output_distribution_is_height_sorted_and_bounded`.
+//! - **§6 `total_outputs_ever` / `reorg_disconnects_total`** — INVARIANT:
+//!   `total_outputs_ever` is MONOTONIC (never decrements, even on reorg); reorg
+//!   disconnects are counted separately so availability = `ever − disconnects`
+//!   is reorg-history-independent. THREAT: **L2** — decrementing on reorg made
+//!   two nodes on the same tip compute different ring sizes (ring-size
+//!   determinism launch-blocker). TESTS: `ring_size_availability_is_reorg_history_invariant`,
+//!   `batch_from_block_and_disconnect_are_exact_inverses`.
+//! - **§7 `evict_old_outputs` / `checkpoint`** — INVARIANT: eviction keeps only
+//!   the `keep_depth` window in memory (older fall back to on-disk DB);
+//!   `checkpoint` persists key_images + output_index and returns Err if ANY
+//!   per-item write failed (no silent partial checkpoint). THREAT: **R-70** —
+//!   a partial checkpoint reported Ok, then a restart admits a double-spend
+//!   (lost key_image) or a stale ring member (lost output_index). TESTS:
+//!   `evict_old_outputs_keeps_recent_window`, `checkpoint_persists_key_images_and_output_index_to_db`.
+//! - **§8 batch ops (`apply_batch` / `batch_from_block` / `batch_disconnect_block`)**
+//!   — INVARIANT: connect and disconnect batches are EXACT inverses (outputs +
+//!   key-image state restored); order is add → spend → remove → un-mark.
+//!   THREAT: **R-71** — the batch is NON-atomic (sequential loop, no txn
+//!   boundary): a panic mid-batch leaves partial mutations; do not assume
+//!   all-or-nothing. TESTS: `batch_from_block_and_disconnect_are_exact_inverses`,
+//!   `reorg_batches_replace_orphaned_outputs_in_decoy_catalog`.
 
 use crate::db::{Database, OutputIndexEntry};
 use crate::decoy::{HeightOutputCount, OutputLocator, ResolvedDecoyOutput};
@@ -197,8 +260,19 @@ impl UtxoSet {
             // SECURITY (A6-STEALTH-IDX): Remove from stealth index to maintain
             // consistency. Previously this was missed, leaving dangling references
             // that could bypass coinbase maturity checks for ring members.
+            // H2: only evict the stealth-index entry if THIS output OWNS it.
+            // Under oldest-wins, a shared stealth address (old-format coinbases
+            // share `miner_pubkey`) points at the OLDEST output; evicting it when
+            // a NEWER sharer is spent reintroduces the H2 dangling-reference /
+            // maturity-bypass class. Mirrors the guard in `remove_output`.
+            // (This in-memory path is not used by ring-sig chains — spends go
+            // through `mark_key_image_spent` — but the guard keeps the two
+            // stealth-index mutators consistent and closes the latent bug should
+            // a transparent/by-reference spend path ever call it.)
             let stealth_addr = *output_ref.output.stealth_address.as_bytes();
-            self.stealth_index.remove(&stealth_addr);
+            if self.stealth_index.get(&stealth_addr) == Some(&key) {
+                self.stealth_index.remove(&stealth_addr);
+            }
             true
         } else {
             false
@@ -326,24 +400,35 @@ impl UtxoSet {
                     .map(|output| *output.public_key.as_bytes())
             });
         if let Some(stealth_addr) = stealth_addr {
-            self.stealth_index.remove(&stealth_addr);
-            // Remove from permanent output index (reorg only)
-            self.output_index.remove(&stealth_addr);
-            // R-68: propagate to on-disk output_index so ring-member
-            // validation on other nodes / after restart doesn't
-            // accept the disconnected UTXO as a valid decoy.
-            if let Some(ref db) = self.db {
-                if let Err(e) = db.output_index.remove(&stealth_addr) {
-                    tracing::error!(
-                        target: "storage::utxos::R68",
-                        stealth = hex::encode(stealth_addr),
-                        tx_hash = hex::encode(tx_hash.as_bytes()),
-                        error = %e,
-                        "R-68: reorg removal failed to propagate to on-disk \
-                         output_index. Ring-member validation MAY accept this \
-                         disconnected UTXO as a valid decoy on next startup. \
-                         Reindex output_index from block store to recover."
-                    );
+            // H2 (cross-node divergence + frozen funds): stealth_index /
+            // output_index keep the OLDEST output per stealth_address
+            // (or_insert oldest-wins), so a colliding coinbase that reuses a
+            // victim's stealth address never OWNS the index entry. Only remove
+            // the entry when it actually references the output being removed
+            // (key match); otherwise a 1-block reorg that disconnects the
+            // attacker's coinbase would erase the victim's still-valid index
+            // entry, making the victim's output vanish on reorged nodes (and a
+            // later tx using it as a ring member splits the chain).
+            if self.stealth_index.get(&stealth_addr) == Some(&key) {
+                self.stealth_index.remove(&stealth_addr);
+                // Remove from permanent output index (reorg only)
+                self.output_index.remove(&stealth_addr);
+                // R-68: propagate to on-disk output_index so ring-member
+                // validation on other nodes / after restart doesn't
+                // accept the disconnected UTXO as a valid decoy.
+                if let Some(ref db) = self.db {
+                    if let Err(e) = db.output_index.remove(&stealth_addr) {
+                        tracing::error!(
+                            target: "storage::utxos::R68",
+                            stealth = hex::encode(stealth_addr),
+                            tx_hash = hex::encode(tx_hash.as_bytes()),
+                            error = %e,
+                            "R-68: reorg removal failed to propagate to on-disk \
+                             output_index. Ring-member validation MAY accept this \
+                             disconnected UTXO as a valid decoy on next startup. \
+                             Reindex output_index from block store to recover."
+                        );
+                    }
                 }
             }
             // L2 (audit fix): total_outputs_ever is now MONOTONIC — never
@@ -361,7 +446,7 @@ impl UtxoSet {
         self.key_images.remove(ki)
     }
 
-    // ===== Fast decoy selection methods =====
+    // ===== §5  Fast decoy selection methods =====
 
     /// Get outputs in a height range for decoy selection
     ///
@@ -533,7 +618,7 @@ impl Default for UtxoSet {
 }
 
 // =============================================================================
-// Batch Operations for Performance
+// §8  Batch Operations for Performance
 // =============================================================================
 
 /// Batch of UTXO operations for efficient bulk updates
@@ -806,6 +891,108 @@ mod tests {
         hash
     }
 
+    /// H2 (cross-node divergence + frozen funds): a colliding coinbase that
+    /// reuses a victim's stealth address must NOT be able to delete the
+    /// victim's index entry when it is disconnected on a reorg. The index keeps
+    /// the OLDEST output per stealth address (or_insert), so the victim owns the
+    /// entry; `remove_output` must only clear an entry it actually references.
+    #[test]
+    fn remove_output_preserves_a_shared_stealth_entry_it_does_not_own_h2() {
+        let mut set = UtxoSet::new();
+        let mut s = [0u8; 32];
+        s[0] = 0xAA;
+        s[8] = 1;
+        let stealth = PublicKey::from_bytes(s);
+        let mk = |tag: u8| TxOutput {
+            stealth_address: stealth,
+            tx_public_key: stealth,
+            commitment: [0u8; 32],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: tag,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+
+        // Victim V (older) OWNS the index entry via or_insert oldest-wins.
+        let victim = Hash::from_bytes([1u8; 32]);
+        set.add_output(victim, 0, mk(1), 1);
+        // Attacker coinbase B reuses V's stealth; it does NOT own the entry.
+        let attacker = Hash::from_bytes([2u8; 32]);
+        set.add_output(attacker, 0, mk(2), 2);
+        assert!(set.get_output_by_stealth(&s).is_some());
+        assert!(set.get_output_index_entry(&s).is_some());
+
+        // A 1-block reorg disconnects the attacker's colliding coinbase.
+        set.remove_output(&attacker, 0);
+
+        // The victim's still-valid entry must survive (pre-fix it was erased —
+        // V vanished on reorged nodes and a later ring-member spend split the
+        // chain).
+        assert!(
+            set.get_output_by_stealth(&s).is_some(),
+            "victim output must remain findable by stealth after the colliding coinbase is disconnected"
+        );
+        assert!(
+            set.get_output_index_entry(&s).is_some(),
+            "victim output_index entry must survive the colliding coinbase disconnect"
+        );
+
+        // Sanity: disconnecting the victim itself (the actual owner) still clears it.
+        set.remove_output(&victim, 0);
+        assert!(
+            set.get_output_index_entry(&s).is_none(),
+            "owner removal still clears the entry"
+        );
+    }
+
+    /// H2 (spend-path sibling): the same shared-stealth invariant must hold on
+    /// the by-reference SPEND path, not just reorg-disconnect. `spend_output`
+    /// previously evicted the stealth-index entry unconditionally, so spending a
+    /// NEWER output that reuses an older output's stealth address erased the
+    /// older (still-unspent) owner's entry. This path is not used by ring-sig
+    /// chains (spends go through `mark_key_image_spent`), but the guard keeps
+    /// the two stealth-index mutators consistent. Asserted via the stealth index
+    /// (`spend_output` intentionally leaves the permanent `output_index` alone).
+    #[test]
+    fn spend_output_preserves_a_shared_stealth_entry_it_does_not_own_h2() {
+        let mut set = UtxoSet::new();
+        let mut s = [0u8; 32];
+        s[0] = 0xBB;
+        s[8] = 1;
+        let stealth = PublicKey::from_bytes(s);
+        let mk = |tag: u8| TxOutput {
+            stealth_address: stealth,
+            tx_public_key: stealth,
+            commitment: [0u8; 32],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: tag,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+
+        // Victim V (older) OWNS the stealth_index entry (oldest-wins).
+        let victim = Hash::from_bytes([1u8; 32]);
+        set.add_output(victim, 0, mk(1), 1);
+        // Newer output B reuses V's stealth address; it does NOT own the entry.
+        let newer = Hash::from_bytes([2u8; 32]);
+        set.add_output(newer, 0, mk(2), 2);
+        assert!(set.get_output_by_stealth(&s).is_some());
+
+        // Spend the NEWER sharer — the victim's index entry must survive.
+        assert!(set.spend_output(newer, 0, KeyImage::from_bytes([7u8; 32])));
+        assert!(
+            set.get_output_by_stealth(&s).is_some(),
+            "victim must remain findable by stealth after a colliding newer output is spent (H2)"
+        );
+
+        // Spending the actual owner V still clears the entry.
+        assert!(set.spend_output(victim, 0, KeyImage::from_bytes([8u8; 32])));
+        assert!(
+            set.get_output_by_stealth(&s).is_none(),
+            "owner spend still clears the stealth entry"
+        );
+    }
+
     // Regression for the ring-size determinism launch-blocker (2026-08-16):
     // the consensus "available outputs" metric that feeds effective_ring_size
     // MUST be independent of a node's reorg history, or two nodes on the same
@@ -991,5 +1178,170 @@ mod tests {
         assert_eq!(distribution[0].count, 1);
         assert_eq!(distribution[1].height, 20);
         assert_eq!(distribution[1].count, 2);
+    }
+
+    /// Build a ClsagSignature placeholder. Its contents are irrelevant to the
+    /// batch builders (they only read TxInput.key_image and tx outputs/hash);
+    /// this mirrors the pattern used by consensus block tests.
+    fn placeholder_sig() -> crate::crypto::ClsagSignature {
+        crate::crypto::ClsagSignature {
+            key_image: crate::crypto::KeyImage::from_bytes(
+                crate::crypto::PublicPoint::identity().to_bytes(),
+            )
+            .expect("identity is a valid curve point"),
+            commitment_image: crate::crypto::PublicPoint::identity(),
+            c1: [0u8; 32],
+            responses: vec![],
+        }
+    }
+
+    fn tx_input(ki: u8) -> crate::transaction::TxInput {
+        crate::transaction::TxInput {
+            key_image: KeyImage::from_bytes([ki; 32]),
+            ring_members: vec![],
+            signature: placeholder_sig(),
+            pseudo_output_commitment: [0u8; 32],
+        }
+    }
+
+    fn tx_output(id: u8) -> TxOutput {
+        TxOutput {
+            stealth_address: PublicKey::from_bytes([id; 32]),
+            tx_public_key: PublicKey::from_bytes([id.wrapping_add(1); 32]),
+            commitment: [id.wrapping_add(2); 32],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        }
+    }
+
+    /// A real 2-in / 2-out transfer transaction (non-coinbase).
+    fn two_in_two_out_transfer() -> crate::transaction::Transaction {
+        crate::transaction::Transaction {
+            version: 1,
+            tx_type: crate::transaction::TxType::Transfer,
+            inputs: vec![tx_input(150), tx_input(151)],
+            outputs: vec![tx_output(160), tx_output(161)],
+            fee: crate::primitives::Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    /// KEY PROPERTY: batch_from_block and batch_disconnect_block are exact
+    /// inverses. Connecting a real 2-in/2-out block then disconnecting it must
+    /// restore the prior output set AND key-image state byte-for-byte.
+    #[test]
+    fn batch_from_block_and_disconnect_are_exact_inverses() {
+        let mut utxos = UtxoSet::new();
+
+        // Prior canonical set: two unrelated pre-existing outputs at height 5.
+        let prior_a = add_test_output(&mut utxos, 1, 5, None);
+        let prior_b = add_test_output(&mut utxos, 2, 5, None);
+        let prior_count = utxos.output_count();
+        let prior_ever = utxos.total_outputs_ever();
+
+        let tx = two_in_two_out_transfer();
+        let tx_hash = tx.hash();
+        let ki0 = tx.inputs[0].key_image;
+        let ki1 = tx.inputs[1].key_image;
+
+        // Baseline: the block's key images are unspent and its outputs absent.
+        assert!(!utxos.contains_key_image(&ki0));
+        assert!(!utxos.contains_key_image(&ki1));
+        assert!(utxos.get_output(&tx_hash, 0).is_none());
+
+        // Connect the block.
+        let block_txs = vec![tx.clone()];
+        let applied = utxos.apply_batch(UtxoSet::batch_from_block(9, &block_txs));
+        assert_eq!(applied, 4, "2 outputs added + 2 key images marked");
+        assert_eq!(utxos.output_count(), prior_count + 2);
+        assert!(utxos.contains_key_image(&ki0));
+        assert!(utxos.contains_key_image(&ki1));
+        assert!(utxos.get_output(&tx_hash, 0).is_some());
+        assert!(utxos.get_output(&tx_hash, 1).is_some());
+
+        // Disconnect the block.
+        utxos.apply_batch(UtxoSet::batch_disconnect_block(&block_txs));
+
+        // Prior output set is restored exactly.
+        assert_eq!(utxos.output_count(), prior_count);
+        assert!(utxos.get_output(&prior_a, 0).is_some());
+        assert!(utxos.get_output(&prior_b, 0).is_some());
+        // The block's own outputs are gone.
+        assert!(utxos.get_output(&tx_hash, 0).is_none());
+        assert!(utxos.get_output(&tx_hash, 1).is_none());
+        // Key-image state is restored: both inputs spendable again.
+        assert!(!utxos.contains_key_image(&ki0));
+        assert!(!utxos.contains_key_image(&ki1));
+
+        // total_outputs_ever is monotonic (it grew by 2), and the two
+        // disconnects are tracked separately — so the "current" availability
+        // metric returns to the prior value.
+        assert_eq!(utxos.total_outputs_ever(), prior_ever + 2);
+        assert_eq!(utxos.reorg_disconnects_total(), 2);
+        assert_eq!(
+            utxos.total_outputs_ever() - utxos.reorg_disconnects_total(),
+            prior_ever
+        );
+    }
+
+    /// evict_old_outputs drops output_index entries older than the keep_depth
+    /// window and keeps everything within it. With no DB fallback configured,
+    /// an evicted entry is no longer resolvable.
+    #[test]
+    fn evict_old_outputs_keeps_recent_window() {
+        let mut utxos = UtxoSet::new();
+
+        let (h_new, o_new) = make_test_output(1, None);
+        let (h_mid, o_mid) = make_test_output(2, None);
+        let (h_old, o_old) = make_test_output(3, None);
+        let sa_new = *o_new.stealth_address.as_bytes();
+        let sa_mid = *o_mid.stealth_address.as_bytes();
+        let sa_old = *o_old.stealth_address.as_bytes();
+
+        utxos.add_output(h_new, 0, o_new, 100);
+        utxos.add_output(h_mid, 0, o_mid, 50);
+        utxos.add_output(h_old, 0, o_old, 10);
+
+        // Early return: current_height <= keep_depth leaves everything intact.
+        utxos.evict_old_outputs(20, 30);
+        assert!(utxos.get_output_index_entry(&sa_old).is_some());
+
+        // keep_depth window of 30 at height 100 → cutoff 70. Only the height-100
+        // entry survives; heights 50 and 10 are evicted.
+        utxos.evict_old_outputs(100, 30);
+        assert!(utxos.get_output_index_entry(&sa_new).is_some());
+        assert!(
+            utxos.get_output_index_entry(&sa_mid).is_none(),
+            "entry below cutoff should be evicted (no DB fallback)"
+        );
+        assert!(utxos.get_output_index_entry(&sa_old).is_none());
+    }
+
+    /// checkpoint() persists the in-memory key images and output_index to the
+    /// on-disk database, giving crash recovery a consistent restore point.
+    #[test]
+    fn checkpoint_persists_key_images_and_output_index_to_db() {
+        use std::sync::Arc;
+
+        let mut utxos = UtxoSet::new();
+        let (hash, output) = make_test_output(7, None);
+        let stealth = *output.stealth_address.as_bytes();
+        utxos.add_output(hash, 0, output, 300);
+
+        let ki = KeyImage::from_bytes([200u8; 32]);
+        assert!(utxos.mark_key_image_spent(ki));
+
+        let db = Arc::new(Database::open_temp().unwrap());
+        utxos.set_database(Arc::clone(&db));
+
+        utxos.checkpoint().unwrap();
+
+        // Key image is durably marked spent on disk.
+        assert!(db.utxos.is_spent(&ki).unwrap());
+        // The output_index entry was persisted.
+        assert!(db.output_index.get(&stealth).unwrap().is_some());
     }
 }

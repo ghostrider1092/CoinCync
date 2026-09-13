@@ -57,6 +57,60 @@
 //! The BridgeTree supports checkpoints. Every block accept creates a
 //! new checkpoint keyed on the block height; block disconnects (reorgs)
 //! rewind to the pre-block checkpoint.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `append_commitment` / `mark_nullifier_spent` / `is_nullifier_spent`**
+//!   — INVARIANT: appends assign dense positions `0..tree_size` and are
+//!   mirrored to `shielded_entries`; a nullifier already present is rejected as
+//!   a double-spend and never re-inserted; the root changes on every append.
+//!   THREAT: shielded double-spend, or an anchor/root that omits a minted note.
+//!   TESTS: `appending_commitments_changes_root`, `nullifier_double_spend_rejected`,
+//!   `nullifier_isolation`, `empty_tree_has_deterministic_root`.
+//! - **§2 R-61 persistence-failure halt (`append_commitment` /
+//!   `mark_nullifier_spent`)** — INVARIANT: a borsh-serialize failure or a
+//!   RocksDB write failure on a consensus commitment/nullifier PANICS rather
+//!   than continuing with in-memory-only state. THREAT: **R-61** — a silent
+//!   persistence gap diverges the replayed tree from the committed anchor after
+//!   restart. TESTS: (gap — needs a fault-injecting `shim::Tree` to exercise the
+//!   panic path).
+//! - **§3 `checkpoint_at_height` (two-stack lock-step)** — INVARIANT: the
+//!   side-table checkpoint is pushed ONLY if the BridgeTree accepted its own
+//!   checkpoint (`tree_checkpointed` gate), both are held under one guard, and
+//!   both cap at `MAX_CHECKPOINTS` (1000, covering testnet max_reorg_depth); a
+//!   non-monotonic id is declined by both. THREAT: **R-65** — the two stacks
+//!   desync so `rewind` rolls the side tables to a boundary the tree never
+//!   reverts to. TESTS: `checkpoint_stack_cap_keeps_tree_and_side_tables_synced`,
+//!   `non_monotonic_checkpoint_id_does_not_desync`.
+//! - **§4 `rewind` (drops entries + nullifiers + persistence, not just the
+//!   tree)** — INVARIANT: a rewind pops the side-table checkpoint, rewinds the
+//!   BridgeTree, drops entries at positions `>= entries_len`, drops nullifiers
+//!   spent at height `>= restore.height`, AND removes both from the backing
+//!   column families; empty stack ⇒ `false`; a tree/side-table desync still
+//!   aligns the side tables (warn) since leaving them ahead is strictly worse.
+//!   THREAT: after a reorg, `tree_size` over-counts, disconnected nullifiers
+//!   read as spent, and a restart replay resurrects the disconnected block.
+//!   TESTS: `rewind_drops_entries_and_nullifiers_not_just_the_tree`,
+//!   `rewind_on_empty_stack_returns_false`, `multiple_rewinds_disconnect_multiple_blocks`,
+//!   `rewind_cleans_persistence_so_replay_matches`,
+//!   `rewind_desync_branch_still_aligns_side_tables_when_tree_declines`.
+//! - **§5 replay / persistence round-trip (`open_with_db`)** — INVARIANT: a
+//!   reopened store replays `shielded_entries` in position order and
+//!   `shielded_nullifiers`, reconstructing an identical root and nullifier set;
+//!   the in-memory-only checkpoint stack starts empty (no rewind past a
+//!   restart). THREAT: durability regression — a restarted node diverges from
+//!   the on-disk state. TESTS: `persist_and_replay_roundtrips`,
+//!   `rewind_cleans_persistence_so_replay_matches`.
+//! - **§6 witness / query surface (`witness_path` / `mark_current` /
+//!   `entry_at` / `tree_size` / `current_root`)** — INVARIANT: `entry_at` is
+//!   dense over `0..tree_size` and `None` at/after the frontier; a marked
+//!   leaf's authentication path survives later appends and spans the full tree
+//!   depth. THREAT: a spend proof anchors against a wrong or stale path.
+//!   TESTS: `mark_current_witness_path_and_entry_at_boundaries`,
+//!   `aggressive_random_op_sequences_keep_tree_and_entries_consistent`,
+//!   `stress_high_volume_checkpoint_append_rewind`, `stress_concurrent_read_write_load`.
 
 use std::collections::HashMap;
 
@@ -1168,5 +1222,115 @@ mod tests {
         // an existing position.
         let pos = store2.append_commitment(entry([4u8; 32], 4));
         assert_eq!(pos, 3);
+    }
+
+    #[test]
+    fn rewind_desync_branch_still_aligns_side_tables_when_tree_declines() {
+        // The `tree_rewound == false while a side-table checkpoint
+        // exists` branch (rewind's warn path). In lock-step operation
+        // the BridgeTree always has a matching checkpoint, so the only
+        // way to reach this branch is a genuine desync: a side-table
+        // checkpoint with no corresponding tree checkpoint. Force that
+        // directly, then prove rewind still drives the side tables
+        // (entries + nullifiers + tree_size) back to the checkpoint
+        // boundary — "leaving them ahead of the tree is strictly
+        // worse" is the contract — and reports `false` (the tree could
+        // not be rolled back), which the chain path treats as a warn.
+        let store = ShieldedStore::new();
+        // Two commitments and one nullifier applied WITHOUT taking a
+        // BridgeTree checkpoint, so the tree has nothing to rewind to.
+        store.append_commitment(entry([0xA1; 32], 1)); // position 0
+        store.append_commitment(entry([0xB2; 32], 2)); // position 1
+        assert!(store.mark_nullifier_spent([0x22; 32], 2));
+        assert_eq!(store.tree_size(), 2);
+
+        // Inject the desync: a side-table checkpoint guarding the
+        // boundary (entries_len 1, height 2) with no matching tree
+        // checkpoint.
+        store.checkpoints.write().push(ShieldedCheckpoint {
+            height: 2,
+            entries_len: 1,
+        });
+
+        // rewind pops the side-table checkpoint; tree.rewind() returns
+        // false (no tree checkpoint) → the desync warn branch. Side
+        // tables are still aligned to the boundary.
+        assert!(
+            !store.rewind(),
+            "tree could not be rewound → rewind returns false"
+        );
+        assert_eq!(
+            store.tree_size(),
+            1,
+            "entries side-table rewound to the checkpoint boundary despite tree desync"
+        );
+        assert!(
+            store.entry_at(0).is_some(),
+            "boundary entry (position 0) retained"
+        );
+        assert!(
+            store.entry_at(1).is_none(),
+            "disconnected entry (position 1) dropped"
+        );
+        assert!(
+            !store.is_nullifier_spent(&[0x22; 32]),
+            "height-2 nullifier dropped with the disconnected block"
+        );
+    }
+
+    #[test]
+    fn mark_current_witness_path_and_entry_at_boundaries() {
+        let store = ShieldedStore::new();
+
+        // entry_at on an empty tree: nothing at any position.
+        assert!(store.entry_at(0).is_none(), "empty tree has no entry at 0");
+
+        let p0 = store.append_commitment(entry([1u8; 32], 1));
+        let p1 = store.append_commitment(entry([2u8; 32], 1));
+        assert_eq!((p0, p1), (0, 1));
+
+        // entry_at boundary: valid positions present; exactly-at and
+        // far-past the frontier absent.
+        assert!(store.entry_at(0).is_some());
+        assert!(store.entry_at(1).is_some());
+        assert!(
+            store.entry_at(2).is_none(),
+            "no entry at position == tree_size"
+        );
+        assert!(
+            store.entry_at(u64::MAX).is_none(),
+            "far out-of-range position → None"
+        );
+
+        // mark_current marks the most-recent leaf (position 1) for
+        // later witness generation.
+        let marked = store.mark_current();
+        assert_eq!(
+            marked,
+            Some(1),
+            "mark_current returns the current frontier position"
+        );
+
+        // Checkpoint so a witness can resolve as of that checkpoint,
+        // then append past it — a marked leaf's path survives later
+        // appends.
+        store.checkpoint_at_height(1);
+        store.append_commitment(entry([3u8; 32], 2)); // position 2
+
+        // witness for the marked leaf resolves as of the latest
+        // checkpoint (depth 0) and spans the full tree depth.
+        let path = store.witness_path(1, 0);
+        assert!(path.is_some(), "marked leaf has an authentication path");
+        assert_eq!(
+            path.unwrap().len(),
+            SHIELDED_TREE_DEPTH as usize,
+            "auth path has one sibling per tree level"
+        );
+
+        // witness for an unmarked, out-of-range position → None.
+        assert!(
+            store.witness_path(999, 0).is_none(),
+            "out-of-range position has no witness"
+        );
     }
 }

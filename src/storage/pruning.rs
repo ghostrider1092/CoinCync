@@ -1,6 +1,45 @@
 //! Chain pruning for reduced disk usage
 //!
 //! Allows nodes to operate with only recent blocks, saving ~90% disk space.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `can_prune` (mode dispatch + protection)** — INVARIANT: a protected
+//!   block is never prunable; `Archive` prunes nothing; `KeepRecent(n)` keeps
+//!   the `n`-block recency window via `saturating_sub`; `Custom` honors
+//!   `min_blocks`, `keep_after_height`, and checkpoint protection. THREAT: a
+//!   still-needed block pruned away. TESTS: `test_archive_mode`,
+//!   `test_keep_recent`, `test_protected_blocks`, `test_custom_rules`,
+//!   `test_checkpoint_protected`.
+//! - **§2 R-59 zero-interval guard (`can_prune` Custom branch)** — INVARIANT:
+//!   checkpoint protection is gated on `checkpoint_interval > 0`, so
+//!   `height % interval` never divides by zero; interval 0 means "no checkpoint
+//!   protection." THREAT: **R-59** — a `PruningRules{ checkpoint_interval: 0 }`
+//!   caller panics on the hot pruning-decision path, taking down the prune
+//!   thread. TESTS: `can_prune_does_not_panic_on_zero_checkpoint_interval`.
+//! - **§3 `prunable_heights` / `estimate_savings`** — INVARIANT:
+//!   `prunable_heights` returns exactly the `can_prune` heights in a half-open
+//!   `from..to` window (empty/inverted ranges yield nothing, no panic);
+//!   `estimate_savings` is an O(1) per-mode estimate consistent with the
+//!   recency/min-blocks boundary. THREAT: an over-aggressive plan, or a
+//!   div-by-zero / overflow in the estimate. TESTS:
+//!   `prunable_heights_returns_correct_range`, `estimate_savings_matches_mode`.
+//! - **§4 `record_prune` / `stats` (A6-CLOCK)** — INVARIANT: prune counters
+//!   accumulate monotonically and `last_pruned_height` tracks the most recent
+//!   prune; the clock read uses `unwrap_or(0)` for pre-epoch safety (never
+//!   panics). THREAT: A6-CLOCK — a system-clock anomaly panicking the stats
+//!   update. TESTS: `record_prune_accumulates_stats`.
+//! - **§5 `create_plan` (R-60 / R-36 coupled contract)** — INVARIANT: the plan
+//!   starts after `last_pruned_height`, is archive-empty, and is bounded by
+//!   `batch_size` and the mode's max-prune height. THREAT: **R-60** — a drifted
+//!   `last_pruned_height` re-prunes or strands blocks; mitigated because
+//!   `db/pruning.rs::execute_plan` (R-36) only bumps the counter after both
+//!   writes succeed. TESTS: `test_pruning_plan`; reorg fork_point safety:
+//!   `pruning_and_reorg_fork_point_interaction`. (Chain-level pruning×reorg
+//!   interaction is a gap — needs a real `Blockchain` reorg across a pruned
+//!   fork_point.)
 
 use crate::consensus::Block;
 use crate::primitives::Hash;
@@ -471,5 +510,131 @@ mod tests {
         let _ = pruner.can_prune(500);
         let _ = pruner.can_prune(1000);
         // If we reached this line, the panic was avoided.
+    }
+
+    #[test]
+    fn prunable_heights_returns_correct_range() {
+        // KeepRecent(100) at tip 1000 → min_keep_height = 900, so every
+        // height strictly below 900 is prunable and 900..=1000 is kept.
+        let mut pruner = ChainPruner::new(PruningMode::KeepRecent(100));
+        pruner.set_height(1000);
+
+        let full = pruner.prunable_heights(0, 1000);
+        assert_eq!(full.len(), 900, "heights 0..=899 are prunable");
+        assert_eq!(*full.first().unwrap(), 0);
+        assert_eq!(*full.last().unwrap(), 899);
+        assert!(
+            !full.contains(&900),
+            "the recency boundary height is not prunable"
+        );
+
+        // `from..to` is honored as a half-open sub-range: the scan is
+        // clipped to the requested window and still excludes kept
+        // heights inside it.
+        let window = pruner.prunable_heights(850, 950);
+        assert_eq!(window, (850..900).collect::<Vec<u64>>());
+
+        // A window entirely inside the keep zone prunes nothing.
+        assert!(pruner.prunable_heights(950, 1000).is_empty());
+
+        // Empty / inverted ranges yield nothing rather than panicking.
+        assert!(pruner.prunable_heights(500, 500).is_empty());
+        assert!(pruner.prunable_heights(600, 500).is_empty());
+    }
+
+    #[test]
+    fn estimate_savings_matches_mode() {
+        // Archive never prunes → zero savings regardless of size.
+        let archive = ChainPruner::new(PruningMode::Archive);
+        assert_eq!(archive.estimate_savings(10_000), 0);
+
+        // KeepRecent: prunable count = height - keep, times block size.
+        let mut keep = ChainPruner::new(PruningMode::KeepRecent(100));
+        keep.set_height(1000);
+        assert_eq!(keep.estimate_savings(10_000), 900 * 10_000);
+
+        // Custom: min_height = height - min_blocks; with checkpoints
+        // disabled and no protected blocks the estimate is the whole
+        // sub-window.
+        let rules = PruningRules {
+            min_blocks: 100,
+            keep_after_height: None,
+            keep_tx_hashes: HashSet::new(),
+            keep_checkpoints: false,
+            checkpoint_interval: 0,
+        };
+        let mut custom = ChainPruner::new(PruningMode::Custom(rules));
+        custom.set_height(1000);
+        assert_eq!(custom.estimate_savings(10_000), 900 * 10_000);
+    }
+
+    #[test]
+    fn record_prune_accumulates_stats() {
+        let mut pruner = ChainPruner::new(PruningMode::KeepRecent(100));
+        pruner.set_height(1000);
+
+        // Baseline: fresh stats are zeroed.
+        assert_eq!(pruner.stats().blocks_pruned, 0);
+        assert_eq!(pruner.stats().bytes_freed, 0);
+        assert_eq!(pruner.stats().last_pruned_height, 0);
+
+        pruner.record_prune(10, 1_000, 50);
+        pruner.record_prune(5, 500, 60);
+
+        let stats = pruner.stats();
+        assert_eq!(stats.blocks_pruned, 15, "block counts accumulate");
+        assert_eq!(stats.bytes_freed, 1_500, "freed bytes accumulate");
+        assert_eq!(
+            stats.last_pruned_height, 60,
+            "last_pruned_height tracks the most recent prune"
+        );
+    }
+
+    #[test]
+    fn pruning_and_reorg_fork_point_interaction() {
+        // A reorg re-derives state from its fork_point, so any height
+        // that could still be a fork_point must never be pruned. With
+        // KeepRecent(keep) the recency window is what guarantees that:
+        // heights within `keep` of the tip stay on disk, while heights
+        // below it are eligible to be pruned and thus cannot serve as a
+        // reorg fork_point. `protect_block` is the explicit override
+        // that keeps a specific below-window height (e.g. a fork_point
+        // the node still needs) unprunable.
+        let mut pruner = ChainPruner::new(PruningMode::KeepRecent(100));
+        pruner.set_height(1000);
+
+        // A fork_point inside the reorg/recency window is safe: it is
+        // never pruned, so a reorg branching from it can be served.
+        for fork_point in [901u64, 950, 999, 1000] {
+            assert!(
+                !pruner.can_prune(fork_point),
+                "fork_point {fork_point} within the keep window must be retained"
+            );
+        }
+
+        // A fork_point below the window is prunable — a reorg that deep
+        // is beyond what a pruned node can reconstruct.
+        assert!(
+            pruner.can_prune(899),
+            "height below the keep window is eligible for pruning"
+        );
+
+        // Explicitly protecting that height (because a reorg still
+        // needs it as a fork_point) overrides the mode and removes it
+        // from the prunable set.
+        pruner.protect_block(899);
+        assert!(
+            !pruner.can_prune(899),
+            "protected fork_point height is no longer prunable"
+        );
+        let heights = pruner.prunable_heights(890, 905);
+        assert!(
+            !heights.contains(&899),
+            "protected fork_point excluded from the prune plan"
+        );
+        assert!(
+            heights.iter().all(|&h| h < 900 && h != 899),
+            "only below-window, unprotected heights remain prunable"
+        );
     }
 }

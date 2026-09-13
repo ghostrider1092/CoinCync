@@ -5,6 +5,61 @@
 //! each new coin and each spent serial is written through to two
 //! RocksDB column families (`spark_coins`, `spark_serials`); on startup
 //! the accumulator is rebuilt by replaying coins in `coin_id` order.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `compute_root` (canonical root)** — INVARIANT: one root definition
+//!   shared by `new` / `open_with_db` / `add_coin` / `rewind`, so an identical
+//!   coin set produces an identical root regardless of construction path
+//!   (fresh, replayed, forward-appended, or rewound). THREAT: a fresh vs
+//!   replayed empty store diverging (the latent bug `rewind` would have made
+//!   reachable). TESTS: `re_applying_after_rewind_reaches_the_same_root`,
+//!   `rewind_then_different_coins_gives_a_different_root`.
+//! - **§2 `add_coin` / `mark_serial_spent` / `is_serial_spent`** — INVARIANT:
+//!   each coin is appended in `coin_id` order and each spent serial records its
+//!   spend height; both are mirrored to disk; a spent serial reads back as
+//!   spent (double-spend surface). THREAT: Spark serial/coin double-spend, or a
+//!   root that omits a minted coin. TESTS: `checkpoint_then_rewind_restores_size_and_root`,
+//!   `aggressive_random_op_sequences_stay_consistent`.
+//! - **§3 R-61 persistence-failure halt (`add_coin` / `mark_serial_spent`)** —
+//!   INVARIANT: a borsh-serialize or RocksDB write failure on a consensus
+//!   coin/serial PANICS rather than continuing in-memory-only. THREAT: **R-61**
+//!   — a silent persistence gap diverges the replayed accumulator from the
+//!   committed root after restart. TESTS: (gap — needs a fault-injecting
+//!   `shim::Tree`).
+//! - **§4 `checkpoint_at_height` (bounded, monotonic-height stack)** —
+//!   INVARIANT: a checkpoint records `(height, coins_len)` taken BEFORE the
+//!   block applies; the stack caps at `MAX_REORG_CHECKPOINTS` (1000); heights
+//!   are strictly monotonic in production. THREAT: **R-67** — a height
+//!   regression means the orchestrator pushed when it should have rewound
+//!   (consensus ordering bug), breaking the rewind restore math; logged at
+//!   error level. TESTS: `checkpoint_stack_cap_holds_and_rewind_works_past_it`,
+//!   `stress_high_volume_checkpoint_append_rewind`. (Direct height-regression
+//!   assertion is a gap — only exercised incidentally by `stress_concurrent_read_write_load`.)
+//! - **§5 `rewind` (coins + serials + root + persistence)** — INVARIANT: pops
+//!   the guarding checkpoint and truncates coins to `coins_len`, drops serials
+//!   spent at height `>= restore_height`, recomputes the root via §1, and
+//!   removes the dropped coins/serials from the backing column families; empty
+//!   stack ⇒ `false`; locks taken coins → serials → root (no cycle vs
+//!   `add_coin`). THREAT: a reorg leaving coins/serials/root or on-disk state
+//!   ahead of the tree, resurrected on restart. TESTS:
+//!   `rewind_on_empty_stack_returns_false`, `rewind_drops_serials_above_restored_height`,
+//!   `multiple_rewinds_disconnect_multiple_blocks`, `rewind_handles_block_with_serials_but_no_coins`,
+//!   `rewind_handles_block_with_coins_but_no_serials`.
+//! - **§6 persistence replay / reorg round-trips (`open_with_db`)** —
+//!   INVARIANT: a reopened store replays coins by `coin_id` and serials,
+//!   reconstructing the rewound (not pre-rewind) state; the in-memory-only
+//!   checkpoint stack starts empty on open (no rewind past a restart);
+//!   coin-id reuse across a shorter fork leaves no orphaned coins on disk.
+//!   THREAT: reorg cruft over-counting the accumulator after restart. TESTS:
+//!   `persistence_rewind_survives_reopen`, `persistence_reorg_with_coin_id_reuse_and_a_shorter_fork`,
+//!   `persistence_survives_repeated_reorg_reopen_cycles`.
+//! - **§7 concurrency / lock-graph** — INVARIANT: the `RwLock`-guarded fields
+//!   compose without a lock-order cycle under concurrent readers + writer(s);
+//!   nothing panics or corrupts. THREAT: a deadlock edge that would hang block
+//!   processing under RPC read load. TESTS: `stress_concurrent_read_write_load`.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use parking_lot::RwLock;
