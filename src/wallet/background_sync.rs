@@ -1,6 +1,47 @@
 //! Background wallet synchronization with progress tracking
 //!
 //! Provides non-blocking wallet sync with real-time progress updates.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `next_batch_range`** — INVARIANT: a batch never runs past
+//!   `target_height` and returns `None` once caught up, paused, or stopped, so
+//!   sync only advances while actively syncing.
+//!   THREAT: scanning past the tip or a busy-loop after a stop.
+//!   TESTS: `test_sync_manager`, `test_cancellation`.
+//! - **§2 `update_progress` / `progress`** — INVARIANT: progress counters and
+//!   `blocks_per_second` reflect the work done and surface stashed error/reorg
+//!   state to the UI. THREAT: a stalled or mis-reported sync the operator
+//!   cannot diagnose. TESTS: `test_sync_progress`, `test_sync_manager`.
+//! - **§3 `rewind_to`** — INVARIANT: on a reorg the manager only moves
+//!   `current_height` backward (forward targets are a no-op) and re-enters
+//!   `Syncing` so it re-scans from the new height, even from a prior `Complete`
+//!   state. THREAT: stale/lost owned outputs kept after a chain reorg.
+//!   TESTS: `test_rewind_to_moves_current_height_and_resumes`,
+//!   `test_rewind_to_unsticks_complete_state`, `test_rewind_to_forward_is_height_noop`.
+//! - **§4 `scan_block_v2` (`ScanBlockOutcome`)** — INVARIANT: the default
+//!   reorg-aware wrapper delegates to legacy `scan_block` and reports
+//!   `Scanned`, so non-reorg scanners keep working unchanged.
+//!   THREAT: a silent behavior change for legacy scanners.
+//!   TESTS: `test_scan_block_v2_default_wraps_legacy_scan`.
+//! - **§5 `handle_reorg_recovery` / `current_position` / `find_fork_point`** —
+//!   INVARIANT: recovery hooks fail closed by default (`Err` / zero position),
+//!   so a scanner that has not wired the full rewind machinery cannot silently
+//!   fast-skip recovery. THREAT: a half-implemented scanner corrupting wallet
+//!   state on a reorg. TESTS: `test_handle_reorg_recovery_default_is_err`,
+//!   `test_current_position_default_is_zero`, `test_find_fork_point_default_is_err`.
+//! - **§6 `try_reorg_recovery`** — INVARIANT: a resolved fork point rewinds the
+//!   scanner and returns stats (with `reorg_at_height` backfilled); a fork point
+//!   below the searchable window returns `Ok(None)` to force a full rescan
+//!   rather than a partial recovery. THREAT: resuming on a divergent chain and
+//!   keeping orphaned outputs. TESTS: `test_try_reorg_recovery_round_trip`,
+//!   `test_try_reorg_recovery_no_fork_point`, `test_stub_reorg_scanner_switches_after_recovery`.
+//! - **§7 `record_reorg_stats`** — INVARIANT: reorg stats are stashed and
+//!   surfaced through the next `progress()` so the UI can render the reorg
+//!   banner. THREAT: a silent balance change with no user notification.
+//!   TESTS: `test_record_reorg_stats_surfaces_via_progress`.
 
 use crate::consensus::Block;
 use crate::error::Result;

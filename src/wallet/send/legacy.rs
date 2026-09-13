@@ -1,3 +1,26 @@
+//! # Deprecated legacy transaction builder
+//!
+//! Holds the DEPRECATED `create_transaction` path, kept only for compatibility.
+//! It emits placeholder commitments that fail consensus; production callers use
+//! `SharedWallet::create_transfer` or the prepared covered-allocation flow.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `create_transaction` (deprecated)** — INVARIANT: it still produces a structurally
+//!   valid tx (recipient output + change output) so legacy callers keep compiling.
+//!   THREAT: this path emits placeholder commitments — must never reach consensus.
+//!   TESTS: `legacy_create_transaction_produces_recipient_and_change_outputs`.
+//! - **§2 balance guard** — INVARIANT: it errors with `InsufficientBalance` when
+//!   available spendable funds are below `total_send + fee`.
+//!   THREAT: over-spend / building a tx that cannot be funded.
+//!   TESTS: `legacy_create_transaction_produces_recipient_and_change_outputs`.
+//! - **§3 change output** — INVARIANT: change is `input_sum - total_needed` and is emitted
+//!   only when it reaches `MIN_OUTPUT_AMOUNT`; the fee is always strictly positive.
+//!   THREAT: dust change output, or value silently lost.
+//!   TESTS: `legacy_create_transaction_produces_recipient_and_change_outputs`.
+
 use super::fee::estimate_tx_size;
 use super::selection::select_utxos;
 use super::types::CoinSelection;

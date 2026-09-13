@@ -4,6 +4,45 @@
 //! clients with different timeouts and authentication behaviour. This module
 //! keeps transport policy in one place and exposes only the methods required
 //! to build and submit a wallet-owned-decoy transaction.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `new` / `with_timeout`** — INVARIANT: an empty/whitespace endpoint is
+//!   rejected, and any `COINCYNC_RPC_API_KEY` is attached as a sensitive
+//!   `Authorization: Bearer` header that never prints in logs.
+//!   THREAT: unauthenticated or misconfigured client silently talking to the
+//!   wrong node. TESTS: `empty_endpoint_is_rejected`.
+//! - **§2 `submit_transaction` / `classify_submission_result`** — INVARIANT:
+//!   a node result is mapped to exactly one of `Accepted`, definitive
+//!   `Rejected`, or retryable `Unknown`; a remote JSON-RPC error is a
+//!   definitive rejection while transport/protocol failures stay `Unknown`.
+//!   THREAT: a rejected tx treated as accepted (funds/inputs mis-tracked), or a
+//!   maybe-delivered tx treated as failed (double submission).
+//!   TESTS: `remote_submission_error_is_a_definitive_rejection`,
+//!   `transport_and_protocol_failures_keep_submission_unknown`.
+//! - **§3 `submission_was_accepted`** — INVARIANT: acceptance is recognized from
+//!   either a bare `true` or `{"accepted": true}`; anything else is not
+//!   accepted. THREAT: ambiguous node reply read as success.
+//!   TESTS: `submission_acceptance_supports_boolean_and_object_results`.
+//! - **§4 `submission_rejection_reason` / `remote_error_reason`** — INVARIANT:
+//!   the human-readable reason is preferred (`reason`/`message`/`error`), so
+//!   operators see why a tx was rejected. THREAT: opaque rejections that hide a
+//!   fee/validity problem. TESTS: `rejection_reason_prefers_human_readable_fields`,
+//!   `remote_error_reason_prefers_the_json_rpc_message`.
+//! - **§5 `encode_transaction`** — INVARIANT: a local borsh/hex encoding failure
+//!   is definitive (no request reached the node) so callers must not open an
+//!   in-flight reservation for it. THREAT: phantom reservation on a tx that was
+//!   never sent. TESTS: (gap — no isolated encode test; covered via
+//!   `submit_transaction`).
+//! - **§6 `decoy_distribution` / `resolve_outputs`** — INVARIANT: locators are
+//!   resolved against the exact snapshot `(height, hash, policy_version)` they
+//!   were built from, so metadata cannot be mispaired. THREAT: decoy set built
+//!   against a stale/foreign snapshot. TESTS: (gap — requires a live node;
+//!   exercised only in end-to-end spend flows).
+//! - **§7 `endpoint`** — INVARIANT: returns the configured endpoint verbatim.
+//!   THREAT: n/a (read-only accessor). TESTS: (gap — trivial getter).
 
 use super::decoy_selection::CoveredRequest;
 use crate::decoy::{DecoyDistributionSnapshot, ResolvedDecoySnapshot};

@@ -3,6 +3,42 @@
 //! Churn timing and amount selection live here.  Transaction construction,
 //! RPC policy and reservation lifecycle are delegated to `SpendCoordinator`
 //! so a churn self-send follows the same safety rules as an interactive send.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `ChurnConfig::validate`** — INVARIANT: rejects a zero or inverted
+//!   interval window, any `*_amount_pct` outside `1..=100` (or `min > max`), and
+//!   an empty `node_url`, so the engine can never start with a nonsensical
+//!   schedule. THREAT: a churn loop that never fires or self-sends 0%/>100%.
+//!   TESTS: `default_config_is_valid`, `invalid_config_rejected`.
+//! - **§2 `next_interval_secs`** — INVARIANT: an exponential draw is clamped to
+//!   the configured `[min, max]` window and sampled from `OsRng`, keeping the
+//!   privacy-affecting timing unpredictable yet bounded. THREAT: predictable or
+//!   out-of-window churn timing aiding traffic analysis.
+//!   TESTS: `poisson_intervals_are_bounded`.
+//! - **§3 `pick_churn_amount`** — INVARIANT: percentage math is done in u128 (no
+//!   overflow), the drawn amount stays within `[min_pct, max_pct]`, a fee
+//!   reserve is always kept back (`amount + fee <= spendable`), and a zero
+//!   balance yields 0. THREAT: an over-spend leaving no fee, or an arithmetic
+//!   overflow. TESTS: `churn_amount_respects_bounds`, `churn_amount_handles_zero_and_u64_max`.
+//! - **§4 `execute_churn`** — INVARIANT: the churn is a self-send to the
+//!   wallet's own current keys (value is preserved, not leaked), requires at
+//!   least 2 mature UTXOs, and caps the amount by both mature-spendable and the
+//!   two-largest-input sum. THREAT: deanonymizing the wallet or spending
+//!   immature outputs. TESTS: (gap — async open/unlock/build/submit path with a
+//!   live node; not unit-tested in isolation).
+//! - **§5 `ChurnEngine::new` / `stats`** — INVARIANT: construction re-validates
+//!   the config and builds the node coordinator up front; `stats` returns a
+//!   consistent locked clone. THREAT: an engine running against an invalid
+//!   config or a torn stats read. TESTS: (gap — constructor exercised only via
+//!   the `test_engine` helper).
+//! - **§6 `run` (scheduling loop)** — INVARIANT: the loop checks the shutdown
+//!   flag before and after each sleep, and accumulates completed/failed/total
+//!   counters with saturating adds. THREAT: churn continuing after shutdown, or
+//!   a stats counter overflow. TESTS: (gap — long-running async loop is not
+//!   unit-tested).
 
 use super::send::Payment;
 use super::spend::{SpendCoordinator, SpendIntent, SpendSubmission};

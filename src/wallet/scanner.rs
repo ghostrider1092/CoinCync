@@ -2,6 +2,97 @@
 //!
 //! Scans blockchain outputs to detect which belong to our wallet.
 //! Uses view tags for fast filtering and proper amount decryption.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `scan_output`** — INVARIANT: an output is attributed to the wallet
+//!   IFF its one-time stealth (or subaddress) address matches under the view
+//!   key, and a forged/identity commitment or corrupt encrypted amount is
+//!   dropped rather than accepted. THREAT: mis-detecting foreign outputs as
+//!   owned (phantom balance) or missing genuinely owned funds. TESTS:
+//!   `test_scanner_stealth_roundtrip`, `test_subaddress_detection_coverage`,
+//!   `scan_output_drops_forged_encrypted_amount_serial_path`,
+//!   `scan_output_with_identity_commitment_is_dropped_safely`,
+//!   `scan_output_with_keys_detects_non_current_epoch_and_tags_it`,
+//!   `scan_output_with_keys_preserves_subaddress_index`.
+//! - **§2 `scan_transaction`** — INVARIANT: every candidate output in a tx is
+//!   scanned, and outputs past the u8 index limit (255) are skipped without
+//!   panic. THREAT: index overflow panic or skipped owned outputs. TESTS:
+//!   `scan_transaction_skips_outputs_past_index_255`,
+//!   `test_scanner_block_with_transfer`.
+//! - **§3 `scan_block_with_result`** — INVARIANT: a block that does not extend
+//!   the current tip is recognised as a reorg (prev-hash mismatch or equal-height
+//!   sibling) and triggers a journal rewind, falling back to full rescan when the
+//!   fork is deeper than the journal. THREAT: applying a fork on top of stale
+//!   state, leaving orphaned owned outputs. TESTS:
+//!   `reorg_detection_skips_journal_on_prev_hash_mismatch`,
+//!   `equal_height_sibling_block_signals_reorg_with_tip_hash`,
+//!   `non_monotonic_height_gap_above_tip_is_accepted`,
+//!   `deeper_than_journal_reorg_falls_back_to_full_rescan`,
+//!   `reorg_reverts_received_output_and_spend_in_one_block`.
+//! - **§4 `rewind_to_height`** — INVARIANT: a rewind removes exactly the owned
+//!   outputs added above the target and unmarks exactly the spends journaled
+//!   above it, in reverse application order, leaving position at the target; it
+//!   errs (not silently) above the tip or outside the journal window. THREAT:
+//!   stale or lost owned-output state after a reorg. TESTS:
+//!   `rewind_to_specific_height_pops_correct_entries`,
+//!   `rewind_surfaces_journaled_spends_in_reverse_order`,
+//!   `rewind_above_current_height_errs`, `rewind_outside_journal_window_errs`,
+//!   `full_reorg_loop_removes_orphaned_received_output`,
+//!   `full_reorg_loop_unmarks_orphaned_spend`,
+//!   `rewind_outputs_to_remove_matches_journaled_outputs`,
+//!   `rewind_unspends_match_journaled_spends`.
+//! - **§5 `record_journal_entry` / `record_spend_for_last_block` / journal
+//!   accessors** — INVARIANT: the per-block journal is bounded at capacity,
+//!   exports height/hash pairs oldest-first, and covers the largest network
+//!   reorg cap; recording a spend on an empty journal is a no-op returning false.
+//!   THREAT: unbounded journal growth, or an un-recoverable reorg. TESTS:
+//!   `journal_bounded_at_max_capacity`,
+//!   `journal_pairs_exports_height_hash_oldest_first`,
+//!   `journal_covers_largest_network_reorg_cap`,
+//!   `record_spend_on_empty_journal_returns_false`.
+//! - **§6 `scan_blocks_parallel`** — INVARIANT: the parallel path returns the
+//!   identical decrypted-output set as the serial path, dedups duplicate txs
+//!   across blocks, drops forged commitments, and does not advance on an empty
+//!   slice. THREAT: parallelism diverging from serial detection (missed/duplicated
+//!   funds). TESTS: `serial_and_parallel_scan_return_identical_decrypted_output`,
+//!   `scan_blocks_parallel_drops_forged_commitment_output`,
+//!   `scan_blocks_parallel_dedups_duplicate_tx_across_blocks`,
+//!   `scan_blocks_parallel_empty_slice_returns_empty_no_advance`.
+//! - **§7 coinbase handling in `scan_output`** — INVARIANT: coinbase outputs are
+//!   detected across old (plaintext) and new (ECDH, no view-tag gate) formats,
+//!   a short encrypted amount yields zero rather than panicking, and coinbase to
+//!   a subaddress is not mis-attributed to the primary. THREAT: coinbase-format
+//!   confusion crediting or crashing the scanner. TESTS:
+//!   `scan_output_coinbase_old_format_reads_plaintext_amount`,
+//!   `scan_output_coinbase_new_format_ecdh_no_viewtag_gate`,
+//!   `scan_output_coinbase_short_encrypted_amount_yields_zero_not_panic`,
+//!   `scan_output_coinbase_to_subaddress_is_not_attributed`.
+//! - **§8 `encrypt_amount` / `generate_view_tag`** — INVARIANT: amount encryption
+//!   round-trips and the view tag is a deterministic fast-filter derived from the
+//!   shared secret. THREAT: view-tag mismatch causing owned outputs to be
+//!   filtered out. TESTS: `test_amount_encryption`, `test_view_tag`.
+//! - **§9 `decrypted_to_utxo`** — INVARIANT: converting a decrypted output to a
+//!   UTXO derives its key image and carries the correct lock height, account and
+//!   subaddress index. THREAT: a wrong key image breaking spend/double-spend
+//!   detection, or a lost lock height letting locked funds be spent. TESTS:
+//!   `decrypted_to_utxo_derives_key_image_and_carries_lock_height`,
+//!   `decrypted_to_utxo_subaddress_sets_account_and_index`.
+//! - **§10 `scan_and_persist` / `load_state` / `save_state`** — INVARIANT: the
+//!   background scanner advances and persists scan state so it round-trips across
+//!   a restart. THREAT: re-scanning from zero or losing detected outputs on
+//!   restart. TESTS: `background_scanner_scan_and_persist_advances_state`,
+//!   `background_scanner_state_roundtrips_across_restart`.
+//! - **§11 `WalletSyncService::run` / `scan_block`** — INVARIANT: the sync
+//!   service drains its block channel and honours shutdown. THREAT: a stuck or
+//!   never-terminating sync loop. TESTS:
+//!   `wallet_sync_service_run_drains_channel_and_honors_shutdown`.
+//! - **§12 `set_position` / `position`** — INVARIANT: setting position
+//!   round-trips and a rescan from the same position is idempotent. THREAT:
+//!   position drift double-counting or skipping blocks. TESTS:
+//!   `set_position_roundtrips_and_rescan_is_idempotent`.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -2712,5 +2803,867 @@ mod tests {
             honest_amount as u128,
             "stats.total_amount must NOT include the forged 999_999_999_999 value"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Test-plan gap fills (docs/audit/test-plan/wallet.md § src/wallet/scanner.rs)
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Build a non-coinbase `TxOutput` owned by `(view_public, spend_public)`,
+    /// mirroring the inline sender-side derivation in `test_scanner_stealth_roundtrip`
+    /// (real commitment so the scanner's ghost-balance recompute check passes).
+    fn mk_owned_output(
+        view_public: &PublicKey,
+        spend_public: &PublicKey,
+        amount: u64,
+        output_index: u8,
+    ) -> TxOutput {
+        use crate::crypto::generate_stealth_address_checked;
+        use rand::rngs::OsRng;
+        let (stealth, tx_secret) =
+            generate_stealth_address_checked(spend_public, view_public, output_index, &mut OsRng)
+                .expect("stealth generation");
+        let tx_scalar = SecretScalar::from_bytes(*tx_secret.as_bytes());
+        let view_point = PublicPoint::from_bytes(*view_public.as_bytes()).unwrap();
+        let shared_point = view_point.mul(&tx_scalar);
+        let shared_secret: [u8; 32] = *hash_domain(
+            b"COINCYNC_SHARED_v2",
+            &[shared_point.to_bytes().as_slice(), &[output_index]].concat(),
+        )
+        .as_bytes();
+        let encrypted_amount = encrypt_amount(amount, &shared_secret);
+        let view_tag = generate_view_tag(view_public, &tx_secret, output_index);
+        let blinding = BlindingFactor::from_bytes(
+            *hash_domain(b"COINCYNC_BLINDING", &shared_secret).as_bytes(),
+        );
+        let commitment = PedersenCommitment::commit(amount, &blinding).to_bytes();
+        TxOutput {
+            stealth_address: stealth.public_key,
+            tx_public_key: stealth.tx_public_key,
+            commitment,
+            encrypted_amount,
+            view_tag,
+            lock_height: None,
+            encrypted_memo: vec![],
+        }
+    }
+
+    fn mk_transfer_tx(outputs: Vec<TxOutput>) -> Transaction {
+        Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs,
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    fn mk_block(height: u64, prev_hash: Hash, txs: Vec<Transaction>) -> Block {
+        Block {
+            header: crate::consensus::BlockHeader {
+                network_magic: NetworkType::Testnet.magic_bytes(),
+                version: 1,
+                height,
+                timestamp: 1000 + height,
+                prev_hash,
+                tx_root: Hash::zero(),
+                anchor: Hash::zero(),
+                algorithm: 0,
+                nonce: 0,
+                target: Hash::from_bytes([0xFFu8; 32]),
+                miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+                supply_commitment: [0u8; 32],
+                checkpoint_vote: None,
+                spark_set_root: [0u8; 32],
+                mw_kernel_root: [0u8; 32],
+            },
+            transactions: txs,
+        }
+    }
+
+    /// Full reorg loop: branch A receives output X, an equal-height sibling B
+    /// signals ReorgDetected, rewind surfaces X for removal, and rescanning B
+    /// leaves X absent.
+    #[test]
+    fn full_reorg_loop_removes_orphaned_received_output() {
+        use rand::rngs::OsRng;
+        let bob_view = SecretKey::generate(&mut OsRng);
+        let bob_spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (bob_view.public_key(), bob_spend.public_key());
+
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(bob_view.clone(), spub, 0);
+
+        // Branch A: height 1 carries owned output X.
+        let out_x = mk_owned_output(&vpub, &spub, 12_345, 0);
+        let tx_a = mk_transfer_tx(vec![out_x]);
+        let x_txhash = tx_a.hash();
+        let block_a = mk_block(1, Hash::zero(), vec![tx_a]);
+        let a_outputs = match scanner.scan_block_with_result(&block_a) {
+            ScanResult::Scanned { outputs, .. } => outputs,
+            other => panic!("branch A should scan cleanly, got {:?}", other),
+        };
+        assert_eq!(a_outputs.len(), 1, "X detected on branch A");
+        assert_eq!(
+            (a_outputs[0].tx_hash, a_outputs[0].output_index),
+            (x_txhash, 0)
+        );
+
+        // Branch B: an equal-height sibling (height <= tip) → reorg signal.
+        let block_b = mk_block(1, Hash::zero(), vec![mk_transfer_tx(vec![])]);
+        match scanner.scan_block_with_result(&block_b) {
+            ScanResult::ReorgDetected {
+                at_height,
+                expected_prev,
+                ..
+            } => {
+                assert_eq!(at_height, 1);
+                // Real code returns the journal tip hash (block A), NOT the
+                // "zero-path" the doc comment mentions.
+                assert_eq!(expected_prev, block_a.hash());
+            }
+            other => panic!("branch B must be flagged as reorg, got {:?}", other),
+        }
+
+        // Rewind to the fork point (height 0) undoes branch A.
+        let outcome = scanner.rewind_to_height(0).expect("rewind to fork point");
+        assert!(
+            outcome.outputs_to_remove.contains(&(x_txhash, 0)),
+            "orphaned output X must be surfaced for removal"
+        );
+
+        // Rescan branch B forward: empty journal → no reorg, X absent.
+        let b_outputs = scanner.scan_block_with_result(&block_b).outputs_or_panic();
+        assert!(
+            !b_outputs.iter().any(|o| o.tx_hash == x_txhash),
+            "X must be absent after rescanning canonical branch B"
+        );
+    }
+
+    /// Reorg un-marks an orphaned spend: a key image journaled onto an
+    /// orphaned block is surfaced in `key_images_to_unspend` after rewind.
+    #[test]
+    fn full_reorg_loop_unmarks_orphaned_spend() {
+        use rand::rngs::OsRng;
+        let bob_view = SecretKey::generate(&mut OsRng);
+        let bob_spend = SecretKey::generate(&mut OsRng);
+        let spub = bob_spend.public_key();
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(bob_view, spub, 0);
+
+        let block1 = mk_block(1, Hash::zero(), vec![mk_transfer_tx(vec![])]);
+        scanner.scan_block_with_result(&block1).outputs_or_panic();
+
+        // Height 2 links to block1 and spends one of our UTXOs; the orchestrator
+        // journals the spent key image onto the just-applied block.
+        let block2 = mk_block(2, block1.hash(), vec![mk_transfer_tx(vec![])]);
+        scanner.scan_block_with_result(&block2).outputs_or_panic();
+        let spent_ki = KeyImage::from_bytes([0x5A; 32]);
+        assert!(scanner.record_spend_for_last_block(spent_ki));
+
+        // An equal-height sibling at 2 orphans block2.
+        let sibling2 = mk_block(2, Hash::from_bytes([0x77; 32]), vec![mk_transfer_tx(vec![])]);
+        assert!(matches!(
+            scanner.scan_block_with_result(&sibling2),
+            ScanResult::ReorgDetected { .. }
+        ));
+
+        let outcome = scanner.rewind_to_height(1).expect("rewind");
+        assert_eq!(outcome.entries_undone, 1);
+        assert!(
+            outcome.key_images_to_unspend.contains(&spent_ki),
+            "orphaned spend's key image must be surfaced for un-marking"
+        );
+    }
+
+    /// A received output AND a spend in the same orphaned block are both
+    /// reverted in one rewind.
+    #[test]
+    fn reorg_reverts_received_output_and_spend_in_one_block() {
+        use rand::rngs::OsRng;
+        let bob_view = SecretKey::generate(&mut OsRng);
+        let bob_spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (bob_view.public_key(), bob_spend.public_key());
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(bob_view, spub, 0);
+
+        let block1 = mk_block(1, Hash::zero(), vec![mk_transfer_tx(vec![])]);
+        scanner.scan_block_with_result(&block1).outputs_or_panic();
+
+        let out_x = mk_owned_output(&vpub, &spub, 9_000, 0);
+        let tx2 = mk_transfer_tx(vec![out_x]);
+        let x_txhash = tx2.hash();
+        let block2 = mk_block(2, block1.hash(), vec![tx2]);
+        let found = scanner.scan_block_with_result(&block2).outputs_or_panic();
+        assert_eq!(found.len(), 1);
+        let spent_ki = KeyImage::from_bytes([0x33; 32]);
+        assert!(scanner.record_spend_for_last_block(spent_ki));
+
+        let sibling2 = mk_block(2, Hash::from_bytes([0x99; 32]), vec![mk_transfer_tx(vec![])]);
+        assert!(matches!(
+            scanner.scan_block_with_result(&sibling2),
+            ScanResult::ReorgDetected { .. }
+        ));
+        let outcome = scanner.rewind_to_height(1).expect("rewind");
+
+        assert!(
+            outcome.outputs_to_remove.contains(&(x_txhash, 0)),
+            "received output reverted"
+        );
+        assert!(
+            outcome.key_images_to_unspend.contains(&spent_ki),
+            "spend reverted"
+        );
+        assert_eq!(
+            outcome.entries_undone, 1,
+            "both reverted by popping one block"
+        );
+    }
+
+    /// Equal-height sibling block returns ReorgDetected; pin that `expected_prev`
+    /// is the journal tip hash (not the doc's `Hash::zero()` "zero-path").
+    #[test]
+    fn equal_height_sibling_block_signals_reorg_with_tip_hash() {
+        let mut scanner = WalletScanner::new();
+        let block1 = mk_block(1, Hash::zero(), vec![mk_transfer_tx(vec![])]);
+        let h1 = block1.hash();
+        scanner.scan_block_with_result(&block1).outputs_or_panic();
+
+        let sibling = mk_block(1, Hash::from_bytes([0xEE; 32]), vec![mk_transfer_tx(vec![])]);
+        match scanner.scan_block_with_result(&sibling) {
+            ScanResult::ReorgDetected {
+                at_height,
+                actual_prev,
+                expected_prev,
+            } => {
+                assert_eq!(at_height, 1);
+                assert_eq!(actual_prev, Hash::from_bytes([0xEE; 32]));
+                assert_eq!(expected_prev, h1);
+            }
+            other => panic!("equal-height sibling must be a reorg, got {:?}", other),
+        }
+        // State unchanged on reorg detection.
+        assert_eq!(scanner.position().0, 1);
+        assert_eq!(scanner.journal_len(), 1);
+    }
+
+    /// Non-monotonic gap: a block at height > tip+1 is currently ACCEPTED
+    /// (no reorg signal). Pin the behavior.
+    #[test]
+    fn non_monotonic_height_gap_above_tip_is_accepted() {
+        let mut scanner = WalletScanner::new();
+        let block1 = mk_block(1, Hash::zero(), vec![mk_transfer_tx(vec![])]);
+        scanner.scan_block_with_result(&block1).outputs_or_panic();
+
+        let ahead = mk_block(5, Hash::from_bytes([0xAB; 32]), vec![mk_transfer_tx(vec![])]);
+        match scanner.scan_block_with_result(&ahead) {
+            ScanResult::Scanned { height, .. } => assert_eq!(height, 5),
+            other => panic!(
+                "a height gap above tip+1 is currently accepted, got {:?}",
+                other
+            ),
+        }
+        assert_eq!(scanner.position().0, 5);
+    }
+
+    /// Deeper-than-journal reorg: detection fires at the tip but the fork point
+    /// is below the journal window, so rewind refuses (OutsideJournalWindow) and
+    /// the caller must fall back to a full rescan.
+    #[test]
+    fn deeper_than_journal_reorg_falls_back_to_full_rescan() {
+        let mut scanner = WalletScanner::new();
+        for h in 100u64..=102 {
+            push_diff(&mut scanner, h, h as u8);
+        }
+        let sibling = mk_block(102, Hash::from_bytes([0xCD; 32]), vec![mk_transfer_tx(vec![])]);
+        assert!(matches!(
+            scanner.scan_block_with_result(&sibling),
+            ScanResult::ReorgDetected { .. }
+        ));
+
+        let err = scanner
+            .rewind_to_height(50)
+            .expect_err("deep rewind must fail");
+        assert_eq!(
+            err,
+            RewindError::OutsideJournalWindow {
+                target_height: 50,
+                earliest_in_journal: 100,
+            }
+        );
+    }
+
+    /// Coinbase old-format (stealth == spend_public): plaintext amount read,
+    /// subaddress_index None.
+    #[test]
+    fn scan_output_coinbase_old_format_reads_plaintext_amount() {
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let spub = spend.public_key();
+        let reward = 50_000_000_000u64;
+
+        let output = TxOutput {
+            stealth_address: spub,
+            tx_public_key: PublicKey::from_bytes([0u8; 32]),
+            commitment: PedersenCommitment::commit(reward, &BlindingFactor::zero()).to_bytes(),
+            encrypted_amount: reward.to_le_bytes().to_vec(),
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(view, spub, 0);
+        let got = scanner
+            .scan_output(&output, 0, Hash::zero(), true)
+            .expect("old-format coinbase detected");
+        assert_eq!(got.amount, reward);
+        assert_eq!(got.subaddress_index, None);
+        assert_eq!(got.key_epoch, 0);
+    }
+
+    /// Coinbase new-format (ECDH-derived) detected without a view-tag gate.
+    #[test]
+    fn scan_output_coinbase_new_format_ecdh_no_viewtag_gate() {
+        use crate::crypto::generate_stealth_address_checked;
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+        let reward = 42_000_000_000u64;
+
+        let (stealth, _tx_secret) =
+            generate_stealth_address_checked(&spub, &vpub, 0, &mut OsRng).unwrap();
+        let output = TxOutput {
+            stealth_address: stealth.public_key,
+            tx_public_key: stealth.tx_public_key,
+            commitment: PedersenCommitment::commit(reward, &BlindingFactor::zero()).to_bytes(),
+            encrypted_amount: reward.to_le_bytes().to_vec(),
+            view_tag: 0xAB, // wrong on purpose: coinbase path must not gate on it
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(view, spub, 0);
+        let got = scanner
+            .scan_output(&output, 0, Hash::zero(), true)
+            .expect("new-format coinbase detected via ECDH regardless of view_tag");
+        assert_eq!(got.amount, reward);
+        assert_eq!(got.subaddress_index, None);
+    }
+
+    /// Coinbase with encrypted_amount < 8 bytes decodes to amount 0, no panic.
+    #[test]
+    fn scan_output_coinbase_short_encrypted_amount_yields_zero_not_panic() {
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let spub = spend.public_key();
+        let output = TxOutput {
+            stealth_address: spub,
+            tx_public_key: PublicKey::from_bytes([0u8; 32]),
+            // amount decodes to 0, so commitment must be commit(0, 0).
+            commitment: PedersenCommitment::commit(0, &BlindingFactor::zero()).to_bytes(),
+            encrypted_amount: vec![1, 2, 3],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(view, spub, 0);
+        let got = scanner
+            .scan_output(&output, 0, Hash::zero(), true)
+            .expect("detected");
+        assert_eq!(got.amount, 0, "short encrypted_amount decodes to 0, not panic");
+    }
+
+    /// Coinbase mined to a subaddress: the coinbase path only checks the PRIMARY
+    /// spend key, so it is NOT detected/attributed. Pin the attribution gap.
+    #[test]
+    fn scan_output_coinbase_to_subaddress_is_not_attributed() {
+        use crate::crypto::generate_stealth_address_checked;
+        use crate::wallet::subaddress::{SubaddressIndex, SubaddressManager};
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+
+        let mut mgr = SubaddressManager::new(
+            SecretKey::from_bytes(*view.as_bytes()),
+            PublicKey::from_bytes(*spub.as_bytes()),
+            PublicKey::from_bytes(*vpub.as_bytes()),
+        );
+        let sub_bytes: [u8; 32] = *mgr
+            .generate_at(SubaddressIndex::new(0, 1))
+            .unwrap()
+            .spend_public
+            .as_bytes();
+        let sub_spend = PublicKey::from_bytes(sub_bytes);
+
+        let reward = 10_000_000_000u64;
+        let (stealth, _tx_secret) =
+            generate_stealth_address_checked(&sub_spend, &vpub, 0, &mut OsRng).unwrap();
+        let output = TxOutput {
+            stealth_address: stealth.public_key,
+            tx_public_key: stealth.tx_public_key,
+            commitment: PedersenCommitment::commit(reward, &BlindingFactor::zero()).to_bytes(),
+            encrypted_amount: reward.to_le_bytes().to_vec(),
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(view, spub, 0);
+        scanner.add_subaddress_keys(vec![(0, 1, sub_spend)]);
+        assert!(
+            scanner.scan_output(&output, 0, Hash::zero(), true).is_none(),
+            "coinbase-to-subaddress is not detected by the coinbase path (attribution gap)"
+        );
+    }
+
+    /// Serial (`scan_output`) and parallel (`scan_output_with_keys`) paths return
+    /// byte-identical DecryptedOutput for the same output.
+    #[test]
+    fn serial_and_parallel_scan_return_identical_decrypted_output() {
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+        let output = mk_owned_output(&vpub, &spub, 3_141_592, 0);
+        let txh = Hash::from_bytes([0x11; 32]);
+
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(view.clone(), spub, 0);
+        let serial = scanner
+            .scan_output(&output, 0, txh, false)
+            .expect("serial detect");
+
+        let keys = vec![ScanKeys::new(view, spub, 0)];
+        let parallel =
+            scan_output_with_keys(&output, 0, txh, &keys, false).expect("parallel detect");
+
+        assert_eq!(serial.tx_hash, parallel.tx_hash);
+        assert_eq!(serial.output_index, parallel.output_index);
+        assert_eq!(serial.amount, parallel.amount);
+        assert_eq!(
+            serial.blinding_factor.to_bytes(),
+            parallel.blinding_factor.to_bytes()
+        );
+        assert_eq!(serial.shared_secret, parallel.shared_secret);
+        assert_eq!(serial.key_epoch, parallel.key_epoch);
+        assert_eq!(serial.subaddress_index, parallel.subaddress_index);
+        assert_eq!(serial.output.commitment, parallel.output.commitment);
+    }
+
+    /// Output owned under a NON-current key epoch is detected and tagged with
+    /// the matching epoch.
+    #[test]
+    fn scan_output_with_keys_detects_non_current_epoch_and_tags_it() {
+        use rand::rngs::OsRng;
+        let view3 = SecretKey::generate(&mut OsRng);
+        let spend3 = SecretKey::generate(&mut OsRng);
+        let (v3, s3) = (view3.public_key(), spend3.public_key());
+        let view7 = SecretKey::generate(&mut OsRng);
+        let spend7 = SecretKey::generate(&mut OsRng);
+
+        let output = mk_owned_output(&v3, &s3, 500_000, 0);
+        let keys = vec![
+            ScanKeys::new(view7, spend7.public_key(), 7),
+            ScanKeys::new(view3, s3, 3),
+        ];
+        let got = scan_output_with_keys(&output, 0, Hash::zero(), &keys, false)
+            .expect("owned under older epoch must be detected");
+        assert_eq!(got.key_epoch, 3, "tagged with the epoch that matched");
+    }
+
+    /// Subaddress match on the parallel path preserves (account, index).
+    #[test]
+    fn scan_output_with_keys_preserves_subaddress_index() {
+        use crate::crypto::generate_stealth_address_checked;
+        use crate::wallet::subaddress::{SubaddressIndex, SubaddressManager};
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+
+        let mut mgr = SubaddressManager::new(
+            SecretKey::from_bytes(*view.as_bytes()),
+            PublicKey::from_bytes(*spub.as_bytes()),
+            PublicKey::from_bytes(*vpub.as_bytes()),
+        );
+        let sub_bytes: [u8; 32] = *mgr
+            .generate_at(SubaddressIndex::new(0, 2))
+            .unwrap()
+            .spend_public
+            .as_bytes();
+        let sub_spend = PublicKey::from_bytes(sub_bytes);
+
+        let (stealth, tx_secret) =
+            generate_stealth_address_checked(&sub_spend, &vpub, 0, &mut OsRng).unwrap();
+        let tx_scalar = SecretScalar::from_bytes(*tx_secret.as_bytes());
+        let view_point = PublicPoint::from_bytes(*vpub.as_bytes()).unwrap();
+        let shared_point = view_point.mul(&tx_scalar);
+        let shared: [u8; 32] = *hash_domain(
+            b"COINCYNC_SHARED_v2",
+            &[shared_point.to_bytes().as_slice(), &[0u8]].concat(),
+        )
+        .as_bytes();
+        let amount = 6_000_000u64;
+        let blinding =
+            BlindingFactor::from_bytes(*hash_domain(b"COINCYNC_BLINDING", &shared).as_bytes());
+        let output = TxOutput {
+            stealth_address: stealth.public_key,
+            tx_public_key: stealth.tx_public_key,
+            commitment: PedersenCommitment::commit(amount, &blinding).to_bytes(),
+            encrypted_amount: encrypt_amount(amount, &shared),
+            view_tag: generate_view_tag(&vpub, &tx_secret, 0),
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+
+        let mut keys = ScanKeys::new(view, spub, 0);
+        keys.subaddress_keys = vec![(0, 2, sub_spend)];
+        let got = scan_output_with_keys(&output, 0, Hash::zero(), &[keys], false)
+            .expect("subaddress output detected on parallel path");
+        assert_eq!(got.subaddress_index, Some((0, 2)));
+        assert_eq!(got.amount, amount);
+    }
+
+    /// Forged encrypted_amount on a NON-coinbase owned stealth address is dropped
+    /// by the commitment recompute in the SERIAL path too.
+    #[test]
+    fn scan_output_drops_forged_encrypted_amount_serial_path() {
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+        let mut output = mk_owned_output(&vpub, &spub, 8_000_000_000, 0);
+        output.commitment = [0xAB; 32]; // still ours by stealth, but forged amount
+
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(view, spub, 0);
+        assert!(
+            scanner.scan_output(&output, 0, Hash::zero(), false).is_none(),
+            "serial path must drop a stealth-owned output with a forged commitment"
+        );
+    }
+
+    /// Outputs past index 255 are skipped safely (no idx truncation, no panic).
+    #[test]
+    fn scan_transaction_skips_outputs_past_index_255() {
+        use rand::rngs::OsRng;
+        let dummy = TxOutput {
+            stealth_address: PublicKey::from_bytes([9u8; 32]),
+            tx_public_key: PublicKey::from_bytes([8u8; 32]),
+            commitment: [7u8; 32],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let tx = mk_transfer_tx(vec![dummy; 260]);
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(
+            SecretKey::generate(&mut OsRng),
+            SecretKey::generate(&mut OsRng).public_key(),
+            0,
+        );
+        let found = scanner.scan_transaction(&tx);
+        assert!(found.is_empty());
+        assert_eq!(
+            scanner.stats().outputs_scanned,
+            256,
+            "only indices 0..=255 are scanned; index 256+ is skipped"
+        );
+    }
+
+    /// An output that is ours by view key but whose commitment is the identity
+    /// point (all-zero encoding) is dropped safely by the recompute check.
+    #[test]
+    fn scan_output_with_identity_commitment_is_dropped_safely() {
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+        let mut output = mk_owned_output(&vpub, &spub, 1_000, 0);
+        output.commitment = [0u8; 32]; // identity point encoding
+
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(view, spub, 0);
+        assert!(scanner.scan_output(&output, 0, Hash::zero(), false).is_none());
+    }
+
+    /// `decrypted_to_utxo` derives the key image via the CLSAG formula and carries
+    /// `lock_height` from the TxOutput.
+    #[test]
+    fn decrypted_to_utxo_derives_key_image_and_carries_lock_height() {
+        use crate::crypto::{
+            compute_one_time_secret, generate_stealth_address_checked,
+            KeyImage as CurveKeyImage,
+        };
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+
+        let (stealth, _tx_secret) =
+            generate_stealth_address_checked(&spub, &vpub, 0, &mut OsRng).unwrap();
+        let amount = 4_242u64;
+        let output = TxOutput {
+            stealth_address: stealth.public_key,
+            tx_public_key: stealth.tx_public_key,
+            commitment: PedersenCommitment::commit(amount, &BlindingFactor::zero()).to_bytes(),
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: Some(500),
+            encrypted_memo: vec![],
+        };
+        let decrypted = DecryptedOutput {
+            tx_hash: Hash::from_bytes([0xA1; 32]),
+            output_index: 0,
+            output_locator: None,
+            output,
+            amount,
+            blinding_factor: BlindingFactor::zero(),
+            shared_secret: [0u8; 32],
+            key_epoch: 0,
+            subaddress_index: None,
+        };
+
+        let utxo = decrypted_to_utxo(&decrypted, &view, &spend, 7).unwrap();
+        assert_eq!(utxo.lock_height, Some(500), "lock_height carried from TxOutput");
+
+        let recipient_stealth = StealthAddress {
+            public_key: decrypted.output.stealth_address,
+            tx_public_key: decrypted.output.tx_public_key,
+        };
+        let x = compute_one_time_secret(&recipient_stealth, &view, &spend, 0).unwrap();
+        let expected_ki =
+            CurveKeyImage::from_secret(&SecretScalar::from_bytes(*x.as_bytes())).to_bytes();
+        assert_eq!(utxo.key_image.as_bytes(), &expected_ki);
+        assert!(!utxo.spent);
+    }
+
+    /// `decrypted_to_utxo` on a subaddress output yields a spendable UTXO with
+    /// subaddress_account/index set.
+    #[test]
+    fn decrypted_to_utxo_subaddress_sets_account_and_index() {
+        use crate::crypto::generate_stealth_address_checked_ext;
+        use crate::wallet::subaddress::{SubaddressIndex, SubaddressManager};
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+
+        let mut mgr = SubaddressManager::new(
+            SecretKey::from_bytes(*view.as_bytes()),
+            PublicKey::from_bytes(*spub.as_bytes()),
+            PublicKey::from_bytes(*vpub.as_bytes()),
+        );
+        let d_bytes: [u8; 32] = *mgr
+            .generate_at(SubaddressIndex::new(3, 7))
+            .unwrap()
+            .spend_public
+            .as_bytes();
+        let d = PublicKey::from_bytes(d_bytes);
+        let d_point = PublicPoint::from_bytes(d_bytes).unwrap();
+        let view_scalar = SecretScalar::from_bytes(*view.as_bytes());
+        let c = PublicKey::from_bytes(d_point.mul(&view_scalar).to_bytes());
+        let (stealth, _tx_secret) =
+            generate_stealth_address_checked_ext(&d, &c, 0, true, &mut OsRng).unwrap();
+
+        let output = TxOutput {
+            stealth_address: stealth.public_key,
+            tx_public_key: stealth.tx_public_key,
+            commitment: PedersenCommitment::commit(1_000, &BlindingFactor::zero()).to_bytes(),
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let decrypted = DecryptedOutput {
+            tx_hash: Hash::zero(),
+            output_index: 0,
+            output_locator: None,
+            output,
+            amount: 1_000,
+            blinding_factor: BlindingFactor::zero(),
+            shared_secret: [0u8; 32],
+            key_epoch: 0,
+            subaddress_index: Some((3, 7)),
+        };
+        let utxo = decrypted_to_utxo(&decrypted, &view, &spend, 1).unwrap();
+        assert_eq!(utxo.subaddress_account, Some(3));
+        assert_eq!(utxo.subaddress_index, Some(7));
+        assert!(!utxo.spent);
+    }
+
+    /// `scan_blocks_parallel` on an empty slice returns empty and does not
+    /// advance position.
+    #[test]
+    fn scan_blocks_parallel_empty_slice_returns_empty_no_advance() {
+        use rand::rngs::OsRng;
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(
+            SecretKey::generate(&mut OsRng),
+            SecretKey::generate(&mut OsRng).public_key(),
+            0,
+        );
+        let found = scanner.scan_blocks_parallel(&[]);
+        assert!(found.is_empty());
+        assert_eq!(
+            scanner.position(),
+            (0, Hash::zero()),
+            "position must not advance on empty input"
+        );
+    }
+
+    /// Duplicate tx_hash across two blocks does not double-count outputs
+    /// (parallel-path dedup by (tx_hash, output_index)).
+    #[test]
+    fn scan_blocks_parallel_dedups_duplicate_tx_across_blocks() {
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+        let out = mk_owned_output(&vpub, &spub, 2_000_000, 0);
+        let tx = mk_transfer_tx(vec![out]);
+        let block_a = mk_block(1, Hash::zero(), vec![tx.clone()]);
+        let block_b = mk_block(2, block_a.hash(), vec![tx]);
+
+        let mut scanner = WalletScanner::new();
+        scanner.add_keys(view, spub, 0);
+        let found = scanner.scan_blocks_parallel(&[block_a, block_b]);
+        assert_eq!(found.len(), 1, "same (tx_hash, index) counted once");
+    }
+
+    /// `set_position` round-trips, and rescanning a block after a reset yields
+    /// the same outputs as the first scan.
+    #[test]
+    fn set_position_roundtrips_and_rescan_is_idempotent() {
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+        let block = mk_block(
+            1,
+            Hash::zero(),
+            vec![mk_transfer_tx(vec![mk_owned_output(&vpub, &spub, 1_234_567, 0)])],
+        );
+
+        let mut s1 = WalletScanner::new();
+        s1.add_keys(view.clone(), spub, 0);
+        let first: Vec<u64> = s1.scan_block(&block).iter().map(|o| o.amount).collect();
+
+        let mut s2 = WalletScanner::new();
+        s2.add_keys(view, spub, 0);
+        s2.set_position(9, Hash::from_bytes([0xAA; 32]));
+        assert_eq!(
+            s2.position(),
+            (9, Hash::from_bytes([0xAA; 32])),
+            "set_position round-trips"
+        );
+        s2.set_position(0, Hash::zero());
+        let second: Vec<u64> = s2.scan_block(&block).iter().map(|o| o.amount).collect();
+
+        assert_eq!(first, second, "rescan after reset yields the same outputs");
+        assert_eq!(first, vec![1_234_567]);
+    }
+
+    /// `BackgroundScanner::scan_and_persist` persists detected outputs and
+    /// advances the persisted ScanState.
+    #[test]
+    fn background_scanner_scan_and_persist_advances_state() {
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+        let out = mk_owned_output(&vpub, &spub, 3_000_000, 0);
+        let tx = mk_transfer_tx(vec![out]);
+        let tx_hash = tx.hash();
+        let block = mk_block(1, Hash::zero(), vec![tx]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let wallet_db = Arc::new(WalletDb::new(&db).unwrap());
+
+        let mut bg = BackgroundScanner::new(wallet_db.clone());
+        bg.add_keys(view, spub, 0);
+        let count = bg.scan_and_persist(&block).unwrap();
+        assert_eq!(count, 1, "one owned output persisted");
+
+        assert!(wallet_db.get_output(&tx_hash, 0).unwrap().is_some());
+        let state = wallet_db.get_scan_state().unwrap();
+        assert_eq!(state.scanned_height, 1);
+        assert_eq!(state.scanned_hash, block.hash());
+        assert_eq!(bg.position(), (1, block.hash()));
+    }
+
+    /// `BackgroundScanner` load/save round-trips the scan position across a
+    /// simulated restart.
+    #[test]
+    fn background_scanner_state_roundtrips_across_restart() {
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+        let block = mk_block(
+            1,
+            Hash::zero(),
+            vec![mk_transfer_tx(vec![mk_owned_output(&vpub, &spub, 5_000, 0)])],
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let wallet_db = Arc::new(WalletDb::new(&db).unwrap());
+
+        let mut bg1 = BackgroundScanner::new(wallet_db.clone());
+        bg1.add_keys(view.clone(), spub, 0);
+        bg1.scan_and_persist(&block).unwrap();
+        let saved = bg1.position();
+        assert_eq!(saved, (1, block.hash()));
+
+        let mut bg2 = BackgroundScanner::new(wallet_db.clone());
+        bg2.add_keys(view, spub, 0);
+        bg2.load_state().unwrap();
+        assert_eq!(bg2.position(), saved, "scan position restored after restart");
+    }
+
+    /// `WalletSyncService::run` drains the block channel, persists outputs, and
+    /// returns aggregated ScanStats on shutdown.
+    #[tokio::test]
+    async fn wallet_sync_service_run_drains_channel_and_honors_shutdown() {
+        use rand::rngs::OsRng;
+        let view = SecretKey::generate(&mut OsRng);
+        let spend = SecretKey::generate(&mut OsRng);
+        let (vpub, spub) = (view.public_key(), spend.public_key());
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let wallet_db = Arc::new(WalletDb::new(&db).unwrap());
+
+        let mut bg = BackgroundScanner::new(wallet_db.clone());
+        bg.add_keys(view, spub, 0);
+
+        let (mut handle, service) = WalletSyncHandle::new(bg, 8);
+        let join = tokio::spawn(service.run());
+
+        let out = mk_owned_output(&vpub, &spub, 7_777, 0);
+        let tx = mk_transfer_tx(vec![out]);
+        let tx_hash = tx.hash();
+        let block = mk_block(1, Hash::zero(), vec![tx]);
+        handle.scan_block(block).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        handle.shutdown();
+
+        let stats = join
+            .await
+            .unwrap()
+            .expect("service returns aggregated stats");
+        assert!(stats.outputs_found >= 1, "the owned output was scanned");
+        assert!(wallet_db.get_output(&tx_hash, 0).unwrap().is_some());
     }
 }

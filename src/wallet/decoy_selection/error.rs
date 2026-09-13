@@ -1,3 +1,37 @@
+//! Fail-closed decoy-selection error taxonomy.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `snapshot-stage variants`** — INVARIANT: every malformed-snapshot
+//!   condition (policy, height ordering, bucket bounds, pool overflow) has a
+//!   distinct fail-closed variant. THREAT: silently sampling from an invalid
+//!   distribution. TESTS: `validated_snapshot_rejects_unsupported_policy`,
+//!   `validated_snapshot_rejects_invalid_height_buckets`.
+//! - **§2 `request-stage variants`** — INVARIANT: malformed covered requests
+//!   (missing/duplicate real, out-of-snapshot, capacity/size overflow, ring
+//!   size) each map to a specific variant. THREAT: building a ring from an
+//!   invalid request. TESTS: `covered_request_rejects_a_real_locator_outside_the_snapshot`,
+//!   `covered_request_rejects_capacity_overflow`.
+//! - **§3 `response-stage variants`** — INVARIANT: a mismatched node response
+//!   (snapshot, length, locator, height) yields a distinct rejection.
+//!   THREAT: accepting a substituted or reordered response.
+//!   TESTS: `covered_response_rejects_snapshot_order_and_height_mismatches`.
+//! - **§4 `allocation-stage variants`** — INVARIANT: every allocation failure
+//!   (real-set/identity mismatch, duplicate real key, ring size/count/input
+//!   mismatch) is a distinct variant. THREAT: emitting a ring that fails to bind
+//!   the real member. TESTS: `allocation_rejects_real_identity_mismatch`,
+//!   `allocation_rejects_duplicate_real_public_key`.
+//! - **§5 `InsufficientDecoys`** — INVARIANT: an undersized eligible pool is
+//!   reported with available/needed counts, never panicked. THREAT: an
+//!   under-mixed ring or a panic. TESTS:
+//!   `allocation_reports_insufficient_decoys_when_candidate_pool_too_small`.
+//! - **§6 `From<DecoySelectionError> for WalletError`** — INVARIANT: each variant
+//!   maps to a stable `WalletError` category while preserving its message.
+//!   THREAT: losing error context at the wallet boundary.
+//!   TESTS: `decoy_selection_error_messages_are_actionable`.
+
 use crate::decoy::OutputLocator;
 use crate::error::Error as WalletError;
 use thiserror::Error;

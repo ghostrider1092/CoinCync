@@ -1,3 +1,39 @@
+//! # Coin selection
+//!
+//! Chooses UTXOs to fund a spend — a general accumulate-to-target selector and
+//! the uniform two-input pair selector — and gates spends on matured balance.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `select_utxos`** — INVARIANT: accumulates UTXOs until `sum ≥ target`, else errors;
+//!   an empty pool fails with `NoOutputsAvailable`.
+//!   THREAT: returning an under-funded selection → unbalanced / rejected tx.
+//!   TESTS: `coin_selection_rejects_empty_pool`,
+//!   `prepare_vesting_fee_growth_loop_reselects_until_inputs_cover_fee`.
+//! - **§2 `select_utxos_uniform` (two-input floor)** — INVARIANT: refuses to proceed with
+//!   fewer than `STANDARD_INPUT_COUNT` UTXOs.
+//!   THREAT: a single-input uniform tx breaks the fixed-shape anonymity model.
+//!   TESTS: `uniform_selection_requires_two_inputs`.
+//! - **§3 `select_utxos_uniform` (coverage gate)** — INVARIANT: if even the largest pair cannot
+//!   reach the target, it fails with a `NoUtxoPairCovers` diagnostic (no silent shortfall).
+//!   THREAT: emitting a pair that under-covers the target → rejected tx.
+//!   TESTS: `uniform_selection_reports_when_no_pair_covers`.
+//! - **§4 `select_utxos_uniform` (minimal excess)** — INVARIANT: picks among pairs within a
+//!   small band of the minimum excess, favouring the tightest cover, not just the largest.
+//!   THREAT: over-large excess is force-folded to fee → avoidable value burn.
+//!   TESTS: `uniform_selection_finds_optimal_non_largest_pair`, `uniform_selection_happy_path`.
+//! - **§5 `no_pair_covers_error`** — INVARIANT: the error reports target, utxo count, total,
+//!   largest pair, and the max-safe amount after the fee reserve.
+//!   THREAT: an opaque failure leaves the user unable to act (consolidate/split).
+//!   TESTS: `uniform_selection_reports_when_no_pair_covers`.
+//! - **§6 `ensure_spendable`** — INVARIANT: distinguishes `BalancePendingMaturity` (funds exist
+//!   but are immature) from true `InsufficientBalance`, never over-reporting spendable funds.
+//!   THREAT: spending immature outputs, or a misleading insufficient-funds error.
+//!   TESTS: `prepare_insufficient_funds_errors_without_reserving`
+//!   (pending-maturity branch: gap — no unit test).
+
 use super::super::{Balance, UTXO};
 use super::types::CoinSelection;
 use crate::constants::{STANDARD_INPUT_COUNT, TARGET_BLOCK_TIME};

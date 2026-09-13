@@ -1,6 +1,34 @@
 //! Shim `KeyEpoch` type used by `crypto::stealth` for ECDH-based output
 //! detection. This is the CoinCync 1.0 shape, kept as its own file so the
 //! Zcash-style FVK/IVK/OVK code in `wallet::keys` is not disturbed.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `ScopedViewKey::from_epoch` / `covers_height`** — INVARIANT: a
+//!   scoped view key covers exactly the inclusive `[from_height, to_height]`
+//!   block range and nothing outside it (an inverted range covers nothing).
+//!   THREAT: over-broad scope would disclose transaction history beyond what the
+//!   holder voluntarily surrendered (e.g. a tax year).
+//!   TESTS: `scoped_view_key_enforces_inclusive_range`,
+//!   `scoped_view_key_scope_selects_only_in_range_blocks`,
+//!   `scoped_view_key_empty_range_covers_nothing`.
+//! - **§2 `ScopedViewKey::to_json`** — INVARIANT: the exported JSON carries the
+//!   scope bounds plus the spend/view public keys and the scoped view secret.
+//!   THREAT: a malformed export would fail to reconstruct the scoped view
+//!   capability at the auditor's side.
+//!   TESTS: `scoped_view_key_json_carries_scope_and_keys`.
+//! - **§3 `ViewOnlyEpoch`** — INVARIANT: a view-only epoch structurally carries
+//!   the view secret and only the PUBLIC spend key — no spend secret exists to
+//!   sign with.
+//!   THREAT: any spend-secret material here would let a view-only export spend.
+//!   TESTS: `view_only_epoch_carries_no_spend_secret`.
+//! - **§4 `KeyEpoch`** — INVARIANT: a full epoch pairs a spend keypair with a
+//!   view keypair; secrets are wiped via the field `SecretKey` drop chain (the
+//!   custom `Drop` only clears the non-secret `epoch` field).
+//!   THREAT: R-72 — relying on a phantom defense-in-depth wipe that does not exist.
+//!   TESTS: (gap — `KeyEpoch` is a data carrier, exercised via `wallet_keys` epoch tests).
 
 use crate::primitives::{PublicKey, SecretKey};
 
@@ -155,5 +183,48 @@ mod tests {
             json.contains(&hex::encode([2u8; 32])),
             "spend_public missing"
         );
+    }
+
+    /// The scope selects exactly the in-range block heights and skips the rest
+    /// — this is the predicate the wallet scanner consults per block, so a
+    /// contiguous height sweep must yield precisely `[from, to]` inclusive.
+    #[test]
+    fn scoped_view_key_scope_selects_only_in_range_blocks() {
+        let epoch = dummy_epoch();
+        let k = ScopedViewKey::from_epoch(&epoch, 100, 105);
+        let scanned: Vec<u64> = (95..=110).filter(|h| k.covers_height(*h)).collect();
+        assert_eq!(scanned, vec![100, 101, 102, 103, 104, 105]);
+    }
+
+    /// An inverted range (from_height > to_height) is empty — it covers no
+    /// height at all, so such a scoped key would scan nothing.
+    #[test]
+    fn scoped_view_key_empty_range_covers_nothing() {
+        let epoch = dummy_epoch();
+        let k = ScopedViewKey::from_epoch(&epoch, 200, 100);
+        for h in [0u64, 99, 100, 150, 200, 201, 1000] {
+            assert!(
+                !k.covers_height(h),
+                "empty (inverted) range must cover nothing, but covered {h}"
+            );
+        }
+    }
+
+    /// A `ViewOnlyEpoch` carries the view secret and only the PUBLIC spend key
+    /// — it structurally has no `spend_secret` field, so there is no key
+    /// material that could be coerced into producing a signature. (Absence of
+    /// the field is a compile-time guarantee; this pins the runtime shape.)
+    #[test]
+    fn view_only_epoch_carries_no_spend_secret() {
+        let vo = ViewOnlyEpoch {
+            epoch: 3,
+            view_secret: SecretKey::from_bytes([7u8; 32]),
+            view_public: PublicKey::from_bytes([8u8; 32]),
+            spend_public: PublicKey::from_bytes([9u8; 32]),
+        };
+        // View capability is present.
+        assert_eq!(vo.view_secret.as_bytes(), &[7u8; 32]);
+        // The spend side is public-only — no secret to sign with.
+        assert_eq!(vo.spend_public.as_bytes(), &[9u8; 32]);
     }
 }

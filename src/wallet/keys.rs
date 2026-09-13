@@ -8,6 +8,45 @@
 //         └── Incoming Viewing Key (IVK)  — sees received funds only
 //               └── Diversified Payment Address  — share to receive
 
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `SpendKey::to_full_viewing_key`** — INVARIANT: the FVK is a
+//!   deterministic function of the spend key — the same `SpendKey` always
+//!   derives the same `ak`/`nk`/`rivk`.
+//!   THREAT: non-determinism would make an FVK un-reproducible, breaking auditor
+//!   hand-off and recovery.
+//!   TESTS: `key_derivation_is_deterministic`, `viewing_key_derivations_are_consistent`.
+//! - **§2 `FullViewingKey::to_incoming_viewing_key` / `to_outgoing_viewing_key`**
+//!   — INVARIANT: IVK and OVK are distinct deterministic derivations from the
+//!   FVK, and the IVK scalar exposes no path back to the master spend key.
+//!   THREAT: if a view-only key derived spend authority, sharing an audit key
+//!   would surrender spend power.
+//!   TESTS: `ivk_cannot_derive_spend_key`, `viewing_key_derivations_are_consistent`.
+//! - **§3 `IncomingViewingKey::to_payment_address` / `new_address`** — INVARIANT:
+//!   distinct diversifiers yield distinct, unlinkable payment addresses that all
+//!   funnel to the one wallet.
+//!   THREAT: colliding/linkable diversified addresses would deanonymize the
+//!   recipient across payments.
+//!   TESTS: `different_diversifiers_give_different_addresses`, `address_bech32_roundtrip`.
+//! - **§4 `IncomingViewingKey::view_tag`** — INVARIANT: the 1-byte view tag is a
+//!   deterministic function of the IVK and ephemeral key.
+//!   THREAT: a non-deterministic tag would make fast-scan reject the recipient's
+//!   own outputs. TESTS: `view_tag_deterministic`.
+//! - **§5 `PaymentAddress::to_bech32` / `from_bech32`** — INVARIANT: encode/decode
+//!   round-trips exactly and a corrupted bech32m checksum is rejected, not
+//!   silently accepted.
+//!   THREAT: a mangled address accepted as valid could send funds to a wrong or
+//!   burn destination.
+//!   TESTS: `address_bech32_roundtrip`, `payment_address_from_bech32_rejects_corruption_and_ignores_hrp`.
+//! - **§6 `SpendKey::to_spark_spend_key` → `SparkScanKey` → `to_spark_address`**
+//!   — INVARIANT: the Spark scan key detects incoming Spark coins but cannot
+//!   spend them, and Spark addresses round-trip with checksum tamper rejected.
+//!   THREAT: a scan key that could spend, or a silently-mangled Spark address,
+//!   breaks the exchange/auditor custody boundary.
+//!   TESTS: `spark_key_chain_derives`, `spark_address_bech32_roundtrips_and_rejects_tamper`.
+
 use crate::error::{Error, Result};
 use blake2b_simd::Params as Blake2bParams;
 use curve25519_dalek::{
@@ -419,6 +458,88 @@ mod tests {
         let ssc = ssk.to_spark_scan_key();
         let addr = ssc.to_spark_address([1u8; 11]);
         assert_ne!(addr.pk.compress().to_bytes(), [0u8; 32]);
+    }
+
+    /// The FVK → IVK and FVK → OVK derivations are deterministic and mutually
+    /// consistent: the same spend key always yields the same viewing keys, and
+    /// the incoming and outgoing keys are distinct material.
+    #[test]
+    fn viewing_key_derivations_are_consistent() {
+        let sk = test_spend_key();
+        let fvk_a = sk.to_full_viewing_key();
+        let fvk_b = sk.to_full_viewing_key();
+
+        // IVK is a deterministic function of the FVK (ak, nk).
+        let ivk_a = fvk_a.to_incoming_viewing_key();
+        let ivk_b = fvk_b.to_incoming_viewing_key();
+        assert_eq!(ivk_a.0.to_bytes(), ivk_b.0.to_bytes());
+
+        // OVK is a deterministic function of the FVK (rivk).
+        let ovk_a = fvk_a.to_outgoing_viewing_key();
+        let ovk_b = fvk_b.to_outgoing_viewing_key();
+        assert_eq!(ovk_a.0, ovk_b.0);
+
+        // Incoming and outgoing keys are independent material.
+        assert_ne!(
+            ivk_a.0.to_bytes(),
+            ovk_a.0,
+            "IVK and OVK must be cryptographically independent"
+        );
+    }
+
+    /// `PaymentAddress::from_bech32` rejects a corrupted checksum and malformed
+    /// input. It does NOT bind the HRP — pin that actual behavior so any future
+    /// HRP check is a deliberate, test-visible change.
+    #[test]
+    fn payment_address_from_bech32_rejects_corruption_and_ignores_hrp() {
+        let sk = test_spend_key();
+        let ivk = sk.to_full_viewing_key().to_incoming_viewing_key();
+        let addr = ivk.to_payment_address([3u8; 11]).unwrap();
+        let enc = addr.to_bech32("yc").expect("valid HRP");
+
+        // Flip the last character to break the bech32m checksum.
+        let mut chars: Vec<char> = enc.chars().collect();
+        let last = chars.len() - 1;
+        chars[last] = if chars[last] == 'q' { 'p' } else { 'q' };
+        let corrupted: String = chars.into_iter().collect();
+        assert!(
+            PaymentAddress::from_bech32(&corrupted).is_err(),
+            "corrupted checksum must be rejected"
+        );
+
+        // Non-bech32 garbage is rejected.
+        assert!(PaymentAddress::from_bech32("definitely not bech32!!").is_err());
+
+        // ACTUAL BEHAVIOR: the HRP is not validated by from_bech32, so a valid
+        // encoding under a different HRP still decodes to the same point.
+        let other_hrp = addr.to_bech32("zz").expect("valid HRP");
+        let decoded = PaymentAddress::from_bech32(&other_hrp)
+            .expect("from_bech32 does not bind the HRP");
+        assert_eq!(decoded.pk_d.compress(), addr.pk_d.compress());
+    }
+
+    /// A Spark address round-trips through bech32m, and a checksum tamper is
+    /// rejected on decode.
+    #[test]
+    fn spark_address_bech32_roundtrips_and_rejects_tamper() {
+        let sk = test_spend_key();
+        let scan = sk.to_spark_spend_key().to_spark_scan_key();
+        let addr = scan.to_spark_address([2u8; 11]);
+
+        let enc = addr.to_bech32("ys").expect("valid HRP");
+        let decoded = SparkAddress::from_bech32(&enc).unwrap();
+        assert_eq!(decoded.diversifier, addr.diversifier);
+        assert_eq!(decoded.pk.compress(), addr.pk.compress());
+
+        // Corrupt the checksum → decode must fail.
+        let mut chars: Vec<char> = enc.chars().collect();
+        let last = chars.len() - 1;
+        chars[last] = if chars[last] == 'q' { 'p' } else { 'q' };
+        let tampered: String = chars.into_iter().collect();
+        assert!(
+            SparkAddress::from_bech32(&tampered).is_err(),
+            "tampered Spark address must be rejected"
+        );
     }
 }
 

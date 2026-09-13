@@ -6,6 +6,58 @@
 //! fields are gone. Per-asset query helpers have been removed too — they
 //! were all single-asset against `AssetId::native()`, so they degenerate
 //! to the plain `total` / `spendable` / `available_utxos` helpers.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `spendable`** — INVARIANT: a UTXO counts as spendable only if it is
+//!   unspent, past `min_age` (coinbase maturity), past its `lock_height`, and
+//!   not held by an active reservation; the age check uses `saturating_add` so
+//!   it never underflows an immature output into the spendable set.
+//!   THREAT: spending an immature/locked/reserved output → invalid or
+//!   double-spending tx. TESTS: `test_spendable_balance`, `test_spent_utxo_not_counted`,
+//!   `spendable_min_age_boundary_is_inclusive_at_exact_threshold`,
+//!   `spendable_saturating_age_does_not_underflow_into_spendable_near_u64_max`.
+//! - **§2 `total`** — INVARIANT: sums only unspent UTXOs (including immature +
+//!   reserved, which still belong to the wallet) with a saturating fold so a
+//!   crafted overflow cannot panic or wrap. THREAT: negative/overflowed balance
+//!   or double counting. TESTS: `total_and_spendable_saturate_on_utxo_sum_overflow`,
+//!   `test_spent_utxo_not_counted`.
+//! - **§3 `available_utxos` / `locked_utxos` / `locked_balance`** — INVARIANT:
+//!   the available set is exactly the spendable UTXOs; locked reports unspent
+//!   outputs still held back by `lock_height`, with no overlap or double
+//!   counting. THREAT: offering a locked output for selection.
+//!   TESTS: `test_locked_utxo`,
+//!   `reserve_subset_of_free_utxos_leaves_the_rest_available_and_reservations_intact`.
+//! - **§4 `reserve_utxos` / `is_reserved`** — INVARIANT: reservation is atomic —
+//!   if ANY requested UTXO is already reserved the call returns `Err` and
+//!   inserts nothing; expiry is honored dynamically at the block boundary and a
+//!   reserved UTXO is excluded from selection. THREAT: two in-flight txs
+//!   selecting the same input → double spend. TESTS: `test_reserve_excludes_from_available`,
+//!   `test_reserve_double_fails_atomically`, `is_reserved_is_false_exactly_at_expiry_boundary`,
+//!   `reserve_subset_of_free_utxos_leaves_the_rest_available_and_reservations_intact`.
+//! - **§5 `release_reservations_by_tx` / `release_expired_reservations` / `restore_reservations`** —
+//!   INVARIANT: release affects only the caller's `by_tx`; expired reservations
+//!   are swept; restore skips already-expired entries. THREAT: freeing another
+//!   tx's inputs or resurrecting stale reservations.
+//!   TESTS: `test_release_only_matches_caller_tx`, `test_release_expired_actually_removes`,
+//!   `test_reservation_expiry`, `test_restore_skips_expired`.
+//! - **§6 `remove_outputs` / `mark_spent`** — INVARIANT: a reorg rewind drops
+//!   orphaned UTXOs while also clearing the key-image reverse index and any
+//!   reservation; missing keys are skipped silently; `mark_spent` clears the
+//!   satisfied reservation. THREAT: stale UTXO or a dead reverse-index pointer
+//!   surviving a reorg. TESTS: `test_remove_outputs_drops_utxo_and_key_image`,
+//!   `test_remove_outputs_missing_keys_silently_skip`, `test_remove_outputs_releases_reservation`,
+//!   `test_mark_spent_clears_reservation`.
+//! - **§7 `add_utxo` / `lookup_by_key_image` / `unmark_spent_by_key_image`** —
+//!   INVARIANT: the key-image reverse index stays consistent — a duplicate key
+//!   replaces without double counting, `lookup` hides spent UTXOs yet the index
+//!   entry survives so a reorg can `unmark` (restore) the spend.
+//!   THREAT: index corruption leaving funds unrecoverable after a reorg.
+//!   TESTS: `add_utxo_duplicate_key_replaces_without_double_counting_or_index_corruption`,
+//!   `lookup_by_key_image_none_for_spent_but_index_survives_for_unmark`,
+//!   `test_unmark_spent_by_key_image_restores_utxo`, `test_unmark_spent_by_key_image_noop_paths`.
 
 use crate::decoy::OutputLocator;
 use crate::primitives::{Amount, Hash, KeyImage, PublicKey};
@@ -808,5 +860,149 @@ mod tests {
         balance.restore_reservations(entries, 1000 + 50); // stale is way past expiry, fresh is recent
         assert!(!balance.is_reserved(&stale, 1000 + 50));
         assert!(balance.is_reserved(&fresh, 1000 + 50));
+    }
+
+    // === Maturity / overflow / index-integrity edge cases =============
+
+    /// `spendable` gates on `current_height >= height + min_age`. The
+    /// boundary is inclusive: at exactly `height + min_age` the output is
+    /// spendable; one block earlier it is not. Guards an off-by-one in the
+    /// maturity check that would either strand mature funds or (worse) count
+    /// immature ones.
+    #[test]
+    fn spendable_min_age_boundary_is_inclusive_at_exact_threshold() {
+        let mut balance = Balance::new();
+        // Output created at height 100, min_age 10 → matures at 110.
+        balance.add_utxo(make_utxo(1000, 100, false));
+        // One below the threshold: NOT spendable.
+        assert_eq!(balance.spendable(109, 10), Amount::ZERO);
+        assert!(balance.available_utxos(109, 10).is_empty());
+        // Exactly at height + min_age: spendable.
+        assert_eq!(balance.spendable(110, 10), Amount::from_atomic(1000));
+        assert_eq!(balance.available_utxos(110, 10).len(), 1);
+    }
+
+    /// The maturity check uses `height.saturating_add(min_age)`. With a
+    /// height near `u64::MAX`, the threshold saturates to `u64::MAX` rather
+    /// than wrapping to a small value — so a huge-but-sub-max `current_height`
+    /// must NOT see the output as spendable. Without the saturating add, the
+    /// wrap could make an immature output appear spendable.
+    #[test]
+    fn spendable_saturating_age_does_not_underflow_into_spendable_near_u64_max() {
+        let mut balance = Balance::new();
+        balance.add_utxo(make_utxo(1000, u64::MAX - 5, false));
+        // threshold = (u64::MAX - 5).saturating_add(100) = u64::MAX; any
+        // current height strictly below u64::MAX is too young.
+        assert_eq!(balance.spendable(u64::MAX - 1, 100), Amount::ZERO);
+        assert!(balance.available_utxos(u64::MAX - 1, 100).is_empty());
+    }
+
+    /// Reserving a subset of the free UTXOs (while another is already
+    /// reserved by a different tx) touches only the requested keys: the
+    /// prior reservation is preserved (not overwritten) and the untouched
+    /// free UTXO stays available.
+    #[test]
+    fn reserve_subset_of_free_utxos_leaves_the_rest_available_and_reservations_intact() {
+        let mut balance = Balance::new();
+        balance.add_utxo(make_utxo_at_idx(100, 0, 1));
+        balance.add_utxo(make_utxo_at_idx(200, 0, 2));
+        balance.add_utxo(make_utxo_at_idx(300, 0, 3));
+        let tx_a = Hash::from_bytes([0xA1; 32]);
+        // Reserve only UTXO 2.
+        balance
+            .reserve_utxos(&[(Hash::from_bytes([2; 32]), 2)], tx_a, 100)
+            .expect("reserve 2");
+        assert_eq!(balance.available_utxos(100, 10).len(), 2); // 1 and 3
+
+        // Reserve only UTXO 1 with a different tx (a subset of the free ones).
+        let tx_b = Hash::from_bytes([0xB2; 32]);
+        balance
+            .reserve_utxos(&[(Hash::from_bytes([1; 32]), 1)], tx_b, 100)
+            .expect("reserve 1");
+
+        // UTXO 3 remains free; 1 and 2 are reserved.
+        assert_eq!(balance.available_utxos(100, 10).len(), 1);
+        assert!(balance.is_reserved(&(Hash::from_bytes([1; 32]), 1), 100));
+        assert!(balance.is_reserved(&(Hash::from_bytes([2; 32]), 2), 100));
+        assert!(!balance.is_reserved(&(Hash::from_bytes([3; 32]), 3), 100));
+
+        // Releasing tx_b's reservation frees only UTXO 1; tx_a's hold on
+        // UTXO 2 is untouched (it was never overwritten).
+        assert_eq!(balance.release_reservations_by_tx(tx_b), 1);
+        assert!(!balance.is_reserved(&(Hash::from_bytes([1; 32]), 1), 100));
+        assert!(balance.is_reserved(&(Hash::from_bytes([2; 32]), 2), 100));
+    }
+
+    /// `total` and `spendable` sum `Amount` values, which saturate on
+    /// overflow (see `Amount`'s `Sum` impl). Two near-`u64::MAX` UTXOs must
+    /// saturate to `u64::MAX`, never wrap to a tiny value that would hide
+    /// balance.
+    #[test]
+    fn total_and_spendable_saturate_on_utxo_sum_overflow() {
+        let mut balance = Balance::new();
+        balance.add_utxo(make_utxo_at_idx(u64::MAX - 10, 0, 1));
+        balance.add_utxo(make_utxo_at_idx(u64::MAX - 10, 0, 2));
+        assert_eq!(balance.total(), Amount::from_atomic(u64::MAX));
+        assert_eq!(balance.spendable(100, 10), Amount::from_atomic(u64::MAX));
+    }
+
+    /// `lookup_by_key_image` returns `None` once a UTXO is spent (it filters
+    /// spent entries), but the reverse-index entry is preserved so
+    /// `unmark_spent_by_key_image` can still restore it after a reorg.
+    #[test]
+    fn lookup_by_key_image_none_for_spent_but_index_survives_for_unmark() {
+        let mut balance = Balance::new();
+        balance.add_utxo(make_utxo_at_idx(100, 0, 1));
+        let ki = KeyImage::from_bytes([1; 32]);
+        assert!(balance.lookup_by_key_image(&ki).is_some());
+
+        balance.mark_spent(Hash::from_bytes([1; 32]), 1);
+        // Spent → lookup returns None...
+        assert!(balance.lookup_by_key_image(&ki).is_none());
+        // ...but the index entry survived, so unmark restores the UTXO and
+        // lookup resolves it again.
+        assert!(balance.unmark_spent_by_key_image(&ki));
+        assert!(balance.lookup_by_key_image(&ki).is_some());
+    }
+
+    /// Re-adding an output with the same `(tx_hash, output_index)` (e.g. a
+    /// rescan re-detecting it) replaces the entry rather than accumulating a
+    /// phantom second UTXO, and leaves the key-image index resolving the one
+    /// surviving UTXO — no double-counted balance, no dead index pointer.
+    #[test]
+    fn add_utxo_duplicate_key_replaces_without_double_counting_or_index_corruption() {
+        let mut balance = Balance::new();
+        let utxo = make_utxo_at_idx(100, 0, 1);
+        balance.add_utxo(utxo.clone());
+        balance.add_utxo(utxo);
+        assert_eq!(
+            balance.all_utxos().len(),
+            1,
+            "duplicate (tx_hash, index) must not create a second UTXO"
+        );
+        assert_eq!(
+            balance.total(),
+            Amount::from_atomic(100),
+            "amount must not be double-counted"
+        );
+        assert!(balance
+            .lookup_by_key_image(&KeyImage::from_bytes([1; 32]))
+            .is_some());
+    }
+
+    /// `is_reserved` treats the expiry boundary as inclusive-of-expiry:
+    /// at exactly `height + RESERVATION_EXPIRY_BLOCKS` the reservation is
+    /// already gone (returns false); one block before, it is still held.
+    #[test]
+    fn is_reserved_is_false_exactly_at_expiry_boundary() {
+        let mut balance = Balance::new();
+        balance.add_utxo(make_utxo_at_idx(100, 0, 1));
+        let tx = Hash::from_bytes([0x5A; 32]);
+        let key = (Hash::from_bytes([1; 32]), 1);
+        balance.reserve_utxos(&[key], tx, 100).expect("reserve");
+        // One below expiry: still reserved.
+        assert!(balance.is_reserved(&key, 100 + RESERVATION_EXPIRY_BLOCKS - 1));
+        // Exactly at expiry: no longer reserved.
+        assert!(!balance.is_reserved(&key, 100 + RESERVATION_EXPIRY_BLOCKS));
     }
 }
