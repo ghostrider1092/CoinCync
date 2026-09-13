@@ -353,6 +353,11 @@ impl BlockchainInner {
     }
 }
 
+/// Read-only query getters live in a child module (issue #108). As a descendant
+/// of `chain`, it can read `Blockchain`'s private fields; nothing there takes
+/// `apply_lock` or mutates, so lock scope is unchanged.
+mod queries;
+
 /// Blockchain state machine with interior mutability
 pub struct Blockchain {
     /// Coarse serialization lock for the ENTIRE block-application operation
@@ -1258,36 +1263,8 @@ impl Blockchain {
         }
     }
 
-    /// Get current height
-    pub fn height(&self) -> u64 {
-        self.inner.read().tip.height
-    }
-
-    /// Get current tip
-    pub fn tip(&self) -> ChainTip {
-        self.inner.read().tip.clone()
-    }
-
-    /// Number of unspent outputs currently tracked. Observability only
-    /// (metrics/RPC) — not a consensus value.
-    pub fn utxo_count(&self) -> usize {
-        self.inner.read().utxos.output_count()
-    }
-
-    /// Look up a transaction's block height and index via the tx_index.
-    pub fn get_tx_location(&self, tx_hash: &[u8]) -> Option<(u64, u32)> {
-        self.db.as_ref().and_then(|db| db.get_tx_location(tx_hash))
-    }
-
-    /// Get tip hash
-    pub fn tip_hash(&self) -> Hash {
-        self.inner.read().tip.hash
-    }
-
-    /// Get the number of available (unspent) outputs in the UTXO set
-    pub fn available_output_count(&self) -> usize {
-        self.inner.read().utxos.output_count()
-    }
+    // height / tip / utxo_count / get_tx_location / tip_hash /
+    // available_output_count moved to `chain::queries` (issue #108).
 
     pub fn decoy_distribution_snapshot(&self) -> DecoyDistributionSnapshot {
         let inner = self.inner.read();
