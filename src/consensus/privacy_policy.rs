@@ -39,6 +39,39 @@
 //! Stage 6 of `consensus::validation::validate_block`. Called after
 //! structural checks (Stages 1–5) and before expensive cryptographic
 //! verification (Stages 8+). Cheap to run, fails fast.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `enforce_privacy_policy` (block sweep / coinbase skip)** —
+//!   INVARIANT: every `TxType::Coinbase` tx is skipped; every other tx is passed
+//!   through `check_tx_privacy`, and the first violation short-circuits the block.
+//!   THREAT: a transparent/naked transfer smuggled into an otherwise-valid block,
+//!   or the coinbase (legitimately transparent) being wrongly rejected.
+//!   TESTS: `enforce_skips_coinbase_and_accepts_valid_block`,
+//!   `enforce_all_valid_block_ok`, `enforce_rejects_violating_transfer`.
+//! - **§2 Rule 1 — Hidden amounts (`MANDATORY_CONFIDENTIAL`)** —
+//!   INVARIANT: every output commitment must decompress to a non-identity
+//!   Ristretto point; identity OR non-decompressable ⇒ `TransparentOutputForbidden`.
+//!   THREAT: M-6 non-canonical-identity commitment — a non-`[0;32]` byte pattern
+//!   that maps to the identity point (or is not a curve point at all) would slip
+//!   past the old all-zeros byte check and commit to no amount.
+//!   TESTS: `zero_commitment_rejected`, `non_decompressable_commitment_rejected`,
+//!   `rule1_fires_before_rule3_when_both_violated`, `valid_tx_is_accepted`.
+//! - **§3 Rule 2 — Hidden recipients (`MANDATORY_STEALTH`)** —
+//!   INVARIANT: every stealth address must decompress to a non-identity Ristretto
+//!   point; identity OR non-decompressable ⇒ `RawPubkeyForbidden`.
+//!   THREAT: M-3 — a non-zero but invalid/low-order stealth encoding (raw pubkey)
+//!   would evade the old all-zeros check and expose the recipient.
+//!   TESTS: `zero_stealth_rejected`, `non_decompressable_stealth_rejected`,
+//!   `valid_tx_is_accepted`.
+//! - **§4 Rule 3 — Hidden senders (`UnshieldedForbidden`)** —
+//!   INVARIANT: a non-coinbase tx must carry ≥1 privacy-preserving input
+//!   (`tx.inputs` non-empty); zero inputs ⇒ `UnshieldedForbidden`.
+//!   THREAT: an input-less "mint" tx with no ring signature de-anonymizing the
+//!   sender (or forging value). Rule 1 is evaluated before Rule 3 by construction.
+//!   TESTS: `empty_inputs_rejected`, `valid_tx_is_accepted`.
 
 use crate::consensus::Block;
 use crate::constants::{MANDATORY_CONFIDENTIAL, MANDATORY_STEALTH};
@@ -63,7 +96,7 @@ pub fn enforce_privacy_policy(block: &Block) -> Result<()> {
 
 /// Check a single non-coinbase transaction against the three privacy rules.
 pub fn check_tx_privacy(tx: &Transaction) -> Result<()> {
-    // ── Rule 1: Hidden amounts (Article III) ───────────────────
+    // ── §2 Rule 1: Hidden amounts (Article III) ───────────────────
     if MANDATORY_CONFIDENTIAL {
         for output in &tx.outputs {
             // M-6 FIX: Use Ristretto decompression to detect the identity point
@@ -88,7 +121,7 @@ pub fn check_tx_privacy(tx: &Transaction) -> Result<()> {
         }
     }
 
-    // ── Rule 2: Hidden recipients (Article III) ────────────────
+    // ── §3 Rule 2: Hidden recipients (Article III) ────────────────
     if MANDATORY_STEALTH {
         for output in &tx.outputs {
             // M-3 FIX: The old all-zeros byte check only caught one specific
@@ -115,7 +148,7 @@ pub fn check_tx_privacy(tx: &Transaction) -> Result<()> {
         }
     }
 
-    // ── Rule 3: Hidden senders (Article III) ───────────────────
+    // ── §4 Rule 3: Hidden senders (Article III) ───────────────────
     //
     // At least one privacy-preserving input must be present. For the
     // current 1.0 transaction schema that's a ring-signature input
@@ -201,6 +234,152 @@ mod tests {
         assert!(matches!(
             check_tx_privacy(&tx),
             Err(Error::UnshieldedForbidden)
+        ));
+    }
+
+    // ── Additional helpers ──────────────────────────────────────────
+    // NOTE: `Block` is already in scope via `use super::*` (the module imports
+    // `crate::consensus::Block`); only pull in the names not already visible.
+    use crate::consensus::BlockHeader;
+    use crate::primitives::{Hash, KeyImage};
+
+    /// A well-formed ring-signature input (satisfies Rule 3). The key image is
+    /// the only field the privacy policy cares about being present (non-empty
+    /// `tx.inputs`); the rest is structurally valid filler.
+    fn mk_input(ki: u8) -> TxInput {
+        TxInput {
+            key_image: KeyImage::from_bytes([ki; 32]),
+            ring_members: vec![],
+            signature: crate::crypto::ClsagSignature {
+                key_image: crate::crypto::KeyImage::from_bytes(
+                    crate::crypto::PublicPoint::identity().to_bytes(),
+                )
+                .expect("identity is a valid curve point"),
+                commitment_image: crate::crypto::PublicPoint::identity(),
+                c1: [0u8; 32],
+                responses: vec![],
+            },
+            pseudo_output_commitment: [0u8; 32],
+        }
+    }
+
+    fn mk_header() -> BlockHeader {
+        BlockHeader {
+            network_magic: [0, 0, 0, 0],
+            version: 1,
+            height: 1,
+            timestamp: 1,
+            prev_hash: Hash::zero(),
+            tx_root: Hash::zero(),
+            anchor: Hash::zero(),
+            algorithm: 0,
+            nonce: 0,
+            target: Hash::from_bytes([0xFF; 32]),
+            miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+            supply_commitment: [0u8; 32],
+            checkpoint_vote: None,
+            spark_set_root: [0u8; 32],
+            mw_kernel_root: [0u8; 32],
+        }
+    }
+
+    fn coinbase_tx() -> Transaction {
+        Transaction {
+            version: 1,
+            tx_type: TxType::Coinbase,
+            inputs: vec![],
+            outputs: vec![],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    // ── check_tx_privacy happy + error branches ─────────────────────
+
+    #[test]
+    fn valid_tx_is_accepted() {
+        // Non-identity commitment + non-identity stealth + a ring input.
+        let tx = mk_tx(
+            vec![mk_input(1)],
+            vec![mk_output(valid_commitment(), valid_commitment())],
+        );
+        assert!(check_tx_privacy(&tx).is_ok());
+    }
+
+    #[test]
+    fn non_decompressable_commitment_rejected() {
+        // M-6: the fix upgraded the weak all-zeros byte check to full Ristretto
+        // decompression. A NON-ZERO byte pattern that is not a valid Ristretto
+        // encoding (here [0xFF; 32], whose high bit makes `s` non-canonical) is
+        // now rejected — the old all-zeros-only check would have let it through.
+        let tx = mk_tx(vec![mk_input(1)], vec![mk_output([0xFF; 32], valid_commitment())]);
+        assert!(matches!(
+            check_tx_privacy(&tx),
+            Err(Error::TransparentOutputForbidden)
+        ));
+    }
+
+    #[test]
+    fn non_decompressable_stealth_rejected() {
+        // M-3 counterpart of the commitment check: a non-zero, non-decodable
+        // stealth address is rejected as a raw/invalid pubkey.
+        let tx = mk_tx(vec![mk_input(1)], vec![mk_output(valid_commitment(), [0xFF; 32])]);
+        assert!(matches!(
+            check_tx_privacy(&tx),
+            Err(Error::RawPubkeyForbidden)
+        ));
+    }
+
+    #[test]
+    fn rule1_fires_before_rule3_when_both_violated() {
+        // Commitment is identity (Rule 1 violation) AND inputs are empty (Rule 3
+        // violation). Rule 1 is evaluated first, so the reported error must be
+        // TransparentOutputForbidden, not UnshieldedForbidden.
+        let tx = mk_tx(vec![], vec![mk_output([0u8; 32], valid_commitment())]);
+        assert!(matches!(
+            check_tx_privacy(&tx),
+            Err(Error::TransparentOutputForbidden)
+        ));
+    }
+
+    // ── enforce_privacy_policy ───────────────────────────────────────
+
+    #[test]
+    fn enforce_skips_coinbase_and_accepts_valid_block() {
+        // Coinbase is not subject to the privacy rules; the single transfer is
+        // fully valid → whole block Ok.
+        let transfer = mk_tx(
+            vec![mk_input(1)],
+            vec![mk_output(valid_commitment(), valid_commitment())],
+        );
+        let block = Block::new(mk_header(), vec![coinbase_tx(), transfer]);
+        assert!(enforce_privacy_policy(&block).is_ok());
+    }
+
+    #[test]
+    fn enforce_all_valid_block_ok() {
+        let t1 = mk_tx(
+            vec![mk_input(1)],
+            vec![mk_output(valid_commitment(), valid_commitment())],
+        );
+        let t2 = mk_tx(
+            vec![mk_input(2)],
+            vec![mk_output(valid_commitment(), valid_commitment())],
+        );
+        let block = Block::new(mk_header(), vec![coinbase_tx(), t1, t2]);
+        assert!(enforce_privacy_policy(&block).is_ok());
+    }
+
+    #[test]
+    fn enforce_rejects_violating_transfer() {
+        // Valid coinbase + one transfer with a transparent (identity) commitment
+        // → the block is rejected with the transfer's specific violation.
+        let bad_transfer = mk_tx(vec![mk_input(1)], vec![mk_output([0u8; 32], valid_commitment())]);
+        let block = Block::new(mk_header(), vec![coinbase_tx(), bad_transfer]);
+        assert!(matches!(
+            enforce_privacy_policy(&block),
+            Err(Error::TransparentOutputForbidden)
         ));
     }
 }

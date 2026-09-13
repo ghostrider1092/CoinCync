@@ -722,7 +722,20 @@ impl Mempool {
             // deduplication so throttling is unnecessary there — that
             // specific claim about LogPrintf's dedup behaviour was not
             // re-verified this session and is dropped.
-            if self.current_size >= prev_size || eviction_attempts >= MAX_EVICTION_ATTEMPTS {
+            // H8 (off-by-one griefing fix): only enforce the attempt cap when
+            // the incoming tx STILL doesn't fit. Previously the cap was checked
+            // before re-testing fit, so a tx that fit exactly after the 100th
+            // eviction was rejected — having already dropped 100 honest resident
+            // txs. The admission SIMULATION above permits up to
+            // MAX_EVICTION_ATTEMPTS evictions and then admits if it fits, so the
+            // real loop must too, or an attacker can tune a valid tx to need
+            // exactly 100 evictions, drop 100 honest txs for free, be rejected,
+            // and repeat forever at zero cost. The no-progress guard
+            // (`current_size >= prev_size`) still rejects unconditionally.
+            let still_doesnt_fit = self.current_size + size > self.max_size;
+            if self.current_size >= prev_size
+                || (still_doesnt_fit && eviction_attempts >= MAX_EVICTION_ATTEMPTS)
+            {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static LAST_WARN_UNIX: AtomicU64 = AtomicU64::new(0);
                 const WARN_THROTTLE_SECS: u64 = 5;
@@ -1920,5 +1933,91 @@ mod load_from_disk_tests {
             "empty mempool.dat must load zero txs without error"
         );
         assert!(!path.exists(), "file is removed after successful read");
+    }
+}
+
+// Live in-crate unit tests for PRIVATE mempool helpers not reachable from
+// `tests/` (the fee-per-byte scaling math, the monotonic clock clamp, and
+// the generation-guard's None/yield branch). Added 2026-09-11 to fill the
+// `src/mempool.rs` gaps in docs/audit/test-plan/mempool.md. This is a FRESH
+// module — deliberately NOT the dead `#[cfg(any())] mod tests` above, which
+// relies on the removed `AssetIssuance` type.
+#[cfg(test)]
+mod extra_tests {
+    use super::{
+        retry_stable_admission, scaled_fee_per_byte, unix_now, AdmissionAttempt, GenerationSource,
+    };
+    use crate::error::Result;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // ── scaled_fee_per_byte / MempoolEntry fee math ─────────────────────────
+
+    #[test]
+    fn scaled_fee_per_byte_typical_value() {
+        // fee=1000 atomic over 100 bytes -> (1000 * 1e6) / 100 = 10_000_000
+        // micro-syncs per byte.
+        assert_eq!(scaled_fee_per_byte(1_000, 100), 10_000_000);
+    }
+
+    #[test]
+    fn scaled_fee_per_byte_zero_size_is_clamped_no_divide_by_zero() {
+        // size 0 is clamped to size.max(1); no panic, divides by 1.
+        assert_eq!(scaled_fee_per_byte(50, 0), 50 * 1_000_000);
+    }
+
+    #[test]
+    fn scaled_fee_per_byte_small_fee_retains_micro_precision() {
+        // The documented A5 scenario: 50 syncs / 100 bytes would truncate to 0
+        // without scaling; scaled it is (50 * 1e6) / 100 = 500_000.
+        assert_eq!(scaled_fee_per_byte(50, 100), 500_000);
+    }
+
+    #[test]
+    fn scaled_fee_per_byte_extreme_fee_clamps_to_u64_max_no_wraparound() {
+        // A5-MEM-01: u64::MAX fee must clamp to u64::MAX, never wrap to a
+        // near-zero value that would make a high-fee tx look cheap.
+        assert_eq!(scaled_fee_per_byte(u64::MAX, 1), u64::MAX);
+        // Even a large-but-not-max fee stays monotone and does not wrap.
+        assert!(scaled_fee_per_byte(u64::MAX, 2) > 0);
+    }
+
+    // ── unix_now monotonic clamp ────────────────────────────────────────────
+
+    #[test]
+    fn unix_now_is_monotonic_nondecreasing() {
+        // The clamp guarantees successive reads never step backwards, so a
+        // clock hiccup can't mark fresh entries as ancient. (We can't inject
+        // an NTP step-back here, but the non-decreasing property is the
+        // observable contract.)
+        let a = unix_now();
+        let b = unix_now();
+        assert!(b >= a, "unix_now must be non-decreasing: {} then {}", a, b);
+    }
+
+    // ── retry_stable_admission: None -> yield & continue, then complete ──────
+
+    struct NoneThenStable {
+        calls: AtomicUsize,
+    }
+    impl GenerationSource for NoneThenStable {
+        fn stable_generation(&self) -> Option<u64> {
+            // First observation: chain is updating (None) -> caller must yield
+            // and retry. Subsequent observations: stable at generation 1.
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                None
+            } else {
+                Some(1)
+            }
+        }
+    }
+
+    #[test]
+    fn retry_stable_admission_yields_on_none_then_completes() {
+        let chain = NoneThenStable {
+            calls: AtomicUsize::new(0),
+        };
+        let result: Result<u64> =
+            retry_stable_admission(&chain, |generation| AdmissionAttempt::Complete(Ok(generation)));
+        assert_eq!(result.expect("should complete after the updating window"), 1);
     }
 }

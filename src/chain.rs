@@ -1,6 +1,155 @@
 //! # Blockchain State Machine
 //!
 //! Core blockchain state management.
+//!
+//! ## Audit map
+//! This file is the audit-critical (non-consensus) state machine: block connect,
+//! fork choice, reorg execution, rollback, load/rebuild, genesis. Each `§` below
+//! names the code element(s), the INVARIANT it guarantees, the THREAT/incident it
+//! defends, and the real TESTS that prove it (or the KNOWN gap). `§N` tags on the
+//! banner comments below point back here. (Renders in `cargo doc`.)
+//!
+//! - **§1 `add_block` extend path** (`commit_block_atomic` call, supply/burn
+//!   `checked_add`) — INVARIANT: on the extend branch the four consensus trees
+//!   (output_index, height_index, state, tx_index) move together via
+//!   `Database::commit_block_atomic`; in-memory tip never lands ahead of a failed
+//!   disk commit (commit failure PANICS rather than diverging). Supply/burn use
+//!   `checked_add` + panic (symmetry with the reorg-rollback `checked_sub`).
+//!   THREAT: torn write leaving height index ahead of state → post-crash
+//!   double-spend / inflation. TESTS: `total_supply_is_conserved_per_block`,
+//!   `total_supply_accumulator_is_u128_and_survives_the_old_u64_ceiling`,
+//!   `add_block_duplicate_in_memory_cache_returns_already_known`,
+//!   `add_block_duplicate_in_db_not_cache_returns_already_known`,
+//!   `commit_block_atomic_writes_all_four_trees_together` (DB-unit).
+//! - **§2 RACE-R7 tip-moved recheck** (`inner.tip.hash != tip_hash` on the extend
+//!   path) — INVARIANT: if the tip advanced between the read and the apply, the
+//!   extend is abandoned and the block falls through to the fork path, never
+//!   double-applied to a stale tip. THREAT: concurrent-writer TOCTOU that applies
+//!   the same block twice / onto the wrong parent. TESTS: (gap — no test drives a
+//!   concurrent tip move through the RACE-R7 branch).
+//! - **§3 Fork choice** (`calculate_fork_cumulative_work`, hash-lex tiebreak) —
+//!   INVARIANT: genesis contributes a fixed base of 1 (not `dft(genesis)`) so an
+//!   equal-work fork is never spuriously heavier; strictly-greater work switches,
+//!   exactly-equal work breaks deterministically by lexicographic tip hash
+//!   (`fork_tip < current_tip` wins) — network-deterministic, no timestamp
+//!   tiebreak. THREAT: selfish-miner / equivocation split from a nondeterministic
+//!   or timestamp-gameable tiebreak. TESTS:
+//!   `total_difficulty_recompute_and_fork_walk_agree_on_genesis_base`,
+//!   `calculate_fork_cumulative_work_parent_not_found_returns_partial`,
+//!   `calculate_fork_cumulative_work_cycle_breaks_at_max_steps`,
+//!   `two_node_partition_heals_to_heavier_chain`,
+//!   `equivocating_miner_does_not_split_honest_nodes` (direct add_block tiebreak
+//!   assertion is a gap).
+//! - **§4 Fork walk helpers** (`find_fork_point`, `collect_fork_chain`,
+//!   `recompute_total_difficulty`) — INVARIANT: fork walks bound their steps and
+//!   return `None`/partial on a cycle or missing parent (never loop forever);
+//!   `recompute_total_difficulty` = `1 + Σ dft(1..=h)` and agrees with the fork
+//!   walk. THREAT: crafted prev_hash cycle → hang / corruption-driven acceptance.
+//!   TESTS: `find_fork_point_returns_common_ancestor_and_genesis`,
+//!   `find_fork_point_detects_cycle_returns_none`,
+//!   `find_fork_point_missing_parent_returns_none`,
+//!   `collect_fork_chain_returns_ascending_and_stops_at_fork_point`,
+//!   `recompute_total_difficulty_missing_mid_range_returns_none`.
+//! - **§5 Reorg execution + `apply_reorg_atomic`** (disconnect loop, re-apply
+//!   loop, `Database::apply_reorg_atomic`) — INVARIANT: the whole switch (output
+//!   removals/adds, height sets/removals, state, tx add/remove) commits atomically
+//!   or not at all; losing-fork work never leaks into `total_difficulty`;
+//!   orphaned non-coinbase txs are returned for mempool restore. THREAT: partial
+//!   reorg commit → hybrid tip / inflation. TESTS:
+//!   `total_difficulty_is_reorg_history_independent`,
+//!   `reorg_does_not_drop_a_re_mined_output_index_entry` (DB-unit),
+//!   `reorg_preserves_oldest_wins_for_non_removed_shared_address` (DB-unit).
+//!   GAP (P0): an ACCEPTED reorg re-applying REAL non-coinbase txs is untested —
+//!   only the *rejected* double-spend reorg is covered (§6).
+//! - **§6 C1 fork-vs-active-UTXO validation + double-spend defense** (contextual
+//!   validation flag; REORG-TIP-VALIDATE recheck) — INVARIANT: a fork sharing a
+//!   real non-coinbase tx / double-spent key image with the active branch is
+//!   rejected; tip unchanged, key image stays unspent, supply unchanged. THREAT:
+//!   reorg-driven double-spend / inflation. TESTS:
+//!   `reorg_tip_double_spend_is_rejected`,
+//!   `ring_size_availability_is_reorg_history_invariant` (storage-level).
+//! - **§7 H3 failed-reorg rollback (path A / path B)** (`reorg_error`,
+//!   `rolled_back` gate) — INVARIANT: when a fork block fails mid-reorg, rollback
+//!   restores pre-reorg tip/stats/UTXO/output_index exactly. H3 FIX: path-A
+//!   removal is now bounded by the highest fork height so a failed reorg no longer
+//!   leaves stale `height_to_hash` entries above the restored tip; path A and
+//!   path B are mutually exclusive (`!rolled_back` fires path B only when path A
+//!   did not, e.g. a triggering-block difficulty recheck failure). THREAT: stale
+//!   height→hash mapping after a rejected reorg → later reads resolve a ghost
+//!   block. TESTS: (gap — the path-A/path-B rollback and the H3 stale-height fix
+//!   have no chain-level regression test).
+//! - **§8 `rollback_to_height`** (finality floor, cache→DB disconnect fallback,
+//!   orphaned-tx return) — INVARIANT: refuses to roll back below the persisted
+//!   `last_checkpoint` (FINALITY VIOLATION → `Err`, no mutation); disconnects
+//!   DB-only blocks past the ~200-block cache window via DB fallback; unwinds
+//!   supply/burn through the same disconnect site as connect (symmetric);
+//!   `target >= height` is a no-op. THREAT: deep rollback past finality; silent
+//!   under-disconnect when the body is only on disk. TESTS:
+//!   `rollback_to_height_rejects_target_below_last_checkpoint`,
+//!   `rollback_to_height_disconnects_db_only_blocks_past_the_cache`,
+//!   `rollback_to_height_unwinds_total_burned_through_the_real_disconnect_site`,
+//!   `rollback_to_height_returns_non_coinbase_txs_as_orphaned`,
+//!   `tier5_rollback_to_current_height_is_noop`,
+//!   `tier5_rollback_beyond_genesis_handled`,
+//!   `total_burned_apply_disconnect_is_symmetric_and_reorg_correct`.
+//! - **§9 Reorg disconnect loop is CACHE-ONLY** (no DB fallback, unlike §8) —
+//!   INVARIANT (intended): every orphaned block on the losing branch is
+//!   disconnected. KNOWN RISK: the reorg disconnect loop reads bodies from the
+//!   in-memory cache only; a reorg whose `fork_point` sits just inside the
+//!   ~200-block cache edge could silently under-disconnect (supply / UTXO /
+//!   phase-2 stores under-counted) where `rollback_to_height` would not. THREAT:
+//!   latent inflation / stuck-spent key image near the cache boundary. TESTS:
+//!   (gap — latent under-disconnect at the cache edge is untested; flagged risk).
+//! - **§10 Supply/burn `checked_sub`/`checked_add` underflow panics + STATS
+//!   INVARIANT floor** — INVARIANT: every supply/burn move uses checked
+//!   arithmetic and PANICS (halts) on under/overflow rather than silently
+//!   clamping — a clamp would mask corruption/inflation; `total_supply` is `u128`
+//!   (survives the old `u64` ~18.4M-CYNC ceiling). L2: `total_burned` and the
+//!   block/tx counters move in lockstep with `total_supply` (`checked_sub`
+//!   None → logs `STATS INVARIANT VIOLATION` and floors, not panic, for the
+//!   telemetry counters). THREAT: silent underflow → phantom supply / inflation
+//!   (ring-size determinism, 1d27d3c8). TESTS:
+//!   `total_supply_accumulator_is_u128_and_survives_the_old_u64_ceiling`,
+//!   `total_burned_apply_disconnect_is_symmetric_and_reorg_correct`,
+//!   `block_fee_burn_matches_validator_burn_split` (the four disconnect-side
+//!   underflow-panic sites themselves are an untested gap).
+//! - **§11 `load_from_database` / `rebuild_utxo_set`** — INVARIANT: a load either
+//!   yields a fully-consistent chain or errors — never a half-state mistaken for
+//!   fresh; genesis/tip/height/network are cross-checked and the UTXO set +
+//!   block/tx counters are reconstructed (not reset to 0) on reopen. THREAT: a
+//!   drifted/partial DB booted as canonical → fork from the network. TESTS:
+//!   `load_from_database_distinguishes_fresh_and_loaded_state`,
+//!   `load_from_database_rejects_blocks_without_chain_state`,
+//!   `load_from_database_rejects_missing_tip_block`,
+//!   `load_from_database_rejects_wrong_network_genesis`,
+//!   `load_from_database_rejects_missing_genesis_height_entry`,
+//!   `load_from_database_rejects_state_height_mismatch_with_tip_block`,
+//!   `db_reopen_reconstructs_identical_state` (rebuild L8 counter reconstruction
+//!   is a gap).
+//! - **§12 `init_genesis` / `verify_tip_integrity`** — INVARIANT: genesis hash
+//!   must equal the expected network genesis (mismatch → `Err`); on init supply =
+//!   `reward(0)`, burned = 0, and genesis+height+state are persisted;
+//!   `verify_tip_integrity` reloads from DB when the in-memory tip disagrees with
+//!   `state.tip_hash`. THREAT: wrong-network / forged genesis silently adopted.
+//!   TESTS: `test_genesis_block`, `tier5_genesis_supply_matches_emission`
+//!   (verify_tip_integrity mismatch-reload branch is a gap).
+//! - **§13 `is_spent` (fail-closed) + `max_reorg_depth`** — INVARIANT: `is_spent`
+//!   returns the in-memory hit, then the DB fallback, and on a DB *error* returns
+//!   `true` (fail-CLOSED) — a lookup failure must never let a key image be treated
+//!   as spendable; `max_reorg_depth` uses the runtime network, not the compile
+//!   feature. THREAT: DB error opening a double-spend window; feature/runtime
+//!   network mismatch loosening the reorg cap. TESTS:
+//!   `is_spent_no_db_false_and_in_memory_hit_true`, `is_spent_db_fallback_true`,
+//!   `f31_blockchain_max_reorg_depth_uses_runtime_network` (the DB-error
+//!   fail-closed→true branch is an untested gap).
+//! - **§14 Phase-2 checkpoint/rewind** (`checkpoint_phase2_stores`,
+//!   `rewind_phase2_stores`; shielded / spark / MW-kernel roots) — INVARIANT: the
+//!   three phase-2 stores checkpoint and rewind together in lockstep with block
+//!   connect/disconnect; a rewind past an empty checkpoint stack hits the loud
+//!   error branch rather than silently desyncing. THREAT: phase-2 root divergence
+//!   across a reorg → shielded/MW state inconsistent with the transparent chain.
+//!   TESTS: `phase2_stores_rewind_together_through_helpers` (rewind-past-restart
+//!   loud-error branch is a gap).
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -1695,6 +1844,21 @@ impl Blockchain {
                             calculate_difficulty_from_target(&orphan_block.header.target);
                         inner.stats.total_difficulty =
                             inner.stats.total_difficulty.saturating_sub(disc_difficulty);
+                        // Telemetry parity with the connect path (which does
+                        // `total_blocks += 1` and `total_transactions += txs.len()`):
+                        // a reorg/rollback MUST unwind these too, or a node that
+                        // reorged reports inflated block/tx totals versus a node that
+                        // built the identical tip linearly — breaking apply/disconnect
+                        // symmetry (caught by the real-PoW e2e
+                        // `apply_disconnect_symmetry_and_supply_conservation`). Not
+                        // consensus-critical (fork choice uses total_difficulty, above,
+                        // which IS unwound), but a correctness bug in reported stats.
+                        // saturating_sub: telemetry never underflows below zero.
+                        inner.stats.total_blocks = inner.stats.total_blocks.saturating_sub(1);
+                        inner.stats.total_transactions = inner
+                            .stats
+                            .total_transactions
+                            .saturating_sub(txs.len() as u64);
                     }
                 }
                 inner.height_to_hash.remove(&h);
@@ -2031,7 +2195,9 @@ impl Blockchain {
                 self.fork_difficulty_window(block.header.prev_hash, block.header.height)
             };
 
-            if difficulty_blocks.len() >= 2 {
+            // `test-fast-pow` (INSECURE test feature) skips the ASERT target
+            // match so the instant-mining harness can use a trivial target.
+            if difficulty_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
                 let expected_target =
                     self.expected_next_target(&difficulty_blocks, block.header.height);
                 if block.header.target != expected_target {
@@ -2811,7 +2977,7 @@ impl Blockchain {
                                 }
                             }
 
-                            if diff_blocks.len() >= 2 {
+                            if diff_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
                                 let expected_target = self
                                     .expected_next_target(&diff_blocks, fork_block.header.height);
                                 if fork_block.header.target != expected_target {
@@ -3040,9 +3206,26 @@ impl Blockchain {
                             }
                         }
 
-                        // Remove fork block height mappings above fork point
-                        for h in (fork_point + 1..=inner.tip.height.max(pre_reorg_tip.height)).rev()
-                        {
+                        // Remove fork block height mappings above fork point.
+                        //
+                        // H3: `inner.tip` has NOT been advanced yet (that happens
+                        // after a successful reorg), so `inner.tip.height ==
+                        // pre_reorg_tip.height` here — bounding the removal by it
+                        // leaves the mappings of any fork block applied at a
+                        // height ABOVE the old tip in place. RPC/sync would then
+                        // report an unapplied fork block as canonical, and a
+                        // follow-up block parented on it could commit a chain
+                        // with an unapplied gap. Bound the removal by the highest
+                        // fork height instead (removing a height that was never
+                        // inserted is a harmless no-op), so every partially
+                        // applied fork mapping is cleaned up.
+                        let highest_fork_height = fork_blocks
+                            .iter()
+                            .map(|b| b.header.height)
+                            .max()
+                            .unwrap_or(pre_reorg_tip.height);
+                        let removal_top = pre_reorg_tip.height.max(highest_fork_height);
+                        for h in (fork_point + 1..=removal_top).rev() {
                             inner.height_to_hash.remove(&h);
                         }
 
@@ -3125,7 +3308,7 @@ impl Blockchain {
                                 }
                             }
 
-                            if diff_blocks.len() >= 2 {
+                            if diff_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
                                 let expected_target =
                                     self.expected_next_target(&diff_blocks, block.header.height);
                                 if block.header.target != expected_target {
@@ -4348,7 +4531,7 @@ mod generation_tests {
 }
 
 // =============================================================================
-// Genesis Block
+// §12  Genesis Block
 // =============================================================================
 
 /// Create the genesis block for a specific network (runtime selection).
@@ -5092,6 +5275,63 @@ mod tests {
         );
     }
 
+    /// Regression for the apply/disconnect-symmetry bug the real-PoW e2e
+    /// `apply_disconnect_symmetry_and_supply_conservation` caught:
+    /// `rollback_to_height` unwound supply/burn/total_difficulty but NOT the
+    /// `total_blocks` / `total_transactions` telemetry counters, so a reorged
+    /// node reported inflated totals versus a linearly-built node on the same
+    /// tip. Fast staged version of that invariant.
+    #[test]
+    fn rollback_to_height_unwinds_total_blocks_and_transactions() {
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        let net = chain.network();
+        let act = net.fee_distribution_height();
+        let h1 = act.max(1);
+        let h2 = h1 + 1;
+        let genesis_hash = chain.tip_hash();
+        let base_blocks = chain.stats().total_blocks;
+        let base_txs = chain.stats().total_transactions;
+
+        let b1 = burn_test_block(h1, 41, &[1_000_000]);
+        let b2 = burn_test_block(h2, 42, &[2_000_000, 3_000_000]);
+        let added_txs = (b1.transactions.len() + b2.transactions.len()) as u64;
+        let burn1 = block_fee_burn(net, &b1);
+        let burn2 = block_fee_burn(net, &b2);
+
+        {
+            let mut inner = chain.inner.write();
+            let h1h = b1.hash();
+            let h2h = b2.hash();
+            inner.blocks.insert(h1h, b1.clone());
+            inner.blocks.insert(h2h, b2.clone());
+            inner.height_to_hash.insert(h1, h1h);
+            inner.height_to_hash.insert(h2, h2h);
+            inner.tip.hash = h2h;
+            inner.tip.height = h2;
+            inner.stats.height = h2;
+            inner.stats.tip_hash = h2h;
+            inner.stats.total_supply = u64::MAX as u128; // headroom for emission subtract
+            inner.stats.total_burned = burn1 + burn2; // headroom for burn subtract
+            // Advance the block/tx counters exactly as the connect path would.
+            inner.stats.total_blocks = base_blocks + 2;
+            inner.stats.total_transactions = base_txs + added_txs;
+        }
+
+        chain.rollback_to_height(0).expect("rollback to genesis");
+        assert_eq!(chain.tip_hash(), genesis_hash, "tip back at genesis");
+        assert_eq!(
+            chain.stats().total_blocks,
+            base_blocks,
+            "total_blocks must unwind to the pre-staging base after a full rollback"
+        );
+        assert_eq!(
+            chain.stats().total_transactions,
+            base_txs,
+            "total_transactions must unwind to the pre-staging base after a full rollback"
+        );
+    }
+
     #[test]
     fn rollback_to_height_disconnects_db_only_blocks_past_the_cache() {
         // Regression (junbyjun1238, PR #48): deep rollbacks target heights below
@@ -5167,5 +5407,347 @@ mod tests {
             base_diff,
             "total_difficulty reverted through the DB-fallback disconnect"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // State-machine gap tests (audit test-plan docs/audit/test-plan/
+    // chain-storage.md). These cover the add_block / fork-choice / rollback /
+    // load / helper branches that are exercisable WITHOUT real PoW mining:
+    // graph-walk helpers (find_fork_point, collect_fork_chain,
+    // calculate_fork_cumulative_work, recompute_total_difficulty), the
+    // AlreadyKnown cache/DB branches, load_from_database error branches, the
+    // rollback finality floor + orphaned-tx return, and is_spent branches.
+    //
+    // The PoW-gated items (accepted reorg re-applying real txs, chain-level
+    // ReorgTooDeep / AcceptedFork / tiebreak) live in
+    // tests/chain_statemachine.rs, marked #[ignore] like the reorg e2e harness.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Clone the genesis block and rewrite only the header identity fields
+    /// (height / prev_hash / nonce) to fabricate a distinct block for the pure
+    /// prev_hash-walk helpers. The body is the real genesis coinbase, which is
+    /// irrelevant to find_fork_point / collect_fork_chain /
+    /// calculate_fork_cumulative_work (they only read header + storage links).
+    fn walk_block(height: u64, prev_hash: Hash, nonce: u64) -> Block {
+        let mut b = create_genesis_block();
+        b.header.height = height;
+        b.header.prev_hash = prev_hash;
+        b.header.nonce = nonce;
+        b
+    }
+
+    #[test]
+    fn add_block_duplicate_in_memory_cache_returns_already_known() {
+        // add_block's first check is the in-memory cache: a hash already present
+        // short-circuits to AlreadyKnown before any parent/validation work.
+        let chain = Blockchain::new();
+        let b = walk_block(5, Hash::from_bytes([0x07; 32]), 42);
+        let h = b.hash();
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(h, b.clone());
+        }
+        assert!(matches!(
+            chain.add_block(b).unwrap(),
+            BlockStatus::AlreadyKnown
+        ));
+    }
+
+    #[test]
+    fn add_block_duplicate_in_db_not_cache_returns_already_known() {
+        // Second AlreadyKnown branch: block absent from the in-memory cache but
+        // present in the DB (db.blocks.contains) — the post-restart replay case.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        let b = walk_block(5, Hash::from_bytes([0x07; 32]), 43);
+        db.blocks.insert(&b).unwrap();
+        // Deliberately NOT inserted into the in-memory cache.
+        assert!(matches!(
+            chain.add_block(b).unwrap(),
+            BlockStatus::AlreadyKnown
+        ));
+    }
+
+    #[test]
+    fn find_fork_point_returns_common_ancestor_and_genesis() {
+        let chain = Blockchain::new();
+        let genesis_hash = chain.init_genesis().unwrap();
+
+        // Main chain m1(h1), m2(h2).
+        let m1 = walk_block(1, genesis_hash, 101);
+        let m2 = walk_block(2, m1.hash(), 102);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(m1.hash(), m1.clone());
+            inner.height_to_hash.insert(1, m1.hash());
+            inner.blocks.insert(m2.hash(), m2.clone());
+            inner.height_to_hash.insert(2, m2.hash());
+        }
+
+        // A competing fork block at height 2 off m1 → common ancestor is m1 (1).
+        let f2 = walk_block(2, m1.hash(), 202);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(f2.hash(), f2.clone());
+        }
+        assert_eq!(chain.find_fork_point(&f2), Some(1));
+
+        // A fork block at height 1 off genesis → fork point is genesis (0).
+        let f1 = walk_block(1, genesis_hash, 201);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(f1.hash(), f1.clone());
+        }
+        assert_eq!(chain.find_fork_point(&f1), Some(0));
+    }
+
+    #[test]
+    fn find_fork_point_detects_cycle_returns_none() {
+        // A prev_hash cycle (corruption) must be reported as None, not masked as
+        // a genesis fork point. Blocks are stored under arbitrary map keys so the
+        // links form a genuine cycle the visited-set guard must catch.
+        let chain = Blockchain::new();
+        let key_a = Hash::from_bytes([0xA1; 32]);
+        let key_b = Hash::from_bytes([0xB2; 32]);
+        let block_a = walk_block(5, key_b, 1); // prev → key_b
+        let block_b = walk_block(4, key_a, 2); // prev → key_a  (cycle)
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(key_a, block_a);
+            inner.blocks.insert(key_b, block_b);
+        }
+        let fork = walk_block(6, key_a, 3); // enters the cycle at key_a
+        assert_eq!(chain.find_fork_point(&fork), None);
+    }
+
+    #[test]
+    fn find_fork_point_missing_parent_returns_none() {
+        // prev_hash references a block that is not in storage → None (corruption),
+        // not a silent genesis fork point.
+        let chain = Blockchain::new();
+        let fork = walk_block(3, Hash::from_bytes([0xCC; 32]), 9);
+        assert_eq!(chain.find_fork_point(&fork), None);
+    }
+
+    #[test]
+    fn collect_fork_chain_returns_ascending_and_stops_at_fork_point() {
+        let chain = Blockchain::new();
+        let genesis_hash = chain.init_genesis().unwrap();
+        let m1 = walk_block(1, genesis_hash, 11);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(m1.hash(), m1.clone());
+            inner.height_to_hash.insert(1, m1.hash());
+        }
+        let f2 = walk_block(2, m1.hash(), 22);
+        let f3 = walk_block(3, f2.hash(), 33);
+        let f4 = walk_block(4, f3.hash(), 44);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(f2.hash(), f2.clone());
+            inner.blocks.insert(f3.hash(), f3.clone());
+            inner.blocks.insert(f4.hash(), f4.clone());
+        }
+        // Collect from fork tip f4 down to fork_point=1. Returns ascending order,
+        // excluding both the tip (f4) and the fork point.
+        let collected = chain.collect_fork_chain(&f4, 1);
+        let heights: Vec<u64> = collected.iter().map(|b| b.header.height).collect();
+        assert_eq!(heights, vec![2, 3]);
+
+        // Missing parent link → the walk breaks immediately, returning empty.
+        let orphan_tip = walk_block(9, Hash::from_bytes([0xEE; 32]), 99);
+        assert!(chain.collect_fork_chain(&orphan_tip, 1).is_empty());
+    }
+
+    #[test]
+    fn calculate_fork_cumulative_work_parent_not_found_returns_partial() {
+        // The walk breaks when a parent is absent, returning only the starting
+        // block's own work (the genesis base +1 is never added).
+        let chain = Blockchain::new();
+        let b = walk_block(3, Hash::from_bytes([0xAB; 32]), 7);
+        let expected = calculate_difficulty_from_target(&b.header.target);
+        assert_eq!(chain.calculate_fork_cumulative_work(&b), expected);
+    }
+
+    #[test]
+    fn calculate_fork_cumulative_work_cycle_breaks_at_max_steps() {
+        // A prev_hash cycle must terminate via the max_steps guard rather than
+        // hang, returning accumulated partial work.
+        let chain = Blockchain::new();
+        let key_a = Hash::from_bytes([0x5A; 32]);
+        let key_b = Hash::from_bytes([0x5B; 32]);
+        let a = walk_block(1, key_b, 1); // height 1 → never treated as genesis
+        let b = walk_block(1, key_a, 2);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(key_a, a);
+            inner.blocks.insert(key_b, b);
+        }
+        let start = walk_block(1, key_a, 3);
+        let work = chain.calculate_fork_cumulative_work(&start);
+        assert!(
+            work >= calculate_difficulty_from_target(&start.header.target),
+            "cycle walk terminates and returns accumulated partial work"
+        );
+    }
+
+    #[test]
+    fn recompute_total_difficulty_missing_mid_range_returns_none() {
+        // A gap anywhere in [1, height] yields None so the caller keeps the
+        // stored value instead of persisting a wrong partial sum.
+        let chain = Blockchain::new();
+        let genesis_hash = chain.init_genesis().unwrap();
+        let m1 = walk_block(1, genesis_hash, 71);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(m1.hash(), m1.clone());
+            inner.height_to_hash.insert(1, m1.hash());
+        }
+        assert_eq!(
+            chain.recompute_total_difficulty(1),
+            Some(1 + calculate_difficulty_from_target(&m1.header.target)),
+        );
+        // Height 2 absent → None.
+        assert_eq!(chain.recompute_total_difficulty(2), None);
+    }
+
+    #[test]
+    fn is_spent_no_db_false_and_in_memory_hit_true() {
+        let chain = Blockchain::new(); // db = None
+        let ki = KeyImage::from_bytes([0x11; 32]);
+        assert!(!chain.is_spent(&ki), "empty set, no DB → not spent");
+        {
+            let mut inner = chain.inner.write();
+            inner.utxos.mark_key_image_spent(ki);
+        }
+        assert!(chain.is_spent(&ki), "in-memory marked key image → spent");
+    }
+
+    #[test]
+    fn is_spent_db_fallback_true() {
+        // Empty in-memory set (output_count 0, key image absent) falls through to
+        // the persistent DB lookup — the fresh-startup-before-rebuild path.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        let ki = KeyImage::from_bytes([0x22; 32]);
+        db.utxos.mark_key_image(&ki).unwrap();
+        assert!(chain.is_spent(&ki), "DB-marked key image found via fallback");
+    }
+
+    #[test]
+    fn load_from_database_rejects_missing_genesis_height_entry() {
+        // Chain state present but the height index has no genesis (height-0)
+        // entry → Err("no genesis entry"), never a spurious Fresh.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        db.blocks.insert(&genesis).unwrap();
+        db.state.save_state(&state_for_genesis(&genesis)).unwrap();
+        // Deliberately NO set_height_hash(0, ..).
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(
+            error.contains("no genesis entry"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn load_from_database_rejects_state_height_mismatch_with_tip_block() {
+        // state.tip_hash resolves to a real block, but state.height disagrees
+        // with that block's header height → Err (guards against a truncated /
+        // corrupt state record silently loading at the wrong height).
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+        let state = ChainStateData {
+            tip_hash: genesis_hash, // resolves to the genesis block (height 0)
+            height: 5,              // …but state claims height 5
+            ..state_for_genesis(&genesis)
+        };
+        db.state.save_state(&state).unwrap();
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(
+            error.contains("does not match tip block height"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rollback_to_height_rejects_target_below_last_checkpoint() {
+        // FINALITY: rollback below the persisted last_checkpoint is refused with
+        // Err(InvalidState) and mutates nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        let genesis = crate::testnet::testnet_genesis();
+        let state = ChainStateData {
+            last_checkpoint: 5,
+            ..state_for_genesis(&genesis)
+        };
+        db.state.save_state(&state).unwrap();
+        // Pretend the live tip sits at height 10.
+        {
+            let mut inner = chain.inner.write();
+            inner.tip.height = 10;
+            inner.stats.height = 10;
+        }
+        let err = chain.rollback_to_height(3).unwrap_err();
+        assert!(matches!(err, Error::InvalidState(_)), "got {err:?}");
+        assert!(err.to_string().contains("finality"), "{err}");
+        assert_eq!(chain.height(), 10, "finality rejection must not mutate the tip");
+    }
+
+    #[test]
+    fn rollback_to_height_returns_non_coinbase_txs_as_orphaned() {
+        // Disconnecting blocks with real non-coinbase txs must return exactly
+        // those txs (for mempool restoration) and never the coinbases.
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        let genesis_hash = chain.tip_hash();
+
+        let b1 = burn_test_block(1, 51, &[1_000_000]);
+        let b2 = burn_test_block(2, 52, &[2_000_000]);
+        let want: Vec<Hash> = [&b1, &b2]
+            .iter()
+            .flat_map(|b| {
+                b.transactions
+                    .iter()
+                    .filter(|t| !t.is_coinbase())
+                    .map(|t| t.hash())
+            })
+            .collect();
+        assert_eq!(want.len(), 2, "each staged block carries one non-coinbase tx");
+
+        {
+            let mut inner = chain.inner.write();
+            for (h, b) in [(1u64, &b1), (2u64, &b2)] {
+                inner.blocks.insert(b.hash(), b.clone());
+                inner.height_to_hash.insert(h, b.hash());
+            }
+            inner.tip.hash = b2.hash();
+            inner.tip.height = 2;
+            inner.stats.height = 2;
+            inner.stats.tip_hash = b2.hash();
+            // Ample headroom so the emission/burn checked_subs never underflow
+            // regardless of the compiled fee-distribution activation height.
+            inner.stats.total_supply = u64::MAX as u128;
+            inner.stats.total_burned = u64::MAX as u128;
+        }
+
+        let orphaned = chain.rollback_to_height(0).unwrap();
+        assert_eq!(orphaned.len(), 2);
+        assert!(orphaned.iter().all(|t| !t.is_coinbase()), "no coinbase returned");
+        let got: Vec<Hash> = orphaned.iter().map(|t| t.hash()).collect();
+        for w in &want {
+            assert!(got.contains(w), "missing an orphaned non-coinbase tx");
+        }
+        assert_eq!(chain.tip_hash(), genesis_hash, "tip reset to genesis");
     }
 }

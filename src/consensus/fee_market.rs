@@ -2,6 +2,41 @@
 //!
 //! Simple, direct fee calculation - no unnecessary abstraction.
 //! Fees are based on transaction size and network congestion.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `calculate_fee`** — INVARIANT: `fee == size·MIN_FEE_PER_BYTE·mult/100`,
+//!   integer-exact with the block validator (no f64 boundary drift).
+//!   THREAT: wallet estimate vs validator divergence → honest txs rejected.
+//!   TESTS: `test_calculate_fee`, `test_zero_size_block_fee`,
+//!   `test_calculate_fee_saturating_extremes`.
+//! - **§2 `congestion_multiplier`** — INVARIANT: integer buckets match the
+//!   validator exactly; `congestion > 100` collapses to ×3.
+//!   TESTS: `test_congestion_multiplier`,
+//!   `congestion_multiplier_above_table_collapses_to_x3`.
+//! - **§3 `calculate_congestion`** — INVARIANT: u64 saturating fold (no 32-bit
+//!   overflow); empty ⇒ 0; capped at 100. THREAT: A7-CONG-01 (overflow hides
+//!   real congestion). TESTS: `congestion_no_overflow`,
+//!   `calculate_congestion_empty_is_zero_and_capped_at_100`.
+//! - **§4 `calculate_priority_fee`** — INVARIANT: priority clamped `[0,100]`;
+//!   NaN / negative saturate, never panic.
+//!   TESTS: `calculate_priority_fee_clamps_priority_and_saturates_on_extremes`.
+//! - **§5 `distribute_fee`** — INVARIANT: `to_miner + burned + to_protocol ==
+//!   total` with ZERO rounding loss (last bucket = exact remainder).
+//!   THREAT: A8-DIST-01 (triple truncation loses ≤2 atomic units).
+//!   TESTS: `test_fee_distribution`,
+//!   `distribute_fee_zero_total_all_buckets_zero_and_valid`,
+//!   `fee_distribution_is_valid_rejects_bad_sum`,
+//!   `property_invariants_fee::distribute_fee_conserves_total`.
+//! - **§6 `block_fee_stats`** — INVARIANT: u64 saturating folds; no overflow on
+//!   32-bit / extreme fees. THREAT: A9-STATS-01. TESTS: `block_fee_stats_no_overflow`,
+//!   `block_fee_stats_empty_returns_default_with_height_and_guards_zero_size`.
+//! - **§7 `FeeCalculator` (tiers / estimator)** — INVARIANT: estimate matches
+//!   the free `distribute_fee`; non-finite fee falls back to unscaled base.
+//!   TESTS: `fee_tier_multipliers`, `fee_calculator_estimate_scales_by_tier_multiplier`,
+//!   `fee_calculator_distribute_matches_free_distribute_fee`.
 
 use crate::primitives::Amount;
 // L-1 FIX: Removed dead imports FEE_PROTOCOL_*_PERCENT (protocol fee is always 0).
@@ -13,7 +48,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 // =============================================================================
-// CORE FEE CALCULATION
+// §1-§4  CORE FEE CALCULATION  (fee · congestion · priority)
 // =============================================================================
 
 /// Calculate fee for a transaction.
@@ -85,7 +120,7 @@ pub fn is_congested(congestion_pct: u64) -> bool {
 }
 
 // =============================================================================
-// FEE DISTRIBUTION
+// §5  FEE DISTRIBUTION
 // =============================================================================
 
 /// How fees are split between miner, burn, and protocol
@@ -160,7 +195,7 @@ impl FeeDistribution {
 }
 
 // =============================================================================
-// BLOCK FEE STATS (for auditing)
+// §6  BLOCK FEE STATS  (for auditing)
 // =============================================================================
 
 /// Summary of fees in a block
@@ -226,7 +261,7 @@ pub fn block_fee_stats(
 }
 
 // =============================================================================
-// RE-EXPORTS FOR BACKWARDS COMPATIBILITY
+// §7  TIERS & ESTIMATOR  (re-exports for backwards compatibility)
 // =============================================================================
 
 // Alias kept for backwards compatibility. Note: this is a plain data struct,
@@ -299,9 +334,40 @@ impl FeeCalculator {
     }
 }
 
+// =============================================================================
+// TEST COVERAGE MAP  (mirrors the code sections above, in order)
+// -----------------------------------------------------------------------------
+// Reviewer/auditor guide: each source section below maps to the tests that pin
+// it. Section banners here match the `// CORE FEE CALCULATION` etc. banners in
+// the code above, so you can read one section of logic and its tests together.
+//
+// §1  CORE FEE CALCULATION            (calculate_fee, calculate_priority_fee,
+//                                      congestion_multiplier, calculate_congestion,
+//                                      is_congested)
+//     tests: test_calculate_fee, test_congestion_multiplier,
+//            test_zero_size_block_fee, test_calculate_fee_saturating_extremes,
+//            congestion_no_overflow, congestion_multiplier_above_table_collapses_to_x3,
+//            calculate_congestion_empty_is_zero_and_capped_at_100,
+//            calculate_priority_fee_clamps_priority_and_saturates_on_extremes,
+//            is_congested_boundary_at_threshold
+//
+// §2  FEE DISTRIBUTION                 (FeeDistribution, distribute_fee)
+//     tests: test_fee_distribution, distribute_fee_zero_total_all_buckets_zero_and_valid,
+//            fee_distribution_is_valid_rejects_bad_sum
+//
+// §3  BLOCK FEE STATS (for auditing)   (FeeStats, block_fee_stats)
+//     tests: block_fee_stats_no_overflow,
+//            block_fee_stats_empty_returns_default_with_height_and_guards_zero_size
+//
+// §4  RE-EXPORTS / TIERS & ESTIMATOR   (FeeTier, FeeContext, FeeEstimate, FeeCalculator)
+//     tests: fee_tier_multipliers, fee_calculator_estimate_scales_by_tier_multiplier,
+//            fee_calculator_distribute_matches_free_distribute_fee
+// =============================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== §1: CORE FEE CALCULATION — tests =====
 
     #[test]
     fn test_calculate_fee() {
@@ -429,5 +495,190 @@ mod tests {
         assert_eq!(stats.tx_count, 5000);
         assert_eq!(stats.height, 42);
         assert!(stats.total_fees.as_atomic() > 0);
+    }
+
+    /// congestion_pct above the table top (>100) falls into the final `else`
+    /// bucket and collapses to the ×3.0 multiplier (300), never panicking on
+    /// out-of-range input.
+    #[test]
+    fn congestion_multiplier_above_table_collapses_to_x3() {
+        assert_eq!(congestion_multiplier(101), 300);
+        assert_eq!(congestion_multiplier(1_000), 300);
+        assert_eq!(congestion_multiplier(u64::MAX), 300);
+    }
+
+    /// distribute_fee on a zero total: every bucket is zero and is_valid holds
+    /// (0 == 0), congested or not.
+    #[test]
+    fn distribute_fee_zero_total_all_buckets_zero_and_valid() {
+        for congested in [false, true] {
+            let dist = distribute_fee(Amount::from_atomic(0), congested);
+            assert_eq!(dist.to_miner.as_atomic(), 0);
+            assert_eq!(dist.burned.as_atomic(), 0);
+            assert_eq!(dist.to_protocol.as_atomic(), 0);
+            assert_eq!(dist.total.as_atomic(), 0);
+            assert!(dist.is_valid(), "zero-total distribution must be valid");
+        }
+    }
+
+    /// is_valid must return false for a hand-constructed distribution whose
+    /// buckets don't sum to total (both under- and over-sum), and true for one
+    /// that does.
+    #[test]
+    fn fee_distribution_is_valid_rejects_bad_sum() {
+        // Under-sum: 50 + 40 + 0 = 90 != 100.
+        let under = FeeDistribution {
+            total: Amount::from_atomic(100),
+            to_miner: Amount::from_atomic(50),
+            burned: Amount::from_atomic(40),
+            to_protocol: Amount::from_atomic(0),
+        };
+        assert!(!under.is_valid(), "buckets summing below total must be invalid");
+
+        // Over-sum: 60 + 50 + 0 = 110 != 100.
+        let over = FeeDistribution {
+            total: Amount::from_atomic(100),
+            to_miner: Amount::from_atomic(60),
+            burned: Amount::from_atomic(50),
+            to_protocol: Amount::from_atomic(0),
+        };
+        assert!(!over.is_valid(), "buckets summing above total must be invalid");
+
+        // Exact: 70 + 30 + 0 = 100.
+        let exact = FeeDistribution {
+            total: Amount::from_atomic(100),
+            to_miner: Amount::from_atomic(70),
+            burned: Amount::from_atomic(30),
+            to_protocol: Amount::from_atomic(0),
+        };
+        assert!(exact.is_valid(), "buckets summing exactly to total must be valid");
+    }
+
+    /// calculate_congestion: empty slice => 0; oversized inputs cap at 100.
+    #[test]
+    fn calculate_congestion_empty_is_zero_and_capped_at_100() {
+        assert_eq!(calculate_congestion(&[]), 0);
+        // Average far above MAX_BLOCK_SIZE must cap at 100, not exceed it.
+        let oversized: Vec<usize> = vec![MAX_BLOCK_SIZE * 10; 5];
+        assert_eq!(calculate_congestion(&oversized), 100);
+    }
+
+    /// block_fee_stats on empty input returns a Default with only `height` set;
+    /// and when all sizes are zero, avg_fee_per_byte guards the total_size==0
+    /// case (no divide-by-zero).
+    #[test]
+    fn block_fee_stats_empty_returns_default_with_height_and_guards_zero_size() {
+        let stats = block_fee_stats(7, &[], false);
+        assert_eq!(stats.height, 7);
+        assert_eq!(stats.tx_count, 0);
+        assert_eq!(stats.total_fees.as_atomic(), 0);
+        assert_eq!(stats.total_burned.as_atomic(), 0);
+        assert_eq!(stats.avg_fee_per_byte, 0);
+        assert!(!stats.was_congested);
+
+        // Non-empty but all-zero sizes: total_size == 0 => avg guarded to 0.
+        let zero_size = vec![(Amount::from_atomic(100), 0usize)];
+        let stats2 = block_fee_stats(9, &zero_size, false);
+        assert_eq!(stats2.tx_count, 1);
+        assert_eq!(stats2.avg_fee_per_byte, 0, "total_size==0 must guard the division");
+    }
+
+    /// calculate_priority_fee: priority is clamped to [0,100], and non-finite /
+    /// negative priorities use saturating arithmetic without panicking.
+    #[test]
+    fn calculate_priority_fee_clamps_priority_and_saturates_on_extremes() {
+        // Clamp: priority above 100 behaves identically to priority == 100.
+        assert_eq!(
+            calculate_priority_fee(1000, 0, 1000.0).as_atomic(),
+            calculate_priority_fee(1000, 0, 100.0).as_atomic(),
+            "priority must clamp at 100"
+        );
+
+        // Negative priority clamps to 0 => no boost => equals the base fee.
+        let base = calculate_fee(1000, 0).as_atomic();
+        assert_eq!(
+            calculate_priority_fee(1000, 0, -5.0).as_atomic(),
+            base,
+            "negative priority must clamp to 0 (no boost)"
+        );
+
+        // NaN priority must not panic and must yield a finite, bounded fee.
+        let nan_fee = calculate_priority_fee(1000, 0, f64::NAN).as_atomic();
+        assert!(nan_fee >= base, "NaN priority must saturate, not underflow/panic");
+
+        // Extreme size + priority: chained saturating ops must not panic and
+        // stay within u64 (Amount is u64-backed).
+        let _ = calculate_priority_fee(usize::MAX, 100, f64::MAX);
+    }
+
+    /// is_congested boundary: false strictly below CONGESTION_THRESHOLD, true at
+    /// and above it.
+    #[test]
+    fn is_congested_boundary_at_threshold() {
+        assert!(!is_congested(CONGESTION_THRESHOLD - 1));
+        assert!(is_congested(CONGESTION_THRESHOLD));
+        assert!(is_congested(CONGESTION_THRESHOLD + 1));
+    }
+
+    /// FeeTier multipliers.
+    #[test]
+    fn fee_tier_multipliers() {
+        assert_eq!(FeeTier::Economy.multiplier(), 1.0);
+        assert_eq!(FeeTier::Standard.multiplier(), 1.5);
+        assert_eq!(FeeTier::Priority.multiplier(), 2.5);
+    }
+
+    /// FeeCalculator::estimate scales the base fee by the tier multiplier.
+    ///
+    /// (The non-finite `fee_f64` fallback and the `u64::MAX` overflow clamp in
+    /// `estimate` are defensively unreachable in practice: `calculate_fee` caps
+    /// the base at `u64::MAX/100`, so `base * 2.5` is always finite and below
+    /// `u64::MAX`. This test pins the reachable scaling behavior.)
+    #[test]
+    fn fee_calculator_estimate_scales_by_tier_multiplier() {
+        let calc = FeeCalculator::new(FeeContext { congestion_pct: 0 });
+        let base = calculate_fee(1000, 0).as_atomic(); // 1000 * MIN_FEE_PER_BYTE
+
+        let economy = calc.estimate(1000, FeeTier::Economy);
+        assert_eq!(economy.fee.as_atomic(), base, "Economy = ×1.0");
+        assert_eq!(economy.tier, FeeTier::Economy);
+
+        let standard = calc.estimate(1000, FeeTier::Standard);
+        assert_eq!(
+            standard.fee.as_atomic(),
+            (base as f64 * 1.5) as u64,
+            "Standard = ×1.5"
+        );
+
+        let priority = calc.estimate(1000, FeeTier::Priority);
+        assert_eq!(
+            priority.fee.as_atomic(),
+            (base as f64 * 2.5) as u64,
+            "Priority = ×2.5"
+        );
+    }
+
+    /// FeeCalculator::distribute must match the free `distribute_fee` fed with
+    /// `is_congested(congestion_pct)` — both below and above the threshold.
+    #[test]
+    fn fee_calculator_distribute_matches_free_distribute_fee() {
+        let total = Amount::from_atomic(1_000_000);
+        for congestion_pct in [0u64, CONGESTION_THRESHOLD, 100] {
+            let calc = FeeCalculator { congestion_pct };
+            let via_calc = calc.distribute(total);
+            let via_free = distribute_fee(total, is_congested(congestion_pct));
+            assert_eq!(
+                via_calc.to_miner.as_atomic(),
+                via_free.to_miner.as_atomic(),
+                "to_miner mismatch at congestion {congestion_pct}"
+            );
+            assert_eq!(
+                via_calc.burned.as_atomic(),
+                via_free.burned.as_atomic(),
+                "burned mismatch at congestion {congestion_pct}"
+            );
+            assert_eq!(via_calc.to_protocol.as_atomic(), via_free.to_protocol.as_atomic());
+            assert_eq!(via_calc.total.as_atomic(), via_free.total.as_atomic());
+        }
     }
 }

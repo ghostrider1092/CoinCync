@@ -20,6 +20,44 @@
 //! Placed here (not in the hash-locked `pow.rs`) so the relay path is fixed
 //! without a critical-file re-lock. Routing `verify_pow` (block validation)
 //! through this cache is a follow-up that requires the `pow.rs` edit.
+//!
+//! ## Audit map
+//! Each `§` is a code element below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `pow_preimage_key`** — INVARIANT: a domain-separated key over EXACTLY the
+//!   fields that determine the RandomX input (`prev_hash, height, timestamp, nonce,
+//!   tx_root, binding`); target-independent, deterministic, and each of those input
+//!   fields changes the key. THREAT: caching one output across two genuinely
+//!   different solutions (a false-accept). TESTS:
+//!   `preimage_key_is_target_independent_and_field_sensitive`.
+//! - **§2 `pow_preimage_key` binding sensitivity (audit §1)** — INVARIANT: a
+//!   different header `binding` changes the key, so malleated variants that share
+//!   `(prev,height,ts,nonce,tx_root)` but differ in a bound field do NOT collapse to
+//!   one cache entry. THREAT: audit §1 PoW/anchor malleability — a mutated bound
+//!   field riding another solution's cached RandomX output. TESTS:
+//!   `pow_verify_cache_does_not_collapse_distinct_bindings`,
+//!   `pow_hash_cached_rejects_reused_anchor_with_different_binding`.
+//! - **§3 `PowVerifyCache`** — INVARIANT: FIFO-bounded at `POW_VERIFY_CACHE_MAX`; an
+//!   existing entry is never overwritten. THREAT: unbounded cache growth (memory
+//!   DoS). TESTS: `cache_is_fifo_bounded_and_collapses_variants`.
+//! - **§4 amplification-collapse (target-variants)** — INVARIANT: the key omits
+//!   `target`, so every target-variant of one solution derives the SAME key and
+//!   shares a single cached RandomX run. THREAT: amplification-collapse — one mined
+//!   solution mutated into unlimited hash-distinct blocks forcing unbounded
+//!   memory-hard RandomX across the network. TESTS:
+//!   `pow_verify_cache_collapses_target_variants_to_one_entry`.
+//! - **§5 `pow_hash_cached` anchor/algorithm gate** — INVARIANT: recomputes and
+//!   binds the anchor first, so a forged `claimed_anchor` or `claimed_algo` is
+//!   rejected free, BEFORE any RandomX hashing. THREAT: a forged anchor/algorithm
+//!   poisoning the cache or wasting a RandomX run. TESTS:
+//!   `pow_hash_cached_rejects_forged_anchor_before_hashing`,
+//!   `pow_hash_cached_rejects_algorithm_mismatch_before_hashing`.
+//! - **§6 `pow_hash_cached` compute + cache** — INVARIANT: a cold miss computes and
+//!   caches the RandomX output; a second call for the same preimage key is a hit
+//!   returning the identical output with no recompute. THREAT: redundant memory-hard
+//!   RandomX per variant of one solution. TESTS:
+//!   `pow_hash_cached_cold_miss_then_hit_returns_same`.
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -186,5 +224,142 @@ mod tests {
             c.insert(kk, Hash::from_bytes([1u8; 32]));
         }
         assert!(c.map.len() <= POW_VERIFY_CACHE_MAX, "cache stays bounded");
+    }
+
+    // ---- pow_hash_cached: forged anchor rejected free, before any hashing ----
+    #[test]
+    fn pow_hash_cached_rejects_forged_anchor_before_hashing() {
+        let prev = Hash::from_bytes([1u8; 32]);
+        let tx_root = Hash::from_bytes([2u8; 32]);
+        let bind = Hash::from_bytes([3u8; 32]);
+        let (height, ts, nonce) = (5u64, 1_000u64, 42u64);
+
+        let real = compute_full_anchor(&prev, height, ts, &bind).unwrap();
+        let mut wb = [0u8; 32];
+        wb.copy_from_slice(real.mixed_hash.as_bytes());
+        wb[0] ^= 0xFF;
+        let forged = Hash::from_bytes(wb);
+
+        let res = pow_hash_cached(&prev, height, ts, nonce, &tx_root, &forged, 0, &bind);
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("Anchor mismatch"), "unexpected error: {err}");
+    }
+
+    // ---- pow_hash_cached: algorithm mismatch rejected free, before hashing ----
+    #[test]
+    fn pow_hash_cached_rejects_algorithm_mismatch_before_hashing() {
+        let prev = Hash::from_bytes([1u8; 32]);
+        let tx_root = Hash::from_bytes([2u8; 32]);
+        let bind = Hash::from_bytes([3u8; 32]);
+        let (height, ts, nonce) = (5u64, 1_000u64, 42u64);
+
+        let real = compute_full_anchor(&prev, height, ts, &bind).unwrap();
+        let res = pow_hash_cached(
+            &prev,
+            height,
+            ts,
+            nonce,
+            &tx_root,
+            &real.mixed_hash,
+            1, // claimed_algo != anchor.algorithm (RandomX == 0)
+            &bind,
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("Algorithm mismatch"), "unexpected error: {err}");
+    }
+
+    // ---- pow_hash_cached: §1 — reused anchor under a different binding rejected ----
+    #[test]
+    fn pow_hash_cached_rejects_reused_anchor_with_different_binding() {
+        // Two "blocks" share (prev, height, ts, nonce, tx_root) but differ in the
+        // header binding. Reusing the first block's anchor under the second's
+        // binding is rejected via AnchorMismatch — before hashing — so a malleated
+        // variant can NOT ride the first block's cached solution. No randomx needed.
+        let prev = Hash::from_bytes([1u8; 32]);
+        let tx_root = Hash::from_bytes([2u8; 32]);
+        let (height, ts, nonce) = (5u64, 1_000u64, 42u64);
+        let bind1 = Hash::from_bytes([3u8; 32]);
+        let bind2 = Hash::from_bytes([4u8; 32]);
+
+        let anchor1 = compute_full_anchor(&prev, height, ts, &bind1).unwrap();
+        let res = pow_hash_cached(
+            &prev,
+            height,
+            ts,
+            nonce,
+            &tx_root,
+            &anchor1.mixed_hash, // reused from bind1's solution
+            0,
+            &bind2, // mutated bound field
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("Anchor mismatch"),
+            "distinct bindings must not share a cached solution: {err}"
+        );
+    }
+
+    // ---- amplification-collapse: all target-variants map to ONE cache entry ----
+    #[test]
+    fn pow_verify_cache_collapses_target_variants_to_one_entry() {
+        // `pow_preimage_key` deliberately does NOT take `target`, so every
+        // target-variant of one solution derives the SAME key and shares a single
+        // cached RandomX output — the amplification defense.
+        let prev = Hash::from_bytes([1u8; 32]);
+        let tx_root = Hash::from_bytes([2u8; 32]);
+        let bind = Hash::from_bytes([3u8; 32]);
+
+        let key = pow_preimage_key(&prev, 7, 1_234, 99, &tx_root, &bind);
+        let variant_key = pow_preimage_key(&prev, 7, 1_234, 99, &tx_root, &bind);
+        assert_eq!(key, variant_key, "target is not part of the key");
+
+        let mut c = PowVerifyCache::new();
+        let out = Hash::from_bytes([0x42u8; 32]);
+        c.insert(key, out);
+        assert_eq!(
+            c.get(&variant_key),
+            Some(out),
+            "a target-variant must hit the same cached RandomX run"
+        );
+    }
+
+    // ---- no false collapse: distinct bindings occupy distinct cache slots ----
+    #[test]
+    fn pow_verify_cache_does_not_collapse_distinct_bindings() {
+        let prev = Hash::from_bytes([1u8; 32]);
+        let tx_root = Hash::from_bytes([2u8; 32]);
+
+        let k1 = pow_preimage_key(&prev, 7, 1_234, 99, &tx_root, &Hash::from_bytes([3u8; 32]));
+        let k2 = pow_preimage_key(&prev, 7, 1_234, 99, &tx_root, &Hash::from_bytes([4u8; 32]));
+        assert_ne!(k1, k2, "different bindings must derive different keys");
+
+        let mut c = PowVerifyCache::new();
+        c.insert(k1, Hash::from_bytes([0xAAu8; 32]));
+        assert_eq!(
+            c.get(&k2),
+            None,
+            "a different-binding variant must NOT collapse onto the other's entry"
+        );
+    }
+
+    // ---- pow_hash_cached: cold miss computes+caches, second call is a hit ----
+    // #[ignore]: computes a real RandomX hash on the cold miss. Run with:
+    //   cargo test -p coincync --features "randomx testnet" -- --ignored pow_hash_cached_cold_miss_then_hit
+    #[cfg(feature = "randomx")]
+    #[test]
+    #[ignore]
+    fn pow_hash_cached_cold_miss_then_hit_returns_same() {
+        let prev = Hash::from_bytes([0x51u8; 32]);
+        let tx_root = Hash::from_bytes([0x52u8; 32]);
+        let bind = Hash::from_bytes([0x53u8; 32]);
+        let (height, ts, nonce) = (5u64, 1_000u64, 42u64);
+
+        let anchor = compute_full_anchor(&prev, height, ts, &bind).unwrap();
+        let h1 = pow_hash_cached(&prev, height, ts, nonce, &tx_root, &anchor.mixed_hash, 0, &bind)
+            .unwrap();
+        // Second call for the same preimage key must be a cache hit (same output).
+        let h2 = pow_hash_cached(&prev, height, ts, nonce, &tx_root, &anchor.mixed_hash, 0, &bind)
+            .unwrap();
+        assert_eq!(h1, h2, "cache hit must return the cold-miss output");
     }
 }
