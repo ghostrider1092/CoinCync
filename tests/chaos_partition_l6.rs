@@ -94,11 +94,7 @@ impl Bus {
             .chain
             .get_block_by_height(self.nodes[i].chain.height())
             .expect("parent block");
-        let target = if h == 1 {
-            Hash::from_difficulty(500)
-        } else {
-            self.nodes[i].chain.next_target()
-        };
+        let target = self.nodes[i].chain.next_target();
         let ts = self.base_ts + h * self.spacing;
         let (cb, _) = build_coinbase(h, &self.nodes[i].spend_pub, &self.nodes[i].view_pub, 0);
         let blk = mine_block(

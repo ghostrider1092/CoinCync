@@ -92,9 +92,32 @@ pub fn mine_block(
     let prev_hash = prev.hash();
     let tx_hashes: Vec<Hash> = transactions.iter().map(|t| t.hash()).collect();
     let tx_root = merkle_root(&tx_hashes);
-    let anchor = compute_full_anchor(&prev_hash, height, timestamp)
+
+    // §1 anchor binding (PR #101): the full anchor commits to this header's
+    // PoW binding, so the header must be fully populated (anchor/nonce aside)
+    // BEFORE the binding is taken, and the anchor set BEFORE mining.
+    let mut header = BlockHeader {
+        network_magic: magic,
+        version: block_version_at_height(height),
+        height,
+        timestamp,
+        prev_hash,
+        tx_root,
+        anchor: Hash::from_bytes([0u8; 32]),
+        algorithm: PowAlgorithm::RandomX as u8,
+        nonce: 0,
+        target,
+        miner_pubkey,
+        supply_commitment: [0u8; 32],
+        checkpoint_vote: None,
+        spark_set_root: [0u8; 32],
+        mw_kernel_root: [0u8; 32],
+    };
+    let binding = header.pow_binding();
+    let anchor = compute_full_anchor(&prev_hash, height, timestamp, &binding)
         .expect("anchor computation must succeed")
         .mixed_hash;
+    header.anchor = anchor;
 
     let mut nonce = 0u64;
     loop {
@@ -107,17 +130,38 @@ pub fn mine_block(
             .checked_add(1)
             .expect("nonce space exhausted — target unexpectedly hard");
     }
+    header.nonce = nonce;
 
-    let header = BlockHeader {
+    Block::new(header, transactions)
+}
+
+/// INSTANT (no-RandomX) block builder — for use with `--features test-fast-pow`,
+/// where the validator skips PoW + difficulty-target enforcement. The block is
+/// fully well-formed (real tx_root + anchor) but carries a trivial target and
+/// nonce 0, so there is no mining loop. Every block has work=1, so fork choice
+/// still resolves by chain length (which is all the multi-node scenarios need).
+pub fn mine_block_fast(
+    prev: &Block,
+    height: u64,
+    timestamp: u64,
+    transactions: Vec<Transaction>,
+    miner_pubkey: PublicKey,
+    magic: [u8; 4],
+) -> Block {
+    let prev_hash = prev.hash();
+    let tx_hashes: Vec<Hash> = transactions.iter().map(|t| t.hash()).collect();
+    let tx_root = merkle_root(&tx_hashes);
+    let target = Hash::from_difficulty(1); // trivial: skipped by test-fast-pow
+    let mut header = BlockHeader {
         network_magic: magic,
         version: block_version_at_height(height),
         height,
         timestamp,
         prev_hash,
         tx_root,
-        anchor,
+        anchor: Hash::from_bytes([0u8; 32]),
         algorithm: PowAlgorithm::RandomX as u8,
-        nonce,
+        nonce: 0,
         target,
         miner_pubkey,
         supply_commitment: [0u8; 32],
@@ -125,7 +169,10 @@ pub fn mine_block(
         spark_set_root: [0u8; 32],
         mw_kernel_root: [0u8; 32],
     };
-
+    let binding = header.pow_binding();
+    header.anchor = compute_full_anchor(&prev_hash, height, timestamp, &binding)
+        .expect("anchor computation must succeed")
+        .mixed_hash;
     Block::new(header, transactions)
 }
 

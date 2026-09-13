@@ -288,9 +288,31 @@ fn mine_block(
     let prev_hash = prev.hash();
     let tx_hashes: Vec<Hash> = transactions.iter().map(|t| t.hash()).collect();
     let tx_root = merkle_root(&tx_hashes);
-    let anchor = compute_full_anchor(&prev_hash, height, timestamp)
+    // audit §1: the anchor binds the header via `pow_binding()`. Build the
+    // header first with a placeholder anchor, derive its binding, then compute
+    // the real 4-arg anchor and write it back before mining.
+    let mut header = BlockHeader {
+        network_magic: magic,
+        version: block_version_at_height(height),
+        height,
+        timestamp,
+        prev_hash,
+        tx_root,
+        anchor: Hash::from_bytes([0u8; 32]),
+        algorithm: PowAlgorithm::RandomX as u8,
+        nonce: 0,
+        target,
+        miner_pubkey,
+        supply_commitment: [0u8; 32],
+        checkpoint_vote: None,
+        spark_set_root: [0u8; 32],
+        mw_kernel_root: [0u8; 32],
+    };
+    let binding = header.pow_binding();
+    let anchor = compute_full_anchor(&prev_hash, height, timestamp, &binding)
         .expect("anchor computation must succeed")
         .mixed_hash;
+    header.anchor = anchor;
 
     let mut nonce = 0u64;
     loop {
@@ -303,24 +325,7 @@ fn mine_block(
             .checked_add(1)
             .expect("nonce space exhausted — target unexpectedly hard");
     }
-
-    let header = BlockHeader {
-        network_magic: magic,
-        version: block_version_at_height(height),
-        height,
-        timestamp,
-        prev_hash,
-        tx_root,
-        anchor,
-        algorithm: PowAlgorithm::RandomX as u8,
-        nonce,
-        target,
-        miner_pubkey,
-        supply_commitment: [0u8; 32],
-        checkpoint_vote: None,
-        spark_set_root: [0u8; 32],
-        mw_kernel_root: [0u8; 32],
-    };
+    header.nonce = nonce;
 
     Block::new(header, transactions)
 }
@@ -400,11 +405,7 @@ fn reorg_tip_double_spend_is_rejected() {
         // genesis difficulty (within the allowed easing ratio) so ASERT then
         // clamps B2..B11 down to the MIN_DIFFICULTY floor, keeping real-PoW
         // mining cheap. From B2 on we use the exact ASERT target.
-        let target = if h == 1 {
-            Hash::from_difficulty(500)
-        } else {
-            chain.next_target() // tip == parent (height h-1)
-        };
+        let target = chain.next_target();
         let (coinbase, stealth) = if h == 1 || h == 2 {
             build_coinbase(h, &spend_public, &view_public, 0) // attacker-controlled
         } else {
@@ -667,11 +668,7 @@ fn total_difficulty_is_reorg_history_independent() {
         // B1's window is genesis-only (< 2 blocks) so it isn't exactly enforced;
         // start it well below genesis difficulty (within the easing ratio) so
         // ASERT clamps C2..C5 to the floor. C2.. use the exact ASERT target.
-        let target = if h == 1 {
-            Hash::from_difficulty(500)
-        } else {
-            chain.next_target() // tip == parent (height h-1)
-        };
+        let target = chain.next_target();
         let (coinbase, _) = build_coinbase(h, &spend_pk, &view_pk, 0);
         let block = mine_block(&parent, h, ts, target, vec![coinbase], miner_pk, magic);
         let status = chain.add_block(block.clone()).expect("add_block C*");
@@ -802,11 +799,7 @@ fn invalid_block_does_not_mutate_chain_state() {
     // Build a short valid chain: genesis + B1..B3 (coinbase-only).
     let mut parent = genesis.clone();
     for h in 1..=3u64 {
-        let target = if h == 1 {
-            Hash::from_difficulty(500)
-        } else {
-            chain.next_target()
-        };
+        let target = chain.next_target();
         let (cb, _) = build_coinbase(h, &spend_pub, &view_pub, 0);
         let blk = mine_block(
             &parent,
@@ -1016,11 +1009,7 @@ fn total_supply_is_conserved_per_block() {
     let mut expected_supply = chain.stats().total_supply; // genesis baseline
 
     for h in 1..=6u64 {
-        let target = if h == 1 {
-            Hash::from_difficulty(500)
-        } else {
-            chain.next_target()
-        };
+        let target = chain.next_target();
         let (cb, _) = build_coinbase(h, &spend_pub, &view_pub, 0);
         let blk = mine_block(
             &parent,
@@ -1085,11 +1074,7 @@ fn replay_of_same_blocks_produces_identical_state() {
     let mut blocks: Vec<Block> = Vec::new();
     let mut parent = genesis.clone();
     for h in 1..=6u64 {
-        let target = if h == 1 {
-            Hash::from_difficulty(500)
-        } else {
-            chain_a.next_target()
-        };
+        let target = chain_a.next_target();
         let (cb, _) = build_coinbase(h, &spend_pub, &view_pub, 0);
         let blk = mine_block(
             &parent,
@@ -1217,11 +1202,7 @@ fn db_reopen_reconstructs_identical_state() {
         let spacing = 3600u64;
         let mut parent = genesis.clone();
         for h in 1..=6u64 {
-            let target = if h == 1 {
-                Hash::from_difficulty(500)
-            } else {
-                chain.next_target()
-            };
+            let target = chain.next_target();
             let (cb, _) = build_coinbase(h, &spend_pub, &view_pub, 0);
             let blk = mine_block(
                 &parent,
