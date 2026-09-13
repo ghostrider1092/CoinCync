@@ -80,6 +80,11 @@ insecure-fast-sync = []
 # multi-node simkit harness mines instantly. INSECURE — never enable in a real
 # build. Off by default → production is byte-identical after cfg-strip.
 test-fast-pow = []
+# Hardware-wallet (Ledger/Trezor) host-side support. Off by default — gates
+# `src/wallet/hardware.rs` (APDU transport abstraction + device-backed TxSigner).
+# The default build pulls no USB/HID deps; the real transport adapter is added
+# behind this feature in a later slice. See docs/ (hardware-wallet plan).
+hardware = []
 # Sketch features â€” implementations reserved for post-mainnet CIPs.
 # All gated modules are off by default and not part of the production
 # audit perimeter. See docs/cip/.
