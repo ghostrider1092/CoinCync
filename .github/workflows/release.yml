@@ -36,11 +36,13 @@ jobs:
   # a tag containing "testnet" (e.g. v2.1.0-testnet) builds testnet binaries;
   # any other tag (e.g. v2.0.0) builds MAINNET binaries. `randomx` is always on.
   #
-  # NOTE (follow-up): the Linux build below goes through the reproducible
-  # Docker path, which currently builds DEFAULT features (= mainnet) and does
-  # not yet thread `testnet`. That is correct for mainnet releases; a future
-  # testnet release needs the feature threaded into scripts/build-in-docker.sh
-  # + docker/builder.Dockerfile (a Docker-validated change).
+  # The Linux build below goes through the reproducible Docker path. It now
+  # threads the consensus feature: the prepare job's `is_testnet` output drives
+  # `scripts/build-in-docker.sh --testnet` -> `--build-arg BUILD_TESTNET=1` ->
+  # docker/builder.Dockerfile, which builds coincync-node/coincync-wallet with
+  # `--features "randomx testnet"` and the miner via coincync-rig's forwarding
+  # `testnet` feature. Mainnet tags take the unchanged DEFAULT-feature path, so
+  # published mainnet checksums remain byte-for-byte reproducible.
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -77,6 +79,7 @@ jobs:
   # runners below — no Debian-Bookworm-equivalent reproducible-container
   # story on GitHub Actions for those platforms today.
   build-linux:
+    needs: prepare
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -90,7 +93,18 @@ jobs:
           fetch-depth: 0
 
       - name: Reproducible Docker build (produces out/{binaries,SHA256SUMS})
-        run: bash ./scripts/build-in-docker.sh --out "$PWD/out"
+        run: |
+          # A `*-testnet` tag (is_testnet=true from the prepare job) threads the
+          # testnet consensus feature into the Docker build; otherwise the
+          # default (mainnet) reproducible path is used, byte-for-byte unchanged.
+          FLAGS=""
+          if [ "${{ needs.prepare.outputs.is_testnet }}" = "true" ]; then
+            FLAGS="--testnet"
+            echo "Building TESTNET Linux binaries (--features testnet)"
+          else
+            echo "Building MAINNET Linux binaries (default features)"
+          fi
+          bash ./scripts/build-in-docker.sh $FLAGS --out "$PWD/out"
 
       - name: Package release tarball
         run: |
