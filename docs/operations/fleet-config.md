@@ -12,7 +12,7 @@ Consolidated onto **Hetzner**. One live public seed:
 
 | Node | IP | Role | RPC bind |
 |------|----|------|----------|
-| `seed1` | `2.28.1.75:28080` | seed | `127.0.0.1` (loopback) |
+| `seed1` | `2.29.34.197:28080` | seed | `127.0.0.1` (loopback) |
 
 The residential home node stays **DNS-only** (privacy) and is intentionally
 not listed here. The former Vultr fleet is in `deactivated` for history.

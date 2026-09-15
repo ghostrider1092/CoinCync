@@ -37,7 +37,7 @@ param(
   [switch]$NoMine,
   [int]$PollSecs = 5,
   # Live testnet Hetzner seed to dial (in addition to DNS seeds). Ignored on regtest.
-  [string]$Seed = "2.28.1.75:28080",
+  [string]$Seed = "2.29.34.197:28080",
   # By default each component opens in its OWN window. Pass -Tabs for one window
   # with four tabs instead.
   [switch]$Tabs

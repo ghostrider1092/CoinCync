@@ -3,8 +3,10 @@
 How to bring up the full CoinCync **testnet** — the seed node **and** all public
 sites (landing, docs, explorer, api, faucet) — on one Hetzner box.
 
-**Target:** `cync-node-hel1` — Hetzner CPX22 (2 vCPU / ~4 GB / 80 GB),
-Falkenstein DE, public IP `2.29.34.197`, Debian 12.
+**Target:** `cync-node-hel1` — Hetzner CPX32 (4 vCPU / ~8 GB / 160 GB),
+Falkenstein DE, public IP `2.29.34.197`, Debian 12. (Upgraded 2026-09-07 from
+the CPX22/4 GB box, which OOM-killed the node — RandomX full dataset + UTXO
+exceeded 4 GB.)
 
 All web services run behind nginx on this box and reverse-proxy to the node's
 **loopback** RPC (`127.0.0.1:28081`). Nothing but P2P (28080) and HTTPS (443)

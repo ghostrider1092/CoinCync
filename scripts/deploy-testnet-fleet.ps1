@@ -26,7 +26,7 @@
   IPs of the fleet boxes. Pass 4+ so each node reaches >=3 peers.
 
 .PARAMETER Seed
-  Public seed each node also dials, as IP:PORT. Default 2.28.1.75:28080.
+  Public seed each node also dials, as IP:PORT. Default 2.29.34.197:28080.
 
 .PARAMETER DryRun
   Print the per-node plan (incl. each unit's --addnode list) without touching
@@ -40,7 +40,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)][string[]]$Nodes,
-  [string]$Seed = '2.28.1.75:28080',
+  [string]$Seed = '2.29.34.197:28080',
   [string]$KeyPath = "$env:USERPROFILE\.ssh\coincync_fleet",
   [int]$P2pPort = 28080,
   [switch]$DryRun
