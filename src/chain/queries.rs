@@ -40,6 +40,15 @@ impl Blockchain {
     pub fn available_output_count(&self) -> usize {
         self.inner.read().utxos.output_count()
     }
+
+    /// A deterministic commitment over the transparent UTXO set at the current
+    /// tip (output catalog + spent key-image set). OBSERVABILITY ONLY (gap #3):
+    /// not a consensus value, not in the block header, not enforced anywhere — a
+    /// light wallet may cross-check it against a trusted source. Two nodes on the
+    /// same tip compute the same value (see `UtxoSet::commitment_hash`).
+    pub fn utxo_commitment_at_tip(&self) -> Hash {
+        self.inner.read().utxos.commitment_hash()
+    }
 }
 
 // ── additional read-only getters (issue #108, queries expansion) ──
