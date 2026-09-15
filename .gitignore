@@ -180,3 +180,11 @@ docs/audit/.coverage-history.json
 # Python bytecode cache (audit tool)
 __pycache__/
 *.pyc
+
+# Local dev/soak node data dirs (scripts/start-all.ps1, scripts/soak-local.ps1)
+.localnet/
+.localnet-soak/
+.localnet-testnet/
+.localnet-smoke/
+.localnet-diag/
+.gtest/
