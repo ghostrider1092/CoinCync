@@ -27,6 +27,12 @@ pub const NEAR_TIP_INV_WINDOW: u64 = 16;
 pub const TIP_REBROADCAST_INTERVAL_SECS: u64 = 60;
 /// Peer timeout (no activity).
 pub const PEER_TIMEOUT: Duration = Duration::from_secs(300);
+/// Max time a single outbound write may take before the peer is dropped (C2).
+/// A write stalling this long means the peer stopped reading (its TCP receive
+/// window is full); without the bound the per-peer write task blocks forever, its
+/// PEER_QUEUE_SIZE send queue fills, and `send_to_peer` -- called by the SHARED
+/// message processor -- then blocks, freezing ALL P2P message handling.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Global memory budget for P2P buffers (50 MB).
 pub const MEMORY_BUDGET_BYTES: usize = 50 * 1024 * 1024;
 /// Per-peer send queue size (with backpressure).
