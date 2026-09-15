@@ -181,16 +181,11 @@ document.addEventListener('DOMContentLoaded', function() {
 // (loopback-only)" badge — intentional, not a problem.
 // `apiNginxOnly` flag: api host runs nginx only (no coincync-node);
 // probing it would always 504. Shown for topology completeness only.
+// Single Hetzner box (cync-node-hel1, Falkenstein DE): seed with public P2P
+// (28080) and loopback-only RPC (28081). Add entries here — plus matching
+// GNODES/MNODES rows and a `/health/<id>` nginx route — as the fleet grows.
 const NODES=[
-  {id:'1a2b',label:'seed1',   loc:'Vultr · public bind',     role:'Seed · public RPC',         proxy:'/health/seed1',    _rpc:'http://216.128.156.239:28081'},
-  {id:'3c4d',label:'seed2',   loc:'Vultr',                   role:'Seed · public RPC',         proxy:'/health/seed2',    _rpc:'http://140.82.57.168:28081'},
-  {id:'5e6f',label:'seed3',   loc:'Vultr · loopback RPC',    role:'Seed · loopback-only',      proxy:'/health/seed3',    _rpc:'http://45.32.251.6:28081',    loopbackRpc:true},
-  {id:'7a8b',label:'explorer',loc:'Vultr · loopback RPC',    role:'Explorer · loopback-only',  proxy:'/health/explorer', _rpc:'http://127.0.0.1:28081'},
-  {id:'9c0d',label:'api',     loc:'Vultr · nginx-only',      role:'Public API · nginx gateway',proxy:'/health/api',      _rpc:'http://95.179.165.225:28081', apiNginxOnly:true},
-  {id:'rxa1',label:'randomx', loc:'Vultr · loopback RPC',    role:'Miner · loopback-only',     proxy:'/health/randomx',  _rpc:'http://173.199.93.21:28081',  loopbackRpc:true},
-  {id:'rxa2',label:'randomx2',loc:'Vultr · loopback RPC',    role:'Miner · loopback-only',     proxy:'/health/randomx2', _rpc:'http://45.32.79.234:28081',   loopbackRpc:true},
-  {id:'rly1',label:'relay1',  loc:'Vultr · loopback RPC',    role:'Relay · loopback-only',     proxy:'/health/relay1',   _rpc:'http://208.85.17.18:28081',   loopbackRpc:true},
-  {id:'rly2',label:'relay2',  loc:'Vultr · loopback RPC',    role:'Relay · loopback-only',     proxy:'/health/relay2',   _rpc:'http://70.34.250.31:28081',   loopbackRpc:true},
+  {id:'hel1',label:'hel1',    loc:'Hetzner · Falkenstein DE', role:'Seed · public P2P, loopback RPC', proxy:'/health/hel1', _rpc:'http://127.0.0.1:28081', loopbackRpc:true},
 ];
 const $=id=>document.getElementById(id);
 const num=n=>Number(n).toLocaleString();

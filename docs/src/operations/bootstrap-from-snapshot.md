@@ -131,17 +131,13 @@ ls testnet/   # should show CURRENT, MANIFEST-*, LOG, *.sst, *.log, etc.
 
 ```bash
 coincync-node --network testnet \
-  --addnode 66.135.23.193:28080 \
-  --addnode 140.82.57.168:28080 \
-  --addnode 207.148.111.76:28080 \
-  --addnode 207.148.6.50:28080 \
-  --addnode 95.179.165.225:28080 \
-  --addnode 192.248.151.16:28080
+  --addnode 2.29.34.197:28080
 ```
 
-(The `--addnode` flags are the standard fleet seeds — same list as in
-[run-a-node.md](../getting-started/run-a-node.md). Drop them after
-first sync if you want.)
+(The `--addnode` flag points at the public testnet seed — same as in
+[run-a-node.md](../getting-started/run-a-node.md). Drop it after
+first sync if you want. Add more `--addnode` peers as the community
+brings up additional seeds.)
 
 ### 8. Verify success
 
@@ -152,7 +148,7 @@ INFO  Loaded chain database at height 14800
 INFO  Tip hash: <matches manifest>
 INFO  Verifying against hardcoded checkpoints...
 INFO  Checkpoint match at height 14000 ✓
-INFO  Connected to peer 66.135.23.193:28080
+INFO  Connected to peer 2.29.34.197:28080
 INFO  Sync started — target height 14823
 INFO  Applied block at height 14801
 INFO  Applied block at height 14802
@@ -200,14 +196,9 @@ New-Item -ItemType Directory -Force -Path $dataParent | Out-Null
 Set-Location $dataParent
 tar -xzf "$dest\${base}.tar.gz"
 
-# 7: start node (with fleet seeds — same list as Linux)
+# 7: start node (with the public seed — same as Linux)
 coincync-node --network testnet `
-  --addnode 66.135.23.193:28080 `
-  --addnode 140.82.57.168:28080 `
-  --addnode 207.148.111.76:28080 `
-  --addnode 207.148.6.50:28080 `
-  --addnode 95.179.165.225:28080 `
-  --addnode 192.248.151.16:28080
+  --addnode 2.29.34.197:28080
 ```
 
 ## FAQ

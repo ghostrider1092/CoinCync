@@ -5,11 +5,7 @@
 // `height`    – last known block height (shown in tooltip)
 // `failCount` – consecutive poll failures before we mark offline
 const GNODES = [
-  {label:'seed1',   id:'1a2b', lat:40.74, lng:-74.17, role:'Seed (US-East)',       city:'New Jersey, USA',     online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/seed1',   _rpc:'http://66.135.23.193:28081'},
-  {label:'seed2',   id:'3c4d', lat:52.37, lng:4.90,   role:'Seed (Europe)',        city:'Amsterdam, NL',       online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/seed2',   _rpc:'http://140.82.57.168:28081'},
-  {label:'seed3',   id:'5e6f', lat:35.68, lng:139.69, role:'Seed (Asia-Pacific)',  city:'Tokyo, Japan',        online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/seed3',   _rpc:'http://207.148.111.76:28081'},
-  {label:'explorer',id:'7a8b', lat:32.78, lng:-96.80, role:'Explorer + Relay',     city:'Dallas, USA',         online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/explorer',_rpc:'http://207.148.6.50:28081'},
-  {label:'api',     id:'9c0d', lat:50.11, lng:8.68,   role:'Public API + Relay',   city:'Frankfurt, Germany',  online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/api',     _rpc:'http://95.179.165.225:28081'},
+  {label:'hel1', id:'hel1', lat:50.48, lng:12.37, role:'Seed · public P2P', city:'Falkenstein, DE', online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/hel1', _rpc:'http://127.0.0.1:28081'},
 ];
 
 // How many consecutive failures before a node is considered offline

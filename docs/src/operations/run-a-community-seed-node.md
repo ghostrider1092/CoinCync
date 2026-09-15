@@ -1,10 +1,10 @@
 # Run a community-operated CoinCync testnet seed node
 
-The CoinCync testnet currently runs on 5 Vultr boxes operated by
-the project maintainer. That's enough for the chain to function,
-but it's a single point of trust — one operator running every
-node means one operator can theoretically censor, delay, or
-manipulate the network.
+The CoinCync testnet currently runs on a single public seed
+(Hetzner, Falkenstein DE) operated by the project maintainer.
+That's enough for the chain to bootstrap, but it's a single point
+of trust — and a single point of failure: one operator, one box,
+one country. If it goes down, new nodes can't find peers.
 
 **Community-operated seed nodes fix that.** Even one box run by
 a different person, on a different provider, in a different
@@ -63,12 +63,11 @@ The cheap European options (Hetzner, OVH, Contabo) are fine
 technically. Vultr/DO/Linode are pricier but have better global
 network paths.
 
-**Where to host** (geographic spread matters): pick a region the
-existing 5 seeds DON'T cover. Current coverage: NJ (US), SFO
-(US), Frankfurt (DE), Amsterdam (NL), Tokyo (JP), Sydney (AU),
-Dallas (US). Underserved continents: South America, Africa, India.
-Even a São Paulo or Mumbai node materially expands the network's
-geographic reach.
+**Where to host** (geographic spread matters): the only current
+seed is in Falkenstein, DE (EU-central), so *anywhere else* adds
+coverage — North America, South America, Africa, India, or
+Asia-Pacific all materially expand the network's geographic reach.
+A second EU box is still useful for redundancy.
 
 ---
 
@@ -100,9 +99,7 @@ ExecStart=/root/coincync/target/release/coincync-node \
     --network testnet \
     --p2p-bind 0.0.0.0:28080 \
     --rpc-bind 127.0.0.1:28081 \
-    --addnode 66.135.23.193:28080 \
-    --addnode 140.82.57.168:28080 \
-    --addnode 207.148.111.76:28080 \
+    --addnode 2.29.34.197:28080 \
     --log-level info
 Restart=on-failure
 RestartSec=10
