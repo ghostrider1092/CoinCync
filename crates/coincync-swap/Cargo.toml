@@ -33,7 +33,7 @@ path = "src/bin/cyncswap.rs"
 # coordinator transport) still return NotImplemented and will
 # pull in `bitcoin`, `curve25519-dalek`, `tokio` etc. as each
 # lands.
-secp256k1  = { version = "0.29", features = ["rand", "global-context"] }
+secp256k1  = { version = "0.31", features = ["rand", "global-context"] }
 sha2       = "0.10"
 # HMAC-SHA256 over the state-file canonical body for integrity. Without it,
 # an attacker with filesystem write to the state file can forge any swap
