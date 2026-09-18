@@ -28,8 +28,17 @@ compile_error!(
 // Bill of Rights X:  No transaction censorship. No address blocking.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Protocol version
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Protocol version.
+///
+/// Bumped 2 -> 3 for the 2026-09 testnet redeploy (anchor-binding reset): old
+/// v2 nodes on the dead pre-reset chain hardcode this seed as their bootstrap
+/// and keep dialing it. Rejecting v2 at the handshake (see
+/// MIN_SUPPORTED_PROTOCOL_VERSION) locks them out at the wire level so they
+/// cannot pollute peer_count or fool `is_synced` into stalling the miner —
+/// letting the new testnet run with P2P open to the public. This touches
+/// neither block validity, the address format, nor the genesis, so it is a
+/// network-compat gate only, not a consensus change.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Target block time in seconds (2 minutes — mountain curve).
 pub const TARGET_BLOCK_TIME: u64 = 120;
@@ -551,11 +560,15 @@ pub const CONGESTION_THRESHOLD: u64 = 80;
 // Protocol Version Support
 // =============================================================================
 
-/// Minimum supported protocol version
-pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
+/// Minimum supported protocol version.
+///
+/// Raised 1 -> 3 for the 2026-09 testnet reset so the handshake rejects the
+/// dead pre-reset network's v1/v2 nodes (see PROTOCOL_VERSION). A fresh
+/// network needs no backward compatibility with the retired chain.
+pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 3;
 
 /// Maximum supported protocol version
-pub const MAX_SUPPORTED_PROTOCOL_VERSION: u32 = 2;
+pub const MAX_SUPPORTED_PROTOCOL_VERSION: u32 = 3;
 
 /// Check if protocol version is supported
 pub fn is_protocol_version_supported(version: u32) -> bool {
