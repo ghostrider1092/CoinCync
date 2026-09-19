@@ -396,11 +396,18 @@ pub fn build_safe_lock_tx(network: &str, request: &SafeLockTxRequest) -> Result<
     Ok(bitcoin::consensus::serialize(&tx))
 }
 
+struct PreparedSpend {
+    tx: Transaction,
+    prevout: TxOut,
+    script: ScriptBuf,
+    spend_info: TaprootSpendInfo,
+}
+
 fn build_spend_internal(
     network: &str,
     base: &SafeSpendBase,
     refund: bool,
-) -> Result<(Transaction, TxOut, ScriptBuf, TaprootSpendInfo)> {
+) -> Result<PreparedSpend> {
     let network = parse_network(network)?;
     if base.fee_sats >= base.lock_value_sats {
         return Err(Error::Verification("spend fee leaves no output"));
@@ -447,22 +454,21 @@ fn build_spend_internal(
             script_pubkey: destination.script_pubkey(),
         }],
     };
-    Ok((
+    Ok(PreparedSpend {
         tx,
         prevout,
-        if refund { refund_script } else { success },
+        script: if refund { refund_script } else { success },
         spend_info,
-    ))
+    })
 }
 
-fn spend_sighash(network: &str, base: &SafeSpendBase, refund: bool) -> Result<[u8; 32]> {
-    let (tx, prevout, script, _) = build_spend_internal(network, base, refund)?;
-    let leaf = TapLeafHash::from_script(&script, LeafVersion::TapScript);
-    let mut cache = bitcoin::sighash::SighashCache::new(&tx);
+fn spend_sighash(prepared: &PreparedSpend) -> Result<[u8; 32]> {
+    let leaf = TapLeafHash::from_script(&prepared.script, LeafVersion::TapScript);
+    let mut cache = bitcoin::sighash::SighashCache::new(&prepared.tx);
     let sighash = cache
         .taproot_script_spend_signature_hash(
             0,
-            &bitcoin::sighash::Prevouts::All(&[prevout]),
+            &bitcoin::sighash::Prevouts::All(std::slice::from_ref(&prepared.prevout)),
             leaf,
             bitcoin::sighash::TapSighashType::Default,
         )
@@ -472,12 +478,12 @@ fn spend_sighash(network: &str, base: &SafeSpendBase, refund: bool) -> Result<[u
 
 /// Exact success-path sighash Bob's adaptor pre-signature must bind.
 pub fn safe_claim_sighash(network: &str, base: &SafeSpendBase) -> Result<[u8; 32]> {
-    spend_sighash(network, base, false)
+    spend_sighash(&build_spend_internal(network, base, false)?)
 }
 
 /// Exact refund-path sighash Alice's adaptor pre-signature must bind.
 pub fn safe_refund_sighash(network: &str, base: &SafeSpendBase) -> Result<[u8; 32]> {
-    spend_sighash(network, base, true)
+    spend_sighash(&build_spend_internal(network, base, true)?)
 }
 
 fn verify_signature(
@@ -501,8 +507,14 @@ fn build_signed_spend(
     alice_signature: &[u8; 64],
     bob_signature: &[u8; 64],
 ) -> Result<Vec<u8>> {
-    let (mut tx, _prevout, script, spend_info) = build_spend_internal(network, base, refund)?;
-    let sighash = spend_sighash(network, base, refund)?;
+    let prepared = build_spend_internal(network, base, refund)?;
+    let sighash = spend_sighash(&prepared)?;
+    let PreparedSpend {
+        mut tx,
+        script,
+        spend_info,
+        ..
+    } = prepared;
     let (alice_key, bob_key) = if refund {
         (
             &base.contract.alice_refund_pubkey,
