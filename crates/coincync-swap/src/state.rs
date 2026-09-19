@@ -16,12 +16,12 @@
 //!
 //! ```json
 //! {
-//!   "version": 1,
+//!   "version": 3,
 //!   "saved_at": 1730000000,
 //!   "swap": {
 //!     "id": "...",
 //!     "role": "Alice",
-//!     "state": "AliceLocked",
+//!     "state": "BobLocked",
 //!     "parameters": { ... }
 //!   }
 //! }
@@ -77,11 +77,11 @@ type HmacSha256 = Hmac<Sha256>;
 /// Length of the HMAC key stored in the sidecar (`<path>.hmac-key`).
 const HMAC_KEY_LEN: usize = 32;
 
-/// Current state-file version. v2 added the `hmac` field + sidecar
-/// key file. v1 files are explicitly rejected on load — operators
-/// migrate by re-creating the swap (state-file integrity is moot
-/// for an abandoned-and-restarted swap).
-pub const STATE_VERSION: u32 = 2;
+/// Current state-file version. v2 added HMAC integrity. v3 changes the
+/// on-chain ordering to Bitcoin-first, changes the meaning of `AliceLocked`,
+/// and adds `BtcRefunded`; loading v2 state under v3 semantics could authorize
+/// an out-of-order spend, so older files are rejected rather than migrated.
+pub const STATE_VERSION: u32 = 3;
 
 // ────────────────────────────────────────────────────────────────
 // File format
@@ -98,7 +98,7 @@ struct StateFileBody {
     swap: Swap,
 }
 
-/// Full on-disk representation of a swap's state (v2 schema). The
+/// Full on-disk representation of a swap's state (v3 schema). The
 /// `hmac` is hex-encoded HMAC-SHA256 over the canonical body bytes,
 /// keyed by the per-state-file random key in the sidecar at
 /// `<path>.hmac-key`. v1 files (no `hmac` field, no sidecar) are
@@ -133,7 +133,7 @@ pub enum StateError {
     /// The on-disk version is something this binary doesn't
     /// understand. Almost always means the file was written by a
     /// newer binary. Loud failure rather than silent best-effort.
-    #[error("unsupported state-file version: file is v{file_version}, this binary handles v2..={supported}")]
+    #[error("unsupported state-file version: file is v{file_version}, this binary requires v{supported}")]
     UnsupportedVersion { file_version: u32, supported: u32 },
 
     /// The HMAC sidecar file is missing — either because the state
@@ -257,14 +257,14 @@ impl SwapStore {
     /// Load the swap from disk. Returns `None` if no state file
     /// exists (fresh start).
     ///
-    /// v2 files: HMAC is verified against the sidecar key. Mismatch
+    /// v3 files: HMAC is verified against the sidecar key. Mismatch
     /// returns `IntegrityFailure`. Missing sidecar returns
     /// `HmacKeyMissing`.
     ///
-    /// v1 files: rejected as `UnsupportedVersion`. v1 files had no
-    /// integrity check; trusting them would defeat the v2 hardening.
-    /// Operators with a v1 file in flight at the upgrade moment
-    /// must restart the swap.
+    /// v1/v2 files: rejected as `UnsupportedVersion`. v1 had no integrity
+    /// check; v2 used the unsafe CYNC-first state semantics. Operators with
+    /// either version in flight must recover any on-chain funds using the old
+    /// binary and start a fresh v3 swap.
     pub fn load(&self) -> Result<Option<Swap>> {
         if !self.path.exists() {
             return Ok(None);
@@ -334,7 +334,7 @@ impl SwapStore {
 }
 
 // ────────────────────────────────────────────────────────────────
-// HMAC helpers (v2 state-file integrity)
+// HMAC helpers (introduced in v2, retained by v3)
 // ────────────────────────────────────────────────────────────────
 
 /// Sidecar key path: `<state_file>.hmac-key`.
@@ -488,10 +488,10 @@ mod tests {
         assert_eq!(store.load().unwrap().unwrap().state, swap.state);
 
         // Apply transition + re-save
-        swap.apply(Transition::AliceLocksCync).unwrap();
+        swap.apply(Transition::ObserveBobLocked).unwrap();
         store.save(&swap).unwrap();
         let loaded = store.load().unwrap().unwrap();
-        assert_eq!(loaded.state, swap.state); // AliceLocked
+        assert_eq!(loaded.state, swap.state); // BobLocked
     }
 
     #[test]
@@ -613,16 +613,8 @@ mod tests {
         let path = dir.path().join("swap.json");
         let store = SwapStore::new(&path);
 
-        // Bob's machine (we use Bob because his happy path is the
-        // simplest to drive synthetically: state forced to
-        // AliceLocked, then BobLocksBtc, ObserveSecretRevealed,
-        // BobClaimsCync).
+        // Bob's Bitcoin-first happy path.
         let mut swap = Swap::negotiate("life-1".into(), Role::Bob, safe_params()).unwrap();
-        store.save(&swap).unwrap();
-
-        // Force-transition to AliceLocked (in real flow Bob's
-        // chain watcher delivers this; tests force).
-        swap.state = crate::protocol::State::AliceLocked;
         store.save(&swap).unwrap();
 
         // Bob locks BTC
@@ -634,8 +626,10 @@ mod tests {
         assert_eq!(reloaded.state, crate::protocol::State::BobLocked);
         let mut swap = reloaded;
 
-        // Continue
-        swap.apply(Transition::ObserveSecretRevealed).unwrap();
+        // Bob observes Alice's gated CYNC lock, then her Bitcoin claim.
+        swap.apply(Transition::ObserveAliceLocked).unwrap();
+        store.save(&swap).unwrap();
+        swap.state = crate::protocol::State::SecretRevealed;
         store.save(&swap).unwrap();
         swap.apply(Transition::BobClaimsCync).unwrap();
         store.save(&swap).unwrap();
@@ -662,7 +656,7 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // v2 HMAC forgery-defense tests (CYNC-AUDIT-2026-05-17-state-file-hmac)
+    // HMAC forgery-defense and version-migration tests
     // ─────────────────────────────────────────────────────────────
 
     #[test]
@@ -704,8 +698,44 @@ mod tests {
     }
 
     #[test]
-    fn v2_file_missing_sidecar_rejected() {
-        // Save a real v2 file (creates the sidecar), then delete the
+    fn v2_cync_first_state_file_rejected() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("swap.json");
+        let old_state = serde_json::json!({
+            "version": 2,
+            "saved_at": 1700000000u64,
+            "swap": {
+                "id": "in-flight-v2",
+                "role": "Alice",
+                "state": "AliceLocked",
+                "parameters": {
+                    "cync_amount": 1u64,
+                    "btc_amount_sats": 1u64,
+                    "cync_timeout_blocks": 720u32,
+                    "btc_timeout_blocks": 100u32,
+                    "alice_cync_address": "a",
+                    "bob_btc_address": "b",
+                    "cync_network": "regtest",
+                    "btc_network": "regtest"
+                }
+            },
+            "hmac": "00"
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&old_state).unwrap()).unwrap();
+        let store = SwapStore::new(&path);
+        let err = store.load().unwrap_err();
+        assert!(matches!(
+            err,
+            StateError::UnsupportedVersion {
+                file_version: 2,
+                supported: STATE_VERSION,
+            }
+        ));
+    }
+
+    #[test]
+    fn v3_file_missing_sidecar_rejected() {
+        // Save a real v3 file (creates the sidecar), then delete the
         // sidecar before loading. Must return HmacKeyMissing.
         let dir = tempdir().unwrap();
         let path = dir.path().join("swap.json");
@@ -718,8 +748,8 @@ mod tests {
     }
 
     #[test]
-    fn v2_file_tampered_hmac_rejected() {
-        // Save a real v2 file, then tamper with the `hmac` field to a
+    fn v3_file_tampered_hmac_rejected() {
+        // Save a real v3 file, then tamper with the `hmac` field to a
         // wrong value of the same length. Must return IntegrityFailure.
         let dir = tempdir().unwrap();
         let path = dir.path().join("swap.json");
@@ -735,8 +765,8 @@ mod tests {
     }
 
     #[test]
-    fn v2_file_tampered_body_rejected() {
-        // Save a real v2 file, then change a swap-state field while
+    fn v3_file_tampered_body_rejected() {
+        // Save a real v3 file, then change a swap-state field while
         // leaving the HMAC alone. Recomputed HMAC won't match — must
         // return IntegrityFailure. This is the canonical attack the
         // HMAC defends against: silent forge of swap state on disk.

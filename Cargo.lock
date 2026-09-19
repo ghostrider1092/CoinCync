@@ -976,6 +976,7 @@ dependencies = [
  "clap",
  "coincync",
  "coincync-rolling-finality",
+ "coincync-swap",
  "colored",
  "config",
  "console",

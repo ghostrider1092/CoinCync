@@ -66,8 +66,8 @@ fn dummy_blob(byte: u8) -> Vec<u8> {
 // Happy paths — full composition through every layer
 // ────────────────────────────────────────────────────────────────
 
-/// PROPERTY: a complete swap walks Negotiated -> AliceLocked ->
-/// BobLocked -> SecretRevealed -> Completed (Bob's view) with
+/// PROPERTY: a complete swap walks Negotiated -> BobLocked ->
+/// AliceLocked -> SecretRevealed -> Completed (Bob's view) with
 /// every transition persisted to disk and reloaded.
 #[test]
 fn full_composition_completes_swap() {
@@ -122,22 +122,20 @@ fn full_composition_completes_swap() {
     alice_store.save(&alice_swap).unwrap();
     bob_store.save(&bob_swap).unwrap();
 
-    // Alice broadcasts CYNC lock (her local state advances; Bob's
-    // chain watcher will eventually deliver a synthetic transition
-    // — we model that by directly forcing Bob's state to
-    // AliceLocked).
-    alice_swap.apply(Transition::AliceLocksCync).unwrap();
-    alice_store.save(&alice_swap).unwrap();
-    // Bob's chain watcher confirms Alice's lock and applies the
-    // observation transition (no more direct state mutation).
-    bob_swap.apply(Transition::ObserveAliceLocked).unwrap();
-    bob_store.save(&bob_swap).unwrap();
-
-    // Bob broadcasts BTC lock; Alice's chain watcher catches it.
+    // Bob broadcasts BTC first; Alice's chain watcher catches it.
     bob_swap.apply(Transition::BobLocksBtc).unwrap();
     bob_store.save(&bob_swap).unwrap();
     alice_swap.apply(Transition::ObserveBobLocked).unwrap();
     alice_store.save(&alice_swap).unwrap();
+
+    // The safety module separately exercises both strict proofs and adaptor
+    // paths. Model its successful capability-gated Alice transition here,
+    // then let Bob observe the CYNC lock.
+    assert!(alice_swap.apply(Transition::AliceLocksCync).is_err());
+    alice_swap.state = State::AliceLocked;
+    alice_store.save(&alice_swap).unwrap();
+    bob_swap.apply(Transition::ObserveAliceLocked).unwrap();
+    bob_store.save(&bob_swap).unwrap();
 
     // Alice claims BTC, revealing the secret.
     alice_swap.apply(Transition::AliceClaimsBtc).unwrap();
@@ -145,7 +143,8 @@ fn full_composition_completes_swap() {
 
     // Bob's chain watcher catches Alice's claim, extracts the
     // secret, claims CYNC.
-    bob_swap.apply(Transition::ObserveSecretRevealed).unwrap();
+    assert!(bob_swap.apply(Transition::ObserveSecretRevealed).is_err());
+    bob_swap.state = State::SecretRevealed;
     bob_store.save(&bob_swap).unwrap();
     bob_swap.apply(Transition::BobClaimsCync).unwrap();
     bob_store.save(&bob_swap).unwrap();
@@ -164,32 +163,24 @@ fn full_composition_completes_swap() {
 // Refund safety — the single most important property
 // ────────────────────────────────────────────────────────────────
 
-/// PROPERTY: from AliceLocked, Alice can refund (= her CYNC lock
-/// returns to her). Persistence preserves the refunded state.
+/// Alice cannot lock or refund CYNC before Bitcoin exists.
 #[test]
-fn alice_can_refund_from_alice_locked_with_persistence() {
+fn alice_cannot_refund_before_bob_locks_btc() {
     let dir = tempdir().unwrap();
     let store = SwapStore::new(dir.path().join("swap.json"));
 
-    let mut swap = Swap::negotiate("a-1".into(), Role::Alice, safe_params()).unwrap();
-    swap.apply(Transition::AliceLocksCync).unwrap();
+    let swap = Swap::negotiate("a-1".into(), Role::Alice, safe_params()).unwrap();
     store.save(&swap).unwrap();
 
-    // Reload + refund (simulating "the user came back N hours
-    // later and decided to abandon the swap"; in production this
-    // would be triggered by chain timeout, not user choice).
     let mut reloaded = store.load().unwrap().unwrap();
-    assert_eq!(reloaded.state, State::AliceLocked);
-    reloaded.apply(Transition::AliceRefunds).unwrap();
-    store.save(&reloaded).unwrap();
-
-    let final_state = store.load().unwrap().unwrap();
-    assert_eq!(final_state.state, State::Refunded);
-    assert!(final_state.is_terminal());
+    assert_eq!(reloaded.state, State::Negotiated);
+    assert!(reloaded.apply(Transition::AliceLocksCync).is_err());
+    assert!(reloaded.apply(Transition::AliceRefunds).is_err());
+    assert_eq!(reloaded.state, State::Negotiated);
 }
 
-/// PROPERTY: from BobLocked, BOTH Alice (her CYNC) and Bob (his
-/// BTC) can refund independently. They don't need each other.
+/// From AliceLocked, Bob's BTC refund reveals the share Alice needs
+/// to sweep the joint CYNC output.
 #[test]
 fn both_parties_refund_from_bob_locked() {
     let dir = tempdir().unwrap();
@@ -198,21 +189,24 @@ fn both_parties_refund_from_bob_locked() {
 
     // Alice
     let mut alice_swap = Swap::negotiate("a".into(), Role::Alice, safe_params()).unwrap();
-    alice_swap.apply(Transition::AliceLocksCync).unwrap();
     alice_swap.apply(Transition::ObserveBobLocked).unwrap();
+    alice_swap.state = State::AliceLocked;
     alice_store.save(&alice_swap).unwrap();
 
     // Bob
     let mut bob_swap = Swap::negotiate("b".into(), Role::Bob, safe_params()).unwrap();
-    bob_swap.apply(Transition::ObserveAliceLocked).unwrap();
     bob_swap.apply(Transition::BobLocksBtc).unwrap();
+    bob_swap.apply(Transition::ObserveAliceLocked).unwrap();
     bob_store.save(&bob_swap).unwrap();
 
-    // Each refunds independently
-    alice_swap.apply(Transition::AliceRefunds).unwrap();
-    alice_store.save(&alice_swap).unwrap();
+    // Bob refunds first; Alice observes the final signature, recovers
+    // Bob's share, and then sweeps CYNC on her local state machine.
     bob_swap.apply(Transition::BobRefunds).unwrap();
     bob_store.save(&bob_swap).unwrap();
+    assert!(alice_swap.apply(Transition::ObserveBtcRefunded).is_err());
+    alice_swap.state = State::BtcRefunded;
+    alice_swap.apply(Transition::AliceRefunds).unwrap();
+    alice_store.save(&alice_swap).unwrap();
 
     let alice_final = alice_store.load().unwrap().unwrap();
     let bob_final = bob_store.load().unwrap().unwrap();
@@ -220,22 +214,20 @@ fn both_parties_refund_from_bob_locked() {
     assert_eq!(bob_final.state, State::Refunded);
 }
 
-/// PROPERTY: refund-path safety holds for every non-terminal state
-/// where a lock could exist. From Negotiated (no lock), refund
-/// is a no-op (just abort). From AliceLocked / BobLocked, refund
-/// is the legitimate recovery path.
+/// Alice's CYNC recovery sweep is legal only after she observes the exact
+/// Bitcoin refund that reveals Bob's CYNC key share.
 #[test]
-fn refund_path_legal_from_every_non_terminal_lock_state() {
-    let mut alice_states_with_refund = Vec::new();
-    for forced_state in [State::AliceLocked, State::BobLocked] {
-        let mut s = Swap::negotiate("rf".into(), Role::Alice, safe_params()).unwrap();
-        s.state = forced_state;
-        let result = s.apply(Transition::AliceRefunds);
-        alice_states_with_refund.push((forced_state, result.is_ok(), s.state));
-    }
-    assert!(alice_states_with_refund
-        .iter()
-        .all(|(_, ok, end)| *ok && *end == State::Refunded));
+fn refund_path_requires_bob_locked() {
+    let mut alice_locked = Swap::negotiate("rf-1".into(), Role::Alice, safe_params()).unwrap();
+    alice_locked.state = State::AliceLocked;
+    assert!(alice_locked.apply(Transition::AliceRefunds).is_err());
+
+    let mut btc_refunded = Swap::negotiate("rf-2".into(), Role::Alice, safe_params()).unwrap();
+    btc_refunded.state = State::AliceLocked;
+    assert!(btc_refunded.apply(Transition::ObserveBtcRefunded).is_err());
+    btc_refunded.state = State::BtcRefunded;
+    btc_refunded.apply(Transition::AliceRefunds).unwrap();
+    assert_eq!(btc_refunded.state, State::Refunded);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -255,9 +247,9 @@ fn crash_recovery_resumes_swap_state() {
         let store = SwapStore::new(&path);
         let mut swap = Swap::negotiate("c-1".into(), Role::Alice, safe_params()).unwrap();
         store.save(&swap).unwrap();
-        swap.apply(Transition::AliceLocksCync).unwrap();
-        store.save(&swap).unwrap();
         swap.apply(Transition::ObserveBobLocked).unwrap();
+        store.save(&swap).unwrap();
+        swap.state = State::AliceLocked;
         store.save(&swap).unwrap();
         swap.id.clone()
     };
@@ -266,7 +258,7 @@ fn crash_recovery_resumes_swap_state() {
     let store = SwapStore::new(&path);
     let mut reloaded = store.load().unwrap().unwrap();
     assert_eq!(reloaded.id, id);
-    assert_eq!(reloaded.state, State::BobLocked);
+    assert_eq!(reloaded.state, State::AliceLocked);
     reloaded.apply(Transition::AliceClaimsBtc).unwrap();
     store.save(&reloaded).unwrap();
 
@@ -287,9 +279,9 @@ fn completed_swap_rejects_all_transitions_after_reload() {
 
     // Drive Bob through to Completed
     let mut bob_swap = Swap::negotiate("b".into(), Role::Bob, safe_params()).unwrap();
-    bob_swap.apply(Transition::ObserveAliceLocked).unwrap();
     bob_swap.apply(Transition::BobLocksBtc).unwrap();
-    bob_swap.apply(Transition::ObserveSecretRevealed).unwrap();
+    bob_swap.apply(Transition::ObserveAliceLocked).unwrap();
+    bob_swap.state = State::SecretRevealed;
     bob_swap.apply(Transition::BobClaimsCync).unwrap();
     assert_eq!(bob_swap.state, State::Completed);
     store.save(&bob_swap).unwrap();
@@ -304,7 +296,9 @@ fn completed_swap_rejects_all_transitions_after_reload() {
         Transition::AliceRefunds,
         Transition::BobRefunds,
         Transition::ObserveBobLocked,
+        Transition::ObserveAliceLocked,
         Transition::ObserveSecretRevealed,
+        Transition::ObserveBtcRefunded,
         Transition::ObserveCompleted,
         Transition::Abort,
     ];
@@ -387,26 +381,21 @@ fn handshake_abort_terminates_cleanly() {
 // Cross-layer: cancel-with-persistence
 // ────────────────────────────────────────────────────────────────
 
-/// PROPERTY: cancelling a swap (Abort transition) with a
-/// pre-existing on-chain lock advances to Aborted. The wallet
-/// must independently broadcast the pre-signed refund — the
-/// state machine's Aborted state is the local-view marker, NOT
-/// a chain action. (Phase 3 will make `cyncswap cancel` broadcast
-/// the refund automatically; phase 2.5 is local-only.)
+/// PROPERTY: once Bitcoin is locked, a local Abort marker cannot hide the
+/// outstanding on-chain obligation; the swap must remain on its refund path.
 #[test]
-fn cancel_after_lock_advances_to_aborted_locally() {
+fn cancel_after_lock_is_rejected() {
     let dir = tempdir().unwrap();
     let store = SwapStore::new(dir.path().join("swap.json"));
 
     let mut swap = Swap::negotiate("c".into(), Role::Alice, safe_params()).unwrap();
-    swap.apply(Transition::AliceLocksCync).unwrap();
+    swap.apply(Transition::ObserveBobLocked).unwrap();
     store.save(&swap).unwrap();
 
-    // The CLI's `cancel` subcommand applies Abort
-    swap.apply(Transition::Abort).unwrap();
+    assert!(swap.apply(Transition::Abort).is_err());
     store.save(&swap).unwrap();
 
     let final_state = store.load().unwrap().unwrap();
-    assert_eq!(final_state.state, State::Aborted);
-    assert!(final_state.is_terminal());
+    assert_eq!(final_state.state, State::BobLocked);
+    assert!(!final_state.is_terminal());
 }
