@@ -45,7 +45,7 @@
 //! 5. **Completed reachability requires the canonical path.** If
 //!    `state == Completed` after the sequence, the sequence MUST have
 //!    included the canonical claim transitions in legal order
-//!    (Alice's lock → Bob's lock → secret reveal → Bob's claim).
+//!    (Bob's lock → gated Alice lock → secret reveal → Bob's claim).
 
 #![cfg(not(miri))]
 
@@ -68,6 +68,7 @@ fn arb_transition() -> impl Strategy<Value = Transition> {
         Just(Transition::ObserveBobLocked),
         Just(Transition::ObserveAliceLocked),
         Just(Transition::ObserveSecretRevealed),
+        Just(Transition::ObserveBtcRefunded),
         Just(Transition::ObserveCompleted),
         Just(Transition::Abort),
     ]
@@ -268,15 +269,13 @@ proptest! {
         }
     }
 
-    /// **Abort always legal from any non-terminal state.**
+    /// **Abort is legal only before Bitcoin is locked.**
     ///
-    /// Documented invariant from `apply`: "Abort is always legal from
-    /// any non-terminal state." This property drives random sequences
-    /// of legal transitions to many states (NOT the random adversarial
-    /// sequence; we use a filter to only feed legal moves), then
-    /// asserts Abort succeeds from any state reachable that way.
+    /// A local abort marker after an on-chain lock would hide the refund
+    /// obligation. Negotiated swaps may abort; every later non-terminal
+    /// state must reject it without changing state.
     #[test]
-    fn abort_always_legal_from_non_terminal(
+    fn abort_only_legal_before_bitcoin_lock(
         role in arb_role(),
         sequence in vec(arb_transition(), 0..30),
     ) {
@@ -287,13 +286,14 @@ proptest! {
             let _ = swap.apply(t);
         }
 
-        // Now try Abort.
-        if !swap.state.is_terminal() {
-            let result = swap.apply(Transition::Abort);
-            prop_assert!(result.is_ok(),
-                "Abort rejected from non-terminal state {:?}", swap.state);
-            prop_assert_eq!(swap.state, State::Aborted,
-                "Abort succeeded but state didn't become Aborted: {:?}", swap.state);
+        let before = swap.state;
+        if before == State::Negotiated {
+            prop_assert!(swap.apply(Transition::Abort).is_ok());
+            prop_assert_eq!(swap.state, State::Aborted);
+        } else if !before.is_terminal() {
+            prop_assert!(swap.apply(Transition::Abort).is_err(),
+                "Abort succeeded after an on-chain state {:?}", before);
+            prop_assert_eq!(swap.state, before);
         }
     }
 }

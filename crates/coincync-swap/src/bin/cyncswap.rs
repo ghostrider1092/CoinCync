@@ -96,15 +96,18 @@ enum AdaptorSecretEncoding {
 #[allow(clippy::enum_variant_names)] // CLI transition variants intentionally share the Observe* prefix
 enum TransitionKind {
     /// Alice OBSERVES Bob's BTC lock arriving on-chain.
-    /// `AliceLocked` → `BobLocked`. Alice's role.
+    /// `Negotiated` → `BobLocked`. Alice's role.
     ObserveBobLocked,
     /// Bob OBSERVES Alice's CYNC lock arriving on-chain.
-    /// `Negotiated` → `AliceLocked`. Bob's role.
+    /// `BobLocked` → `AliceLocked`. Bob's role.
     ObserveAliceLocked,
     /// Bob OBSERVES Alice's BTC claim arriving on-chain (which
-    /// reveals the adaptor secret). `BobLocked` → `SecretRevealed`.
+    /// reveals the adaptor secret). `AliceLocked` → `SecretRevealed`.
     /// Bob's role.
     ObserveSecretRevealed,
+    /// Alice OBSERVES Bob's BTC refund, verifies the final signature, and
+    /// recovers Bob's CYNC share. `AliceLocked` -> `BtcRefunded`.
+    ObserveBtcRefunded,
     /// Bob OBSERVES Alice's CYNC claim arriving on-chain — used
     /// only in recovery scenarios where Alice somehow finalizes the
     /// CYNC side independently. `SecretRevealed` → `Completed`.
@@ -120,6 +123,7 @@ impl TransitionKind {
             Self::ObserveBobLocked => Transition::ObserveBobLocked,
             Self::ObserveAliceLocked => Transition::ObserveAliceLocked,
             Self::ObserveSecretRevealed => Transition::ObserveSecretRevealed,
+            Self::ObserveBtcRefunded => Transition::ObserveBtcRefunded,
             Self::ObserveCompleted => Transition::ObserveCompleted,
         }
     }
@@ -268,15 +272,14 @@ enum Command {
 
     /// Drive Alice's CYNC lock — the
     /// state-machine-aware bundled command. Pre-checks the swap is
-    /// in `Negotiated` state with `role=Alice`, broadcasts the
+    /// in `BobLocked` state with `role=Alice`, re-verifies the
+    /// Bitcoin safety evidence, broadcasts the
     /// supplied signed CYNC lock tx via `coincync-node`, applies
     /// the `AliceLocksCync` transition, saves the state file.
     /// Prints the broadcast txid + new state.
     ///
-    /// This is Alice's first on-chain move. Until this command
-    /// returns successfully, no swap-related funds have moved on
-    /// either chain; after it returns, Alice's CYNC sits behind
-    /// the adaptor pubkey waiting for Bob's BTC lock.
+    /// Bob's verified BTC lock is already confirmed before this command can
+    /// run. After it returns, both assets are locked and Alice may claim BTC.
     ///
     /// For step-by-step debugging or non-bundled flows, prefer the
     /// granular `cync-broadcast` subcommand combined with whatever
@@ -286,6 +289,10 @@ enum Command {
         /// State file. Defaults to `~/.coincync/swap.json`.
         #[arg(long)]
         state_file: Option<PathBuf>,
+        /// JSON containing the exact Bitcoin lock, both strict share proofs,
+        /// and the claim/refund adaptor pre-signatures.
+        #[arg(long)]
+        safety_evidence: PathBuf,
         /// CoinCync network. Same set as `cync-broadcast`.
         #[arg(long)]
         network: String,
@@ -303,22 +310,23 @@ enum Command {
 
     /// Drive Bob's BTC lock — the
     /// state-machine-aware bundled command. Pre-checks the swap
-    /// is in `AliceLocked` state with `role=Bob`, broadcasts the
+    /// is in `Negotiated` state with `role=Bob`, verifies the same safety
+    /// evidence Alice must later accept, broadcasts the
     /// supplied signed lock tx via `bitcoind`, applies the
     /// `BobLocksBtc` transition, saves the state file. Prints
     /// the broadcast txid + new state.
     ///
-    /// Inputs: same RPC flag set as `btc-broadcast` plus the
-    /// signed tx hex (typically the output of `construct-btc-lock`
-    /// piped through your wallet's signer).
-    ///
-    /// For step-by-step debugging or non-bundled flows, prefer
-    /// the granular `construct-btc-lock` + `btc-broadcast`
-    /// subcommands.
+    /// The signed transaction must be the exact lock transaction carried by
+    /// the evidence. The older granular construction command is diagnostic
+    /// and cannot produce a lock accepted by this safety gate.
     LockBtc {
         /// State file. Defaults to `~/.coincync/swap.json`.
         #[arg(long)]
         state_file: Option<PathBuf>,
+        /// JSON containing the exact safe Bitcoin lock and both share-reveal
+        /// paths. The lock transaction in this file must equal signed-tx-hex.
+        #[arg(long)]
+        safety_evidence: PathBuf,
         /// Bitcoin network. Same set as `btc-broadcast`.
         #[arg(long)]
         network: String,
@@ -331,16 +339,16 @@ enum Command {
         /// Optional RPC pass. Coupled with `--rpc-user`.
         #[arg(long)]
         rpc_pass: Option<String>,
-        /// The signed lock tx as hex. From the wallet after
-        /// `construct-btc-lock` + signing.
+        /// The signed safe lock tx as hex. It must be byte-identical to the
+        /// transaction carried by safety-evidence.
         #[arg(long)]
         signed_tx_hex: String,
     },
 
-    /// Drive Alice's BTC claim — the
-    /// state-machine-aware bundled command. Pre-checks the swap is
-    /// in `BobLocked` state with `role=Alice`, broadcasts the
-    /// supplied signed claim tx via `bitcoind`, applies the
+    /// Drive Alice's BTC claim — the state-machine-aware bundled command.
+    /// Pre-checks `AliceLocked`, verifies the exact two-signature
+    /// success-path spend and its share reveal against the safety evidence,
+    /// broadcasts it via `bitcoind`, applies the
     /// `AliceClaimsBtc` transition, saves the state file. Prints
     /// the broadcast txid + new state.
     ///
@@ -348,12 +356,16 @@ enum Command {
     /// public mempool: Alice's claim signature, once on-chain,
     /// lets Bob compute `recover-secret-from-btc-sig` and then
     /// `claim-cync`. For step-by-step debugging or non-bundled
-    /// flows, prefer the granular `construct-btc-claim` +
-    /// `btc-broadcast` subcommands.
+    /// flows, the granular legacy construction commands remain diagnostic;
+    /// they do not satisfy this bundled command's safety gate.
     ClaimBtc {
         /// State file. Defaults to `~/.coincync/swap.json`.
         #[arg(long)]
         state_file: Option<PathBuf>,
+        /// The same evidence accepted before Alice locked CYNC. The signed
+        /// claim must exactly spend its success leaf and reveal Alice's share.
+        #[arg(long)]
+        safety_evidence: PathBuf,
         /// Bitcoin network. Same set as `btc-broadcast`.
         #[arg(long)]
         network: String,
@@ -366,31 +378,7 @@ enum Command {
         /// Optional RPC pass. Coupled with `--rpc-user`.
         #[arg(long)]
         rpc_pass: Option<String>,
-        /// Lock transaction's txid, 64-char lowercase hex.
-        #[arg(long)]
-        lock_txid: String,
-        /// Lock UTXO's output index.
-        #[arg(long, default_value_t = 0)]
-        lock_vout: u32,
-        /// 32-byte x-only Taproot internal key committed by the lock.
-        #[arg(long)]
-        lock_internal_key: String,
-        /// Alice's negotiated BTC claim destination.
-        #[arg(long)]
-        dest_address: String,
-        /// Claim fee in satoshis.
-        #[arg(long, default_value_t = 1000)]
-        fee_sats: u64,
-        /// Bob's refund-branch x-only pubkey, when the lock has a
-        /// script-path refund branch.
-        #[arg(long)]
-        refund_bob_pubkey: Option<String>,
-        /// Refund CSV delay. Required iff `--refund-bob-pubkey` is set.
-        #[arg(long)]
-        refund_csv_blocks: Option<u16>,
-        /// The signed claim tx as hex. From the wallet after
-        /// `construct-btc-claim` + `decrypt-btc-adaptor` (which
-        /// produces the BIP-340 signature) + witness assembly.
+        /// The signed two-signature success-path transaction as hex.
         #[arg(long)]
         signed_tx_hex: String,
     },
@@ -407,17 +395,19 @@ enum Command {
     /// have passed since the lock confirmation will be rejected by
     /// the chain (non-final tx); the orchestration layer does NOT
     /// double-check this — bitcoind is the authority. The CIP-001
-    /// timeout-safety invariant guarantees CYNC's timeout outlasts
-    /// BTC's by a 20% margin, so Bob's refund opens BEFORE Alice's
-    /// refund would expire her ability to retrieve CYNC.
+    /// refund signature itself reveals Bob's CYNC share so Alice can recover
+    /// a joint output if one was created.
     ///
-    /// For step-by-step debugging or non-bundled flows, prefer the
-    /// granular `construct-btc-refund` + `btc-broadcast`
-    /// subcommands.
+    /// The older granular refund constructor is diagnostic and cannot produce
+    /// a refund accepted by this safety gate.
     RefundBtc {
         /// State file. Defaults to `~/.coincync/swap.json`.
         #[arg(long)]
         state_file: Option<PathBuf>,
+        /// The same evidence accepted before Alice locked CYNC. The signed
+        /// refund must exactly spend its CSV leaf and reveal Bob's share.
+        #[arg(long)]
+        safety_evidence: PathBuf,
         /// Bitcoin network. Same set as `btc-broadcast`.
         #[arg(long)]
         network: String,
@@ -430,27 +420,20 @@ enum Command {
         /// Optional RPC pass. Coupled with `--rpc-user`.
         #[arg(long)]
         rpc_pass: Option<String>,
-        /// The signed refund tx as hex. From the wallet after
-        /// `construct-btc-refund` + signing under Bob's refund key.
+        /// The signed two-signature CSV refund transaction as hex.
         #[arg(long)]
         signed_tx_hex: String,
     },
 
-    /// Drive Alice's CYNC refund —
-    /// the state-machine-aware bundled command. Pre-checks the
-    /// swap is in `AliceLocked` OR `BobLocked` state with
-    /// `role=Alice` (refunds are legal from BOTH non-terminal lock
-    /// states for Alice — see CIP-001 §"Refund Paths"), broadcasts
-    /// the supplied signed CYNC refund tx via `coincync-node`,
+    /// Drive Alice's CYNC recovery sweep after Bob's Bitcoin refund.
+    /// Pre-checks the swap is in `BtcRefunded` with `role=Alice`, then
+    /// broadcasts the supplied signed CYNC sweep via `coincync-node`,
     /// applies the `AliceRefunds` transition, saves the state file.
     /// Prints the broadcast txid + new state (terminal: `Refunded`).
     ///
-    /// **Timeout note**: Alice's refund tx commits to a CSV-delayed
-    /// output (analogous to BTC's). Broadcasting before
-    /// `cync_timeout_blocks` have passed since the CYNC lock
-    /// confirmation will be rejected by `coincync-node` (non-final
-    /// tx). The orchestration layer does NOT double-check this —
-    /// the node is the authority.
+    /// Bob's Bitcoin refund must reveal the missing CYNC spend share
+    /// before the wallet constructs this transaction. CYNC has no
+    /// script or CSV branch that grants Alice a separate timeout key.
     ///
     /// For step-by-step debugging or non-bundled flows, prefer the
     /// granular `cync-broadcast` subcommand.
@@ -584,6 +567,14 @@ enum Command {
         /// Which observation transition to apply.
         #[arg(long, value_enum)]
         kind: TransitionKind,
+        /// Required for share-reveal observations. Contains the exact lock,
+        /// strict proofs, and adaptor pre-signatures.
+        #[arg(long)]
+        safety_evidence: Option<PathBuf>,
+        /// Required for ObserveSecretRevealed and ObserveBtcRefunded: the
+        /// 64-byte final Bitcoin signature taken from the matching witness.
+        #[arg(long)]
+        final_signature_hex: Option<String>,
     },
 
     /// Derive the Curve25519 public
@@ -1508,12 +1499,14 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Cancel { state_file } => cancel_cmd(resolve_state_path(state_file)?),
         Command::LockCync {
             state_file,
+            safety_evidence,
             network,
             rpc_url,
             api_key,
             signed_tx_hex,
         } => lock_cync_orchestration_cmd(
             resolve_state_path(state_file)?,
+            safety_evidence,
             network,
             rpc_url,
             api_key,
@@ -1521,6 +1514,7 @@ fn run(cli: Cli) -> Result<(), String> {
         ),
         Command::LockBtc {
             state_file,
+            safety_evidence,
             network,
             rpc_url,
             rpc_user,
@@ -1528,6 +1522,7 @@ fn run(cli: Cli) -> Result<(), String> {
             signed_tx_hex,
         } => lock_btc_orchestration_cmd(
             resolve_state_path(state_file)?,
+            safety_evidence,
             network,
             rpc_url,
             rpc_user,
@@ -1536,31 +1531,19 @@ fn run(cli: Cli) -> Result<(), String> {
         ),
         Command::ClaimBtc {
             state_file,
+            safety_evidence,
             network,
             rpc_url,
             rpc_user,
             rpc_pass,
-            lock_txid,
-            lock_vout,
-            lock_internal_key,
-            dest_address,
-            fee_sats,
-            refund_bob_pubkey,
-            refund_csv_blocks,
             signed_tx_hex,
         } => claim_btc_orchestration_cmd(
             resolve_state_path(state_file)?,
+            safety_evidence,
             network,
             rpc_url,
             rpc_user,
             rpc_pass,
-            lock_txid,
-            lock_vout,
-            lock_internal_key,
-            dest_address,
-            fee_sats,
-            refund_bob_pubkey,
-            refund_csv_blocks,
             signed_tx_hex,
         ),
         Command::ClaimCync {
@@ -1578,6 +1561,7 @@ fn run(cli: Cli) -> Result<(), String> {
         ),
         Command::RefundBtc {
             state_file,
+            safety_evidence,
             network,
             rpc_url,
             rpc_user,
@@ -1585,6 +1569,7 @@ fn run(cli: Cli) -> Result<(), String> {
             signed_tx_hex,
         } => refund_btc_orchestration_cmd(
             resolve_state_path(state_file)?,
+            safety_evidence,
             network,
             rpc_url,
             rpc_user,
@@ -1628,9 +1613,17 @@ fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Command::Selftest => selftest_cmd(),
-        Command::Transition { state_file, kind } => {
-            transition_cmd(resolve_state_path(state_file)?, kind)
-        }
+        Command::Transition {
+            state_file,
+            kind,
+            safety_evidence,
+            final_signature_hex,
+        } => transition_cmd(
+            resolve_state_path(state_file)?,
+            kind,
+            safety_evidence,
+            final_signature_hex,
+        ),
         Command::NoiseKeygen {
             out,
             i_understand_this_is_a_secret,
@@ -2287,14 +2280,6 @@ fn cancel_cmd(state_path: PathBuf) -> Result<(), String> {
     println!("Swap cancelled.");
     println!("  prior state: {}", state_string(prior_state));
     println!("  new state:   {}", state_string(swap.state));
-    if matches!(prior_state, State::AliceLocked | State::BobLocked) {
-        println!();
-        println!("Note: an on-chain lock was active at cancel time. The local state");
-        println!("is now Aborted, but your locked funds are NOT released until the");
-        println!("on-chain timeout fires. Once it does, broadcast your pre-signed");
-        println!("refund tx via `cyncswap refund-btc` (Bob) or `cyncswap refund-cync`");
-        println!("(Alice) to reclaim the funds.");
-    }
     Ok(())
 }
 
@@ -3225,7 +3210,12 @@ fn selftest_cmd() -> Result<(), String> {
     }
 }
 
-fn transition_cmd(state_path: PathBuf, kind: TransitionKind) -> Result<(), String> {
+fn transition_cmd(
+    state_path: PathBuf,
+    kind: TransitionKind,
+    safety_evidence_path: Option<PathBuf>,
+    final_signature_hex: Option<String>,
+) -> Result<(), String> {
     let store = SwapStore::new(&state_path);
     let mut swap = match store.load().map_err(|e| format!("load failed: {e}"))? {
         Some(s) => s,
@@ -3238,8 +3228,46 @@ fn transition_cmd(state_path: PathBuf, kind: TransitionKind) -> Result<(), Strin
     };
 
     let before = swap.state;
-    swap.apply(kind.to_protocol())
-        .map_err(|e| format!("apply {kind:?}: {e}"))?;
+    match kind {
+        TransitionKind::ObserveSecretRevealed | TransitionKind::ObserveBtcRefunded => {
+            let evidence_path = safety_evidence_path
+                .ok_or_else(|| format!("{kind:?} requires --safety-evidence <path>"))?;
+            let signature_hex = final_signature_hex
+                .ok_or_else(|| format!("{kind:?} requires --final-signature-hex <64-byte-hex>"))?;
+            let mut signature = [0u8; 64];
+            hex::decode_to_slice(signature_hex.trim(), &mut signature)
+                .map_err(|_| "final-signature-hex must be exactly 64 bytes of hex".to_string())?;
+            let evidence = load_pre_cync_safety_evidence(&evidence_path)?;
+            match kind {
+                TransitionKind::ObserveSecretRevealed => {
+                    let verified = coincync_swap::safety::verify_claim_share_reveal(
+                        &evidence, &swap, &signature,
+                    )
+                    .map_err(|e| format!("claim share-reveal verification failed: {e}"))?;
+                    swap.apply_verified_claim_reveal(&verified)
+                        .map_err(|e| format!("apply {kind:?}: {e}"))?;
+                }
+                TransitionKind::ObserveBtcRefunded => {
+                    let verified = coincync_swap::safety::verify_refund_share_reveal(
+                        &evidence, &swap, &signature,
+                    )
+                    .map_err(|e| format!("refund share-reveal verification failed: {e}"))?;
+                    swap.apply_verified_refund_reveal(&verified)
+                        .map_err(|e| format!("apply {kind:?}: {e}"))?;
+                }
+                _ => unreachable!(),
+            }
+        }
+        _ => {
+            if safety_evidence_path.is_some() || final_signature_hex.is_some() {
+                return Err(format!(
+                    "{kind:?} does not accept safety evidence or a final signature"
+                ));
+            }
+            swap.apply(kind.to_protocol())
+                .map_err(|e| format!("apply {kind:?}: {e}"))?;
+        }
+    }
     let after = swap.state;
     store.save(&swap).map_err(|e| format!("save failed: {e}"))?;
 
@@ -3616,8 +3644,27 @@ fn construct_btc_claim_cmd(
     Ok(())
 }
 
+fn load_pre_cync_safety_evidence(
+    path: &std::path::Path,
+) -> Result<coincync_swap::safety::PreCyncLockSafetyEvidence, String> {
+    const MAX_EVIDENCE_BYTES: u64 = 9 * 1024 * 1024;
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("read safety evidence {}: {e}", path.display()))?;
+    if metadata.len() > MAX_EVIDENCE_BYTES {
+        return Err(format!(
+            "safety evidence {} exceeds {} bytes",
+            path.display(),
+            MAX_EVIDENCE_BYTES
+        ));
+    }
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("read safety evidence {}: {e}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("parse safety evidence {}: {e}", path.display()))
+}
+
 /// State-machine-aware orchestration: Bob broadcasts his BTC lock tx
-/// and the swap transitions `AliceLocked → BobLocked`. Save-after-
+/// and the swap transitions `Negotiated → BobLocked`. Save-after-
 /// broadcast posture: we apply the in-memory state transition and
 /// then persist; if the persist fails, the swap is still on-chain
 /// but the state file lags — operator runs `cyncswap status` to
@@ -3628,6 +3675,7 @@ fn construct_btc_claim_cmd(
 #[allow(clippy::too_many_arguments)]
 fn lock_btc_orchestration_cmd(
     state_path: PathBuf,
+    safety_evidence_path: PathBuf,
     network: String,
     rpc_url: String,
     rpc_user: Option<String>,
@@ -3657,9 +3705,9 @@ fn lock_btc_orchestration_cmd(
             swap.role
         ));
     }
-    if swap.state != State::AliceLocked {
+    if swap.state != State::Negotiated {
         return Err(format!(
-            "lock-btc requires state AliceLocked (after Alice broadcasts CYNC + Bob observes); \
+            "lock-btc requires state Negotiated because Bitcoin is the first on-chain lock; \
              current state is {}",
             state_string(swap.state)
         ));
@@ -3671,6 +3719,18 @@ fn lock_btc_orchestration_cmd(
     if tx_bytes.is_empty() {
         return Err("signed-tx-hex: empty transaction bytes".into());
     }
+    let evidence = load_pre_cync_safety_evidence(&safety_evidence_path)?;
+    if network != evidence.btc_network {
+        return Err("--network does not match safety evidence Bitcoin network".into());
+    }
+    if hex::decode(&evidence.lock_tx_hex)
+        .map_err(|e| format!("safety evidence lock_tx_hex: {e}"))?
+        != tx_bytes
+    {
+        return Err("signed-tx-hex does not equal the Bitcoin lock in safety evidence".into());
+    }
+    coincync_swap::safety::verify_pre_cync_lock(&evidence, &swap)
+        .map_err(|e| format!("pre-CYNC-lock safety verification failed: {e}"))?;
     let config = build_btc_rpc_config(network, rpc_url, rpc_user, rpc_pass)?;
 
     // Broadcast first, then transition + save. If broadcast fails,
@@ -3694,7 +3754,7 @@ fn lock_btc_orchestration_cmd(
 }
 
 /// Drive Alice's BTC claim. State-machine-aware bundled command:
-/// pre-checks `role=Alice` + `state=BobLocked`, broadcasts the
+/// pre-checks `role=Alice` + `state=AliceLocked`, broadcasts the
 /// supplied signed claim tx, applies `AliceClaimsBtc`
 /// (`BobLocked` → `SecretRevealed`), saves the state file.
 ///
@@ -3711,20 +3771,13 @@ fn lock_btc_orchestration_cmd(
 /// `recover-secret-from-btc-sig`. Bob's chain watcher catches the
 /// claim, advances his own swap to `SecretRevealed`, and the
 /// `claim-cync` step becomes available to him.
-#[allow(clippy::too_many_arguments)]
 fn claim_btc_orchestration_cmd(
     state_path: PathBuf,
+    safety_evidence_path: PathBuf,
     network: String,
     rpc_url: String,
     rpc_user: Option<String>,
     rpc_pass: Option<String>,
-    lock_txid_hex: String,
-    lock_vout: u32,
-    lock_internal_key_hex: String,
-    dest_address: String,
-    fee_sats: u64,
-    refund_bob_pubkey_hex: Option<String>,
-    refund_csv_blocks: Option<u16>,
     signed_tx_hex: String,
 ) -> Result<(), String> {
     use coincync_swap::protocol::{Role, State, Transition};
@@ -3746,9 +3799,9 @@ fn claim_btc_orchestration_cmd(
             swap.role
         ));
     }
-    if swap.state != State::BobLocked {
+    if swap.state != State::AliceLocked {
         return Err(format!(
-            "claim-btc requires state BobLocked (after Alice observes Bob's BTC lock); \
+            "claim-btc requires state AliceLocked after both chain locks; \
              current state is {}",
             state_string(swap.state)
         ));
@@ -3759,21 +3812,13 @@ fn claim_btc_orchestration_cmd(
     if tx_bytes.is_empty() {
         return Err("signed-tx-hex: empty transaction bytes".into());
     }
-    // A second CLI amount would let one operator input validate another;
-    // the persisted swap amount is the independent authority here.
-    let base = parse_claim_tx_base(
-        &lock_txid_hex,
-        lock_vout,
-        swap.parameters.btc_amount_sats,
-        &lock_internal_key_hex,
-        dest_address,
-        fee_sats,
-        refund_bob_pubkey_hex,
-        refund_csv_blocks,
-    )?;
+    let evidence = load_pre_cync_safety_evidence(&safety_evidence_path)?;
+    if network != evidence.btc_network {
+        return Err("--network does not match safety evidence Bitcoin network".into());
+    }
+    coincync_swap::safety::verify_safe_claim_transaction(&evidence, &swap, &tx_bytes)
+        .map_err(|e| format!("signed claim does not match safety evidence: {e}"))?;
     let config = build_btc_rpc_config(network, rpc_url, rpc_user, rpc_pass)?;
-    coincync_swap::btc::validate_claim_tx(&config, &base, &tx_bytes)
-        .map_err(|e| format!("signed claim does not match this swap: {e}"))?;
 
     let txid_hex = coincync_swap::btc::broadcast(&config, &tx_bytes)
         .map_err(|e| format!("btc broadcast: {e}"))?;
@@ -3794,9 +3839,10 @@ fn claim_btc_orchestration_cmd(
 }
 
 /// Drive Alice's CYNC lock. State-machine-aware bundled command:
-/// pre-checks `role=Alice` + `state=Negotiated`, broadcasts the
+/// pre-checks `role=Alice` + `state=BobLocked`, verifies the Bitcoin
+/// safety evidence, broadcasts the
 /// supplied signed CYNC lock tx, applies `AliceLocksCync`
-/// (`Negotiated` → `AliceLocked`), saves the state file.
+/// (`BobLocked` → `AliceLocked`), saves the state file.
 ///
 /// Posture matches `lock_btc_orchestration_cmd` /
 /// `claim_btc_orchestration_cmd`: broadcast first, then transition
@@ -3807,16 +3853,16 @@ fn claim_btc_orchestration_cmd(
 ///
 /// Implication for Bob: once this command returns successfully,
 /// Bob's chain watcher catches the CYNC lock at the agreed
-/// confirmation depth and advances Bob's swap to `AliceLocked`,
-/// after which `lock-btc` becomes available to him.
+/// confirmation depth and advances Bob's swap to `AliceLocked`.
 fn lock_cync_orchestration_cmd(
     state_path: PathBuf,
+    safety_evidence_path: PathBuf,
     network: String,
     rpc_url: String,
     api_key: Option<String>,
     signed_tx_hex: String,
 ) -> Result<(), String> {
-    use coincync_swap::protocol::{Role, State, Transition};
+    use coincync_swap::protocol::{Role, State};
 
     let store = SwapStore::new(&state_path);
     let mut swap = match store.load().map_err(|e| format!("load failed: {e}"))? {
@@ -3835,9 +3881,9 @@ fn lock_cync_orchestration_cmd(
             swap.role
         ));
     }
-    if swap.state != State::Negotiated {
+    if swap.state != State::BobLocked {
         return Err(format!(
-            "lock-cync requires state Negotiated (the freshly-initialized state); \
+            "lock-cync requires state BobLocked after Alice observes the confirmed Bitcoin lock; \
              current state is {}",
             state_string(swap.state)
         ));
@@ -3848,12 +3894,18 @@ fn lock_cync_orchestration_cmd(
     if tx_bytes.is_empty() {
         return Err("signed-tx-hex: empty transaction bytes".into());
     }
+    let evidence = load_pre_cync_safety_evidence(&safety_evidence_path)?;
+    if network != swap.parameters.cync_network {
+        return Err("--network does not match the negotiated CYNC network".into());
+    }
+    let verified = coincync_swap::safety::verify_pre_cync_lock(&evidence, &swap)
+        .map_err(|e| format!("pre-CYNC-lock safety verification failed: {e}"))?;
     let config = build_cync_rpc_config(network, rpc_url, api_key);
 
     let txid_hex = coincync_swap::cync::broadcast(&config, &tx_bytes)
         .map_err(|e| format!("cync broadcast: {e}"))?;
 
-    swap.apply(Transition::AliceLocksCync)
+    swap.apply_pre_cync_lock(&verified)
         .map_err(|e| format!("apply AliceLocksCync transition: {e}"))?;
     store
         .save(&swap)
@@ -3917,6 +3969,9 @@ fn claim_cync_orchestration_cmd(
             state_string(swap.state)
         ));
     }
+    if network != swap.parameters.cync_network {
+        return Err("--network does not match the negotiated CYNC network".into());
+    }
 
     let tx_bytes = hex::decode(signed_tx_hex.trim())
         .map_err(|e| format!("signed-tx-hex: not valid hex: {e}"))?;
@@ -3957,6 +4012,7 @@ fn claim_cync_orchestration_cmd(
 /// this command returns successfully.
 fn refund_btc_orchestration_cmd(
     state_path: PathBuf,
+    safety_evidence_path: PathBuf,
     network: String,
     rpc_url: String,
     rpc_user: Option<String>,
@@ -3982,9 +4038,9 @@ fn refund_btc_orchestration_cmd(
             swap.role
         ));
     }
-    if swap.state != State::BobLocked {
+    if !matches!(swap.state, State::BobLocked | State::AliceLocked) {
         return Err(format!(
-            "refund-btc requires state BobLocked (after Bob's BTC lock confirmed); \
+            "refund-btc requires state BobLocked or AliceLocked after Bitcoin confirms; \
              current state is {}",
             state_string(swap.state)
         ));
@@ -3995,6 +4051,12 @@ fn refund_btc_orchestration_cmd(
     if tx_bytes.is_empty() {
         return Err("signed-tx-hex: empty transaction bytes".into());
     }
+    let evidence = load_pre_cync_safety_evidence(&safety_evidence_path)?;
+    if network != evidence.btc_network {
+        return Err("--network does not match safety evidence Bitcoin network".into());
+    }
+    coincync_swap::safety::verify_safe_refund_transaction(&evidence, &swap, &tx_bytes)
+        .map_err(|e| format!("signed refund does not match safety evidence: {e}"))?;
     let config = build_btc_rpc_config(network, rpc_url, rpc_user, rpc_pass)?;
 
     let txid_hex = coincync_swap::btc::broadcast(&config, &tx_bytes)
@@ -4014,22 +4076,9 @@ fn refund_btc_orchestration_cmd(
     Ok(())
 }
 
-/// Drive Alice's CYNC refund. State-machine-aware bundled
-/// command: pre-checks `role=Alice` + state ∈ {`AliceLocked`,
-/// `BobLocked`}, broadcasts the supplied signed refund tx,
-/// applies `AliceRefunds` (any-of-{AliceLocked,BobLocked} →
-/// `Refunded`), saves the state file.
-///
-/// Why two source states? CIP-001 §"Refund Paths": Alice can
-/// refund whether Bob locked or not. If Bob never locked, Alice's
-/// timeout on her CYNC lock fires and she reclaims directly. If
-/// Bob locked but then disappeared (Alice never broadcast her
-/// claim), the same refund path is available — Bob's BTC sits
-/// dormant until his own (shorter) timeout fires and he reclaims
-/// independently.
-///
-/// Posture matches the other orchestration handlers; timeout
-/// enforcement is the chain's job.
+/// Drive Alice's CYNC recovery sweep after Bob's Bitcoin refund has
+/// revealed his CYNC key share. The joint output has no native CYNC
+/// timeout branch, so `AliceLocked` alone is not a refundable state.
 ///
 /// `Refunded` is terminal.
 fn refund_cync_orchestration_cmd(
@@ -4058,12 +4107,15 @@ fn refund_cync_orchestration_cmd(
             swap.role
         ));
     }
-    if !matches!(swap.state, State::AliceLocked | State::BobLocked) {
+    if swap.state != State::BtcRefunded {
         return Err(format!(
-            "refund-cync requires state AliceLocked or BobLocked (per CIP-001 §Refund Paths); \
+            "refund-cync requires state BtcRefunded and a verified CYNC share recovered from Bob's Bitcoin refund; \
              current state is {}",
             state_string(swap.state)
         ));
+    }
+    if network != swap.parameters.cync_network {
+        return Err("--network does not match the negotiated CYNC network".into());
     }
 
     let tx_bytes = hex::decode(signed_tx_hex.trim())
@@ -4190,6 +4242,7 @@ fn state_string(s: State) -> &'static str {
         State::AliceLocked => "AliceLocked",
         State::BobLocked => "BobLocked",
         State::SecretRevealed => "SecretRevealed",
+        State::BtcRefunded => "BtcRefunded",
         State::Completed => "Completed (terminal)",
         State::Refunded => "Refunded (terminal)",
         State::Aborted => "Aborted (terminal)",
@@ -4202,11 +4255,14 @@ fn transition_hint(t: Transition) -> &'static str {
         Transition::BobLocksBtc => "  (broadcast Bob's BTC lock — `cyncswap lock-btc`)",
         Transition::AliceClaimsBtc => "  (broadcast Alice's BTC claim — `cyncswap claim-btc`)",
         Transition::BobClaimsCync => "  (broadcast Bob's CYNC claim — `cyncswap claim-cync`)",
-        Transition::AliceRefunds => "  (Alice broadcasts CYNC refund)",
+        Transition::AliceRefunds => {
+            "  (Alice sweeps CYNC after Bob's BTC refund reveals his share)"
+        }
         Transition::BobRefunds => "  (Bob broadcasts BTC refund)",
         Transition::ObserveBobLocked => "  (auto on Bob's BTC lock confirming)",
         Transition::ObserveAliceLocked => "  (auto on Alice's CYNC lock confirming)",
         Transition::ObserveSecretRevealed => "  (auto on Alice's BTC claim confirming)",
+        Transition::ObserveBtcRefunded => "  (auto on Bob's BTC refund revealing his share)",
         Transition::ObserveCompleted => "  (auto on Bob's CYNC claim confirming)",
         Transition::Abort => "  (`cyncswap cancel`)",
     }

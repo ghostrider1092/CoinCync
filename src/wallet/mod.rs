@@ -21,6 +21,8 @@ pub mod scanner;
 pub mod send;
 pub mod spend;
 pub mod subaddress;
+#[cfg(feature = "cyncswap")]
+pub mod swap;
 pub mod wallet_keys;
 // `lightsync` is the SPV path. Network handler for `GetOutputDigests`
 // is wired in `crate::network::node` (serves up to 100 blocks/request);
