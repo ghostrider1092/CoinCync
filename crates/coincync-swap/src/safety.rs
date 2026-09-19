@@ -396,6 +396,12 @@ pub fn build_safe_lock_tx(network: &str, request: &SafeLockTxRequest) -> Result<
     Ok(bitcoin::consensus::serialize(&tx))
 }
 
+#[derive(Clone, Copy)]
+enum SpendPath {
+    Claim,
+    Refund,
+}
+
 struct PreparedSpend {
     tx: Transaction,
     prevout: TxOut,
@@ -406,7 +412,7 @@ struct PreparedSpend {
 fn build_spend_internal(
     network: &str,
     base: &SafeSpendBase,
-    refund: bool,
+    path: SpendPath,
 ) -> Result<PreparedSpend> {
     let network = parse_network(network)?;
     if base.fee_sats >= base.lock_value_sats {
@@ -438,10 +444,9 @@ fn build_spend_internal(
             vout: base.lock_vout,
         },
         script_sig: ScriptBuf::new(),
-        sequence: if refund {
-            Sequence::from_height(base.contract.refund_csv_blocks)
-        } else {
-            Sequence::ENABLE_RBF_NO_LOCKTIME
+        sequence: match path {
+            SpendPath::Claim => Sequence::ENABLE_RBF_NO_LOCKTIME,
+            SpendPath::Refund => Sequence::from_height(base.contract.refund_csv_blocks),
         },
         witness: Witness::new(),
     };
@@ -457,7 +462,10 @@ fn build_spend_internal(
     Ok(PreparedSpend {
         tx,
         prevout,
-        script: if refund { refund_script } else { success },
+        script: match path {
+            SpendPath::Claim => success,
+            SpendPath::Refund => refund_script,
+        },
         spend_info,
     })
 }
@@ -478,12 +486,12 @@ fn spend_sighash(prepared: &PreparedSpend) -> Result<[u8; 32]> {
 
 /// Exact success-path sighash Bob's adaptor pre-signature must bind.
 pub fn safe_claim_sighash(network: &str, base: &SafeSpendBase) -> Result<[u8; 32]> {
-    spend_sighash(&build_spend_internal(network, base, false)?)
+    spend_sighash(&build_spend_internal(network, base, SpendPath::Claim)?)
 }
 
 /// Exact refund-path sighash Alice's adaptor pre-signature must bind.
 pub fn safe_refund_sighash(network: &str, base: &SafeSpendBase) -> Result<[u8; 32]> {
-    spend_sighash(&build_spend_internal(network, base, true)?)
+    spend_sighash(&build_spend_internal(network, base, SpendPath::Refund)?)
 }
 
 fn verify_signature(
@@ -503,11 +511,11 @@ fn verify_signature(
 fn build_signed_spend(
     network: &str,
     base: &SafeSpendBase,
-    refund: bool,
+    path: SpendPath,
     alice_signature: &[u8; 64],
     bob_signature: &[u8; 64],
 ) -> Result<Vec<u8>> {
-    let prepared = build_spend_internal(network, base, refund)?;
+    let prepared = build_spend_internal(network, base, path)?;
     let sighash = spend_sighash(&prepared)?;
     let PreparedSpend {
         mut tx,
@@ -515,16 +523,15 @@ fn build_signed_spend(
         spend_info,
         ..
     } = prepared;
-    let (alice_key, bob_key) = if refund {
-        (
-            &base.contract.alice_refund_pubkey,
-            &base.contract.bob_refund_pubkey,
-        )
-    } else {
-        (
+    let (alice_key, bob_key) = match path {
+        SpendPath::Claim => (
             &base.contract.alice_claim_pubkey,
             &base.contract.bob_claim_pubkey,
-        )
+        ),
+        SpendPath::Refund => (
+            &base.contract.alice_refund_pubkey,
+            &base.contract.bob_refund_pubkey,
+        ),
     };
     verify_signature(
         alice_signature,
@@ -561,7 +568,13 @@ pub fn build_safe_claim_tx(
     alice_signature: &[u8; 64],
     bob_adapted_signature: &[u8; 64],
 ) -> Result<Vec<u8>> {
-    build_signed_spend(network, base, false, alice_signature, bob_adapted_signature)
+    build_signed_spend(
+        network,
+        base,
+        SpendPath::Claim,
+        alice_signature,
+        bob_adapted_signature,
+    )
 }
 
 /// Assemble a refund-path spend from Alice's adaptor-decrypted final signature
@@ -572,7 +585,13 @@ pub fn build_safe_refund_tx(
     alice_adapted_signature: &[u8; 64],
     bob_signature: &[u8; 64],
 ) -> Result<Vec<u8>> {
-    build_signed_spend(network, base, true, alice_adapted_signature, bob_signature)
+    build_signed_spend(
+        network,
+        base,
+        SpendPath::Refund,
+        alice_adapted_signature,
+        bob_signature,
+    )
 }
 
 fn signed_spend_signatures(tx_bytes: &[u8]) -> Result<([u8; 64], [u8; 64])> {
@@ -616,7 +635,7 @@ pub fn verify_safe_claim_transaction(
     tx_bytes: &[u8],
 ) -> Result<VerifiedShareReveal> {
     let (alice_signature, bob_signature) = signed_spend_signatures(tx_bytes)?;
-    let (base, _, _, _) = reveal_context(evidence, swap, true)?;
+    let (base, _, _, _) = reveal_context(evidence, swap, SpendPath::Claim)?;
     let expected = build_safe_claim_tx(
         &evidence.btc_network,
         &base,
@@ -640,7 +659,7 @@ pub fn verify_safe_refund_transaction(
     tx_bytes: &[u8],
 ) -> Result<VerifiedShareReveal> {
     let (alice_signature, bob_signature) = signed_spend_signatures(tx_bytes)?;
-    let (base, _, _, _) = reveal_context(evidence, swap, false)?;
+    let (base, _, _, _) = reveal_context(evidence, swap, SpendPath::Refund)?;
     let expected = build_safe_refund_tx(
         &evidence.btc_network,
         &base,
@@ -835,7 +854,7 @@ pub fn verify_pre_cync_lock(
 fn reveal_context(
     evidence: &PreCyncLockSafetyEvidence,
     swap: &Swap,
-    claim: bool,
+    path: SpendPath,
 ) -> Result<(SafeSpendBase, [u8; 33], [u8; 32], BtcAdaptorSig)> {
     verify_pre_cync_lock(evidence, swap)?;
     let lock_tx = decode_lock_transaction(&evidence.lock_tx_hex)?;
@@ -843,20 +862,19 @@ fn reveal_context(
         .output
         .get(evidence.lock_vout as usize)
         .ok_or(Error::Verification("Bitcoin lock vout does not exist"))?;
-    let (destination, fee, share, adaptor) = if claim {
-        (
+    let (destination, fee, share, adaptor) = match path {
+        SpendPath::Claim => (
             &evidence.claim_destination,
             evidence.claim_fee_sats,
             &evidence.alice_share,
             &evidence.claim_adaptor,
-        )
-    } else {
-        (
+        ),
+        SpendPath::Refund => (
             &evidence.refund_destination,
             evidence.refund_fee_sats,
             &evidence.bob_share,
             &evidence.refund_adaptor,
-        )
+        ),
     };
     let (btc_point, cync_point) = verify_share_binding(share)?;
     Ok((
@@ -899,7 +917,8 @@ pub fn verify_claim_share_reveal(
     swap: &Swap,
     final_signature: &[u8; 64],
 ) -> Result<VerifiedShareReveal> {
-    let (base, expected_btc, expected_cync, adaptor) = reveal_context(evidence, swap, true)?;
+    let (base, expected_btc, expected_cync, adaptor) =
+        reveal_context(evidence, swap, SpendPath::Claim)?;
     let sighash = safe_claim_sighash(&evidence.btc_network, &base)?;
     verify_signature(
         final_signature,
@@ -923,7 +942,8 @@ pub fn verify_refund_share_reveal(
     swap: &Swap,
     final_signature: &[u8; 64],
 ) -> Result<VerifiedShareReveal> {
-    let (base, expected_btc, expected_cync, adaptor) = reveal_context(evidence, swap, false)?;
+    let (base, expected_btc, expected_cync, adaptor) =
+        reveal_context(evidence, swap, SpendPath::Refund)?;
     let sighash = safe_refund_sighash(&evidence.btc_network, &base)?;
     verify_signature(
         final_signature,
