@@ -484,6 +484,11 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         .register_method("get_state_snapshot", |_params, state, _ext| {
             let stats = state.chain.stats();
             let tip = state.chain.tip_hash();
+            // gap #3: a deterministic commitment over the transparent UTXO set at
+            // this tip. Observability only (not a consensus value); a fresh node
+            // or light wallet can compare its own tip UTXO commitment to detect
+            // divergence without trusting this node's word.
+            let utxo_hash = state.chain.utxo_commitment_at_tip();
 
             Ok::<_, ErrorObjectOwned>(json!({
                 "height": stats.height,
@@ -491,6 +496,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 "total_difficulty": stats.total_difficulty.to_string(),
                 "total_supply": supply_atomic_decimal(stats.total_supply),
                 "total_transactions": stats.total_transactions,
+                "utxo_hash": utxo_hash.to_hex(),
                 "checkpoints": crate::testnet::testnet_checkpoints().iter()
                     .map(|cp| json!({"height": cp.height, "hash": cp.hash.to_hex()}))
                     .collect::<Vec<_>>(),
