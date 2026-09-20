@@ -56,7 +56,7 @@ pub use pow::{
 pub use pow::{compute_pow_hash_batch, prewarm_next_epoch_if_near, randomx_seed_for_height};
 // M-1: finality module is dead code; re-exports removed.
 pub use validation::{
-    v1_0_12_rules_active, validate_block, validate_block_with_checkpoint,
+    v1_0_12_rules_active, validate_block, validate_block_ctx, validate_block_with_checkpoint,
     validate_block_with_checkpoint_for_network, validate_transaction, validate_transaction_basic,
     validate_transaction_for_network, BlockValidation,
 };
