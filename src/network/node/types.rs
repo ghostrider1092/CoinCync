@@ -133,6 +133,10 @@ pub struct NetworkStats {
     pub inbound: usize,
     pub bytes_recv: u64,
     pub bytes_sent: u64,
+    /// Sustained mesh-floor state: true when connected peers have been below
+    /// `MESH_FLOOR_PEERS` for `MESH_FLOOR_SUSTAIN_TICKS` consecutive heartbeats.
+    /// Observational by default (see docs/design/runtime-mesh-floor.md).
+    pub mesh_degraded: bool,
 }
 
 /// Connection memory accounting exposed by the facade.

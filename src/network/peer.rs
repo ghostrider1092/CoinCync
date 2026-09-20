@@ -158,6 +158,12 @@ pub struct PeerInfo {
     /// Zero until a Flare message is received. Unknown bits are ignored.
     /// Use `firework::has_cap(peer.capabilities, CAP_*)` to test a feature.
     pub capabilities: u64,
+    /// Consensus-rules fingerprint advertised by this peer (Firework
+    /// `CAP_CONSENSUS_FINGERPRINT`). `None` until a `ConsensusFingerprint`
+    /// message is received. Compared advisorily against our own — a mismatch
+    /// signals the peer runs divergent consensus rules. See
+    /// `crate::consensus::fingerprint`.
+    pub consensus_fingerprint: Option<[u8; 32]>,
     /// Consecutive `try_send(Full)` count for this peer's broadcast
     /// channel. Reset on any successful send. When it crosses the
     /// stall threshold (see `node/broadcast.rs::STALL_THRESHOLD`) the peer is
@@ -200,6 +206,7 @@ impl PeerInfo {
             encrypted: false,
             remote_static_key: None,
             capabilities: 0,
+            consensus_fingerprint: None,
             consecutive_full: Arc::new(AtomicU32::new(0)),
             connection_token: Arc::new(()),
             eclipse_slot: None,

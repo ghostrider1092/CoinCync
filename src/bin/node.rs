@@ -797,6 +797,12 @@ async fn start_node(
     // rebuild per epoch key-switch); full-mem is reserved for the built-in miner.
     coincync::consensus::pow::set_node_mining_active(mine.is_some());
 
+    // Self-preflight: refuse to run a binary compiled for one network as
+    // another (a mainnet build started as --network testnet, or vice-versa).
+    // This has no consensus effect — it can only reject a misconfigured start,
+    // before any DB or network work. See src/preflight.rs.
+    coincync::preflight::check_compiled_network(network)?;
+
     // Ensure data dir exists
     std::fs::create_dir_all(&data_dir).ok();
 
@@ -1838,6 +1844,10 @@ async fn start_node(
     // on a misbehaving disk; without the escape hatch, the user had
     // no way to abort the shutdown.
     let shutdown_seq = async {
+        // Persist anchor peers on graceful shutdown so a restart re-dials known
+        // good outbound peers first (eclipse resistance). The process exits
+        // without a full P2PNode::stop() teardown, so do this explicitly here.
+        p2p.save_anchors();
         match mempool.save_to_disk(&data_dir) {
             Ok(0) => {}
             Ok(n) => info!("Mempool: saved {} txs to disk", n),

@@ -57,12 +57,19 @@
 /// sync cannot recover from.
 pub const CAP_CHAINWORK: u64 = 1 << 0;
 
+/// Peer understands the `ConsensusFingerprint` message and will advertise its
+/// consensus-rules fingerprint (magic + genesis + hard-fork schedule digest).
+/// Gated so nodes predating this message never receive it (they would reject
+/// the unknown message type). Advisory: a fingerprint mismatch is logged and
+/// recorded, never an auto-disconnect. See `crate::consensus::fingerprint`.
+pub const CAP_CONSENSUS_FINGERPRINT: u64 = 1 << 1;
+
 /// The capability set THIS node supports and advertises in its Flare.
 ///
 /// `const` so it is a single source of truth; extend the OR-set as new
 /// capability bits are added.
 pub const fn local_capabilities() -> u64 {
-    CAP_CHAINWORK
+    CAP_CHAINWORK | CAP_CONSENSUS_FINGERPRINT
 }
 
 /// True if `caps` advertises every bit set in `cap`.
@@ -81,6 +88,13 @@ mod tests {
     #[test]
     fn local_node_advertises_chainwork() {
         assert!(has_cap(local_capabilities(), CAP_CHAINWORK));
+    }
+
+    #[test]
+    fn local_node_advertises_consensus_fingerprint() {
+        assert!(has_cap(local_capabilities(), CAP_CONSENSUS_FINGERPRINT));
+        // The two capabilities are distinct bits.
+        assert_ne!(CAP_CHAINWORK, CAP_CONSENSUS_FINGERPRINT);
     }
 
     #[test]

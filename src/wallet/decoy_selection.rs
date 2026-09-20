@@ -19,7 +19,9 @@ mod validation;
 
 pub use allocation::allocate_unique_rings;
 pub use error::{DecoySelectionError, DecoySelectionResult};
-pub use sampling::{build_covered_request, sample_candidate_locators};
+pub use sampling::{
+    build_covered_request, sample_candidate_locators, sample_candidate_locators_empirical,
+};
 pub use types::{
     AllocatedRing, AllocatedRings, CoveredRequest, RealOutputIdentity, SnapshotId,
     ValidatedCoveredResponse, ValidatedDecoySnapshot,

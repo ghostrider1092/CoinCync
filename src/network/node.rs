@@ -255,6 +255,11 @@ pub struct P2PNode {
     /// Normalizes packet sizes, adds timing jitter, and injects constant-rate
     /// padding so P2P traffic is indistinguishable from generic HTTPS.
     pub traffic_shaper: Arc<TrafficShaper>,
+    /// Sustained mesh-floor state, maintained by the heartbeat tick: true when
+    /// connected peers have been below `MESH_FLOOR_PEERS` for
+    /// `MESH_FLOOR_SUSTAIN_TICKS` consecutive heartbeats. Observational by
+    /// default. See docs/design/runtime-mesh-floor.md.
+    mesh_degraded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl P2PNode {
@@ -370,6 +375,7 @@ impl P2PNode {
             tx_broadcast_rx: parking_lot::Mutex::new(Some(tx_broadcast_rx)),
             dht: None,
             traffic_shaper: Arc::new(TrafficShaper::default_enabled()),
+            mesh_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -1040,6 +1046,7 @@ impl P2PNode {
                     chain_state: self.chain_state.reader(),
                     broadcast_rx,
                     magic: self.config.magic,
+                    mesh_degraded: self.mesh_degraded.clone(),
                 },
                 node_runtime.shutdown_receiver(),
             ),
@@ -1192,7 +1199,25 @@ impl P2PNode {
             inbound,
             bytes_recv: total_recv,
             bytes_sent: total_sent,
+            mesh_degraded: self.mesh_degraded(),
         }
+    }
+
+    /// Sustained mesh-floor state: true when connected peers have been below
+    /// `MESH_FLOOR_PEERS` for `MESH_FLOOR_SUSTAIN_TICKS` consecutive heartbeats.
+    /// Observational (does not itself change mining/peering); a monitor or an
+    /// opt-in mine-gate can read it. See docs/design/runtime-mesh-floor.md.
+    pub fn mesh_degraded(&self) -> bool {
+        self.mesh_degraded
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Persist the current anchor set to disk immediately. Used as a
+    /// graceful-shutdown hook: the binary exits without a full `stop()`
+    /// teardown, so without this anchors would only survive via the periodic
+    /// 60s save in the outbound connector (up to 60s of loss on a clean stop).
+    pub fn save_anchors(&self) {
+        peer_manager::save_anchors_to_disk(&self.peers, &self.config.data_dir);
     }
 
     /// Ban a peer

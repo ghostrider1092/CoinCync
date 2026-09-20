@@ -188,6 +188,10 @@ pub(super) async fn process_message(
             control::handle_chain_work(peer_id, payload, peers, sync, chain).await?;
         }
 
+        MessageType::ConsensusFingerprint => {
+            control::handle_consensus_fingerprint(peer_id, payload, peers, chain).await?;
+        }
+
         MessageType::Verack => {
             control::handle_verack(peer_id, magic, peers, senders, dandelion, sync, chain).await?;
         }

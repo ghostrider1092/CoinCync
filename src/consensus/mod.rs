@@ -18,6 +18,12 @@
 
 pub mod block;
 pub mod difficulty;
+/// Consensus-rules fingerprint advertised in the handshake (advisory divergence
+/// detection). See docs/design/consensus-fingerprint.md.
+pub mod fingerprint;
+/// Non-consensus difficulty / block-interval telemetry (kept out of the
+/// hash-locked difficulty.rs). See docs/design/difficulty-health-telemetry.md.
+pub mod telemetry;
 pub mod fee_market;
 pub mod finality;
 pub mod fork_signal;

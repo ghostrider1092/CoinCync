@@ -97,7 +97,7 @@ use super::super::sync::ChainSync;
 use super::super::traffic_shaping::TrafficShaper;
 use super::chain_state::ChainStateReader;
 use super::connection::handle_connection;
-use super::constants::{CONNECT_TIMEOUT, INBOUND_HANDSHAKE_SLACK, MAX_INBOUND};
+use super::constants::{ANCHOR_MAX, CONNECT_TIMEOUT, INBOUND_HANDSHAKE_SLACK, MAX_INBOUND};
 use super::runtime::wait_for_shutdown;
 use super::types::NodeEvent;
 use super::PeerMessage;
@@ -874,14 +874,23 @@ pub(super) fn pick_random_peer(peers: &Arc<DashMap<PeerId, PeerInfo>>) -> Option
 
 /// Persist connected outbound peers so restart can prefer known-good anchors.
 pub(super) fn save_anchors_to_disk(peers: &DashMap<PeerId, PeerInfo>, data_dir: &std::path::Path) {
-    let anchors: Vec<SocketAddr> = peers
+    // Longevity-ranked, bounded anchor set: keep the ANCHOR_MAX longest-lived
+    // connected outbound peers (oldest connection first = most stable), rather
+    // than every momentarily-connected outbound peer. Bitcoin Core persists 2.
+    let mut candidates: Vec<(std::time::Instant, SocketAddr)> = peers
         .iter()
         .filter(|peer| peer.outbound && peer.state == PeerState::Connected)
-        .map(|peer| peer.addr)
+        .map(|peer| (peer.connected_at, peer.addr))
         .collect();
-    if anchors.is_empty() {
+    if candidates.is_empty() {
         return;
     }
+    candidates.sort_by_key(|(connected_at, _)| *connected_at);
+    let anchors: Vec<SocketAddr> = candidates
+        .into_iter()
+        .take(ANCHOR_MAX)
+        .map(|(_, addr)| addr)
+        .collect();
 
     let path = data_dir.join("anchors.json");
     match serde_json::to_string(&anchors) {
@@ -999,6 +1008,37 @@ mod tests {
         save_anchors_to_disk(&peers, data_dir.path());
 
         assert_eq!(load_anchors_from_disk(data_dir.path()), vec![outbound_addr]);
+    }
+
+    #[tokio::test]
+    async fn save_anchors_caps_to_max_and_keeps_longest_lived() {
+        use std::time::{Duration, Instant};
+        let data_dir = tempfile::tempdir().unwrap();
+        let peers = DashMap::new();
+        let now = Instant::now();
+        // Three connected outbound peers with staggered connect times; the
+        // ANCHOR_MAX (2) oldest (longest-lived) must be kept, newest dropped.
+        let mk = |n: u8, port: u16, age_secs: u64| {
+            let id = [n; 32];
+            let mut p = PeerInfo::new(id, format!("127.0.0.1:{port}").parse().unwrap(), true);
+            p.state = PeerState::Connected;
+            p.connected_at = now.checked_sub(Duration::from_secs(age_secs)).unwrap();
+            (id, p)
+        };
+        let (id_old, p_old) = mk(1, 13001, 300); // oldest -> keep
+        let (id_mid, p_mid) = mk(2, 13002, 200); // -> keep
+        let (id_new, p_new) = mk(3, 13003, 100); // newest -> dropped
+        let (addr_old, addr_mid, addr_new) = (p_old.addr, p_mid.addr, p_new.addr);
+        peers.insert(id_old, p_old);
+        peers.insert(id_mid, p_mid);
+        peers.insert(id_new, p_new);
+
+        save_anchors_to_disk(&peers, data_dir.path());
+        let saved = load_anchors_from_disk(data_dir.path());
+        assert_eq!(saved.len(), ANCHOR_MAX);
+        assert!(saved.contains(&addr_old));
+        assert!(saved.contains(&addr_mid));
+        assert!(!saved.contains(&addr_new));
     }
 
     #[tokio::test]

@@ -95,34 +95,22 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             // `clock_available = false` flag so a monitoring dashboard
             // can distinguish "tip is brand new" from "we have no idea
             // how stale the tip is".
-            let (tip_age_secs, clock_available): (Value, bool) =
+            let tip_age_opt: Option<u64> =
                 match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                    Ok(d) => {
-                        let now = d.as_secs();
-                        (json!(now.saturating_sub(tip.timestamp)), true)
-                    }
-                    Err(_) => (Value::Null, false),
+                    Ok(d) => Some(d.as_secs().saturating_sub(tip.timestamp)),
+                    Err(_) => None,
                 };
+            let clock_available = tip_age_opt.is_some();
+            let tip_age_secs: Value = tip_age_opt.map(|s| json!(s)).unwrap_or(Value::Null);
 
-            // Derive a simple health score and status label from the
-            // observable signals. The score is a float in [0.0, 1.0];
-            // 1.0 = everything nominal, 0.0 = disconnected / stalled.
-            // This mirrors the health-band rendering in the TUI status
-            // bar so the node, not the TUI, is the source of truth.
-            let (status, health_score) = if !synced {
-                ("syncing".to_string(), 0.5_f64)
-            } else if peer_count == 0 {
-                ("no-peers".to_string(), 0.2_f64)
-            } else {
-                let age = tip_age_secs.as_u64().unwrap_or(u64::MAX);
-                if age > 300 {
-                    ("stalled".to_string(), 0.3_f64)
-                } else if peer_count < 2 {
-                    ("low-peers".to_string(), 0.7_f64)
-                } else {
-                    ("healthy".to_string(), 1.0_f64)
-                }
-            };
+            // Derive the health band + score from the observable signals via the
+            // single source of truth in `crate::vitals` (also used by
+            // `get_vitals` and mirrored by the TUI status bar). The score is a
+            // float in [0.0, 1.0]; 1.0 = nominal, 0.0 = disconnected/stalled.
+            let health =
+                crate::vitals::HealthStatus::from_signals(synced, peer_count as u64, tip_age_opt);
+            let status = health.as_str();
+            let health_score = health.score();
 
             Ok::<_, ErrorObjectOwned>(json!({
                 // Identity
@@ -131,6 +119,13 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 "build_dirty":             crate::build_info::git_dirty(),
                 "build_profile":           crate::build_info::build_profile(),
                 "network":                 state.network_name,
+                // Consensus-rules fingerprint (magic + genesis + hard-fork
+                // schedule digest). Compare across nodes to spot a peer running
+                // divergent consensus rules before it forks. See
+                // crate::consensus::fingerprint.
+                "consensus_fingerprint":   hex::encode(
+                    crate::consensus::fingerprint::consensus_fingerprint_bytes(state.chain.network())
+                ),
                 // Chain tip
                 "height":                  height,
                 "target_height":           target_height,
@@ -151,6 +146,9 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 "synced":                  synced,
                 "is_synced":               synced, // back-compat alias
                 "peer_count":              peer_count,
+                // Sustained mesh-floor state (observational). See crate::vitals
+                // + docs/design/runtime-mesh-floor.md.
+                "mesh_degraded":           state.p2p.as_ref().map(|p| p.mesh_degraded()).unwrap_or(false),
                 // Mempool
                 "tx_pool_size":            state.mempool.len(),
                 "mempool_size":            state.mempool.len(), // back-compat alias
@@ -180,6 +178,110 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 "stratum_native_tls_enabled": state.stratum_native_tls_enabled,
                 "stratum_tls_proxy_ack": state.stratum_tls_proxy_ack,
                 "stratum_transport_hardened": state.stratum_transport_hardened,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
+    // ── get_vitals ─────────────────────────────────────────────
+    // Stable, versioned subset of get_info for monitoring, load-balancer
+    // health checks, and partition detectors. Unlike get_info (a kitchen-sink
+    // diagnostic blob that grows over time), this is a small documented schema
+    // carrying an explicit `schema_version` so tooling can depend on it across
+    // releases. The health band is computed by crate::vitals — the same source
+    // of truth get_info uses. See docs/design/chain-vitals-schema.md.
+    // register_blocking_method — same locking rationale as get_info.
+    module
+        .register_blocking_method("get_vitals", |_params, state, _ext| {
+            let tip = state.chain.tip();
+            let stats = state.chain.stats();
+            let synced = state.chain.is_synced();
+            let peer_count = state
+                .p2p
+                .as_ref()
+                .map(|p| p.network_stats().peer_count)
+                .unwrap_or(0);
+            let tip_age_opt: Option<u64> =
+                match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                    Ok(d) => Some(d.as_secs().saturating_sub(tip.timestamp)),
+                    Err(_) => None,
+                };
+            let mesh_degraded = state
+                .p2p
+                .as_ref()
+                .map(|p| p.mesh_degraded())
+                .unwrap_or(false);
+            let vitals = crate::vitals::ChainVitals::from_signals(
+                state.network_name.clone(),
+                tip.height,
+                hex::encode(tip.hash.as_bytes()),
+                tip_age_opt,
+                synced,
+                peer_count as u64,
+                stats.difficulty.to_string(),
+                state.mempool.len() as u64,
+                mesh_degraded,
+            );
+            serde_json::to_value(&vitals).map_err(|e| {
+                ErrorObjectOwned::owned(-32603, format!("vitals serialization: {}", e), None::<()>)
+            })
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
+    // ── get_difficulty_health ──────────────────────────────────
+    // Non-consensus difficulty/block-production telemetry: current difficulty,
+    // an informational hashrate estimate, and inter-block interval statistics
+    // (mean/stddev/min/max/last) plus a coarse assessment. Surfaces the
+    // block-regularity signal the difficulty-oscillation analysis identified as
+    // the real health indicator. Heavier than get_info (scans a difficulty
+    // window), so it is its OWN method — poll it periodically, not per-tick.
+    // register_blocking_method — reads chain state under a lock, same rationale
+    // as get_info.
+    module
+        .register_blocking_method("get_difficulty_health", |_params, state, _ext| {
+            let height = state.chain.height();
+            let window = state.chain.get_difficulty_blocks(height + 1);
+            let istats = crate::consensus::telemetry::interval_stats(&window);
+            let hashrate = crate::consensus::difficulty::estimate_hashrate(&window);
+            let cstats = state.chain.stats();
+            let tip = state.chain.tip();
+            let tip_age_opt: Option<u64> =
+                match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                    Ok(d) => Some(d.as_secs().saturating_sub(tip.timestamp)),
+                    Err(_) => None,
+                };
+            let target = crate::constants::TARGET_BLOCK_TIME as f64;
+            let assessment = if istats.samples < 2 {
+                "warming" // not enough blocks to assess
+            } else if tip_age_opt.map(|a| a as f64 > target * 3.0).unwrap_or(false) {
+                "stalled" // no new block in >3x target block time
+            } else if istats.stddev_secs > target * 1.5 {
+                "oscillating" // high interval variance
+            } else if istats.mean_secs > target * 1.5 {
+                "slow"
+            } else if istats.mean_secs > 0.0 && istats.mean_secs < target * 0.5 {
+                "fast"
+            } else {
+                "healthy"
+            };
+            Ok::<_, ErrorObjectOwned>(json!({
+                "schema_version":         1u32,
+                "network":                state.network_name,
+                "height":                 height,
+                "difficulty":             cstats.difficulty.to_string(),
+                "total_difficulty":       cstats.total_difficulty.to_string(),
+                "target_block_time_secs": crate::constants::TARGET_BLOCK_TIME,
+                "estimated_hashrate":     hashrate,
+                "tip_age_secs":           tip_age_opt.map(|a| json!(a)).unwrap_or(Value::Null),
+                "window_blocks":          window.len(),
+                "interval": {
+                    "samples":     istats.samples,
+                    "mean_secs":   istats.mean_secs,
+                    "stddev_secs": istats.stddev_secs,
+                    "min_secs":    istats.min_secs,
+                    "max_secs":    istats.max_secs,
+                    "last_secs":   istats.last_secs,
+                },
+                "assessment":             assessment,
             }))
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;

@@ -83,6 +83,8 @@ impl Blockchain {
             db.blocks.insert(&genesis)?;
             db.blocks.set_height_hash(0, &hash)?;
             db.state.set_genesis_hash(&hash)?;
+            // Stamp which network created this data-dir (self-preflight marker).
+            db.state.set_network(self.network)?;
             let state = ChainStateData {
                 tip_hash: hash,
                 height: 0,
@@ -163,6 +165,21 @@ impl Blockchain {
                     "database genesis {} does not match the expected {} genesis {}",
                     actual_genesis, self.network, expected_genesis,
                 )));
+            }
+
+            // Self-preflight network marker: a data-dir explicitly stamped for a
+            // different network fails fast with a clear message; a legacy data-dir
+            // with no marker (written before this existed) is lazily stamped now.
+            match db.state.get_network()? {
+                Some(stored) if stored != self.network => {
+                    return Err(Error::DatabaseError(format!(
+                        "data-dir was created for the {} network but this node is running as {}; \
+                         refusing to start on a mismatched data-dir",
+                        stored, self.network,
+                    )));
+                }
+                Some(_) => {}
+                None => db.state.set_network(self.network)?,
             }
 
             return match db.blocks.get(&state.tip_hash)? {

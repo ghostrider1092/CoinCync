@@ -160,6 +160,16 @@ pub enum MessageType {
     /// message types).
     ChainWork = 51,
 
+    /// Consensus-rules fingerprint advertisement (Firework
+    /// `CAP_CONSENSUS_FINGERPRINT`). Sent only to peers that advertised the
+    /// capability in their Flare — on handshake completion. Carries a 32-byte
+    /// digest of this node's chain-affecting consensus parameters (magic +
+    /// genesis + hard-fork schedule) so a peer can detect divergent consensus
+    /// rules early. ADVISORY: a mismatch is logged/recorded, never a
+    /// disconnect. Gated by the capability bit so nodes predating this message
+    /// never receive it (they reject unknown message types).
+    ConsensusFingerprint = 52,
+
     // ── Personal Node (Tier 1) Protocol Messages ────────────────────
     /// Request compact block filters for a height range.
     /// Personal nodes send this to network nodes.
@@ -228,6 +238,7 @@ impl TryFrom<u8> for MessageType {
             41 => Ok(MessageType::Alert),
             50 => Ok(MessageType::Flare),
             51 => Ok(MessageType::ChainWork),
+            52 => Ok(MessageType::ConsensusFingerprint),
             60 => Ok(MessageType::GetFilters),
             61 => Ok(MessageType::Filters),
             62 => Ok(MessageType::GetOutputDigests),
@@ -259,6 +270,7 @@ impl MessageType {
             MessageType::Pong => 256,         // 256 bytes
             MessageType::Flare => 1024,       // 1 KB
             MessageType::ChainWork => 256,    // u128 + u64 + Hash (~56 B)
+            MessageType::ConsensusFingerprint => 64, // [u8; 32] + borsh overhead
 
             // Request messages: moderate
             MessageType::GetHeaders => 2 * 1024, // 2 KB (locator hashes)
@@ -362,6 +374,17 @@ pub struct ChainWorkMessage {
     pub total_difficulty: u128,
     pub height: u64,
     pub best_hash: Hash,
+}
+
+/// Consensus-rules fingerprint advertisement (Firework
+/// `CAP_CONSENSUS_FINGERPRINT`). A 32-byte digest of the sender's chain-
+/// affecting consensus parameters (see [`crate::consensus::fingerprint`]).
+/// Advisory: the receiver records it and logs a mismatch, but never
+/// disconnects — a staged consensus upgrade must not partition the network
+/// before the activation height it schedules.
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct ConsensusFingerprintMessage {
+    pub fingerprint: [u8; 32],
 }
 
 impl VersionMessage {
@@ -763,6 +786,15 @@ impl Message {
         Ok(Self::new(magic, MessageType::ChainWork, payload))
     }
 
+    /// Consensus-rules fingerprint advertisement (Firework
+    /// `CAP_CONSENSUS_FINGERPRINT`). Only sent to peers that advertised the
+    /// capability in their Flare.
+    pub fn consensus_fingerprint(magic: [u8; 4], fingerprint: [u8; 32]) -> Result<Self> {
+        let msg = ConsensusFingerprintMessage { fingerprint };
+        let payload = borsh::to_vec(&msg).map_err(|e| Error::SerializationError(e.to_string()))?;
+        Ok(Self::new(magic, MessageType::ConsensusFingerprint, payload))
+    }
+
     pub fn ping(magic: [u8; 4]) -> Self {
         use rand::RngCore;
         let mut nonce = [0u8; 8];
@@ -980,8 +1012,8 @@ mod tests {
     /// authoritative list mirrored from the `TryFrom` impl; any drift between
     /// this and the impl is a wire-compatibility break the sweep tests catch.
     const VALID_DISCRIMINANTS: &[u8] = &[
-        0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 30, 31, 40, 41, 50, 51, 60, 61, 62,
-        63, 64, 65, 70, 71, 80, 81, 99,
+        0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 30, 31, 40, 41, 50, 51, 52, 60, 61,
+        62, 63, 64, 65, 70, 71, 80, 81, 99,
     ];
 
     /// n distinct hashes (varying the first two bytes so counts up to ~65k
@@ -1071,13 +1103,13 @@ mod tests {
         }
         assert_eq!(
             VALID_DISCRIMINANTS.len(),
-            32,
-            "expected 32 defined message types"
+            33,
+            "expected 33 defined message types"
         );
     }
 
     /// Every byte NOT in the defined set is rejected — full 0..=255 sweep,
-    /// covering all gaps (4-9, 16-19, 25-29, 32-39, 42-49, 52-59, 66-69,
+    /// covering all gaps (4-9, 16-19, 25-29, 32-39, 42-49, 53-59, 66-69,
     /// 72-79, 82-98, 100-255).
     #[test]
     fn message_type_try_from_rejects_all_undefined_bytes() {
@@ -1175,6 +1207,30 @@ mod tests {
         assert_eq!(parsed.length, msg.header.length);
         assert_eq!(parsed.length as usize, payload.len());
         assert_eq!(parsed.checksum, msg.header.checksum);
+    }
+
+    // ── ConsensusFingerprint message ────────────────────────────────────
+
+    #[test]
+    fn consensus_fingerprint_message_round_trips() {
+        let fp = [7u8; 32];
+        let msg = Message::consensus_fingerprint([1, 2, 3, 4], fp).unwrap();
+        assert_eq!(
+            msg.header.msg_type,
+            MessageType::ConsensusFingerprint as u8
+        );
+        let decoded: ConsensusFingerprintMessage = borsh::from_slice(&msg.payload).unwrap();
+        assert_eq!(decoded.fingerprint, fp);
+    }
+
+    #[test]
+    fn consensus_fingerprint_discriminant_and_size_cap() {
+        assert_eq!(
+            MessageType::try_from(52u8).unwrap(),
+            MessageType::ConsensusFingerprint
+        );
+        // Payload cap comfortably fits a 32-byte fingerprint + borsh framing.
+        assert!(MessageType::ConsensusFingerprint.max_size() >= 32);
     }
 
     // ── VersionMessage::validate ────────────────────────────────────────
