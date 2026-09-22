@@ -521,33 +521,23 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> MessageFramer<R, W> {
         self.reservation = None;
     }
 
-    /// Parse header from buffer
+    /// Parse header from buffer.
+    ///
+    /// Decodes with the SAME borsh codec `write_message` encodes with
+    /// (`borsh::to_vec(&MessageHeader)` at the send side), rather than a
+    /// hand-rolled offset parse. `MessageHeader`'s fields (`magic[4]`,
+    /// `msg_type: u8`, `length: u32` LE, `checksum[4]`) serialize to exactly
+    /// `HEADER_SIZE` bytes, so this is byte-identical to the old manual parse —
+    /// but the read and write sides can no longer drift apart if a field is
+    /// added, reordered, or retyped (shared-rail principle; see the
+    /// `header_roundtrips_through_the_shared_codec` test). We pass exactly
+    /// `HEADER_SIZE` bytes because borsh requires full consumption.
     fn parse_header(&self) -> Result<MessageHeader> {
         if self.header_buf.len() < HEADER_SIZE {
             return Err(Error::InvalidMessage("incomplete header".into()));
         }
-
-        let mut magic = [0u8; 4];
-        magic.copy_from_slice(&self.header_buf[0..4]);
-
-        let msg_type = self.header_buf[4];
-
-        let length = u32::from_le_bytes([
-            self.header_buf[5],
-            self.header_buf[6],
-            self.header_buf[7],
-            self.header_buf[8],
-        ]);
-
-        let mut checksum = [0u8; 4];
-        checksum.copy_from_slice(&self.header_buf[9..13]);
-
-        Ok(MessageHeader {
-            magic,
-            msg_type,
-            length,
-            checksum,
-        })
+        borsh::from_slice(&self.header_buf[..HEADER_SIZE])
+            .map_err(|e| Error::InvalidMessage(format!("header decode: {e}")))
     }
 
     /// Write a complete message to the stream
@@ -740,6 +730,31 @@ mod tests {
         Message::new(magic, MessageType::Blocks, payload.to_vec())
             .to_bytes()
             .unwrap()
+    }
+
+    /// The invariant that lets `parse_header` share the writer's borsh codec:
+    /// a `MessageHeader` encodes to EXACTLY `HEADER_SIZE` bytes and decodes back
+    /// unchanged. If a field is ever added/reordered/retyped, this breaks here
+    /// (loudly, in one place) instead of silently desyncing send vs receive.
+    #[test]
+    fn header_roundtrips_through_the_shared_codec() {
+        let magic = [0xC0, 0x1A, 0xCE, 0x01];
+        let payload = vec![7u8; 1234];
+        let header = MessageHeader::new(magic, MessageType::Blocks, &payload);
+        let bytes = borsh::to_vec(&header).unwrap();
+        assert_eq!(bytes.len(), HEADER_SIZE, "header must be exactly HEADER_SIZE");
+
+        let decoded: MessageHeader = borsh::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.magic, header.magic);
+        assert_eq!(decoded.msg_type, header.msg_type);
+        assert_eq!(decoded.length, header.length);
+        assert_eq!(decoded.checksum, header.checksum);
+        // Byte-for-byte pin of the wire layout the old hand-rolled parser read:
+        // magic[0..4] ‖ msg_type[4] ‖ length u32 LE [5..9] ‖ checksum[9..13].
+        assert_eq!(&bytes[0..4], &magic);
+        assert_eq!(bytes[4], MessageType::Blocks as u8);
+        assert_eq!(u32::from_le_bytes(bytes[5..9].try_into().unwrap()), payload.len() as u32);
+        assert_eq!(&bytes[9..13], &header.checksum);
     }
 
     fn unnormalized_shaper() -> Arc<TrafficShaper> {
