@@ -191,6 +191,20 @@ pub struct MempoolEntry {
     pub height_added: u64,
 }
 
+/// A lightweight mempool transaction summary built from cached `MempoolEntry`
+/// metadata (hash, fee, size) plus cheap-by-reference reads (type, in/out counts)
+/// — for RPC listings that need only summary fields, avoiding a full
+/// `Transaction` clone and hash/size recomputation. See issue #118.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxSummary {
+    pub hash: Hash,
+    pub tx_type: crate::transaction::TxType,
+    pub inputs: usize,
+    pub outputs: usize,
+    pub fee: Amount,
+    pub size: usize,
+}
+
 impl MempoolEntry {
     pub fn new(tx: Transaction, height: u64, time: u64) -> Self {
         let tx_hash = tx.hash();
@@ -1019,6 +1033,51 @@ impl Mempool {
         result
     }
 
+    /// Lightweight summaries mirroring [`Mempool::get_block_transactions`]'s
+    /// selection (same fee-ordered, size-capped, key-image-deduped set), but
+    /// returning cached-metadata [`TxSummary`]s instead of cloning full
+    /// transactions or recomputing each hash/size. See issue #118.
+    pub fn get_transaction_summaries(
+        &self,
+        max_size: usize,
+        max_count: usize,
+    ) -> Vec<TxSummary> {
+        let mut result = Vec::new();
+        let mut total_size = 0;
+        let mut selected_key_images: HashSet<KeyImage> = HashSet::new();
+
+        for (_, tx_hash) in self.by_fee.iter().rev() {
+            if result.len() >= max_count {
+                break;
+            }
+            if let Some(entry) = self.transactions.get(tx_hash) {
+                if total_size + entry.size <= max_size {
+                    let tx_key_images = entry.tx.key_images();
+                    let has_conflict = tx_key_images
+                        .iter()
+                        .any(|ki| selected_key_images.contains(ki));
+                    if has_conflict {
+                        continue;
+                    }
+                    for ki in &tx_key_images {
+                        selected_key_images.insert(*ki);
+                    }
+                    result.push(TxSummary {
+                        hash: entry.tx_hash,
+                        tx_type: entry.tx.tx_type,
+                        inputs: entry.tx.input_count(),
+                        outputs: entry.tx.output_count(),
+                        fee: entry.fee,
+                        size: entry.size,
+                    });
+                    total_size += entry.size;
+                }
+            }
+        }
+
+        result
+    }
+
     /// Get all transaction hashes
     pub fn get_hashes(&self) -> Vec<Hash> {
         self.transactions.keys().copied().collect()
@@ -1486,6 +1545,17 @@ impl SharedMempool {
 
     pub fn get_block_transactions(&self, max_size: usize, max_count: usize) -> Vec<Transaction> {
         self.read_lock().get_block_transactions(max_size, max_count)
+    }
+
+    /// Cached-metadata summaries (issue #118) — see
+    /// [`Mempool::get_transaction_summaries`]. JSON is built by the caller after
+    /// this returns, so the read lock is released before serialization.
+    pub fn get_transaction_summaries(
+        &self,
+        max_size: usize,
+        max_count: usize,
+    ) -> Vec<TxSummary> {
+        self.read_lock().get_transaction_summaries(max_size, max_count)
     }
 
     pub fn stats(&self) -> MempoolStats {
