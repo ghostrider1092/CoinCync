@@ -11,6 +11,13 @@ pub enum TxType {
     Coinbase,
     Transfer,
     Churn,
+    /// Shielded (Lelantus-Spark) private spend — CIP-Shielded. A spend proves
+    /// membership in the Spark accumulator with a serial-tag double-spend guard
+    /// instead of a CLSAG ring over transparent UTXOs. Borsh discriminant `3`:
+    /// adding it is a WIRE HARD FORK, gated by `SHIELDED_TX_ACTIVATION_HEIGHT`
+    /// (disabled by default). Fail-closed until activation + a real verifier is
+    /// wired. See docs/design/cip-shielded-txtype.md.
+    Shielded,
 }
 
 /// Ring member for ring signatures.
@@ -80,6 +87,12 @@ impl Transaction {
 
     pub fn is_coinbase(&self) -> bool {
         self.tx_type == TxType::Coinbase
+    }
+    /// True for a shielded (Spark) private spend. These do NOT use the CLSAG
+    /// ring / transparent-UTXO model, so the ring/range/balance validation and
+    /// the UTXO-set apply paths must branch on this.
+    pub fn is_shielded(&self) -> bool {
+        self.tx_type == TxType::Shielded
     }
     pub fn input_count(&self) -> usize {
         self.inputs.len()
@@ -486,17 +499,30 @@ mod tests {
 
     #[test]
     fn test_txtype_out_of_range_discriminant_decode_rejected() {
-        // Valid TxType discriminants are 0 (Coinbase), 1 (Transfer), 2 (Churn).
-        // make_minimal_tx is Coinbase, so byte[0] is version and byte[1] is the
-        // TxType discriminant. Setting it to 3 must fail to decode (no panic).
+        // Valid TxType discriminants are 0 (Coinbase), 1 (Transfer), 2 (Churn),
+        // 3 (Shielded). make_minimal_tx is Coinbase, so byte[0] is version and
+        // byte[1] is the TxType discriminant. Setting it to 4 (out of range)
+        // must fail to decode (no panic).
         let tx = make_minimal_tx();
         let mut bytes = borsh::to_vec(&tx).unwrap();
-        bytes[1] = 3;
+        bytes[1] = 4;
         let decoded = borsh::from_slice::<Transaction>(&bytes);
         assert!(
             decoded.is_err(),
             "out-of-range TxType discriminant must be rejected, not decoded"
         );
+    }
+
+    #[test]
+    fn test_txtype_shielded_discriminant_roundtrips() {
+        // Discriminant 3 (Shielded) is now a valid variant and must round-trip.
+        let mut tx = make_minimal_tx();
+        tx.tx_type = TxType::Shielded;
+        let bytes = borsh::to_vec(&tx).unwrap();
+        assert_eq!(bytes[1], 3, "Shielded is borsh discriminant 3");
+        let decoded = borsh::from_slice::<Transaction>(&bytes).unwrap();
+        assert_eq!(decoded.tx_type, TxType::Shielded);
+        assert!(decoded.is_shielded() && !decoded.is_coinbase());
     }
 
     #[test]

@@ -104,6 +104,18 @@ fn g_point() -> RistrettoPoint {
     RISTRETTO_BASEPOINT_POINT
 }
 
+/// The value generator `H` of the range-proof Pedersen commitment `C = v·H + r·G`.
+/// Exposed so a shielded value commitment can be linked (via a value-equality
+/// proof) to a range-provable commitment on this exact basis.
+pub fn value_generator() -> RistrettoPoint {
+    *H_POINT
+}
+/// The blinding generator `G` (Ristretto basepoint) of the range-proof
+/// Pedersen commitment `C = v·H + r·G`.
+pub fn blinding_generator() -> RistrettoPoint {
+    g_point()
+}
+
 /// Commit using Monero convention: C = v*H + r*G
 fn pedersen_commit(value: u64, blinding: &Scalar) -> RistrettoPoint {
     Scalar::from(value) * *H_POINT + blinding * g_point()

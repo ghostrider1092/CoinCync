@@ -92,6 +92,8 @@ sketch-cut-through        = []   # CIP-003 (also see existing src/crypto/mw_cutt
 sketch-block-aggregation  = []   # CIP-003 (pairs with cut-through)
 sketch-kernel-offsets     = []   # CIP-004
 sketch-lelantus-spark     = []   # CIP-005 (gates src/crypto/lelantus_spark.rs)
+sketch-gk-proof           = []   # CIP-Shielded 2c#1 (gates src/crypto/groth_kohlweiss.rs)
+shielded-soak-stub        = []   # CIP-Shielded: inert prover/verifier for the assembly-line soak (NEVER production)
 
 [dependencies]
 # â”€â”€ Elliptic curves â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

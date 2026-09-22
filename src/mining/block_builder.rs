@@ -412,15 +412,14 @@ pub fn claimable_fees_for_block_size(
         .as_atomic()
 }
 
-/// The validator's block-size formula, so the builder can size a candidate the
-/// exact same way: 200-byte header + every transaction (coinbase included).
-/// Mirrors `Block::size()` in `consensus/block.rs`.
+/// Size a candidate block exactly the way the validator does, by calling the
+/// single-sourced [`crate::consensus::block::block_size_from_txs`] over the
+/// coinbase + mempool txs — no local re-implementation, so the builder and
+/// `Block::size()` can never drift.
 fn assembled_block_size(coinbase: &Transaction, mempool_txs: &[Transaction]) -> usize {
-    let tx_sizes = std::iter::once(coinbase)
-        .chain(mempool_txs.iter())
-        .map(|tx| tx.size())
-        .fold(0usize, |acc, s| acc.saturating_add(s));
-    200usize.saturating_add(tx_sizes)
+    crate::consensus::block::block_size_from_txs(
+        std::iter::once(coinbase).chain(mempool_txs.iter()),
+    )
 }
 
 /// Build the coinbase tx — emission reward + claimable fees, paid to a fresh

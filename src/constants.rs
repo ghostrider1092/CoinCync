@@ -402,6 +402,24 @@ pub const SEQ_PAD_ITERATIONS: u32 = 1;
 /// Must be coordinated across all nodes. Set to a future height agreed by governance.
 pub const V2_TX_ACTIVATION_HEIGHT: u64 = 50_000; // ~69 days at 120s blocks
 
+/// Activation height for shielded (Lelantus-Spark) transactions
+/// (`TxType::Shielded`). Below this height a shielded tx is REJECTED by
+/// consensus (fail-closed). `u64::MAX` = permanently disabled: the wire type
+/// and its validation/apply dispatch exist, but no shielded tx can ever be
+/// accepted until this is set to a real governance-agreed future height AND the
+/// real Spark verifier + accumulator-apply path are wired and audited.
+///
+/// SECURITY: setting this to a finite height is a consensus-breaking wire hard
+/// fork (borsh discriminant 3). It stays `u64::MAX` until the shielded path is
+/// complete, verified, and coordinated. See docs/design/cip-shielded-txtype.md.
+pub const SHIELDED_TX_ACTIVATION_HEIGHT: u64 = u64::MAX;
+
+/// Whether shielded transactions are active at `height` (fail-closed: only once
+/// a real activation height is set and reached).
+pub const fn shielded_tx_active_at_height(height: u64) -> bool {
+    height >= SHIELDED_TX_ACTIVATION_HEIGHT
+}
+
 pub fn block_version_at_height(height: u64) -> u8 {
     if height >= V2_TX_ACTIVATION_HEIGHT {
         2

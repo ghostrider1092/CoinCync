@@ -44,6 +44,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                         crate::transaction::TxType::Coinbase => "coinbase",
                         crate::transaction::TxType::Transfer => "transfer",
                         crate::transaction::TxType::Churn => "churn",
+                        crate::transaction::TxType::Shielded => "shielded",
                     };
                     json!({
                         "hash":    hex::encode(tx.hash().as_bytes()),
