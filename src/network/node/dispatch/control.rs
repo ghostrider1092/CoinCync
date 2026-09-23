@@ -813,7 +813,8 @@ mod handler_tests {
         let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
 
         let payload = vec![0u8; 257]; // > MAX_CHAINWORK_MSG_SIZE (256)
-        handle_chain_work(peer_id, &payload, &peers, &sync)
+        let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        handle_chain_work(peer_id, &payload, &peers, &sync, &chain)
             .await
             .unwrap();
 
@@ -834,7 +835,8 @@ mod handler_tests {
             best_hash: tip,
         })
         .unwrap();
-        handle_chain_work(peer_id, &payload, &peers, &sync)
+        let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        handle_chain_work(peer_id, &payload, &peers, &sync, &chain)
             .await
             .unwrap();
 
@@ -851,7 +853,8 @@ mod handler_tests {
         let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
 
         let payload = vec![0u8; 3]; // <= 256 but not a valid ChainWorkMessage
-        handle_chain_work(peer_id, &payload, &peers, &sync)
+        let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        handle_chain_work(peer_id, &payload, &peers, &sync, &chain)
             .await
             .unwrap();
 
@@ -920,8 +923,10 @@ mod handler_tests {
         handle_verack(peer_id, MAGIC, &peers, &senders, &dand, &sync, &chain)
             .await
             .unwrap();
-        assert!(srx.try_recv().is_ok(), "GetAddr re-sent on replay");
-        assert!(srx.try_recv().is_err(), "no second GetHeaders on replay");
+        assert!(
+            srx.try_recv().is_err(),
+            "replayed Verack on an already-Connected peer is a no-op (nothing re-sent)"
+        );
         assert!(sync.read().await.headers_request_pending());
     }
 }
