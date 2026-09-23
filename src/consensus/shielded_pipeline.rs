@@ -500,12 +500,133 @@ pub mod gk {
     }
 
     // ── The COMPLETE shielded payload verifier (all proofs composed) ──────────
-    use crate::consensus::shielded::ShieldedPayload;
-    use crate::crypto::groth_kohlweiss::{
-        verify_mint_binding, verify_spend_bound, MintBindingProof, SparkSpendProofV3,
+    use crate::consensus::shielded::{
+        ShieldedInput, ShieldedOutput, ShieldedPayload, SHIELDED_PAYLOAD_VERSION,
     };
-    use crate::crypto::spark_balance::BalanceProof;
-    use crate::crypto::spark_range::{BulletproofSparkBridge, RangeTranslator, ShieldedRangeProof};
+    use crate::crypto::groth_kohlweiss::{
+        bound_coin_commitment, prove_mint_binding, prove_spend_bound, verify_mint_binding,
+        verify_spend_bound, MintBindingProof, SparkSpendProofV3,
+    };
+    use crate::crypto::spark_balance::{prove_balance_with_delta, value_commitment, BalanceProof};
+    use crate::crypto::spark_range::{
+        prove_value_range, BulletproofSparkBridge, RangeTranslator, ShieldedRangeProof,
+    };
+    use curve25519_dalek::scalar::Scalar;
+    use rand::{CryptoRng, RngCore};
+
+    /// A shielded note the wallet owns and is spending: which bucket + leaf offset
+    /// it sits at, and its full opening `(value, serial m, blinding r)` of the
+    /// bound coin `C = value·Gv + m·H + r·K`.
+    pub struct SpendNote {
+        pub bucket_index: u64,
+        pub member_index: usize,
+        pub value: u64,
+        pub serial: Scalar,
+        pub blinding: Scalar,
+    }
+
+    /// A new shielded coin to create: value + a fresh serial and coin blinding.
+    pub struct NewNote {
+        pub value: u64,
+        pub serial: Scalar,
+        pub coin_blinding: Scalar,
+    }
+
+    /// The shielded transaction BUILDER — the prover-side counterpart to
+    /// [`verify_shielded_payload`]. Given wallet-owned `inputs`, the `outputs` to
+    /// create, the `fee`, and a public `value_balance` (shield/unshield), it
+    /// assembles a complete [`ShieldedPayload`] whose every proof
+    /// (`verify_shielded_payload`) will accept: per-input value-bound spend +
+    /// range, per-output mint-binding + range, and the tx balance. The per-value
+    /// commitment blindings for the balance are drawn fresh here. This is the core
+    /// the wallet's shielded send path drives. Gated `sketch-gk-proof`.
+    pub fn build_shielded_payload<R: CryptoRng + RngCore>(
+        store: &ShieldedStore,
+        inputs: &[SpendNote],
+        outputs: &[NewNote],
+        fee: u64,
+        value_balance: i64,
+        rng: &mut R,
+    ) -> Result<ShieldedPayload> {
+        // Conservation must hold before we spend effort proving anything.
+        let sin: i128 = inputs.iter().map(|n| n.value as i128).sum();
+        let sout: i128 = outputs.iter().map(|n| n.value as i128).sum();
+        if sin - sout - fee as i128 - value_balance as i128 != 0 {
+            return Err(Error::CryptoError(
+                "build: Σ in must equal Σ out + fee + value_balance".into(),
+            ));
+        }
+
+        // Outputs first (the message binds them). Each output publishes a value
+        // commitment V_out (blinding drawn here) bound to its tree coin.
+        let mut out_structs = Vec::with_capacity(outputs.len());
+        let mut out_values = Vec::with_capacity(outputs.len());
+        let mut out_vblinds = Vec::with_capacity(outputs.len());
+        for o in outputs {
+            let ob = Scalar::random(&mut *rng);
+            out_structs.push(ShieldedOutput {
+                note_commitment: bound_coin_commitment(o.value, &o.serial, &o.coin_blinding)
+                    .compress()
+                    .to_bytes(),
+                value_commitment: value_commitment(o.value, &ob).compress().to_bytes(),
+                range_proof: prove_value_range(o.value, &ob, rng)?.encode(),
+                mint_binding: prove_mint_binding(o.value, &o.serial, &o.coin_blinding, &ob, rng)
+                    .encode(),
+            });
+            out_values.push(o.value);
+            out_vblinds.push(ob);
+        }
+
+        let message = shielded_tx_message(fee, value_balance, &out_structs);
+
+        // Inputs: each spend publishes V_in (blinding drawn here) bound to the
+        // spent coin, plus its range.
+        let mut in_structs = Vec::with_capacity(inputs.len());
+        let mut in_values = Vec::with_capacity(inputs.len());
+        let mut in_vblinds = Vec::with_capacity(inputs.len());
+        for inp in inputs {
+            let anon = StoreAnonSetResolver::new(store).resolve_bucket(inp.bucket_index)?;
+            let coins = decode_set(&anon)?;
+            let vb = Scalar::random(&mut *rng);
+            let sp = prove_spend_bound(
+                &coins,
+                inp.member_index,
+                inp.value,
+                &inp.serial,
+                &inp.blinding,
+                &vb,
+                &message,
+                rng,
+            )?;
+            in_structs.push(ShieldedInput {
+                bucket_index: inp.bucket_index,
+                nullifier: sp.nullifier(),
+                spend_proof: sp.encode(),
+                range_proof: prove_value_range(inp.value, &vb, rng)?.encode(),
+            });
+            in_values.push(inp.value);
+            in_vblinds.push(vb);
+        }
+
+        let balance = prove_balance_with_delta(
+            &in_values,
+            &in_vblinds,
+            &out_values,
+            &out_vblinds,
+            fee,
+            value_balance,
+            &message,
+            rng,
+        )?;
+
+        Ok(ShieldedPayload {
+            version: SHIELDED_PAYLOAD_VERSION,
+            inputs: in_structs,
+            outputs: out_structs,
+            value_balance,
+            balance_proof: balance.encode(),
+        })
+    }
 
     /// The COMPLETE shielded-transaction verifier — every proof composed into the
     /// full value-conservation + privacy check for one shielded tx:
@@ -1148,5 +1269,48 @@ mod tests {
             verify_shielded_payload(&store, &inflated, fee).is_err(),
             "inflated output must fail the composed payload verifier"
         );
+    }
+
+    /// The BUILDER round-trip: `build_shielded_payload` (the wallet/prover side)
+    /// produces a payload the complete verifier accepts, and it enforces value
+    /// conservation up front.
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn builder_produces_a_payload_the_verifier_accepts() {
+        use super::gk::{build_shielded_payload, verify_shielded_payload, NewNote, SpendNote};
+        use crate::crypto::groth_kohlweiss::bound_coin_commitment;
+        use curve25519_dalek::scalar::Scalar;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        let mut rng = ChaCha20Rng::seed_from_u64(2718);
+        let store = ShieldedStore::new();
+        let mut openings = Vec::new();
+        for i in 0..5u64 {
+            let value = (i + 1) * 1000;
+            let serial = Scalar::random(&mut rng);
+            let blinding = Scalar::random(&mut rng);
+            store.append_commitment(NoteCommitmentEntry {
+                commitment: bound_coin_commitment(value, &serial, &blinding).compress().to_bytes(),
+                height: 1,
+                tx_index: 0,
+                position: 0,
+            });
+            openings.push((value, serial, blinding));
+        }
+        // Spend coins at offsets 1 (2000) and 3 (4000) = 6000 in; fee 500; one 5500 output.
+        let inputs = vec![
+            SpendNote { bucket_index: 0, member_index: 1, value: openings[1].0, serial: openings[1].1, blinding: openings[1].2 },
+            SpendNote { bucket_index: 0, member_index: 3, value: openings[3].0, serial: openings[3].1, blinding: openings[3].2 },
+        ];
+        let fee = 500u64;
+        let outputs = vec![NewNote { value: 5500, serial: Scalar::random(&mut rng), coin_blinding: Scalar::random(&mut rng) }];
+
+        let payload = build_shielded_payload(&store, &inputs, &outputs, fee, 0, &mut rng).unwrap();
+        assert!(verify_shielded_payload(&store, &payload, fee).is_ok(), "built payload must verify");
+
+        // Builder rejects a non-conserving tx up front.
+        let bad = vec![NewNote { value: 9999, serial: Scalar::random(&mut rng), coin_blinding: Scalar::random(&mut rng) }];
+        assert!(build_shielded_payload(&store, &inputs, &bad, fee, 0, &mut rng).is_err());
     }
 }
