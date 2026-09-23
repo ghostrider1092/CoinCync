@@ -57,46 +57,53 @@ Prove knowledge of a hidden index `l` and witnesses `(v, s_pub, x, r, b)` s.t.
 
 The nullifier published for double-spend detection is `T`.
 
-## The tag-base problem (the crux to pin with the paper)
+## The tag construction — CORRECTED against the paper (2021/1173)
 
-`T` must be **per-coin** (so one spend key spending two coins yields two different
-tags — else all a wallet's coins link and only one is ever spendable) **and**
-bindable to a **hidden** member. Two candidate resolutions, to be decided at audit:
+**Update (grounded in the Lelantus-Spark paper):** the linking tag is a
+**Dodis-Yampolskiy-style verifiable random function (VRF)**, *not* a key-image.
+The earlier key-image sketch (`T = x·Hp(C_l)`) is the **wrong** tree for Spark's
+scan ≠ spend and is retracted here. What the paper actually does:
 
-- **(A) Coin-derived base, proven in-circuit:** `B_l = Hp(C_l)`
-  (`spark_note::hash_to_point`). Per-coin by construction. The difficulty is
-  proving `T = x·Hp(C_l)` for hidden `l`, since `Hp` is nonlinear — the one-of-many
-  works over *linear* combinations of the `C_i`. This needs the Triptych treatment:
-  the proof's selection polynomial that isolates `C_l` is reused to isolate the
-  matching precomputed `Hp(C_i)` (the verifier computes `{Hp(C_i)}` for the public
-  set, so they are public points and the *same* one-of-many coefficients select
-  `Hp(C_l)` linearly). **This is the preferred route** — it keeps the tag per-coin
-  and the base is a public function of public data.
-- **(B) Fixed base + per-coin factor:** `T = x·U` with global NUMS `U` links all of
-  one key's spends → rejected (violates per-coin). A per-coin variant `T =
-  (x + s_pub)^{-1}·U` (Spark's actual serial/tag inversion) is per-coin but adds an
-  inverse relation to prove. Fallback only if (A)'s dual-selection is unsound.
+- **(PRIMARY — Spark's real construction) VRF inversion tag.** The coin has a
+  serial-number-context value `s` (derivable by the *view* key, for detection) and
+  the spend key contributes a secret `r_spend`. The tag is a VRF evaluation of the
+  form `T = (r_spend + s)^{-1}·U` (Dodis-Yampolskiy VRF, base a NUMS `U`). This is:
+  - **per-coin** (depends on the coin's `s`) → a key's coins don't all collide;
+  - **spend-bound** → computing `T` needs `r_spend` (the view key knows `s` but not
+    `r_spend`), which is the scan ≠ spend separation, done properly;
+  - **unforgeable & unique** (VRF pseudorandomness + uniqueness).
+  The cost: the spend proof must prove a **multiplicative/inverse relation**
+  (`T·(r_spend + s) = U`), i.e. a Chaum-Pedersen over the inverse, fused with the
+  one-of-many — the standard Spark spend proof.
+- **(RETRACTED) key-image `T = x·Hp(C_l)`.** Nonlinear `Hp` over a hidden member
+  needs a Triptych dual-selection, and — more importantly — it does not match
+  Spark's view/spend key split. Do not implement this route.
 
-**Route (A) is the design intent**: because `{Hp(C_i)}` are public, binding `T`
-reduces to running the *existing* one-of-many's selection over a second public
-vector — a well-understood extension (Triptych's key image is exactly this).
+**Implication for the code already written:** `spark_note::link_tag` /
+`prove_tag` / `verify_tag` (the key-image + Chaum-Pedersen equality) are a
+*correct standalone equality-of-DL primitive* but the **wrong tag shape** for the
+shielded spend. They stay as a tested building block / for other uses, but the
+shielded nullifier must be the VRF tag above. Flag them in code accordingly.
 
-## Construction sketch (Route A, to be formalized + audited)
+## Construction (VRF route — to be transcribed verbatim from the paper, then audited)
 
-Extend `prove_one_of_many_ctx` so a single Fiat-Shamir transcript proves the
-selection of `C_l` from `{C_i}` **and** the identical selection of `Hp(C_l)` from
-`{Hp(C_i)}`, then attaches a Chaum-Pedersen-style equality tying the selected
-`Hp(C_l)` to `T` via the same `x` that contributes `x·H` to `C_l`:
+The precise relations must be copied from Lelantus-Spark §(spend proof) — this
+CIP intentionally does **not** reconstruct the VRF one-of-many algebra from
+memory (that is how subtly-unsound proofs get shipped). The shape to transcribe:
 
-1. Prover forms the standard one-of-many commitments for index `l` over the shifted
-   set `W_i = C_i − V` (membership + value).
-2. Using the **same** blinding/selection scalars, form the parallel commitments
-   over `{Hp(C_i)}`, yielding a proof element that equals `x·Hp(C_l) = T` at `l`.
-3. Bind `x` across the two rails (the `x·H` inside `C_l` and the `x·Hp(C_l)` in
-   `T`) with the equality-of-DL argument already implemented in
-   `spark_note::{prove_tag, verify_tag}` — generalized to the hidden index.
-4. Single challenge `c = H(ctx ‖ set ‖ V ‖ T ‖ all commitments)`; responses fold
-   the membership witnesses and `x` together.
+1. Membership + value: the HK one-of-many already built
+   (`prove_spend_value_hidden`, `SparkSpendProofV4`) proves `W_l = C_l − V ∈
+   ⟨H,K⟩` at hidden `l`, serial hidden. **This half is done and sound.**
+2. Serial recovery: the view key derives `s` for the spent coin (see
+   `cip-shielded-notes.md`, `RecoveredNote.serial_public`).
+3. VRF tag: publish `T = (r_spend + s)^{-1}·U`; prove `T·(r_spend + s) = U`
+   without revealing `r_spend` or `s`, and prove the *same* `s` is the spent
+   coin's serial (binding the tag to the hidden member selected in step 1).
+4. Single Fiat-Shamir transcript over `ctx ‖ set ‖ V ‖ T ‖ all commitments`.
+
+**Blocking dependency:** transcribe steps 3's exact relations + generators from
+the paper (or the Firo reference implementation) before coding. Until then the
+nullifier cannot be produced soundly, so the shielded spend is not end-to-end.
 
 The output is a new `SparkSpendProofV4 { one_of_many_ext, value_commitment: V,
 tag: T, message }` — replacing V3's `serial` field with the tag `T`. `verify`

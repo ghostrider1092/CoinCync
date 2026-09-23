@@ -327,6 +327,14 @@ fn xor8_bytes(enc: &[u8; 8], pad: &[u8; 8]) -> [u8; 8] {
 // `Q_spend` — stays HIDDEN (the verifier here is given `Q_spend` for a known
 // coin). That composition is the remaining unaudited step; this equality proof
 // is a self-contained, standard building block for it.
+//
+// ⚠ TAG SHAPE (corrected against eprint 2021/1173, see
+// docs/design/cip-shielded-spend-composition.md): Lelantus-Spark's real linking
+// tag is a **Dodis-Yampolskiy VRF** `T = (r_spend + s)^{-1}·U`, NOT this
+// key-image `x·Hp(coin)`. The key-image tag + Chaum-Pedersen below is a correct
+// standalone equality-of-DL primitive, but it is the WRONG shape for the
+// shielded spend nullifier. Do NOT wire `link_tag`/`prove_tag` as the shielded
+// nullifier; the VRF tag must be transcribed from the paper first.
 
 /// Hash-to-point in the tag basis: `Hp(coin)`.
 fn hash_to_point(coin: &[u8; 32]) -> RistrettoPoint {
