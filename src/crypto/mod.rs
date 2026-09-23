@@ -67,6 +67,8 @@ pub mod spark_balance; // CIP-Shielded (value-balance / excess proof)
 pub mod spark_range; // CIP-Shielded (value range binding via BP+)
 #[cfg(feature = "sketch-gk-proof")]
 pub mod spark_turnstile; // CIP-Shielded (transparent⇄shielded value turnstile)
+#[cfg(feature = "sketch-gk-proof")]
+pub mod spark_note; // CIP-Shielded (Note Connector: stealth⇄bound-coin detect/recover)
 
 pub use bulletproofs::{
     batch_verify_range_proofs, commit, create_aggregated_range_proof,
