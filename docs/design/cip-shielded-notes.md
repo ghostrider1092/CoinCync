@@ -39,6 +39,65 @@ Spark separation needs the address to carry **two** points (diversified):
 payload grows; version the HRP/format). `SparkScanKey` detects + recovers value;
 only the holder of `SparkSpendKey` can produce the spend witness / nullifier.
 
+## The Note Connector — the shared rail (stealth ⇄ bound-coin translator)
+
+The clean way to close the gap is a **connector**, in the same family as the
+bulletproof⇄Spark "talking connector" (`spark_range::CommitmentBridge`) and the
+`Phase2Store` shared-rail: **one derivation function that both the sender's
+`create` and the recipient's `scan` traverse.** Because detection runs the
+*identical* rail as creation, scan is the exact inverse of create *by
+construction* — the two sides cannot drift apart, which is the whole class of
+"wallet can't find its own coin" / "recomputed `C` ≠ tree `C`" bugs designed out.
+
+**What it translates.** The wallet already speaks a mature *stealth-address
+language* for transparent outputs (`wallet/lightsync.rs`):
+`compute_view_tag_light` (the cheap O(1) filter), `compute_shared_secret_light`
+(ECDH `ss`), `decrypt_amount_light` (amount pad + blinding via
+`hash_domain(b"COINCYNC_AMOUNT_KEY", ss)`). The flagship speaks *bound-coin
+language*: an opening `(v, s, r)` for `C = v·Gv + s·H + r·K` plus a balance
+blinding `b`. The Note Connector is the translator between the two vocabularies —
+nothing about the ECDH envelope is novel; it is the audited transparent pattern
+pointed at a new commitment basis.
+
+```text
+            ┌───────────────── the one shared rail ─────────────────┐
+ sender ──▶ │ ss = ECDH(e, Q_scan)  →  derive_note(ss, Q_spend):     │ ──▶ published note (C,R,enc,tag)
+ (create)   │      view_tag  = H(ss ‖ "…_tag")[0]      (Stage-1)      │      + tree coin C
+            │      r,b,amt    = H(ss ‖ {"_r","_b","_amt"})            │
+ recipient  │      s_pub      = H(ss ‖ "…_s" ‖ Q_spend) (scan-side)   │ ◀── scan(scan_key, note):
+ (scan)  ◀─ │ ss = ECDH(scan_secret, R)  → SAME derive_note          │      tag filter → recompute C' → C'==C ?
+            └────────────────────────────────────────────────────────┘
+```
+
+**Two-stage assembly line** (mirrors lightsync): Stage-1 is the 1-byte
+`view_tag` — reject non-owned notes in O(1) without any point math; Stage-2
+recomputes `C'` and compares constant-time only for tag survivors. This keeps a
+wallet scan O(notes) cheap hashes + O(owned) point recomputes, not O(notes)
+recomputes (Open question #2, answered).
+
+**The connector is deliberately one-way on the spend axis.** It emits the
+*value-recovering* half — `(v, r, b, s_pub)` — which is all a scan key needs for
+balance and display. It does **not** emit spend authority: the full serial `s`
+and the nullifier bind `SparkSpendKey` and are produced by a *separate* spend
+rail, not this connector. So "scan ≠ spend" is a structural property of the
+connector's output type (a `RecoveredNote` has no nullifier), not a runtime
+check — the view-key-steals-funds class is closed at the type level. **(This
+binding is the audit-critical piece; the connector seam is safe to build now,
+its serial/nullifier body is the reviewed fill-in.)**
+
+Interface (gated `sketch-gk-proof`, to live in `crypto/spark_note.rs`):
+
+```rust
+/// The stealth⇄bound-coin connector. `create` and `scan` share `derive_note`,
+/// so scan is the inverse of create by construction.
+pub trait NoteConnector {
+    fn create<R: CryptoRng + RngCore>(&self, addr: &SparkAddr2, value: u64, rng: &mut R) -> PublishedNote;
+    fn scan(&self, scan: &SparkScanKey, note: &PublishedNote) -> Option<RecoveredNote>;
+}
+/// The single rail both sides call — the anti-drift guarantee.
+fn derive_note(ss: &[u8; 32], q_spend: &RistrettoPoint) -> NoteSecrets; // {r,b,amt_pad,s_pub,view_tag}
+```
+
 ## Note creation (sender → recipient address `(d, Q_scan, Q_spend)`)
 
 Per output:
@@ -94,8 +153,10 @@ nullifier and spend witness need `SparkSpendKey`. Retire the standalone O(n)
 
 ## Open questions
 
-1. Exact nullifier ↔ spend-secret binding (pin to the paper).
-2. Detection-tag design (avoid O(notes) full trial-recompute; e.g. a short view tag).
+1. Exact nullifier ↔ spend-secret binding (pin to the paper). *(Lives on the
+   spend rail, deliberately outside the Note Connector — see the connector section.)*
+2. ~~Detection-tag design~~ **Answered:** the connector's Stage-1 1-byte `view_tag`
+   (same shape as `compute_view_tag_light`) gates the full recompute.
 3. Address/bech32 format + version bump for the two-point address.
 4. How `s` (public function of `ss`) interacts with the GK spend (the spend proves
    knowledge of `(m=s, r)`; confirm scan-derivable `s` doesn't weaken soundness —
@@ -105,9 +166,11 @@ nullifier and spend witness need `SparkSpendKey`. Retire the standalone O(n)
 ## Implementation plan (post-design-signoff, all gated `sketch-gk-proof`)
 
 1. Extend `SparkAddress` → `{diversifier, q_scan, q_spend}` + bech32 version.
-2. `crypto/spark_note.rs`: `create_note(address, value, rng) -> (coin C, R, enc, opening)`
-   and `scan_note(scan_key, C, R, enc) -> Option<RecoveredNote>` + tests
-   (create→scan round-trip; wrong key rejects; scan-only cannot spend).
+2. `crypto/spark_note.rs`: the **Note Connector** — `NoteConnector::create` /
+   `::scan` over the shared `derive_note` rail (create→scan round-trip; wrong key
+   rejects on the Stage-1 tag; `RecoveredNote` type carries no nullifier, so
+   scan-only *cannot* spend). Seam + tests land first; the serial/nullifier body
+   is the audited fill-in.
 3. Wallet: a shielded note store (owned `SpendNote`s) + hook `scan_note` into the
    block scan (`background_sync`/`lightsync`).
 4. Wallet `shielded-send` command → selects notes → `build_shielded_payload` → submit.
