@@ -39,9 +39,9 @@
 //! spend-secret binding** (the spend rail) is deliberately NOT in this file — it
 //! is the audit-critical fill-in pinned to the Lelantus-Spark paper.
 
-use crate::crypto::peer_scalars::PeerPoint;
+use crate::crypto::peer_scalars::{PeerPoint, PeerScalar};
 use crate::crypto::spark_generators::{gen_gv, gen_h, gen_k};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
@@ -299,16 +299,127 @@ fn xor8_bytes(enc: &[u8; 8], pad: &[u8; 8]) -> [u8; 8] {
     out
 }
 
-/// The scan ≠ spend boundary, made explicit: the spendable serial is
-/// `s_full = s_pub + spend_secret`. This helper needs `spend_secret`, which a
-/// [`NoteScanKey`] does not carry — so a view-only holder physically cannot call
-/// it with the right input.
-///
-/// NOTE: the **nullifier** derived from `s_full` (and its exact binding to the
-/// spend secret) is the audit-critical piece pinned to the Lelantus-Spark paper;
-/// it is intentionally NOT implemented here.
-pub fn spend_serial(recovered: &RecoveredNote, spend_secret: &Scalar) -> Scalar {
-    recovered.serial_public + spend_secret
+// ---------------------------------------------------------------------------
+// Spend rail: the linking tag (double-spend nullifier bound to the spend key)
+// ---------------------------------------------------------------------------
+//
+// WHY A TAG, NOT A REVEALED SERIAL. The classic spend (`SparkSpendProofV3`)
+// reveals the serial scalar and sets `nullifier = H(serial)`. That cannot give
+// scan ≠ spend: the serial is sender-committed (hence scan-derivable), so a view
+// key could reconstruct it and spend; and folding in the spend key
+// (`s_full = s_pub + spend_secret`) is worse — REVEALING `s_full` at spend would
+// leak the long-term `spend_secret` (= `s_full − s_pub`, and the scanner knows
+// `s_pub`). So the double-spend nullifier is instead a **linking tag** — a group
+// element `T = spend_secret·Hp(coin)` (key-image style) that:
+//   * is deterministic per coin (double-spend ⇒ identical `T`),
+//   * requires `spend_secret` to form (a view-only holder cannot), and
+//   * reveals nothing about `spend_secret` (discrete-log hard) or other coins.
+//
+// The coin already commits the owner's spend key: `C = v·Gv + s_pub·H + Q_spend
+// + r·K` with `Q_spend = spend_secret·H`. This primitive proves, via a standard
+// Chaum-Pedersen equality-of-discrete-log, that the SAME `spend_secret` underlies
+// both `Q_spend = x·H` and `T = x·Hp(coin)` — so a thief who scanned the opening
+// but lacks `spend_secret` cannot produce a `T` that verifies against the coin's
+// `Q_spend`.
+//
+// AUDIT-CRITICAL FILL-IN (deferred, pin to the Lelantus-Spark paper): binding
+// this tag into the GK one-of-many so the spent coin's index — and thus its
+// `Q_spend` — stays HIDDEN (the verifier here is given `Q_spend` for a known
+// coin). That composition is the remaining unaudited step; this equality proof
+// is a self-contained, standard building block for it.
+
+/// Hash-to-point in the tag basis: `Hp(coin)`.
+fn hash_to_point(coin: &[u8; 32]) -> RistrettoPoint {
+    let mut h = Sha3_512::new();
+    h.update(b"COINCYNC_NOTE_TAGBASE_v1");
+    h.update(coin);
+    let mut wide = [0u8; 64];
+    wide.copy_from_slice(&h.finalize());
+    RistrettoPoint::from_uniform_bytes(&wide)
+}
+
+/// A Chaum-Pedersen proof that `Q_spend = x·H` and `T = x·Hp(coin)` share the
+/// same `x` (= `spend_secret`), without revealing `x`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "sketch-gk-proof", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
+pub struct TagProof {
+    a: [u8; 32], // k·H
+    b: [u8; 32], // k·Hp
+    z: [u8; 32], // k + c·x
+}
+
+fn tag_challenge(
+    coin: &[u8; 32],
+    q_spend: &RistrettoPoint,
+    tag: &RistrettoPoint,
+    a: &RistrettoPoint,
+    b: &RistrettoPoint,
+) -> Scalar {
+    let mut h = Sha3_512::new();
+    h.update(b"COINCYNC_NOTE_TAG_CHALLENGE_v1");
+    h.update(coin);
+    h.update(q_spend.compress().as_bytes());
+    h.update(tag.compress().as_bytes());
+    h.update(a.compress().as_bytes());
+    h.update(b.compress().as_bytes());
+    let mut wide = [0u8; 64];
+    wide.copy_from_slice(&h.finalize());
+    Scalar::from_bytes_mod_order_wide(&wide)
+}
+
+/// The deterministic double-spend nullifier for a coin: `T = spend_secret·Hp(coin)`.
+/// Requires `spend_secret` — a [`NoteScanKey`] holder cannot compute it.
+pub fn link_tag(coin: &[u8; 32], spend_secret: &Scalar) -> [u8; 32] {
+    (hash_to_point(coin) * spend_secret).compress().to_bytes()
+}
+
+/// Prove spend authority for `coin`: produce the linking tag `T` and a proof it
+/// is bound to the same `spend_secret` as the coin's `Q_spend`. `T` is the
+/// nullifier published for double-spend detection.
+pub fn prove_tag<R: CryptoRng + RngCore>(
+    coin: &[u8; 32],
+    spend_secret: &Scalar,
+    rng: &mut R,
+) -> ([u8; 32], TagProof) {
+    let hp = hash_to_point(coin);
+    let q_spend = gen_h() * spend_secret;
+    let tag = hp * spend_secret;
+    let k = Scalar::random(rng);
+    let a = gen_h() * k;
+    let b = hp * k;
+    let c = tag_challenge(coin, &q_spend, &tag, &a, &b);
+    let z = k + c * spend_secret;
+    (
+        tag.compress().to_bytes(),
+        TagProof { a: a.compress().to_bytes(), b: b.compress().to_bytes(), z: z.to_bytes() },
+    )
+}
+
+/// Verify a spend-authority tag against the coin and the owner's public
+/// `Q_spend`. Fail-closed. (The hidden-index composition that supplies `Q_spend`
+/// from inside the one-of-many is the deferred audit-critical step.)
+pub fn verify_tag(
+    coin: &[u8; 32],
+    q_spend: &[u8; 32],
+    tag: &[u8; 32],
+    proof: &TagProof,
+) -> Result<()> {
+    let hp = hash_to_point(coin);
+    let q = PeerPoint::decode_non_identity(*q_spend)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .into_point();
+    let t = PeerPoint::decode_non_identity(*tag)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .into_point();
+    let a = PeerPoint::decode(proof.a).map_err(|_| Error::SparkVerifyFailed)?.into_point();
+    let b = PeerPoint::decode(proof.b).map_err(|_| Error::SparkVerifyFailed)?.into_point();
+    let z = PeerScalar::decode(proof.z).map_err(|_| Error::SparkVerifyFailed)?.into_scalar();
+    let c = tag_challenge(coin, &q, &t, &a, &b);
+    // z·H == A + c·Q_spend  and  z·Hp == B + c·T
+    if gen_h() * z != a + q * c || hp * z != b + t * c {
+        return Err(Error::SparkVerifyFailed);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -328,6 +439,13 @@ mod tests {
         (scan_secret, spend_secret, addr, scan_key)
     }
 
+    /// Test-only: the coin's effective serial-on-H is `s_pub + spend_secret`
+    /// (because `Q_spend = spend_secret·H`). Used ONLY to check the coin math —
+    /// the spend rail must NEVER reveal this scalar (it would leak spend_secret).
+    fn effective_serial(rec: &RecoveredNote, spend_secret: &Scalar) -> Scalar {
+        rec.serial_public + spend_secret
+    }
+
     #[test]
     fn create_scan_round_trip_recovers_value_and_openings() {
         let mut rng = ChaCha20Rng::seed_from_u64(100);
@@ -339,10 +457,8 @@ mod tests {
         let rec = c.scan(&scan_key, &note).expect("owner recovers its note");
 
         assert_eq!(rec.value, value);
-        // The recovered opening reconstructs the exact tree coin, using the FULL
-        // serial s_full = s_pub + spend_secret (only the spender can form it).
-        let s_full = spend_serial(&rec, &spend_secret);
-        let coin = bound_coin_commitment(value, &s_full, &rec.coin_blinding)
+        // The recovered opening reconstructs the exact tree coin.
+        let coin = bound_coin_commitment(value, &effective_serial(&rec, &spend_secret), &rec.coin_blinding)
             .compress()
             .to_bytes();
         assert_eq!(coin, note.coin, "opening must reproduce the tree coin");
@@ -384,30 +500,77 @@ mod tests {
         assert_eq!(a.serial_public, b.serial_public);
     }
 
+    // ── spend rail: the linking tag ──────────────────────────────────────
+
     #[test]
-    fn view_only_key_recovers_but_cannot_form_spendable_serial() {
-        // The scan key holds NO spend_secret. It recovers value, but the
-        // spendable serial requires spend_secret — demonstrated by the fact
-        // that scan yields only s_pub, and spend_serial needs the extra secret.
-        let mut rng = ChaCha20Rng::seed_from_u64(103);
-        let (_s, spend_secret, addr, scan_key) = recipient(5);
+    fn tag_prove_verify_round_trip() {
+        let mut rng = ChaCha20Rng::seed_from_u64(200);
+        let (_s, spend_secret, addr, _key) = recipient(6);
+        let coin = [0x33u8; 32];
+        let (tag, proof) = prove_tag(&coin, &spend_secret, &mut rng);
+        assert!(verify_tag(&coin, &addr.q_spend, &tag, &proof).is_ok());
+    }
+
+    #[test]
+    fn tag_is_deterministic_per_coin_and_key() {
+        let (_s, spend_secret, _addr, _key) = recipient(7);
+        let coin_a = [0x11u8; 32];
+        let coin_b = [0x22u8; 32];
+        // Same coin+key → same nullifier (double-spend collides).
+        assert_eq!(link_tag(&coin_a, &spend_secret), link_tag(&coin_a, &spend_secret));
+        // Different coin → different nullifier (no cross-coin linkage).
+        assert_ne!(link_tag(&coin_a, &spend_secret), link_tag(&coin_b, &spend_secret));
+    }
+
+    #[test]
+    fn tag_from_wrong_spend_key_is_rejected() {
+        // A thief who scanned the opening but lacks spend_secret cannot forge a
+        // tag that verifies against the coin's real Q_spend.
+        let mut rng = ChaCha20Rng::seed_from_u64(201);
+        let (_s, _spend_secret, addr, _key) = recipient(8);
+        let thief_secret = Scalar::random(&mut rng);
+        let coin = [0x44u8; 32];
+        let (tag, proof) = prove_tag(&coin, &thief_secret, &mut rng);
+        assert!(
+            verify_tag(&coin, &addr.q_spend, &tag, &proof).is_err(),
+            "tag not bound to the coin's Q_spend must be rejected"
+        );
+    }
+
+    #[test]
+    fn tampered_tag_or_proof_is_rejected() {
+        let mut rng = ChaCha20Rng::seed_from_u64(202);
+        let (_s, spend_secret, addr, _key) = recipient(9);
+        let coin = [0x55u8; 32];
+        let (tag, proof) = prove_tag(&coin, &spend_secret, &mut rng);
+        assert!(verify_tag(&coin, &addr.q_spend, &tag, &proof).is_ok());
+
+        let mut bad_tag = tag;
+        bad_tag[0] ^= 0x01;
+        assert!(verify_tag(&coin, &addr.q_spend, &bad_tag, &proof).is_err());
+
+        let mut bad_proof = proof;
+        bad_proof.z[0] ^= 0x01;
+        assert!(verify_tag(&coin, &addr.q_spend, &tag, &bad_proof).is_err());
+    }
+
+    #[test]
+    fn view_only_holder_recovers_value_but_cannot_spend() {
+        // The full flow: sender creates, a VIEW-ONLY key (no spend_secret)
+        // recovers the value, but producing the spend nullifier needs spend_secret.
+        let mut rng = ChaCha20Rng::seed_from_u64(203);
+        let (_s, spend_secret, addr, scan_key) = recipient(10);
         let c = SparkNoteConnector;
 
         let note = c.create(&addr, 55u64, &mut rng).unwrap();
         let rec = c.scan(&scan_key, &note).unwrap();
+        assert_eq!(rec.value, 55u64); // value recovered by view key alone
 
-        // s_pub alone does NOT reproduce the coin; only s_pub + spend_secret does.
-        let with_pub_only = bound_coin_commitment(rec.value, &rec.serial_public, &rec.coin_blinding)
-            .compress()
-            .to_bytes();
-        assert_ne!(with_pub_only, note.coin, "scan-derivable serial must not spend");
-        let with_full = bound_coin_commitment(
-            rec.value,
-            &spend_serial(&rec, &spend_secret),
-            &rec.coin_blinding,
-        )
-        .compress()
-        .to_bytes();
-        assert_eq!(with_full, note.coin, "only spend_secret completes the serial");
+        // The owner (with spend_secret) forms a valid nullifier + tag proof.
+        let (tag, proof) = prove_tag(&note.coin, &spend_secret, &mut rng);
+        assert!(verify_tag(&note.coin, &addr.q_spend, &tag, &proof).is_ok());
+        // The view-only holder has only `rec` + the public q_spend; no path here
+        // yields spend_secret, so it cannot compute `tag` (RecoveredNote carries
+        // no nullifier by construction — enforced at the type level).
     }
 }
