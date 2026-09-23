@@ -621,6 +621,298 @@ pub fn verify_spend_bound(
     Ok(v_point)
 }
 
+// ── HK one-of-many: membership + value binding WITHOUT revealing the serial ──
+//
+// The V3 bound spend REVEALS the serial `s` (to shift `s·H` out and prove the
+// remainder is pure-`K`). Revealing `s` is fatal to scan ≠ spend (see
+// docs/design/cip-shielded-spend-composition.md). This variant proves the spent
+// coin's shifted point `W_l = C_l − V` lies in `⟨H, K⟩` (i.e. has ZERO `Gv`
+// component ⇒ `V`'s value equals the coin's value), while HIDING both the `H`
+// coefficient (the serial `s_pub + x`) and the `K` coefficient (`r − b`).
+//
+// The Groth-Bootle machinery is unchanged except the final relation, which is
+// blinded on BOTH admissible generators: `gk_k = Σ_i p_{i,k}·W_i + ρh_k·H +
+// ρk_k·K`, and the two final responses `z_dh, z_dk` each subtract their own
+// `Σ ρ·x^k`, so neither reveals `x^m · coefficient`. A nonzero `Gv` component in
+// `W_l` cannot be matched by `z_dh·H + z_dk·K` (Gv ⟂ H,K, NUMS) ⇒ value binding.
+//
+// SCOPE: this is membership + value binding, serial hidden. It publishes NO
+// nullifier — the spend-key-bound linking tag fused over the hidden index (the
+// Triptych step, `cip-shielded-spend-composition.md`) is the remaining
+// audit-critical piece. Gated, unaudited, unwired.
+
+/// Wire form of the HK one-of-many (membership in `⟨H,K⟩`). Mirrors
+/// [`GkOneOfManyProof`] but the single `zd` becomes `(zdh, zdk)` — the blinded
+/// responses for the `H` and `K` coefficients.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct GkOneOfManyHkProof {
+    pub cl: Vec<[u8; 32]>,
+    pub ca: Vec<[u8; 32]>,
+    pub cb: Vec<[u8; 32]>,
+    pub gk: Vec<[u8; 32]>,
+    pub f: Vec<[u8; 32]>,
+    pub za: Vec<[u8; 32]>,
+    pub zb: Vec<[u8; 32]>,
+    pub zdh: [u8; 32],
+    pub zdk: [u8; 32],
+}
+
+struct DecodedGkHkProof {
+    m: usize,
+    cl: Vec<PeerPoint>,
+    ca: Vec<PeerPoint>,
+    cb: Vec<PeerPoint>,
+    gk: Vec<PeerPoint>,
+    f: Vec<PeerScalar>,
+    za: Vec<PeerScalar>,
+    zb: Vec<PeerScalar>,
+    zdh: PeerScalar,
+    zdk: PeerScalar,
+}
+
+impl GkOneOfManyHkProof {
+    fn decode(&self) -> Result<DecodedGkHkProof> {
+        let m = self.cl.len();
+        if m == 0 || m > MAX_GK_ROUNDS {
+            return Err(Error::SparkVerifyFailed);
+        }
+        for len in [self.ca.len(), self.cb.len(), self.gk.len(), self.f.len(), self.za.len(), self.zb.len()] {
+            if len != m {
+                return Err(Error::SparkVerifyFailed);
+            }
+        }
+        let points = |v: &[[u8; 32]]| -> Result<Vec<PeerPoint>> {
+            v.iter().copied().map(PeerPoint::decode_non_identity).collect()
+        };
+        let scalars = |v: &[[u8; 32]]| -> Result<Vec<PeerScalar>> {
+            v.iter().copied().map(PeerScalar::decode).collect()
+        };
+        Ok(DecodedGkHkProof {
+            m,
+            cl: points(&self.cl).map_err(|_| Error::SparkVerifyFailed)?,
+            ca: points(&self.ca).map_err(|_| Error::SparkVerifyFailed)?,
+            cb: points(&self.cb).map_err(|_| Error::SparkVerifyFailed)?,
+            gk: points(&self.gk).map_err(|_| Error::SparkVerifyFailed)?,
+            f: scalars(&self.f).map_err(|_| Error::SparkVerifyFailed)?,
+            za: scalars(&self.za).map_err(|_| Error::SparkVerifyFailed)?,
+            zb: scalars(&self.zb).map_err(|_| Error::SparkVerifyFailed)?,
+            zdh: PeerScalar::decode(self.zdh).map_err(|_| Error::SparkVerifyFailed)?,
+            zdk: PeerScalar::decode(self.zdk).map_err(|_| Error::SparkVerifyFailed)?,
+        })
+    }
+}
+
+/// Prove `commitments[l] = h_coef·H + k_coef·K` (membership in `⟨H,K⟩`) without
+/// revealing `l`, `h_coef`, or `k_coef`.
+pub fn prove_one_of_many_hk_ctx<R: CryptoRng + RngCore>(
+    commitments: &[RistrettoPoint],
+    l: usize,
+    h_coef: &Scalar,
+    k_coef: &Scalar,
+    context: &[u8],
+    rng: &mut R,
+) -> Result<GkOneOfManyHkProof> {
+    let n = commitments.len();
+    if n == 0 || !n.is_power_of_two() {
+        return Err(Error::CryptoError("GK-HK: set size must be a power of two >= 1".into()));
+    }
+    let m = n.trailing_zeros() as usize;
+    if m == 0 || m > MAX_GK_ROUNDS {
+        return Err(Error::CryptoError("GK-HK: rounds out of range".into()));
+    }
+    if l >= n {
+        return Err(Error::CryptoError("GK-HK: index out of range".into()));
+    }
+    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+
+    // Round 1: per-bit commitments (identical to the base one-of-many).
+    let (mut lj, mut aj, mut rj, mut sj, mut tj) =
+        (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
+    let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
+    for j in 0..m {
+        let l_j = Scalar::from(bit(j) as u64);
+        let a_j = Scalar::random(&mut *rng);
+        let r_j = Scalar::random(&mut *rng);
+        let s_j = Scalar::random(&mut *rng);
+        let t_j = Scalar::random(&mut *rng);
+        cl.push(commit(&l_j, &r_j).compress().to_bytes());
+        ca.push(commit(&a_j, &s_j).compress().to_bytes());
+        cb.push(commit(&(l_j * a_j), &t_j).compress().to_bytes());
+        lj.push(l_j);
+        aj.push(a_j);
+        rj.push(r_j);
+        sj.push(s_j);
+        tj.push(t_j);
+    }
+
+    // Polynomial coefficient sums Σ_i p_{i,k}·c_i, then blind on BOTH H and K.
+    let rho_h: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
+    let rho_k: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
+    let mut coeff_sum = vec![RistrettoPoint::default(); m];
+    for (i, c_i) in commitments.iter().enumerate() {
+        let mut poly = vec![Scalar::ONE];
+        for j in 0..m {
+            let i_j = (i >> j) & 1;
+            let (c0, c1) = if i_j == 1 { (aj[j], lj[j]) } else { (-aj[j], Scalar::ONE - lj[j]) };
+            poly = poly_mul_linear(&poly, c0, c1);
+        }
+        for k in 0..m {
+            coeff_sum[k] += c_i * poly[k];
+        }
+    }
+    let mut gk = Vec::with_capacity(m);
+    for k in 0..m {
+        gk.push((coeff_sum[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k]).compress().to_bytes());
+    }
+
+    let x = challenge(context, commitments, &cl, &ca, &cb, &gk);
+
+    let (mut f, mut za, mut zb) = (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
+    for j in 0..m {
+        let f_j = lj[j] * x + aj[j];
+        f.push(f_j.to_bytes());
+        za.push((rj[j] * x + sj[j]).to_bytes());
+        zb.push((rj[j] * (x - f_j) + tj[j]).to_bytes());
+    }
+    // z_dh = h_coef·x^m − Σ ρh_k·x^k ; z_dk likewise for k_coef.
+    let (mut x_pow, mut sum_h, mut sum_k) = (Scalar::ONE, Scalar::ZERO, Scalar::ZERO);
+    for k in 0..m {
+        sum_h += rho_h[k] * x_pow;
+        sum_k += rho_k[k] * x_pow;
+        x_pow *= x;
+    }
+    // x_pow == x^m
+    let zdh = (*h_coef * x_pow - sum_h).to_bytes();
+    let zdk = (*k_coef * x_pow - sum_k).to_bytes();
+
+    Ok(GkOneOfManyHkProof { cl, ca, cb, gk, f, za, zb, zdh, zdk })
+}
+
+/// Verify an HK one-of-many: `commitments[l] ∈ ⟨H,K⟩` at some hidden `l`.
+pub fn verify_one_of_many_hk_ctx(
+    commitments: &[RistrettoPoint],
+    proof: &GkOneOfManyHkProof,
+    context: &[u8],
+) -> Result<()> {
+    let n = commitments.len();
+    if n == 0 || !n.is_power_of_two() {
+        return Err(Error::SparkVerifyFailed);
+    }
+    let m = n.trailing_zeros() as usize;
+    let d = proof.decode()?;
+    if d.m != m {
+        return Err(Error::SparkVerifyFailed);
+    }
+    let g = gen_g();
+    let k_gen = gen_k();
+    let x = challenge(context, commitments, &proof.cl, &proof.ca, &proof.cb, &proof.gk);
+
+    // Per-bit bit-ness checks (identical to the base proof).
+    for j in 0..m {
+        let cl_j = *d.cl[j].as_point();
+        let f_j = *d.f[j].as_scalar();
+        if x * cl_j + *d.ca[j].as_point() != g * f_j + k_gen * *d.za[j].as_scalar() {
+            return Err(Error::SparkVerifyFailed);
+        }
+        if (x - f_j) * cl_j + *d.cb[j].as_point() != k_gen * *d.zb[j].as_scalar() {
+            return Err(Error::SparkVerifyFailed);
+        }
+    }
+
+    // Final: Σ_i prod_i·c_i − Σ_k x^k·gk_k == z_dh·H + z_dk·K.
+    let f_scalars: Vec<Scalar> = d.f.iter().map(|s| *s.as_scalar()).collect();
+    let mut lhs = RistrettoPoint::default();
+    for (i, c_i) in commitments.iter().enumerate() {
+        let mut prod = Scalar::ONE;
+        for (j, f_j) in f_scalars.iter().enumerate() {
+            let factor = if (i >> j) & 1 == 1 { *f_j } else { x - f_j };
+            prod *= factor;
+        }
+        lhs += c_i * prod;
+    }
+    let mut x_pow = Scalar::ONE;
+    for j in 0..m {
+        lhs -= *d.gk[j].as_point() * x_pow;
+        x_pow *= x;
+    }
+    if lhs != gen_h() * *d.zdh.as_scalar() + k_gen * *d.zdk.as_scalar() {
+        return Err(Error::SparkVerifyFailed);
+    }
+    Ok(())
+}
+
+/// A serial-HIDING value-bound spend: membership + value binding with the serial
+/// kept secret (unlike [`SparkSpendProofV3`], which reveals it). The published
+/// `V` is the input value commitment for the balance proof. This is the
+/// membership+value HALF of the end-state spend; the spend-key linking tag /
+/// nullifier is fused in the (deferred, audit-critical) Triptych step.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct SparkSpendProofV4 {
+    /// HK one-of-many over the shifted set `{C_i − V}`.
+    pub membership: GkOneOfManyHkProof,
+    /// Published value commitment `V = v·Gv + b·K`.
+    pub value_commitment: [u8; 32],
+    /// The spend message this proof is bound to.
+    pub message: [u8; 32],
+}
+
+fn spend_context_v4(value_commitment: &[u8; 32], message: &[u8; 32]) -> Vec<u8> {
+    let mut h = Sha3_256::new();
+    h.update(b"COINCYNC_SPARK_SPEND_V4_CTX_v1");
+    h.update(value_commitment);
+    h.update(message);
+    h.finalize().to_vec()
+}
+
+/// Prove a serial-hiding value-bound spend of coin `l`. The spender knows the
+/// full opening `coins[l] = value·Gv + h_coef·H + blinding·K` (where `h_coef` is
+/// the coin's total serial coefficient `s_pub + spend_secret`) and draws a fresh
+/// `value_blinding` for the published `V`.
+pub fn prove_spend_value_hidden<R: CryptoRng + RngCore>(
+    coins: &[RistrettoPoint],
+    l: usize,
+    value: u64,
+    h_coef: &Scalar,
+    blinding: &Scalar,
+    value_blinding: &Scalar,
+    message: &[u8; 32],
+    rng: &mut R,
+) -> Result<SparkSpendProofV4> {
+    if l >= coins.len() {
+        return Err(Error::CryptoError("v4 spend: index out of range".into()));
+    }
+    if coins[l] != gen_gv() * Scalar::from(value) + gen_h() * h_coef + gen_k() * blinding {
+        return Err(Error::CryptoError("v4 spend: opening does not match coins[l]".into()));
+    }
+    let v_point = gen_gv() * Scalar::from(value) + gen_k() * value_blinding;
+    let v_bytes = v_point.compress().to_bytes();
+    // W_i = C_i − V ; at l this is h_coef·H + (blinding − value_blinding)·K ∈ ⟨H,K⟩.
+    let shifted: Vec<RistrettoPoint> = coins.iter().map(|c| c - v_point).collect();
+    let k_coef = blinding - value_blinding;
+    let ctx = spend_context_v4(&v_bytes, message);
+    let membership = prove_one_of_many_hk_ctx(&shifted, l, h_coef, &k_coef, &ctx, rng)?;
+    Ok(SparkSpendProofV4 { membership, value_commitment: v_bytes, message: *message })
+}
+
+/// Verify a serial-hiding value-bound spend. Returns the bound value commitment
+/// `V` on success. Fail-closed.
+pub fn verify_spend_value_hidden(
+    coins: &[RistrettoPoint],
+    proof: &SparkSpendProofV4,
+    message: &[u8; 32],
+) -> Result<RistrettoPoint> {
+    if &proof.message != message {
+        return Err(Error::SparkVerifyFailed);
+    }
+    let v_point = PeerPoint::decode_non_identity(proof.value_commitment)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .into_point();
+    let shifted: Vec<RistrettoPoint> = coins.iter().map(|c| c - v_point).collect();
+    let ctx = spend_context_v4(&proof.value_commitment, message);
+    verify_one_of_many_hk_ctx(&shifted, &proof.membership, &ctx)?;
+    Ok(v_point)
+}
+
 /// Proof that a bound coin `C = v·Gv + s·H + r·K` (appended to the tree) and a
 /// published value commitment `V = v·Gv + b·K` (used by the balance proof) commit
 /// the **same value** `v` — the OUTPUT mint-binding, the mirror of the input
@@ -767,6 +1059,81 @@ mod tests {
 
     fn coin(m: &Scalar, r: &Scalar) -> RistrettoPoint {
         gen_g() * m + gen_k() * r
+    }
+
+    /// A bound coin `C = v·Gv + h·H + r·K`.
+    fn bound(v: u64, h: &Scalar, r: &Scalar) -> RistrettoPoint {
+        gen_gv() * Scalar::from(v) + gen_h() * h + gen_k() * r
+    }
+
+    #[test]
+    fn hk_one_of_many_round_trip_and_context_binding() {
+        let mut rng = ChaCha20Rng::seed_from_u64(700);
+        let h = Scalar::random(&mut rng);
+        let k = Scalar::random(&mut rng);
+        let mut coins: Vec<RistrettoPoint> =
+            (0..4u64).map(|s| bound(s + 2, &Scalar::from(s + 3), &Scalar::from(s + 4))).collect();
+        let l = 2;
+        coins[l] = gen_h() * h + gen_k() * k; // member in ⟨H,K⟩
+        let proof = prove_one_of_many_hk_ctx(&coins, l, &h, &k, b"ctx", &mut rng).unwrap();
+        assert!(verify_one_of_many_hk_ctx(&coins, &proof, b"ctx").is_ok());
+        // A different context no longer reproduces the challenge → fail.
+        assert!(verify_one_of_many_hk_ctx(&coins, &proof, b"other").is_err());
+    }
+
+    #[test]
+    fn hk_rejects_member_with_gv_component() {
+        // The proof asserts the member lies in ⟨H,K⟩; a Gv term (nonzero value)
+        // cannot be absorbed by z_dh·H + z_dk·K (Gv ⟂ H,K).
+        let mut rng = ChaCha20Rng::seed_from_u64(701);
+        let h = Scalar::random(&mut rng);
+        let k = Scalar::random(&mut rng);
+        let mut coins: Vec<RistrettoPoint> = (0..4u64).map(|s| gen_k() * Scalar::from(s * 5 + 2)).collect();
+        let l = 1;
+        coins[l] = gen_h() * h + gen_k() * k;
+        let proof = prove_one_of_many_hk_ctx(&coins, l, &h, &k, b"c", &mut rng).unwrap();
+        assert!(verify_one_of_many_hk_ctx(&coins, &proof, b"c").is_ok());
+        let mut tampered = coins.clone();
+        tampered[l] += gen_gv() * Scalar::from(1u64); // inject value
+        assert!(verify_one_of_many_hk_ctx(&tampered, &proof, b"c").is_err());
+    }
+
+    #[test]
+    fn hk_tampered_response_rejected() {
+        let mut rng = ChaCha20Rng::seed_from_u64(702);
+        let h = Scalar::random(&mut rng);
+        let k = Scalar::random(&mut rng);
+        let mut coins: Vec<RistrettoPoint> = (0..8u64).map(|s| gen_k() * Scalar::from(s + 1)).collect();
+        let l = 5;
+        coins[l] = gen_h() * h + gen_k() * k;
+        let mut proof = prove_one_of_many_hk_ctx(&coins, l, &h, &k, b"", &mut rng).unwrap();
+        proof.zdh = tweak(proof.zdh);
+        assert!(verify_one_of_many_hk_ctx(&coins, &proof, b"").is_err());
+    }
+
+    #[test]
+    fn spark_spend_v4_round_trip_and_value_binding() {
+        let mut rng = ChaCha20Rng::seed_from_u64(703);
+        let value = 1_000_000u64;
+        let h_coef = Scalar::random(&mut rng); // s_pub + spend_secret (hidden)
+        let r = Scalar::random(&mut rng);
+        let vb = Scalar::random(&mut rng);
+        let mut coins: Vec<RistrettoPoint> =
+            (0..4u64).map(|s| bound(s + 5, &Scalar::from(s + 6), &Scalar::from(s + 7))).collect();
+        let l = 3;
+        coins[l] = bound(value, &h_coef, &r);
+
+        let msg = [7u8; 32];
+        let proof = prove_spend_value_hidden(&coins, l, value, &h_coef, &r, &vb, &msg, &mut rng).unwrap();
+        let v = verify_spend_value_hidden(&coins, &proof, &msg).unwrap();
+        // The returned V is the published value commitment v·Gv + vb·K.
+        assert_eq!(v, gen_gv() * Scalar::from(value) + gen_k() * vb);
+        // Wrong message rejected (Fiat-Shamir binding).
+        assert!(verify_spend_value_hidden(&coins, &proof, &[8u8; 32]).is_err());
+        // Tampered value commitment rejected.
+        let mut bad = proof.clone();
+        bad.value_commitment = tweak(bad.value_commitment);
+        assert!(verify_spend_value_hidden(&coins, &bad, &msg).is_err());
     }
 
     #[test]
