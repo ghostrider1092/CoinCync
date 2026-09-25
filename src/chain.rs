@@ -372,6 +372,12 @@ mod recovery;
 /// apply_lock, so lock scope is unchanged.
 mod events;
 
+/// Node-backed [`ChainView`](crate::compliance::ChainView) for the compliant-
+/// privacy use case. Read-only; resolves disclosure output refs + key-image
+/// spentness against real chain state so auditors can anchor-verify packages.
+mod compliance_view;
+pub use compliance_view::NodeChainView;
+
 /// Blockchain state machine with interior mutability
 pub struct Blockchain {
     /// Coarse serialization lock for the ENTIRE block-application operation
@@ -4696,6 +4702,66 @@ mod tests {
         let ki = KeyImage::from_bytes([0x22; 32]);
         db.utxos.mark_key_image(&ki).unwrap();
         assert!(chain.is_spent(&ki), "DB-marked key image found via fallback");
+    }
+
+    #[test]
+    fn node_chain_view_anchors_outputs_and_reports_spentness() {
+        use crate::compliance::ChainView; // trait must be in scope for its methods
+                                          // NodeChainView is the auditor seam for the compliant-privacy use case:
+                                          // it resolves a disclosure output ref against real chain state and
+                                          // answers key-image spentness.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+
+        let height = 1u64;
+        let block = burn_test_block(height, 77, &[1_000_000]);
+        // Cache the block so get_block_by_height resolves it in-memory, and index
+        // its tx so get_tx_location finds the (height, index) location.
+        let (tx_idx, tx) = block
+            .transactions
+            .iter()
+            .enumerate()
+            .find(|(_, t)| !t.outputs.is_empty())
+            .map(|(i, t)| (i as u32, t.clone()))
+            .expect("a tx with at least one output");
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(block.hash(), block.clone());
+            inner.height_to_hash.insert(height, block.hash());
+        }
+        db.index_tx(tx.hash().as_bytes(), height, tx_idx).unwrap();
+
+        let view = NodeChainView::new(&chain);
+
+        // Known output → anchors to its on-chain commitment, stealth, height.
+        let oref = crate::crypto::DisclosureOutputRef { tx_hash: tx.hash(), output_index: 0 };
+        let anchor = view.anchor(&oref).unwrap().expect("output should anchor");
+        assert_eq!(anchor.commitment, tx.outputs[0].commitment);
+        assert_eq!(anchor.stealth_address, *tx.outputs[0].stealth_address.as_bytes());
+        assert_eq!(anchor.block_height, height);
+
+        // Unknown tx → no anchor.
+        let unknown =
+            crate::crypto::DisclosureOutputRef { tx_hash: Hash::from_bytes([0xAB; 32]), output_index: 0 };
+        assert!(view.anchor(&unknown).unwrap().is_none());
+        // Out-of-range output index on a known tx → no anchor.
+        let bad_idx = crate::crypto::DisclosureOutputRef { tx_hash: tx.hash(), output_index: 250 };
+        assert!(view.anchor(&bad_idx).unwrap().is_none());
+
+        // Key-image spentness tracks the real spent set. The disclosure suite's
+        // KeyImage is a curve point, so derive a valid one and mark its
+        // byte-equal on-chain twin (`primitives::KeyImage`) spent.
+        let secret = crate::crypto::SecretScalar::random(&mut rand::rngs::OsRng);
+        let curve_ki = crate::crypto::KeyImage::from_secret(&secret);
+        assert!(!view.key_image_spent(&curve_ki).unwrap());
+        {
+            let mut inner = chain.inner.write();
+            inner
+                .utxos
+                .mark_key_image_spent(KeyImage::from_bytes(curve_ki.to_bytes()));
+        }
+        assert!(view.key_image_spent(&curve_ki).unwrap());
     }
 
     #[test]

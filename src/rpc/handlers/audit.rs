@@ -2,11 +2,41 @@
 
 use jsonrpsee::types::ErrorObjectOwned;
 use jsonrpsee::RpcModule;
+use serde::Deserialize;
 use serde_json::json;
 
+use crate::chain::NodeChainView;
+use crate::compliance::SignedAuditPackage;
 use crate::error::{Error, Result};
 
 use super::RpcState;
+
+/// Params for `verify_audit_package`: the signed package plus the issuer key
+/// and auditor identity the caller trusts out of band. `now` defaults to the
+/// server's wall-clock seconds (drives expiry).
+#[derive(Deserialize)]
+struct VerifyAuditParams {
+    /// The [`SignedAuditPackage`] to verify.
+    package: SignedAuditPackage,
+    /// Ed25519 public key the auditor expects the org to have signed with (hex,
+    /// 32 bytes).
+    issuer_pubkey: String,
+    /// The auditor identity this package must be addressed to.
+    auditor: String,
+    /// Expiry reference time (unix seconds). Defaults to the server clock.
+    #[serde(default)]
+    now: Option<u64>,
+}
+
+fn decode_verifying_key(hex_key: &str) -> std::result::Result<ed25519_dalek::VerifyingKey, ErrorObjectOwned> {
+    let bytes = hex::decode(hex_key)
+        .map_err(|e| ErrorObjectOwned::owned(-32602, format!("issuer_pubkey: bad hex: {e}"), None::<()>))?;
+    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        ErrorObjectOwned::owned(-32602, "issuer_pubkey: expected 32 bytes", None::<()>)
+    })?;
+    ed25519_dalek::VerifyingKey::from_bytes(&arr)
+        .map_err(|e| ErrorObjectOwned::owned(-32602, format!("issuer_pubkey: invalid key: {e}"), None::<()>))
+}
 
 /// Maximum inclusive block span for CPU-heavy audit RPCs (`*_in_range`, `full_chain_audit`).
 pub const MAX_RPC_AUDIT_BLOCK_SPAN: u64 = 128;
@@ -333,6 +363,73 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 "txs_checked": txs_checked,
                 "findings": findings.len(),
                 "details": &findings[..findings.len().min(100)],
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
+    // ── verify_audit_package ────────────────────────────────────
+    // The compliant-privacy auditor endpoint: verify an org-signed disclosure
+    // package against THIS node's canonical chain state (the sound decision),
+    // and return the reconciliation summary and a human-readable report.
+    //
+    // Stateless: single-use (audit_id replay) is the auditor's own bookkeeping
+    // — the signed package carries the id, but a stateless RPC cannot remember
+    // it across calls, so this endpoint verifies signature + anchoring only and
+    // reports the id for the caller to record.
+    module
+        .register_blocking_method("verify_audit_package", |params, state, _ext| {
+            let (p,): (VerifyAuditParams,) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("params: [ {{package, issuer_pubkey, auditor, now?}} ]: {e}"), None::<()>)
+            })?;
+
+            let issuer = decode_verifying_key(&p.issuer_pubkey)?;
+            let now = p.now.unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            });
+
+            let signature_valid = p
+                .package
+                .verify_signature(&issuer, &p.auditor)
+                .map_err(|e| ErrorObjectOwned::owned(-32603, format!("signature check: {e}"), None::<()>))?;
+
+            let view = NodeChainView::new(&state.chain);
+            let anchored_valid = p
+                .package
+                .package
+                .verify_anchored(now, &view)
+                .map_err(|e| ErrorObjectOwned::owned(-32603, format!("anchored verify: {e}"), None::<()>))?;
+
+            let rec = p
+                .package
+                .package
+                .reconcile()
+                .map_err(|e| ErrorObjectOwned::owned(-32603, format!("reconcile: {e}"), None::<()>))?;
+
+            let report = p.package.to_report(now);
+
+            Ok::<_, ErrorObjectOwned>(json!({
+                // The sound trust decision: signed by the expected org, addressed
+                // to this auditor, AND every proof anchors to real chain state.
+                "accepted": signature_valid && anchored_valid,
+                "signature_valid": signature_valid,
+                "anchored_valid": anchored_valid,
+                "audit_id": p.package.audit_id,
+                "issued_to": p.package.audience,
+                "org": p.package.package.org,
+                "period": p.package.package.period,
+                "reconciliation": {
+                    "has_total": rec.has_total,
+                    "claimed_total": rec.claimed_total,
+                    "disbursed_outputs": rec.disbursed.len(),
+                    "receipted_outputs": rec.receipted.len(),
+                    "missing_receipts": rec.missing_receipts.len(),
+                    "unexpected_receipts": rec.unexpected_receipts.len(),
+                    "fully_reconciled": rec.is_fully_reconciled(),
+                },
+                "report": report,
             }))
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
