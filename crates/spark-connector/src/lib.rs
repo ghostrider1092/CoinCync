@@ -129,13 +129,65 @@ impl SparkBackend for StubBackend {
     }
 }
 
-/// The libspark FFI backend (Firo's audited Spark, via a C shim). Placeholder
-/// until the vendoring lands; see `docs/design/cip-shielded-libspark-ffi.md`.
+/// The libspark FFI backend (Firo's audited Spark, via a C shim) — vendored under
+/// `vendor/`, built by `build.rs` behind this feature. See
+/// `docs/design/cip-shielded-libspark-ffi.md`.
 #[cfg(feature = "libspark-ffi")]
 pub mod ffi {
-    //! Vendored `libspark` + secp256k1 + SHA-512 backend, behind a thin C shim.
-    //! Building this feature is what pulls in the C++ toolchain.
-    // TODO(#shielded): implement `LibsparkBackend: SparkBackend` over the shim.
+    //! Vendored `libspark` + secp256k1 backend, behind a thin C shim. Building
+    //! this feature pulls in the C++ toolchain + OpenSSL (via `SPARK_OPENSSL_DIR`).
+    use super::*;
+
+    extern "C" {
+        fn spark_ffi_selftest() -> core::ffi::c_int;
+    }
+
+    /// Run the vendored-libspark self-test: builds a real coin + recovers its VRF
+    /// tag, and runs a Chaum tag-proof prove→verify round-trip. Returns true iff
+    /// the vendored crypto + proof machinery is live. Proves the FFI build works.
+    pub fn selftest() -> bool {
+        // Safety: the shim takes/returns only a plain int and touches no Rust memory.
+        unsafe { spark_ffi_selftest() == 1 }
+    }
+
+    /// The libspark-backed [`SparkBackend`].
+    ///
+    /// Stage 3a: the vendored build is live (see [`selftest`]). The
+    /// create/spend/verify/identify **marshalling** (CoinCync bytes ⇄ libspark
+    /// serializations, over the C shim) is Stage 3b — until it lands these return
+    /// a clear error, so the connector stays fail-closed even with the feature on.
+    pub struct LibsparkBackend;
+
+    impl SparkBackend for LibsparkBackend {
+        fn create_output(&self, _address: &[u8], _value: u64, _memo: &[u8]) -> Result<CoinBytes> {
+            Err(ConnectorError::Rejected("libspark create marshalling not wired (Stage 3b)".into()))
+        }
+        fn build_spend(&self, _c: &[CoinBytes], _m: &[u8], _f: u64, _vb: i64) -> Result<SpendBytes> {
+            Err(ConnectorError::Rejected("libspark build_spend marshalling not wired (Stage 3b)".into()))
+        }
+        fn verify_spend(&self, _c: &[CoinBytes], _s: &SpendBytes, _f: u64, _vb: i64) -> Result<Vec<Nullifier>> {
+            Err(ConnectorError::Rejected("libspark verify marshalling not wired (Stage 3b)".into()))
+        }
+        fn identify(&self, _v: &[u8], _c: &CoinBytes) -> Result<Option<IdentifiedCoin>> {
+            Err(ConnectorError::Rejected("libspark identify marshalling not wired (Stage 3b)".into()))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn libspark_selftest_passes() {
+            assert!(selftest(), "vendored libspark self-test failed");
+        }
+
+        #[test]
+        fn backend_fail_closed_until_marshalling() {
+            let b = LibsparkBackend;
+            assert!(b.verify_spend(&[], &SpendBytes(vec![]), 0, 0).is_err());
+        }
+    }
 }
 
 #[cfg(test)]
