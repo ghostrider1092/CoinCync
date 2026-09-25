@@ -76,6 +76,35 @@ that complexity for a full-crypto audit burden. Neither is small; FFI is lower
 *crypto* risk, higher *build* complexity. This doc does not itself commit to FFI;
 it makes the cost explicit so the choice is informed.
 
+## Build-spike results (empirical, 2026-09-24)
+
+Ran a staged spike in the scratchpad (not the repo):
+
+- **Gate 0 — C++↔Rust FFI toolchain: PASS.** A `cc`-crate C++17 shim (using
+  `std::vector`, MSVC ABI) compiled and linked into an `x86_64-pc-windows-msvc`
+  Rust binary and was called via `extern "C"` (`GATE0_OK`). The FFI plumbing is
+  not a blocker.
+- **Gate 1 — OpenSSL: the real hurdle.** `clang++`, `cmake`, MSVC are present, but
+  **there is no MSVC-linkable OpenSSL** (no `libcrypto.lib`, no vcpkg; only a
+  mingw `openssl` binary with no usable dev libs). And OpenSSL is **pervasive** in
+  libspark: the whole `Hash` class (`hash.cpp`) — every hash-to-scalar/group and
+  the Fiat-Shamir transcript — is `EVP_sha512`, plus `hash_generator` in
+  `util.cpp`. So OpenSSL is a hard prerequisite, used everywhere, currently absent.
+
+Two ways past Gate 1:
+- **(a) Provide MSVC OpenSSL** (`vcpkg install openssl`, or a prebuilt) — no source
+  changes, but a heavy external dependency to install + ship.
+- **(b) Patch the digest backend to a vendored SHA-512** (Bitcoin-core `CSHA512`).
+  SHA-512 is deterministic, so output is byte-identical and the crypto is
+  unchanged — but it touches libspark's `Hash`/`hash_generator`/transcript layer
+  (mechanical, not a crypto change). Trades an external dep for a maintained patch.
+
+**Remaining bulk (not attempted — beyond a spike):** vendor `secp_primitives`
+(secp256k1 C++ wrapper) + the secp256k1 C library + Bitcoin-core crypto
+(`CSHA256`/`CSHA512`/AES/ChaCha20/HMAC) + serialization (`CDataStream`). That
+subtree is the real cost; the spike confirms it's *feasible* (toolchain works) but
+*substantial* (a multi-file C++ vendoring + an OpenSSL decision), not a quick win.
+
 ## First implementation steps (only after go, all gated)
 
 1. Prove the shim builds: vendor `libspark` + minimal `secp_primitives` + the
