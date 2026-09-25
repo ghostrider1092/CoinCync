@@ -97,6 +97,7 @@ pub mod tick_adapter;
 // coincync-tick sidecar. Phase 1: forager in observe mode (scores peers on
 // public block/tip signals; sends nothing). See docs/architecture/colony.md.
 pub mod colony;
+pub mod compliance; // auditor-facing disclosure packages (compliant-privacy use case)
 
 // ── Network genesis definitions ─────────────────────────────
 pub mod mainnet;
