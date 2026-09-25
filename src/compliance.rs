@@ -27,8 +27,10 @@ use crate::crypto::{
 };
 use crate::error::{Error, Result};
 use crate::primitives::{Hash, PublicKey, SecretKey};
+use ed25519_dalek::{Signature as EdSignature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 /// The auditor's trusted view of the chain, against which disclosure proofs are
 /// anchored. A running node implements this over its real UTXO set + spent-key-
@@ -222,6 +224,356 @@ impl AuditPackage {
             .iter()
             .all(|i| i.proof.expires_at.map_or(true, |exp| now <= exp))
     }
+
+    /// Reconcile the recipient receipts against the total-disbursed proof.
+    ///
+    /// The total-disbursed [`SumProof`] names the exact set of on-chain outputs
+    /// it sums; each recipient receipt ([`OwnershipProof`]) attests one output.
+    /// This cross-checks those two sets: which disbursements have a receipt,
+    /// which are missing one, and which receipts fall outside the sum. It is a
+    /// **structural** check of the outputs the proofs *name* — amounts stay
+    /// hidden, and each proof is only trustworthy once [`Self::verify_anchored`]
+    /// checks it against the chain. Uses the first Sum proof in the package.
+    ///
+    /// `Ok` even when nothing reconciles; inspect [`Reconciliation`]. Errors only
+    /// if a proof's bytes are malformed.
+    pub fn reconcile(&self) -> Result<Reconciliation> {
+        let mut disbursed: Vec<DisclosureOutputRef> = Vec::new();
+        let mut claimed_total = 0u64;
+        let mut has_total = false;
+        for item in &self.items {
+            if matches!(item.proof.proof_type, DisclosureType::Sum) {
+                let inner: SumProof = decode_inner(&item.proof)?;
+                disbursed = inner.output_refs.clone();
+                claimed_total = inner.claimed_total;
+                has_total = true;
+                break;
+            }
+        }
+
+        let mut receipted: Vec<DisclosureOutputRef> = Vec::new();
+        for item in &self.items {
+            if matches!(item.proof.proof_type, DisclosureType::Ownership) {
+                let inner: OwnershipProof = decode_inner(&item.proof)?;
+                receipted.push(DisclosureOutputRef {
+                    tx_hash: inner.tx_hash,
+                    output_index: inner.output_index,
+                });
+            }
+        }
+
+        // Diffs only mean something when there is a total to reconcile against.
+        let (missing_receipts, unexpected_receipts) = if has_total {
+            let disbursed_set: HashSet<&DisclosureOutputRef> = disbursed.iter().collect();
+            let receipted_set: HashSet<&DisclosureOutputRef> = receipted.iter().collect();
+            let missing = disbursed
+                .iter()
+                .filter(|r| !receipted_set.contains(*r))
+                .cloned()
+                .collect();
+            let unexpected = receipted
+                .iter()
+                .filter(|r| !disbursed_set.contains(*r))
+                .cloned()
+                .collect();
+            (missing, unexpected)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        Ok(Reconciliation {
+            disbursed,
+            receipted,
+            missing_receipts,
+            unexpected_receipts,
+            claimed_total,
+            has_total,
+        })
+    }
+
+    /// Render a human-readable Markdown report for a treasurer or auditor:
+    /// the org and period, the validity window, every item's statement and
+    /// proof type, and the reconciliation summary.
+    ///
+    /// **Descriptive only** — the report itself verifies nothing. The sound
+    /// decision is [`Self::verify_anchored`] against a trusted [`ChainView`];
+    /// `now` only drives the expiry note.
+    pub fn to_report(&self, now: u64) -> String {
+        let mut s = String::new();
+        let _ = writeln!(s, "# Audit package — {}", self.org);
+        let _ = writeln!(s);
+        let _ = writeln!(s, "- **Period:** {}", self.period);
+        let _ = writeln!(s, "- **Created at:** {}", self.created_at);
+        match self.expires_at {
+            Some(exp) if now > exp => {
+                let _ = writeln!(s, "- **Expires at:** {exp} — ⚠️ EXPIRED (now {now})");
+            }
+            Some(exp) => {
+                let _ = writeln!(s, "- **Expires at:** {exp}");
+            }
+            None => {
+                let _ = writeln!(s, "- **Expires at:** never");
+            }
+        }
+        let _ = writeln!(s, "- **Items:** {}", self.items.len());
+        let _ = writeln!(s);
+
+        let _ = writeln!(s, "## Statements");
+        let _ = writeln!(s);
+        let _ = writeln!(s, "| # | Type | Statement |");
+        let _ = writeln!(s, "|---|------|-----------|");
+        for (i, item) in self.items.iter().enumerate() {
+            let _ = writeln!(
+                s,
+                "| {} | {} | {} |",
+                i + 1,
+                type_name(&item.proof.proof_type),
+                item.statement.replace('|', "\\|"),
+            );
+        }
+        let _ = writeln!(s);
+
+        let _ = writeln!(s, "## Reconciliation");
+        let _ = writeln!(s);
+        match self.reconcile() {
+            Ok(r) if r.has_total => {
+                let _ = writeln!(s, "- **Total disbursed (claimed):** {}", r.claimed_total);
+                let _ = writeln!(s, "- **Disbursed outputs:** {}", r.disbursed.len());
+                let _ = writeln!(
+                    s,
+                    "- **Receipts matched:** {} of {}",
+                    r.disbursed.len() - r.missing_receipts.len(),
+                    r.disbursed.len(),
+                );
+                let _ = writeln!(s, "- **Missing receipts:** {}", r.missing_receipts.len());
+                let _ = writeln!(
+                    s,
+                    "- **Receipts outside the sum:** {}",
+                    r.unexpected_receipts.len()
+                );
+                let verdict = if r.is_fully_reconciled() {
+                    "✅ fully reconciled (every disbursement has a receipt; no extras)"
+                } else {
+                    "⚠️ not fully reconciled"
+                };
+                let _ = writeln!(s, "- **Status:** {verdict}");
+            }
+            Ok(_) => {
+                let _ = writeln!(
+                    s,
+                    "- No total-disbursed proof in this package; nothing to reconcile."
+                );
+            }
+            Err(_) => {
+                let _ = writeln!(s, "- Reconciliation unavailable (a proof is malformed).");
+            }
+        }
+        let _ = writeln!(s);
+
+        let _ = writeln!(
+            s,
+            "> Verification note: this report is descriptive. Trust requires \
+             anchored verification of each proof against the chain \
+             (`verify_anchored`); offline well-formedness is not a trust decision."
+        );
+        s
+    }
+
+    /// Canonical bytes bound by an issuer signature: a domain tag, the compact
+    /// package JSON, and the length-prefixed binding fields (issuer key, audit
+    /// id, audience). Deterministic — [`AuditPackage`] contains no maps, so
+    /// compact JSON is stable. Length prefixes stop adjacent fields from
+    /// blurring into one another.
+    fn signing_bytes(
+        &self,
+        issuer_pubkey: &[u8; 32],
+        audit_id: &[u8; 32],
+        audience: &str,
+    ) -> Result<Vec<u8>> {
+        let pkg = serde_json::to_vec(self).map_err(|e| Error::SerializationError(e.to_string()))?;
+        let mut m = Vec::with_capacity(pkg.len() + 128);
+        m.extend_from_slice(b"coincync/audit-package/v1");
+        m.extend_from_slice(&(pkg.len() as u64).to_le_bytes());
+        m.extend_from_slice(&pkg);
+        m.extend_from_slice(issuer_pubkey);
+        m.extend_from_slice(audit_id);
+        m.extend_from_slice(&(audience.len() as u64).to_le_bytes());
+        m.extend_from_slice(audience.as_bytes());
+        Ok(m)
+    }
+
+    /// Sign this package as the issuing org, binding it to a single named
+    /// `audience` (auditor) and a unique `audit_id` nonce — producing a
+    /// [`SignedAuditPackage`] that is attributable, non-transferable, and
+    /// single-use. The signature covers the package **and** the binding fields,
+    /// so none can be swapped without breaking it.
+    pub fn sign(
+        self,
+        signing_key: &SigningKey,
+        audit_id: [u8; 32],
+        audience: impl Into<String>,
+    ) -> Result<SignedAuditPackage> {
+        let issuer_pubkey = signing_key.verifying_key().to_bytes();
+        let audience = audience.into();
+        let msg = self.signing_bytes(&issuer_pubkey, &audit_id, &audience)?;
+        let signature = signing_key.sign(&msg).to_bytes();
+        Ok(SignedAuditPackage {
+            package: self,
+            issuer_pubkey: hex::encode(issuer_pubkey),
+            audit_id: hex::encode(audit_id),
+            audience,
+            signature: hex::encode(signature),
+        })
+    }
+}
+
+/// Which disbursed outputs are covered by recipient receipts, and which are not.
+///
+/// Produced by [`AuditPackage::reconcile`]. The total-disbursed proof names the
+/// exact set of outputs it sums; the receipts attest ownership of individual
+/// outputs. A package is **fully reconciled** when those two sets are equal:
+/// every disbursement has a receipt and no receipt falls outside the sum.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reconciliation {
+    /// Outputs named by the total-disbursed Sum proof.
+    pub disbursed: Vec<DisclosureOutputRef>,
+    /// Outputs receipted by recipients (Ownership proofs).
+    pub receipted: Vec<DisclosureOutputRef>,
+    /// In the disbursed sum but with no matching receipt.
+    pub missing_receipts: Vec<DisclosureOutputRef>,
+    /// Receipted but not part of the disbursed sum.
+    pub unexpected_receipts: Vec<DisclosureOutputRef>,
+    /// The total the Sum proof binds (0 when absent).
+    pub claimed_total: u64,
+    /// Whether a total-disbursed Sum proof was present to reconcile against.
+    pub has_total: bool,
+}
+
+impl Reconciliation {
+    /// Every disbursed output has a receipt and every receipt is for a disbursed
+    /// output — the package reconciles against itself. Requires a total.
+    pub fn is_fully_reconciled(&self) -> bool {
+        self.has_total && self.missing_receipts.is_empty() && self.unexpected_receipts.is_empty()
+    }
+}
+
+/// An [`AuditPackage`] signed by the issuing org and bound to one named auditor
+/// plus a unique id — so it is **attributable** (the org's signature),
+/// **non-transferable** (bound to one `audience`), and **single-use** (the
+/// `audit_id` an auditor records to reject replays). Binding fields are hex for
+/// readable JSON; the signature covers the package together with all of them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SignedAuditPackage {
+    pub package: AuditPackage,
+    /// Ed25519 public key of the issuing org (hex, 32 bytes).
+    pub issuer_pubkey: String,
+    /// Unique issuance nonce the auditor records for single-use (hex, 32 bytes).
+    pub audit_id: String,
+    /// The single auditor this package is issued to (non-transferable).
+    pub audience: String,
+    /// Ed25519 signature over the canonical signing bytes (hex, 64 bytes).
+    pub signature: String,
+}
+
+impl SignedAuditPackage {
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(self).map_err(|e| Error::SerializationError(e.to_string()))
+    }
+
+    pub fn from_json(s: &str) -> Result<Self> {
+        serde_json::from_str(s).map_err(|e| Error::SerializationError(e.to_string()))
+    }
+
+    /// Verify the org's signature and that this package was issued **by**
+    /// `expected_issuer` **to** `expected_auditor`. The auditor knows the org's
+    /// real key out of band and checks against it, rejecting a package that
+    /// claims any other issuer or audience. Fail-closed: `Ok(false)` on any
+    /// mismatch or bad signature.
+    pub fn verify_signature(
+        &self,
+        expected_issuer: &VerifyingKey,
+        expected_auditor: &str,
+    ) -> Result<bool> {
+        let issuer_bytes = decode_hex_array::<32>(&self.issuer_pubkey)?;
+        if issuer_bytes != expected_issuer.to_bytes() {
+            return Ok(false);
+        }
+        if self.audience != expected_auditor {
+            return Ok(false);
+        }
+        let audit_id = decode_hex_array::<32>(&self.audit_id)?;
+        let sig_bytes = decode_hex_array::<64>(&self.signature)?;
+        let sig = EdSignature::from_bytes(&sig_bytes);
+        let msg = self
+            .package
+            .signing_bytes(&issuer_bytes, &audit_id, &self.audience)?;
+        Ok(expected_issuer.verify(&msg, &sig).is_ok())
+    }
+
+    /// Record single use against a set of already-consumed `audit_id`s: `true`
+    /// (and marks it consumed) the first time this id is seen, `false` on replay.
+    /// The auditor persists this set across packages.
+    pub fn claim_single_use(&self, consumed: &mut HashSet<String>) -> bool {
+        consumed.insert(self.audit_id.clone())
+    }
+
+    /// Full auditor acceptance: the signature is valid for `(expected_issuer,
+    /// expected_auditor)`, the package verifies anchored against `chain` at
+    /// `now`, and this `audit_id` has not been used before. Single-use is
+    /// claimed only after the other checks pass, so a package that fails to
+    /// verify does not burn its id. Fail-closed.
+    pub fn accept<V: ChainView>(
+        &self,
+        expected_issuer: &VerifyingKey,
+        expected_auditor: &str,
+        consumed: &mut HashSet<String>,
+        now: u64,
+        chain: &V,
+    ) -> Result<bool> {
+        if !self.verify_signature(expected_issuer, expected_auditor)? {
+            return Ok(false);
+        }
+        if !self.package.verify_anchored(now, chain)? {
+            return Ok(false);
+        }
+        Ok(self.claim_single_use(consumed))
+    }
+
+    /// Human-readable report for the signed package: issuer, audience and audit
+    /// id, then the underlying package's [`AuditPackage::to_report`].
+    pub fn to_report(&self, now: u64) -> String {
+        let mut s = String::new();
+        let _ = writeln!(s, "**Issued by:** `{}`", self.issuer_pubkey);
+        let _ = writeln!(s, "**Issued to:** {}", self.audience);
+        let _ = writeln!(s, "**Audit id:** `{}`", self.audit_id);
+        let _ = writeln!(s);
+        s.push_str(&self.package.to_report(now));
+        s
+    }
+}
+
+/// Decode a hex string into a fixed-size byte array, erroring on wrong length.
+fn decode_hex_array<const N: usize>(s: &str) -> Result<[u8; N]> {
+    let v = hex::decode(s).map_err(|e| Error::SerializationError(e.to_string()))?;
+    if v.len() != N {
+        return Err(Error::SerializationError(format!(
+            "expected {N} bytes, got {}",
+            v.len()
+        )));
+    }
+    let mut out = [0u8; N];
+    out.copy_from_slice(&v);
+    Ok(out)
+}
+
+/// Short label for a disclosure proof type, for reports.
+fn type_name(t: &DisclosureType) -> &'static str {
+    match t {
+        DisclosureType::Balance => "Balance",
+        DisclosureType::Ownership => "Ownership",
+        DisclosureType::Sum => "Sum",
+        DisclosureType::Source => "Source",
+    }
 }
 
 fn decode_inner<T: for<'de> Deserialize<'de>>(proof: &DisclosureProof) -> Result<T> {
@@ -318,6 +670,7 @@ mod tests {
     use crate::crypto::{
         create_balance_proof, BlindingFactor, KeyImage, PedersenCommitment, SecretScalar,
     };
+    use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
     fn oref(tag: u8, idx: u8) -> DisclosureOutputRef {
@@ -439,5 +792,151 @@ mod tests {
             .with_anchor(ChainAnchor::new(r1, c1, [0u8; 32], 50))
             .with_anchor(ChainAnchor::new(r2, c2, [0u8; 32], 50));
         assert!(pkg.verify_anchored(1_000_000, &chain).unwrap(), "whole payroll package anchors");
+    }
+
+    /// Build a payroll package: total-disbursed over `outputs`, plus a receipt
+    /// for each `receipt_ref`. Receipts reuse one throwaway key (reconcile only
+    /// looks at the output each names, not its key).
+    fn payroll_with_receipts(
+        outputs: &[(u64, BlindingFactor, Hash, u8)],
+        receipt_refs: &[DisclosureOutputRef],
+    ) -> AuditPackage {
+        let mut run = PayrollRun::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
+        run.total_disbursed(outputs, (0, 100)).unwrap();
+        let (sk, pk, _s) = keypair();
+        for r in receipt_refs {
+            let rc = recipient_receipt(&r.tx_hash, r.output_index, &pk, &sk, b"pay", Some(2_000_000_000))
+                .unwrap();
+            run.add_recipient_receipt("recipient", rc);
+        }
+        run.finish()
+    }
+
+    fn sum_outputs() -> (Vec<(u64, BlindingFactor, Hash, u8)>, DisclosureOutputRef, DisclosureOutputRef) {
+        let (r1, r2) = (oref(1, 0), oref(2, 1));
+        let outputs = vec![
+            (300_000u64, BlindingFactor::random(&mut OsRng), r1.tx_hash, r1.output_index),
+            (200_000u64, BlindingFactor::random(&mut OsRng), r2.tx_hash, r2.output_index),
+        ];
+        (outputs, r1, r2)
+    }
+
+    #[test]
+    fn reconcile_full_missing_and_unexpected() {
+        let (outputs, r1, r2) = sum_outputs();
+
+        // Every disbursement receipted => fully reconciled.
+        let full = payroll_with_receipts(&outputs, &[r1.clone(), r2.clone()]);
+        let rec = full.reconcile().unwrap();
+        assert!(rec.has_total);
+        assert_eq!(rec.claimed_total, 500_000);
+        assert!(rec.is_fully_reconciled());
+        assert!(rec.missing_receipts.is_empty() && rec.unexpected_receipts.is_empty());
+
+        // One receipt missing => flagged, not reconciled.
+        let partial = payroll_with_receipts(&outputs, &[r1.clone()]);
+        let rec = partial.reconcile().unwrap();
+        assert!(!rec.is_fully_reconciled());
+        assert_eq!(rec.missing_receipts, vec![r2.clone()]);
+        assert!(rec.unexpected_receipts.is_empty());
+
+        // A receipt for an output outside the sum => flagged as unexpected.
+        let stray = oref(3, 0);
+        let extra = payroll_with_receipts(&outputs, &[r1, r2, stray.clone()]);
+        let rec = extra.reconcile().unwrap();
+        assert!(!rec.is_fully_reconciled());
+        assert_eq!(rec.unexpected_receipts, vec![stray]);
+        assert!(rec.missing_receipts.is_empty());
+    }
+
+    #[test]
+    fn reconcile_without_total_reconciles_nothing() {
+        // Package with only a receipt and no total-disbursed proof.
+        let (sk, pk, _s) = keypair();
+        let rc = recipient_receipt(&Hash::from_bytes([4u8; 32]), 0, &pk, &sk, b"x", Some(2_000_000_000))
+            .unwrap();
+        let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
+        pkg.add("receipt", rc);
+        let rec = pkg.reconcile().unwrap();
+        assert!(!rec.has_total);
+        assert!(!rec.is_fully_reconciled());
+        // No total to reconcile against => a lone receipt is not "unexpected".
+        assert!(rec.unexpected_receipts.is_empty());
+        assert_eq!(rec.receipted.len(), 1);
+    }
+
+    #[test]
+    fn signature_is_attributable_and_tamper_evident() {
+        let (dp, _c) = treasury_solvency_proof(1_000_000);
+        let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
+        pkg.add_anchored("treasury solvency >= 1,000,000", dp, oref(9, 0));
+
+        let key = SigningKey::generate(&mut OsRng);
+        let vk = key.verifying_key();
+        let audit_id = [7u8; 32];
+        let signed = pkg.sign(&key, audit_id, "Auditor One").unwrap();
+
+        // Valid for the right issuer + audience; survives a JSON round trip.
+        assert!(signed.verify_signature(&vk, "Auditor One").unwrap());
+        let received = SignedAuditPackage::from_json(&signed.to_json().unwrap()).unwrap();
+        assert!(received.verify_signature(&vk, "Auditor One").unwrap());
+
+        // Wrong audience (non-transferable) and wrong issuer are rejected.
+        assert!(!signed.verify_signature(&vk, "Auditor Two").unwrap());
+        let other = SigningKey::generate(&mut OsRng).verifying_key();
+        assert!(!signed.verify_signature(&other, "Auditor One").unwrap());
+
+        // Tampering with the package after signing breaks the signature.
+        let mut tampered = signed.clone();
+        tampered.package.org = "Evil DAO".to_string();
+        assert!(!tampered.verify_signature(&vk, "Auditor One").unwrap());
+    }
+
+    #[test]
+    fn accept_verifies_signs_and_enforces_single_use() {
+        let (dp, commitment) = treasury_solvency_proof(1_000_000);
+        let t_ref = oref(9, 0);
+        let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
+        pkg.add_anchored("treasury solvency >= 1,000,000", dp, t_ref.clone());
+
+        let key = SigningKey::generate(&mut OsRng);
+        let vk = key.verifying_key();
+        let signed = pkg.sign(&key, [11u8; 32], "Auditor One").unwrap();
+
+        let chain = InMemoryChainView::new()
+            .with_anchor(ChainAnchor::new(t_ref, commitment, [0u8; 32], 10));
+        let mut consumed = HashSet::new();
+
+        // First acceptance: signature + anchored + fresh id => accepted.
+        assert!(signed
+            .accept(&vk, "Auditor One", &mut consumed, 1_000_000, &chain)
+            .unwrap());
+        // Replay of the same id => rejected (single-use).
+        assert!(!signed
+            .accept(&vk, "Auditor One", &mut consumed, 1_000_000, &chain)
+            .unwrap());
+
+        // A failed anchored check must NOT burn the id: fresh consumed set,
+        // empty chain => rejected, and the id stays available.
+        let mut fresh = HashSet::new();
+        assert!(!signed
+            .accept(&vk, "Auditor One", &mut fresh, 1_000_000, &InMemoryChainView::new())
+            .unwrap());
+        assert!(!fresh.contains(&signed.audit_id), "id must not be consumed on failure");
+    }
+
+    #[test]
+    fn report_renders_statements_and_reconciliation() {
+        let (outputs, r1, r2) = sum_outputs();
+        let pkg = payroll_with_receipts(&outputs, &[r1, r2]);
+        let report = pkg.to_report(1_000_000);
+        assert!(report.contains("# Audit package — Acme DAO"));
+        assert!(report.contains("## Statements"));
+        assert!(report.contains("## Reconciliation"));
+        assert!(report.contains("fully reconciled"));
+        assert!(report.contains("Sum"));
+        assert!(report.contains("Ownership"));
+        // Expiry note fires past the window.
+        assert!(pkg.to_report(3_000_000_000).contains("EXPIRED"));
     }
 }
