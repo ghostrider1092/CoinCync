@@ -8,6 +8,79 @@ against the Lelantus-Spark paper (Feickert & Jivanyan) and externally audited
 before it lands unGated.** Everything stays behind `sketch-gk-proof` +
 `SHIELDED_TX_ACTIVATION_HEIGHT = u64::MAX` until then.
 
+## PINNED REFERENCE CONSTRUCTION (from Firo `libspark`, `master`)
+
+Transcribed verbatim from the **deployed, audited** reference implementation
+(`firoorg/firo/src/libspark/` — `coin.cpp`, `keys.cpp`, `chaum.cpp`,
+`params.cpp`), not from memory. This is the ground truth to build/bind against.
+Firo is on **secp256k1**; CoinCync is on **ristretto/curve25519**, so every
+generator below must be **re-derived as a NUMS point on ristretto** (the algebra
+is curve-agnostic; only the group changes).
+
+### Generators (`params.cpp`)
+- `F = hash_generator("F")`, `H = hash_generator("H")`, `U = hash_generator("U")`
+  — NUMS. `G = base point`. Plus `G_range/H_range` (BPPlus range) and
+  `G_grootle/H_grootle` (one-of-many), `n_grootle=8, m_grootle=5` ⇒ anon set
+  `n^m = 8^5 = 32768` (test: `n=2, m=4`). **Note: Grootle is base-`n`, not the
+  base-2 of our current HK one-of-many.**
+
+### Keys (`keys.cpp`)
+- **SpendKey** `= (s1, s2, r)` — three scalars; `r` is the spend authority.
+- **FullViewKey** `= (s1, s2, D, P2)` with **`D = G·r`**, `P2 = F·s2 + D`.
+- **IncomingViewKey** `= (s1, P2)`.
+- **Address(i)** (diversifier `i`): `Q1 = hash_div(d)·s1`,
+  **`Q2 = F·hash_Q2(s1,i) + P2`**.
+
+### Coin (`coin.cpp`)
+- Recovery key: `K = hash_div(d)·hash_k(k)` (`k` = per-coin nonce).
+- **Value commitment:** `C = G·v + H·hash_val(k)`.
+- **Serial commitment:** `S = F·hash_ser(k,ctx) + Q2` `= F·s + D`, where the
+  **serial** `s = hash_ser(k,ctx) + hash_Q2(s1,i) + s2` (needs `s2` ⇒ full view).
+- **Tag / nullifier (the VRF):** `T = (U − D)·s⁻¹` (Dodis-Yampolskiy inversion).
+
+### Detection vs spend (this IS scan ≠ spend, done right)
+- **Incoming view** (`s1,P2`): *identifies* a coin — decrypt recipient data with
+  `K·s1`, then check `K`, `C`, `S` (`coin.cpp::identify`/`validate`).
+- **Full view** (`+s2,D`): *recovers* `s` and computes `T` — so it can **detect/
+  link** spends. It still **cannot spend** (no `r`).
+- **Spend** needs `r` (`D = G·r`): the Chaum proof proves knowledge of it.
+
+### Spend proof (three ANDed proofs over the same transcript)
+1. **Grootle one-of-many** over the cover set `{S_i}`: proves the spender opens a
+   re-randomization of one `S_l` at a **hidden** index `l`. (Our
+   `SparkSpendProofV4` HK one-of-many is the base-2 analogue of this — good, but
+   Grootle is base-`n`.)
+2. **Chaum tag proof** (`chaum.cpp`) — the piece I got wrong before. For each
+   input it proves knowledge of `(x, y, z)` with:
+   - `F·x + G·y + H·z = S`   (serial-commitment opening; `x = s`, `y = r`)
+   - `T·x + G·y = U`         ⟺  `T·s = U − G·r = U − D`  ⟺  `T = (U−D)·s⁻¹`
+
+   The Σ-protocol: commit `A1 = F·r_+G·s_+H·t_`, `A2 = T·r_+G·s_`; challenge
+   `c` over a labeled transcript (`F,G,H,U,mu,S,T,A1,A2`); responses
+   `t1=r_+c·x, t2=s_+c·y, t3=t_+c·z`. Verify `A1+S·c = F·t1+G·t2+H·t3` and
+   `A2+U·c = T·t1+G·t2`. **This binds the tag to both the serial `s` and the
+   spend key `r` without revealing either — the real scan≠spend enforcement.**
+3. **BPPlus range** on `C` (value ≥ 0) + a **balance** relation across inputs/
+   outputs/fee/`value_balance` (the Chaum V2 transcript binds cover-set refs,
+   outputs, fee, transparent_value).
+
+### Consequence for CoinCync's current model (the real design decision)
+Spark uses **two commitments per coin** — a value commitment `C = G·v + H·(nonce)`
+and a **separate** serial commitment `S = F·s + D`. CoinCync's current bound coin
+**fuses** value+serial+blinding into one point (`C = v·Gv + s·H + r·K`). To adopt
+Spark's spend/tag **soundly**, the coin must be **restructured to Spark's `(C, S)`
+two-commitment form** (or bind to `libspark` via FFI). Corollaries:
+- The key-image tag + Chaum in `spark_note.rs` is **retracted** (already flagged);
+  the real tag is `T=(U−D)·s⁻¹` with the Chaum relations above.
+- `SparkSpendProofV4`'s HK one-of-many maps to Grootle but must move to base-`n`
+  and operate over `{S_i}` (serial commitments), not the fused coins.
+- The Note Connector (`cip-shielded-notes.md`) must produce Spark-shaped coins
+  `(K, C, S)` with `s`/`k` derived per the key schedule above.
+
+**Recommendation (unchanged, now evidenced): bind to `libspark` via FFI** rather
+than reimplement Grootle+Chaum+BPPlus from scratch — inherit its audit; put the
+originality in the CoinCync integration. Reimplementing is the high-risk path.
+
 ## The gap in one sentence
 
 We have a log-size membership+value proof (`SparkSpendProofV3`, `prove_spend_bound`
