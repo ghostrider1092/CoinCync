@@ -138,9 +138,33 @@ pub mod ffi {
     //! this feature pulls in the C++ toolchain + OpenSSL (via `SPARK_OPENSSL_DIR`).
     use super::*;
 
+    use core::ffi::c_int;
+
     extern "C" {
-        fn spark_ffi_selftest() -> core::ffi::c_int;
-        fn spark_ffi_spend_verify_roundtrip() -> core::ffi::c_int;
+        fn spark_ffi_selftest() -> c_int;
+        fn spark_ffi_spend_verify_roundtrip() -> c_int;
+        fn spark_ffi_make_verify_bundle(out: *mut u8, cap: c_int) -> c_int;
+        fn spark_ffi_verify_bundle(
+            ptr: *const u8,
+            len: c_int,
+            out_tags: *mut u8,
+            tags_cap: c_int,
+            out_tags_len: *mut c_int,
+        ) -> c_int;
+    }
+
+    /// Build a valid self-contained verify bundle (a real spend + its verify
+    /// context), for tests and as the format `verify_spend` consumes. `None` on
+    /// error. In production CoinCync's wallet produces this via `build_spend`.
+    pub fn make_verify_bundle() -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; 1 << 16];
+        // Safety: shim writes at most `cap` bytes into `buf` and returns the length.
+        let len = unsafe { spark_ffi_make_verify_bundle(buf.as_mut_ptr(), buf.len() as c_int) };
+        if len <= 0 {
+            return None;
+        }
+        buf.truncate(len as usize);
+        Some(buf)
     }
 
     /// Run the vendored-libspark self-test: builds a real coin + recovers its VRF
@@ -175,8 +199,43 @@ pub mod ffi {
         fn build_spend(&self, _c: &[CoinBytes], _m: &[u8], _f: u64, _vb: i64) -> Result<SpendBytes> {
             Err(ConnectorError::Rejected("libspark build_spend marshalling not wired (Stage 3b)".into()))
         }
-        fn verify_spend(&self, _c: &[CoinBytes], _s: &SpendBytes, _f: u64, _vb: i64) -> Result<Vec<Nullifier>> {
-            Err(ConnectorError::Rejected("libspark verify marshalling not wired (Stage 3b)".into()))
+        /// Verify a shielded spend. `spend` is a self-contained verify bundle
+        /// (see [`make_verify_bundle`]) carrying the `SpendTransaction` plus the
+        /// verifier-side context libspark needs (cover set, its representation,
+        /// output coins, block hash). Returns the linking-tag nullifiers on a
+        /// valid spend; fail-closed otherwise.
+        fn verify_spend(&self, _cover_set: &[CoinBytes], spend: &SpendBytes, _f: u64, _vb: i64) -> Result<Vec<Nullifier>> {
+            let mut tags = vec![0u8; 8192];
+            let mut tags_len: c_int = 0;
+            // Safety: pointers/lengths are valid for the duration of the call; the
+            // shim only reads `spend` and writes up to `tags.len()` into `tags`.
+            let rc = unsafe {
+                spark_ffi_verify_bundle(
+                    spend.0.as_ptr(),
+                    spend.0.len() as c_int,
+                    tags.as_mut_ptr(),
+                    tags.len() as c_int,
+                    &mut tags_len,
+                )
+            };
+            if rc != 1 {
+                return Err(ConnectorError::Rejected("shielded spend failed verification".into()));
+            }
+            let tl = tags_len.max(0) as usize;
+            if tl < 4 {
+                return Err(ConnectorError::Marshalling("tag buffer too short".into()));
+            }
+            let count = u32::from_le_bytes([tags[0], tags[1], tags[2], tags[3]]) as usize;
+            let mut out = Vec::with_capacity(count);
+            let mut off = 4usize;
+            for _ in 0..count {
+                if off + 34 > tl {
+                    return Err(ConnectorError::Marshalling("truncated nullifier tags".into()));
+                }
+                out.push(Nullifier(tags[off..off + 34].to_vec()));
+                off += 34;
+            }
+            Ok(out)
         }
         fn identify(&self, _v: &[u8], _c: &CoinBytes) -> Result<Option<IdentifiedCoin>> {
             Err(ConnectorError::Rejected("libspark identify marshalling not wired (Stage 3b)".into()))
@@ -197,6 +256,32 @@ pub mod ffi {
             assert!(
                 spend_verify_roundtrip(),
                 "SpendTransaction serialize->deserialize->verify round-trip failed"
+            );
+        }
+
+        #[test]
+        fn verify_spend_accepts_valid_bundle_and_returns_nullifiers() {
+            let bundle = make_verify_bundle().expect("failed to build verify bundle");
+            let b = LibsparkBackend;
+            let nullifiers = b
+                .verify_spend(&[], &SpendBytes(bundle), 0, 0)
+                .expect("valid bundle must verify");
+            assert_eq!(nullifiers.len(), 1, "one input => one linking-tag nullifier");
+            assert_eq!(nullifiers[0].0.len(), 34, "tag is a 34-byte group element");
+        }
+
+        #[test]
+        fn verify_spend_rejects_tampered_bundle() {
+            let mut bundle = make_verify_bundle().expect("failed to build verify bundle");
+            // The SpendTransaction (proofs) is serialized LAST, so tamper near the
+            // end — the range-proof tail. (Flipping earlier can hit a cover-set
+            // coin's encrypted memo, which verification legitimately ignores.)
+            let n = bundle.len();
+            bundle[n - 10] ^= 0x01;
+            let b = LibsparkBackend;
+            assert!(
+                b.verify_spend(&[], &SpendBytes(bundle), 0, 0).is_err(),
+                "tampered spend must be rejected"
             );
         }
 
