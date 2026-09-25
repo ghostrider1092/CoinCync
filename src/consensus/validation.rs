@@ -1584,17 +1584,15 @@ fn check_shielded_tx(tx: &Transaction, current_height: u64) -> Result<()> {
     // wrong-version bytes.) The stateful serial-tag double-spend + accumulator
     // append happen at block-apply against the ShieldedStore — see
     // consensus::shielded::apply_shielded_payload.
-    let _payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
-    // ── ACTIVATION SLOT (still fail-closed) ───────────────────────────────
-    // When the real verifier lands, verify `_payload`'s SparkSpendProof here:
-    //   - accumulator membership + value-hiding spend proof,
-    //   - serial-tag / output well-formedness.
-    // Until then remain fail-closed even post-activation, so an activation
-    // height can never precede a working, audited verifier. The current
-    // lelantus_spark proof is an unaudited O(n) Schnorr stand-in — NOT wired.
-    Err(Error::InvalidTransaction(
-        "shielded (Spark) transaction verifier is not yet wired (fail-closed)".to_string(),
-    ))
+    let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
+    // ── ACTIVATION SLOT ───────────────────────────────────────────────────
+    // Route the stateless leg through the shielded connector (its own crate).
+    // Today the connector's backend is the fail-closed `StubBackend`, so this
+    // still rejects post-activation — an activation height can never precede a
+    // working, reviewed verifier. When the libspark backend lands inside the
+    // connector, this same call verifies for real. The stateful cover-set +
+    // serial-tag double-spend verify runs at block-apply against ShieldedStore.
+    crate::consensus::shielded_connector::verify_payload(&payload, tx.fee.as_atomic())
 }
 
 // ── §9–§13  validate_transaction sub-checks (AUDIT 2026-06-30 H1) ──────────

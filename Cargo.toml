@@ -96,6 +96,9 @@ sketch-gk-proof           = []   # CIP-Shielded 2c#1 (gates src/crypto/groth_koh
 shielded-soak-stub        = []   # CIP-Shielded: inert prover/verifier for the assembly-line soak (NEVER production)
 
 [dependencies]
+# Shielded engine's own section — a clean Rust API; secp256k1/OpenSSL/C++ stay
+# behind its default-off `libspark-ffi` feature (see crates/spark-connector).
+spark-connector     = { path = "crates/spark-connector" }
 # â”€â”€ Elliptic curves â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 curve25519-dalek    = { version = "4", features = ["serde", "rand_core", "zeroize"] }
 ed25519-dalek       = { version = "2", features = ["serde", "rand_core"] }

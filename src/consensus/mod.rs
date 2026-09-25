@@ -26,6 +26,7 @@ pub mod shielded;
 /// rail, serial-tag derivation, and the fail-closed [`shielded_pipeline::SpendVerifier`]
 /// activation slot. Non-gated scaffolding; production verifier rejects all.
 pub mod shielded_pipeline;
+pub mod shielded_connector; // bridge to the isolated spark-connector crate
 pub mod fee_market;
 pub mod finality;
 pub mod fork_signal;
