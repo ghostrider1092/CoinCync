@@ -9,12 +9,34 @@
 
 use crate::consensus::shielded::ShieldedPayload;
 use crate::error::{Error, Result};
-use spark_connector::{SparkBackend, SpendBytes, StubBackend};
+use spark_connector::{SparkBackend, SpendBytes};
+#[cfg(not(feature = "libspark-ffi"))]
+use spark_connector::StubBackend;
 
-/// The active Spark backend. Fail-closed `StubBackend` until the reviewed
-/// libspark FFI backend replaces it here (the one swap point).
+/// The active Spark backend — the single swap point.
+///
+/// With the `libspark-ffi` feature the vendored Firo libspark backend verifies
+/// for real; without it the fail-closed `StubBackend` keeps shielded inert.
+/// Either way consensus stays activation-gated (`SHIELDED_TX_ACTIVATION_HEIGHT =
+/// u64::MAX`) until external review.
+#[cfg(feature = "libspark-ffi")]
+fn backend() -> impl SparkBackend {
+    spark_connector::ffi::LibsparkBackend
+}
+#[cfg(not(feature = "libspark-ffi"))]
 fn backend() -> impl SparkBackend {
     StubBackend
+}
+
+/// Verify a self-contained libspark shielded-spend **bundle** through the active
+/// backend (see `spark_connector` — cover set + outputs + `SpendTransaction`).
+/// This is the node-side entry the shielded tx path uses once the payload carries
+/// the bundle (Stage 3e). Fail-closed on any error.
+pub fn verify_bundle(bundle: &[u8]) -> Result<()> {
+    backend()
+        .verify_spend(&[], &SpendBytes(bundle.to_vec()), 0, 0)
+        .map(|_nullifiers| ())
+        .map_err(|e| Error::InvalidTransaction(format!("shielded (Spark) bundle verify failed: {e}")))
 }
 
 /// Verify a shielded payload through the connector; fail-closed on any error.
@@ -54,5 +76,24 @@ mod tests {
         };
         let err = verify_payload(&payload, 0).unwrap_err().to_string();
         assert!(err.contains("shielded") && err.contains("verifier"), "got: {err}");
+    }
+}
+
+/// With the libspark backend live, the NODE-side connector verifies a real spend
+/// bundle end-to-end (and rejects a tampered one). Proves `backend()` is wired to
+/// the functional `LibsparkBackend`.
+#[cfg(all(test, feature = "libspark-ffi"))]
+mod ffi_tests {
+    use super::*;
+
+    #[test]
+    fn node_verifies_real_libspark_bundle() {
+        let bundle = spark_connector::ffi::make_verify_bundle().expect("build verify bundle");
+        assert!(verify_bundle(&bundle).is_ok(), "node must verify a real spend bundle");
+
+        let mut bad = bundle;
+        let n = bad.len();
+        bad[n - 10] ^= 0x01; // tamper the proof region
+        assert!(verify_bundle(&bad).is_err(), "node must reject a tampered spend");
     }
 }
