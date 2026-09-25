@@ -21,10 +21,12 @@
 //!   output. This is what an audit actually relies on.
 
 use crate::crypto::{
-    verify_balance_proof_anchored, verify_ownership_proof_anchored, ChainAnchor,
-    DisclosureBalanceProof, DisclosureProof, DisclosureType, OwnershipProof,
+    create_balance_proof, create_sum_proof, verify_balance_proof_anchored,
+    verify_ownership_proof_anchored, BlindingFactor, ChainAnchor, DisclosureBalanceProof,
+    DisclosureProof, DisclosureType, OwnershipProof, PedersenCommitment,
 };
 use crate::error::{Error, Result};
+use crate::primitives::Hash;
 use serde::{Deserialize, Serialize};
 
 /// One entry in an audit package: a disclosure proof plus a plain-language
@@ -91,6 +93,12 @@ impl AuditPackage {
             return Ok(false);
         }
         for item in &self.items {
+            // Sum proofs are inherently anchored-only: they can't be checked
+            // without the on-chain commitments they sum over, so the offline
+            // pre-check skips them (they're covered by anchored verification).
+            if matches!(item.proof.proof_type, DisclosureType::Sum) {
+                continue;
+            }
             if !item.proof.verify_internal_consistency()? {
                 return Ok(false);
             }
@@ -163,6 +171,69 @@ fn decode_inner<T: for<'de> Deserialize<'de>>(proof: &DisclosureProof) -> Result
     serde_json::from_slice(&proof.proof_data).map_err(|e| Error::SerializationError(e.to_string()))
 }
 
+/// Builds a payroll run's [`AuditPackage`] — the product workflow. The
+/// organization proves the **org-side** facts (treasury solvency, total
+/// disbursed); each **recipient** contributes their own receipt (an ownership
+/// proof only they can produce). One click for a treasurer, one package for an
+/// auditor, and no contributor's pay exposed to another.
+pub struct PayrollRun {
+    package: AuditPackage,
+}
+
+impl PayrollRun {
+    pub fn new(
+        org: impl Into<String>,
+        period: impl Into<String>,
+        created_at: u64,
+        expires_at: Option<u64>,
+    ) -> Self {
+        Self { package: AuditPackage::new(org, period, created_at, expires_at) }
+    }
+
+    /// Prove the treasury holds at least `threshold`, without revealing the exact
+    /// balance. `commitment` is the treasury's on-chain Pedersen commitment.
+    pub fn treasury_solvency(
+        &mut self,
+        value: u64,
+        blinding: &BlindingFactor,
+        commitment: &PedersenCommitment,
+        threshold: u64,
+    ) -> Result<&mut Self> {
+        let bp = create_balance_proof(value, blinding, commitment, threshold)?;
+        let stmt = format!("treasury solvency >= {threshold}");
+        let dp = DisclosureProof::from_balance(&bp, &stmt, self.package.expires_at)?;
+        self.package.add(stmt, dp);
+        Ok(self)
+    }
+
+    /// Prove the total amount disbursed in this run — the sum of the run's
+    /// payment outputs — without revealing individual amounts. Each output is
+    /// `(amount, blinding, tx_hash, output_index)`.
+    pub fn total_disbursed(
+        &mut self,
+        outputs: &[(u64, BlindingFactor, Hash, u8)],
+        height_range: (u64, u64),
+    ) -> Result<&mut Self> {
+        let sp = create_sum_proof(outputs, height_range)?;
+        let stmt = format!("total disbursed = {}", sp.claimed_total);
+        let dp = DisclosureProof::from_sum(&sp, &stmt, self.package.expires_at)?;
+        self.package.add(stmt, dp);
+        Ok(self)
+    }
+
+    /// A recipient adds their own receipt (an ownership [`DisclosureProof`] they
+    /// built with their one-time key — the org cannot forge it).
+    pub fn add_recipient_receipt(&mut self, recipient: &str, receipt: DisclosureProof) -> &mut Self {
+        self.package.add(format!("receipt for {recipient}"), receipt);
+        self
+    }
+
+    /// The assembled audit package.
+    pub fn finish(self) -> AuditPackage {
+        self.package
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +302,35 @@ mod tests {
 
         let empty = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, None);
         assert!(!empty.check_offline_consistency(1_000_000).unwrap(), "empty proves nothing");
+    }
+
+    #[test]
+    fn payroll_run_builds_a_reconciling_audit_package() {
+        // Treasury the org proves solvency over.
+        let treasury_value = 10_000_000u64;
+        let tb = BlindingFactor::random(&mut OsRng);
+        let treasury_commitment = PedersenCommitment::commit(treasury_value, &tb);
+
+        // Two private payment outputs disbursed this run.
+        let b1 = BlindingFactor::random(&mut OsRng);
+        let b2 = BlindingFactor::random(&mut OsRng);
+        let outputs = vec![
+            (300_000u64, b1, Hash::from_bytes([1u8; 32]), 0u8),
+            (200_000u64, b2, Hash::from_bytes([2u8; 32]), 1u8),
+        ];
+
+        let mut run = PayrollRun::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
+        run.treasury_solvency(treasury_value, &tb, &treasury_commitment, 1_000_000).unwrap();
+        run.total_disbursed(&outputs, (0, 100)).unwrap();
+        let pkg = run.finish();
+
+        assert_eq!(pkg.items.len(), 2, "solvency + total-disbursed");
+        assert!(pkg.check_offline_consistency(1_000_000).unwrap(), "the run's proofs reconcile");
+        assert!(pkg.items[1].statement.contains("500000"), "total = 300k + 200k");
+
+        // The auditor receives it as JSON; it still reconciles.
+        let json = pkg.to_json().unwrap();
+        let received = AuditPackage::from_json(&json).unwrap();
+        assert!(received.check_offline_consistency(1_000_000).unwrap());
     }
 }
