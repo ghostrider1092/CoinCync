@@ -11,26 +11,29 @@
 //! bulletproofs), independent of the gated Spark shielded pool. Spark is the
 //! stronger-shielding upgrade underneath the same disclosure model.
 //!
-//! ## Two levels of check (this is the important part)
-//! - [`AuditPackage::check_offline_consistency`] — the offline cryptographic
-//!   check. Confirms each proof is well-formed. **NOT a trust decision:** a
-//!   prover could pass it with a commitment they invented.
-//! - [`AuditPackage::verify_anchored`] — the **sound** auditor decision. Each
-//!   proof is verified against a [`ChainAnchor`] the auditor resolves from their
-//!   own trusted chain view, so the proof must correspond to a real on-chain
-//!   output. This is what an audit actually relies on.
+//! ## Two levels of check
+//! - [`AuditPackage::check_offline_consistency`] — offline cryptographic
+//!   well-formedness. **NOT a trust decision** (a prover could invent a
+//!   commitment); Sum proofs can't be checked offline at all and are skipped.
+//! - [`AuditPackage::verify_anchored`] — the **sound** auditor decision. Every
+//!   proof is verified against a [`ChainAnchor`] resolved from the auditor's own
+//!   trusted chain view (a `resolve: OutputRef -> ChainAnchor` closure), so each
+//!   proof must correspond to a real on-chain output. Covers Balance, Ownership,
+//!   and Sum; Source (key-image provenance) anchors differently and is a follow-up.
 
 use crate::crypto::{
     create_balance_proof, create_sum_proof, verify_balance_proof_anchored,
-    verify_ownership_proof_anchored, BlindingFactor, ChainAnchor, DisclosureBalanceProof,
-    DisclosureProof, DisclosureType, OwnershipProof, PedersenCommitment,
+    verify_ownership_proof_anchored, verify_sum_proof_anchored, BlindingFactor, ChainAnchor,
+    DisclosureBalanceProof, DisclosureOutputRef, DisclosureProof, DisclosureType, OwnershipProof,
+    PedersenCommitment, SumProof,
 };
 use crate::error::{Error, Result};
 use crate::primitives::Hash;
 use serde::{Deserialize, Serialize};
 
-/// One entry in an audit package: a disclosure proof plus a plain-language
-/// statement of what it attests, so the auditor reads intent, not just crypto.
+/// One entry in an audit package: a disclosure proof, a plain-language statement
+/// of what it attests, and (for proofs that don't carry their own on-chain
+/// reference) which output the auditor should anchor it to.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuditItem {
     /// What this proof shows, in words: "treasury solvency ≥ 1,000,000",
@@ -38,6 +41,10 @@ pub struct AuditItem {
     pub statement: String,
     /// The disclosure proof backing the statement.
     pub proof: DisclosureProof,
+    /// The on-chain output this proof anchors to, when the proof doesn't already
+    /// name it. Balance proofs need it (a commitment isn't tied to an output in
+    /// the proof); Ownership proofs carry their own ref; Sum proofs carry many.
+    pub output_ref: Option<DisclosureOutputRef>,
 }
 
 /// What an org hands an auditor to reconcile a payroll run or settlement period.
@@ -69,9 +76,26 @@ impl AuditPackage {
         }
     }
 
-    /// Attach a disclosure proof with a plain-language statement of what it shows.
+    /// Attach a proof whose on-chain reference is carried by the proof itself
+    /// (Ownership) or which references many outputs (Sum).
     pub fn add(&mut self, statement: impl Into<String>, proof: DisclosureProof) -> &mut Self {
-        self.items.push(AuditItem { statement: statement.into(), proof });
+        self.items.push(AuditItem { statement: statement.into(), proof, output_ref: None });
+        self
+    }
+
+    /// Attach a proof and the on-chain output the auditor should anchor it to
+    /// (needed for Balance proofs).
+    pub fn add_anchored(
+        &mut self,
+        statement: impl Into<String>,
+        proof: DisclosureProof,
+        output_ref: DisclosureOutputRef,
+    ) -> &mut Self {
+        self.items.push(AuditItem {
+            statement: statement.into(),
+            proof,
+            output_ref: Some(output_ref),
+        });
         self
     }
 
@@ -84,20 +108,17 @@ impl AuditPackage {
         serde_json::from_str(s).map_err(|e| Error::SerializationError(e.to_string()))
     }
 
-    /// OFFLINE consistency check at time `now`: package and proofs unexpired, and
-    /// every proof cryptographically well-formed. **Not a trust decision** — use
-    /// it as a fast pre-check; a real audit calls [`verify_anchored`].
-    /// `Ok(false)` on any expiry, empty package, or malformed proof.
+    /// OFFLINE well-formedness at time `now`. **Not a trust decision.** Sum
+    /// proofs are inherently anchored-only (they need the on-chain commitments
+    /// they sum over) and are skipped here. `Ok(false)` on expiry, empty package,
+    /// or a malformed offline-checkable proof.
     pub fn check_offline_consistency(&self, now: u64) -> Result<bool> {
         if !self.unexpired_and_nonempty(now) {
             return Ok(false);
         }
         for item in &self.items {
-            // Sum proofs are inherently anchored-only: they can't be checked
-            // without the on-chain commitments they sum over, so the offline
-            // pre-check skips them (they're covered by anchored verification).
             if matches!(item.proof.proof_type, DisclosureType::Sum) {
-                continue;
+                continue; // anchored-only; covered by verify_anchored
             }
             if !item.proof.verify_internal_consistency()? {
                 return Ok(false);
@@ -106,46 +127,55 @@ impl AuditPackage {
         Ok(true)
     }
 
-    /// The SOUND auditor decision at time `now`. For each item, `resolve` returns
-    /// the [`ChainAnchor`] the auditor read from their trusted chain view; the
-    /// proof is verified against it, so it must correspond to a real on-chain
-    /// output. `Ok(false)` if anything is expired, unanchored, or fails to
-    /// verify (fail-closed). Sum proofs need a multi-output resolver and are not
-    /// yet wired here (they return an error).
+    /// The SOUND auditor decision at time `now`. `resolve` maps an on-chain
+    /// [`DisclosureOutputRef`] to the [`ChainAnchor`] the auditor read from their
+    /// trusted chain view. Every proof is verified against real on-chain outputs.
+    /// `Ok(false)` on expiry, a missing anchor, or any failed proof (fail-closed).
+    /// Source proofs are not yet wired (they anchor on key-image provenance).
     pub fn verify_anchored<F>(&self, now: u64, resolve: F) -> Result<bool>
     where
-        F: Fn(&AuditItem) -> Option<ChainAnchor>,
+        F: Fn(&DisclosureOutputRef) -> Result<Option<ChainAnchor>>,
     {
         if !self.unexpired_and_nonempty(now) {
             return Ok(false);
         }
         for item in &self.items {
-            let anchor = match resolve(item) {
-                Some(a) => a,
-                None => return Ok(false), // no trusted anchor => cannot be trusted
-            };
-            let valid = match item.proof.proof_type {
+            let ok = match item.proof.proof_type {
                 DisclosureType::Balance => {
                     let inner: DisclosureBalanceProof = decode_inner(&item.proof)?;
-                    verify_balance_proof_anchored(&inner, &anchor)?.is_valid()
+                    let oref = match &item.output_ref {
+                        Some(r) => r,
+                        None => return Ok(false), // Balance needs its output ref
+                    };
+                    match resolve(oref)? {
+                        Some(anchor) => verify_balance_proof_anchored(&inner, &anchor)?.is_valid(),
+                        None => return Ok(false),
+                    }
                 }
                 DisclosureType::Ownership => {
                     let inner: OwnershipProof = decode_inner(&item.proof)?;
-                    verify_ownership_proof_anchored(&inner, &anchor)?.is_valid()
+                    let oref = DisclosureOutputRef {
+                        tx_hash: inner.tx_hash,
+                        output_index: inner.output_index,
+                    };
+                    match resolve(&oref)? {
+                        Some(anchor) => verify_ownership_proof_anchored(&inner, &anchor)?.is_valid(),
+                        None => return Ok(false),
+                    }
                 }
-                DisclosureType::Sum | DisclosureType::Source => {
-                    // Sum needs a multi-output resolver; Source anchors on
-                    // key-image provenance (a different resolver shape). Balance
-                    // + Ownership (treasury solvency + recipient receipt) cover
-                    // the core payroll workflow; the other two are a follow-up.
+                DisclosureType::Sum => {
+                    let inner: SumProof = decode_inner(&item.proof)?;
+                    verify_sum_proof_anchored(&inner, |r| resolve(r))?.is_valid()
+                }
+                DisclosureType::Source => {
                     return Err(Error::CryptoError(
-                        "Sum/Source anchored verification is not yet wired in the \
-                         compliance connector (Balance and Ownership are)"
+                        "Source anchored verification (key-image provenance) is not yet \
+                         wired in the compliance connector"
                             .into(),
                     ));
                 }
             };
-            if !valid {
+            if !ok {
                 return Ok(false);
             }
         }
@@ -171,11 +201,11 @@ fn decode_inner<T: for<'de> Deserialize<'de>>(proof: &DisclosureProof) -> Result
     serde_json::from_slice(&proof.proof_data).map_err(|e| Error::SerializationError(e.to_string()))
 }
 
-/// Builds a payroll run's [`AuditPackage`] — the product workflow. The
-/// organization proves the **org-side** facts (treasury solvency, total
-/// disbursed); each **recipient** contributes their own receipt (an ownership
-/// proof only they can produce). One click for a treasurer, one package for an
-/// auditor, and no contributor's pay exposed to another.
+/// Builds a payroll run's [`AuditPackage`] — the product workflow. The org proves
+/// the **org-side** facts (treasury solvency, total disbursed); each **recipient**
+/// contributes their own receipt (an ownership proof only they can produce). One
+/// flow for a treasurer, one package for an auditor, no contributor's pay exposed
+/// to another.
 pub struct PayrollRun {
     package: AuditPackage,
 }
@@ -190,24 +220,25 @@ impl PayrollRun {
         Self { package: AuditPackage::new(org, period, created_at, expires_at) }
     }
 
-    /// Prove the treasury holds at least `threshold`, without revealing the exact
-    /// balance. `commitment` is the treasury's on-chain Pedersen commitment.
+    /// Prove the treasury (its on-chain output `output_ref`, commitment
+    /// `commitment`) holds at least `threshold`, without revealing the balance.
     pub fn treasury_solvency(
         &mut self,
         value: u64,
         blinding: &BlindingFactor,
         commitment: &PedersenCommitment,
         threshold: u64,
+        output_ref: DisclosureOutputRef,
     ) -> Result<&mut Self> {
         let bp = create_balance_proof(value, blinding, commitment, threshold)?;
         let stmt = format!("treasury solvency >= {threshold}");
         let dp = DisclosureProof::from_balance(&bp, &stmt, self.package.expires_at)?;
-        self.package.add(stmt, dp);
+        self.package.add_anchored(stmt, dp, output_ref);
         Ok(self)
     }
 
-    /// Prove the total amount disbursed in this run — the sum of the run's
-    /// payment outputs — without revealing individual amounts. Each output is
+    /// Prove the total disbursed in this run — the sum of the payment outputs —
+    /// without revealing individual amounts. Each output is
     /// `(amount, blinding, tx_hash, output_index)`.
     pub fn total_disbursed(
         &mut self,
@@ -238,13 +269,14 @@ impl PayrollRun {
 mod tests {
     use super::*;
     use crate::crypto::{create_balance_proof, BlindingFactor, PedersenCommitment};
-    use crate::primitives::Hash;
     use rand::rngs::OsRng;
 
-    /// A treasury-solvency disclosure (prove balance ≥ `threshold`) and the
-    /// on-chain commitment it was built over, for anchoring.
-    fn treasury_solvency(threshold: u64) -> (DisclosureProof, [u8; 32]) {
-        let value = 5_000_000u64; // actual (hidden) treasury balance
+    fn oref(tag: u8, idx: u8) -> DisclosureOutputRef {
+        DisclosureOutputRef { tx_hash: Hash::from_bytes([tag; 32]), output_index: idx }
+    }
+
+    fn treasury_solvency_proof(threshold: u64) -> (DisclosureProof, [u8; 32]) {
+        let value = 5_000_000u64;
         let blinding = BlindingFactor::random(&mut OsRng);
         let commitment = PedersenCommitment::commit(value, &blinding);
         let bp = create_balance_proof(value, &blinding, &commitment, threshold).unwrap();
@@ -252,85 +284,94 @@ mod tests {
         (dp, commitment.to_bytes())
     }
 
-    fn anchor_for(commitment: [u8; 32]) -> ChainAnchor {
-        ChainAnchor::new(
-            crate::crypto::DisclosureOutputRef { tx_hash: Hash::from_bytes([1u8; 32]), output_index: 0 },
-            commitment,
-            [0u8; 32],
-            10,
-        )
-    }
-
     #[test]
     fn offline_consistency_and_json_round_trip() {
-        let (dp, _c) = treasury_solvency(1_000_000);
+        let (dp, _c) = treasury_solvency_proof(1_000_000);
         let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
-        pkg.add("treasury solvency >= 1,000,000", dp);
+        pkg.add_anchored("treasury solvency >= 1,000,000", dp, oref(9, 0));
 
-        assert!(pkg.check_offline_consistency(1_000_000).unwrap(), "well-formed package");
+        assert!(pkg.check_offline_consistency(1_000_000).unwrap());
         let json = pkg.to_json().unwrap();
         let received = AuditPackage::from_json(&json).unwrap();
-        assert!(received.check_offline_consistency(1_000_000).unwrap(), "survives JSON");
+        assert!(received.check_offline_consistency(1_000_000).unwrap());
         assert_eq!(received.org, "Acme DAO");
     }
 
     #[test]
     fn anchored_verify_is_the_sound_check() {
-        let (dp, commitment) = treasury_solvency(1_000_000);
+        let (dp, commitment) = treasury_solvency_proof(1_000_000);
+        let t_ref = oref(9, 0);
         let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
-        pkg.add("treasury solvency >= 1,000,000", dp);
+        pkg.add_anchored("treasury solvency >= 1,000,000", dp, t_ref.clone());
 
-        // Correct anchor (the on-chain commitment the proof was built over) => valid.
-        let good = anchor_for(commitment);
-        assert!(pkg.verify_anchored(1_000_000, |_| Some(good.clone())).unwrap(), "sound anchor verifies");
+        // Correct anchor (the on-chain commitment the proof was built over).
+        let good = ChainAnchor::new(t_ref.clone(), commitment, [0u8; 32], 10);
+        assert!(pkg
+            .verify_anchored(1_000_000, |_r| Ok(Some(good.clone())))
+            .unwrap());
 
-        // Anchor pointing at a different on-chain commitment => rejected (a prover
-        // can't pass off a proof against an output that isn't theirs).
-        let wrong = anchor_for([9u8; 32]);
-        assert!(!pkg.verify_anchored(1_000_000, |_| Some(wrong.clone())).unwrap(), "wrong anchor rejected");
+        // Anchor at a different commitment => rejected.
+        let wrong = ChainAnchor::new(t_ref.clone(), [9u8; 32], [0u8; 32], 10);
+        assert!(!pkg
+            .verify_anchored(1_000_000, |_r| Ok(Some(wrong.clone())))
+            .unwrap());
 
-        // No anchor available => cannot be trusted.
-        assert!(!pkg.verify_anchored(1_000_000, |_| None).unwrap(), "unanchored is not trusted");
+        // No anchor => not trusted.
+        assert!(!pkg.verify_anchored(1_000_000, |_r| Ok(None)).unwrap());
     }
 
     #[test]
     fn expired_and_empty_fail_closed() {
-        let (dp, _c) = treasury_solvency(1_000_000);
+        let (dp, _c) = treasury_solvency_proof(1_000_000);
         let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(5_000));
-        pkg.add("treasury solvency", dp);
-        assert!(!pkg.check_offline_consistency(10_000).unwrap(), "past window fails closed");
+        pkg.add_anchored("treasury solvency", dp, oref(9, 0));
+        assert!(!pkg.check_offline_consistency(10_000).unwrap());
 
         let empty = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, None);
-        assert!(!empty.check_offline_consistency(1_000_000).unwrap(), "empty proves nothing");
+        assert!(!empty.check_offline_consistency(1_000_000).unwrap());
     }
 
     #[test]
-    fn payroll_run_builds_a_reconciling_audit_package() {
-        // Treasury the org proves solvency over.
-        let treasury_value = 10_000_000u64;
-        let tb = BlindingFactor::random(&mut OsRng);
-        let treasury_commitment = PedersenCommitment::commit(treasury_value, &tb);
-
-        // Two private payment outputs disbursed this run.
+    fn payroll_run_builds_and_fully_anchored_verifies() {
+        // Payment outputs disbursed this run (compute commitments before moving blindings).
+        let (a1, a2) = (300_000u64, 200_000u64);
         let b1 = BlindingFactor::random(&mut OsRng);
         let b2 = BlindingFactor::random(&mut OsRng);
-        let outputs = vec![
-            (300_000u64, b1, Hash::from_bytes([1u8; 32]), 0u8),
-            (200_000u64, b2, Hash::from_bytes([2u8; 32]), 1u8),
-        ];
+        let c1 = PedersenCommitment::commit(a1, &b1).to_bytes();
+        let c2 = PedersenCommitment::commit(a2, &b2).to_bytes();
+        let (r1, r2) = (oref(1, 0), oref(2, 1));
+        let outputs = vec![(a1, b1, r1.tx_hash, r1.output_index), (a2, b2, r2.tx_hash, r2.output_index)];
+
+        // Treasury.
+        let tv = 10_000_000u64;
+        let tb = BlindingFactor::random(&mut OsRng);
+        let tc = PedersenCommitment::commit(tv, &tb);
+        let t_ref = oref(9, 0);
 
         let mut run = PayrollRun::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
-        run.treasury_solvency(treasury_value, &tb, &treasury_commitment, 1_000_000).unwrap();
+        run.treasury_solvency(tv, &tb, &tc, 1_000_000, t_ref.clone()).unwrap();
         run.total_disbursed(&outputs, (0, 100)).unwrap();
         let pkg = run.finish();
 
-        assert_eq!(pkg.items.len(), 2, "solvency + total-disbursed");
-        assert!(pkg.check_offline_consistency(1_000_000).unwrap(), "the run's proofs reconcile");
+        assert_eq!(pkg.items.len(), 2);
         assert!(pkg.items[1].statement.contains("500000"), "total = 300k + 200k");
 
-        // The auditor receives it as JSON; it still reconciles.
-        let json = pkg.to_json().unwrap();
-        let received = AuditPackage::from_json(&json).unwrap();
-        assert!(received.check_offline_consistency(1_000_000).unwrap());
+        // The auditor's trusted chain view: each output ref -> its on-chain anchor.
+        let tc_bytes = tc.to_bytes();
+        let resolve = |r: &DisclosureOutputRef| -> Result<Option<ChainAnchor>> {
+            let a = if *r == t_ref {
+                ChainAnchor::new(t_ref.clone(), tc_bytes, [0u8; 32], 50)
+            } else if *r == r1 {
+                ChainAnchor::new(r1.clone(), c1, [0u8; 32], 50)
+            } else if *r == r2 {
+                ChainAnchor::new(r2.clone(), c2, [0u8; 32], 50)
+            } else {
+                return Ok(None);
+            };
+            Ok(Some(a))
+        };
+
+        // The WHOLE payroll package (solvency + total-disbursed) verifies anchored.
+        assert!(pkg.verify_anchored(1_000_000, resolve).unwrap(), "payroll package must fully anchor-verify");
     }
 }
