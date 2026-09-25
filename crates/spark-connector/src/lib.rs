@@ -140,6 +140,7 @@ pub mod ffi {
 
     extern "C" {
         fn spark_ffi_selftest() -> core::ffi::c_int;
+        fn spark_ffi_spend_verify_roundtrip() -> core::ffi::c_int;
     }
 
     /// Run the vendored-libspark self-test: builds a real coin + recovers its VRF
@@ -148,6 +149,15 @@ pub mod ffi {
     pub fn selftest() -> bool {
         // Safety: the shim takes/returns only a plain int and touches no Rust memory.
         unsafe { spark_ffi_selftest() == 1 }
+    }
+
+    /// Build a valid V2 `SpendTransaction`, serialize it to bytes, deserialize it,
+    /// and verify the round-tripped transaction. Returns true iff verify passes —
+    /// proving the `SpendBytes` boundary carries a real, verifiable spend (the
+    /// core of `verify_spend`). Stage 3b.
+    pub fn spend_verify_roundtrip() -> bool {
+        // Safety: plain-int shim, no Rust memory touched.
+        unsafe { spark_ffi_spend_verify_roundtrip() == 1 }
     }
 
     /// The libspark-backed [`SparkBackend`].
@@ -180,6 +190,14 @@ pub mod ffi {
         #[test]
         fn libspark_selftest_passes() {
             assert!(selftest(), "vendored libspark self-test failed");
+        }
+
+        #[test]
+        fn spend_serialize_deserialize_verify_round_trips() {
+            assert!(
+                spend_verify_roundtrip(),
+                "SpendTransaction serialize->deserialize->verify round-trip failed"
+            );
         }
 
         #[test]
