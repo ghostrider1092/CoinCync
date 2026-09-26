@@ -216,6 +216,13 @@ enum Command {
         /// is set; ignored otherwise.
         #[arg(long)]
         recovery_timeout: Option<u64>,
+        /// Treasury allowlist policy file (from `treasury allow`). When set, the
+        /// send is REFUSED unless the recipient (spend+view) is on the list — a
+        /// guard against a compromised host or operator redirecting funds. This
+        /// is enforced by this wallet binary; pair it with M-of-N custody for
+        /// protection a single compromised signer cannot bypass.
+        #[arg(long)]
+        policy: Option<String>,
     },
 
     /// Generate M-of-N multi-sig key shares using FROST.
@@ -419,6 +426,22 @@ enum TreasuryAction {
         /// Path to the watch file from `treasury watchfile`.
         #[arg(long)]
         watchfile: String,
+    },
+    /// Add an approved recipient to a treasury allowlist policy file (created if
+    /// missing). `send --policy <file>` then refuses any recipient not listed.
+    Allow {
+        /// Recipient spend public key (64-hex).
+        #[arg(long)]
+        spend: String,
+        /// Recipient view public key (64-hex).
+        #[arg(long)]
+        view: String,
+        /// Optional human label (e.g. "payroll:bob").
+        #[arg(long)]
+        label: Option<String>,
+        /// Policy file to create/append.
+        #[arg(long)]
+        policy: String,
     },
 }
 
@@ -691,6 +714,7 @@ async fn main() {
             memo,
             recovery_address,
             recovery_timeout,
+            policy,
         } => {
             cmd_send(
                 &wallet_path,
@@ -704,6 +728,7 @@ async fn main() {
                 memo,
                 recovery_address,
                 recovery_timeout,
+                policy,
                 &cli.node,
             )
             .await
@@ -878,6 +903,12 @@ async fn main() {
             TreasuryAction::Watch { watchfile } => {
                 cmd_treasury_watch(&watchfile, &cli.node).await
             }
+            TreasuryAction::Allow {
+                spend,
+                view,
+                label,
+                policy,
+            } => cmd_treasury_allow(&spend, &view, label, &policy),
         },
     };
 
@@ -985,6 +1016,89 @@ async fn cmd_treasury_watch(watchfile: &str, node: &str) -> Result<(), String> {
         Err(format!(
             "{} treasury output(s) have moved — investigate immediately",
             spent.len()
+        ))
+    }
+}
+
+/// Add an approved recipient to a treasury allowlist policy file (created if
+/// missing). Keys are validated and stored lowercase for stable matching.
+fn cmd_treasury_allow(
+    spend: &str,
+    view: &str,
+    label: Option<String>,
+    policy: &str,
+) -> Result<(), String> {
+    for (h, name) in [(spend, "spend"), (view, "view")] {
+        let b = hex::decode(h).map_err(|e| format!("{name} hex: {e}"))?;
+        if b.len() != 32 {
+            return Err(format!("{name} must be 32 bytes"));
+        }
+    }
+    let spend = spend.to_lowercase();
+    let view = view.to_lowercase();
+
+    let mut doc: serde_json::Value = if std::path::Path::new(policy).exists() {
+        let raw = std::fs::read_to_string(policy).map_err(|e| format!("read {policy}: {e}"))?;
+        serde_json::from_str(&raw).map_err(|e| format!("parse {policy}: {e}"))?
+    } else {
+        serde_json::json!({ "label": "coincync-treasury-policy/v1", "allow": [] })
+    };
+    let allow = doc
+        .get_mut("allow")
+        .and_then(|v| v.as_array_mut())
+        .ok_or("policy has no `allow` array")?;
+    let exists = allow.iter().any(|e| {
+        e.get("spend").and_then(|v| v.as_str()) == Some(spend.as_str())
+            && e.get("view").and_then(|v| v.as_str()) == Some(view.as_str())
+    });
+    if exists {
+        println!("Recipient already on the allowlist ({policy}).");
+        return Ok(());
+    }
+    allow.push(serde_json::json!({
+        "spend": spend,
+        "view": view,
+        "label": label.unwrap_or_default(),
+    }));
+    let n = allow.len();
+    std::fs::write(
+        policy,
+        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("write {policy}: {e}"))?;
+    println!("Added recipient to {policy} ({n} approved).");
+    Ok(())
+}
+
+/// Enforce a treasury allowlist: the (spend, view) recipient must be listed, or
+/// the send is refused. Advisory — enforced by this wallet binary; pair with
+/// M-of-N custody for protection a single compromised signer cannot bypass.
+fn enforce_send_policy(
+    policy_file: &str,
+    to_spend_hex: &str,
+    to_view_hex: &str,
+) -> Result<(), String> {
+    let raw =
+        std::fs::read_to_string(policy_file).map_err(|e| format!("read policy {policy_file}: {e}"))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse policy {policy_file}: {e}"))?;
+    let allow = doc
+        .get("allow")
+        .and_then(|v| v.as_array())
+        .ok_or("policy has no `allow` array")?;
+    let want_spend = to_spend_hex.to_lowercase();
+    let want_view = to_view_hex.to_lowercase();
+    let approved = allow.iter().any(|e| {
+        e.get("spend").and_then(|v| v.as_str()).map(str::to_lowercase) == Some(want_spend.clone())
+            && e.get("view").and_then(|v| v.as_str()).map(str::to_lowercase) == Some(want_view.clone())
+    });
+    if approved {
+        Ok(())
+    } else {
+        Err(format!(
+            "BLOCKED by treasury allowlist ({policy_file}): recipient spend {}… is not approved. \
+             Add it with `treasury allow --spend <hex> --view <hex> --policy {policy_file}`.",
+            &want_spend[..want_spend.len().min(12)]
         ))
     }
 }
@@ -1753,6 +1867,7 @@ async fn cmd_send(
     memo: Option<String>,
     recovery_address_hex: Option<String>,
     recovery_timeout: Option<u64>,
+    policy: Option<String>,
     node: &str,
 ) -> Result<(), String> {
     use coincync::decoy::{DecoyDistributionSnapshot, ResolvedDecoySnapshot};
@@ -1762,6 +1877,12 @@ async fn cmd_send(
         ValidatedDecoySnapshot,
     };
     use coincync::wallet::{KeyEpoch, Wallet};
+
+    // Treasury allowlist: refuse before touching keys if the recipient is not
+    // approved (guards against a compromised host/operator redirecting funds).
+    if let Some(policy_file) = policy.as_deref() {
+        enforce_send_policy(policy_file, &to_spend_hex, &to_view_hex)?;
+    }
 
     // Parse recipient keys
     let parse_pk = |hex_str: &str, label: &str| -> Result<PublicKey, String> {

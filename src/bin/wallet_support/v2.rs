@@ -44,6 +44,7 @@ fn run_send_command_v2(cli: Cli) {
         memo,
         recovery_address,
         recovery_timeout,
+        policy,
     } = command
     else {
         unreachable!("send dispatcher called for a non-send command");
@@ -61,6 +62,7 @@ fn run_send_command_v2(cli: Cli) {
         memo,
         recovery_address,
         recovery_timeout,
+        policy,
         node,
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -94,6 +96,7 @@ struct SendCommandArguments {
     memo: Option<String>,
     recovery_address: Option<String>,
     recovery_timeout: Option<u64>,
+    policy: Option<String>,
     node: String,
 }
 
@@ -110,10 +113,17 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
         memo,
         recovery_address: recovery_address_hex,
         recovery_timeout,
+        policy,
         node,
     } = arguments;
     use coincync::wallet::spend::{SpendCoordinator, SpendIntent, SpendSubmission};
     use coincync::wallet::{KeyEpoch, Wallet};
+
+    // Treasury allowlist: refuse before touching keys if the recipient is not
+    // approved (guards against a compromised host/operator redirecting funds).
+    if let Some(policy_file) = policy.as_deref() {
+        enforce_send_policy(policy_file, &to_spend_hex, &to_view_hex)?;
+    }
 
     let to_spend = parse_public_key_v2(&to_spend_hex, "to-spend")?;
     let to_view = parse_public_key_v2(&to_view_hex, "to-view")?;
