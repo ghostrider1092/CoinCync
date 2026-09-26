@@ -489,6 +489,55 @@ enum DiscloseAction {
         #[arg(long)]
         auditor: String,
     },
+    /// Org side: build and sign a payroll/settlement audit package for one
+    /// named auditor. Proves treasury solvency from one of this wallet's UTXOs;
+    /// optionally adds a total-disbursed proof (from a disbursements file the
+    /// org holds, since only it knows those outputs' blindings) and recipient
+    /// receipts (DisclosureProof JSON the recipients handed over). Signs with
+    /// the org's Ed25519 audit key and writes a SignedAuditPackage the auditor
+    /// verifies with `verify-audit-package`.
+    BuildPayrollAudit {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Organization name recorded in the package.
+        #[arg(long)]
+        org: String,
+        /// Period label (e.g. "2026-Q3").
+        #[arg(long)]
+        period: String,
+        /// Index of the treasury UTXO in the wallet's unspent list (run `scan`
+        /// first); its value + blinding back the solvency proof.
+        #[arg(long)]
+        treasury_utxo_index: usize,
+        /// Solvency threshold in atomic units (asserts treasury >= threshold).
+        #[arg(long)]
+        threshold: u64,
+        /// The org's Ed25519 audit signing seed (hex, 32 bytes). Distinct from
+        /// wallet keys — it is the org's audit identity. Reads
+        /// `COINCYNC_AUDIT_SIGNING_SEED` if the flag is omitted.
+        #[arg(long, env = "COINCYNC_AUDIT_SIGNING_SEED", hide_env_values = true)]
+        signing_seed: Option<String>,
+        /// The single auditor this package is addressed to (its `audience`).
+        #[arg(long)]
+        auditor: String,
+        /// Unique single-use id (hex, 32 bytes). Random if omitted.
+        #[arg(long)]
+        audit_id: Option<String>,
+        /// Package expiry as a unix timestamp (seconds). Never expires if unset.
+        #[arg(long)]
+        expires_at: Option<u64>,
+        /// Optional disbursements JSON file adding a total-disbursed proof:
+        /// {"height_range":[start,end],"outputs":[{"value":u64,
+        /// "blinding":"hex32","tx_hash":"hex32","output_index":u8}, …]}.
+        #[arg(long)]
+        disbursements: Option<String>,
+        /// Recipient receipt file (a DisclosureProof JSON). Repeatable.
+        #[arg(long = "receipt")]
+        receipts: Vec<String>,
+        /// Output path for the signed package JSON.
+        #[arg(long)]
+        out: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -716,6 +765,37 @@ async fn main() {
                 issuer,
                 auditor,
             } => cmd_disclose_verify_audit_package(&package, &issuer, &auditor, &cli.node).await,
+            DiscloseAction::BuildPayrollAudit {
+                password,
+                org,
+                period,
+                treasury_utxo_index,
+                threshold,
+                signing_seed,
+                auditor,
+                audit_id,
+                expires_at,
+                disbursements,
+                receipts,
+                out,
+            } => {
+                cmd_disclose_build_payroll_audit(
+                    &wallet_path,
+                    password,
+                    &org,
+                    &period,
+                    treasury_utxo_index,
+                    threshold,
+                    signing_seed,
+                    &auditor,
+                    audit_id,
+                    expires_at,
+                    disbursements,
+                    &receipts,
+                    &out,
+                )
+                .await
+            }
         },
         Command::ShowMemo {
             password,
@@ -3077,6 +3157,158 @@ async fn cmd_disclose_verify_audit_package(
     }
 }
 
+/// A disbursements file for `build-payroll-audit`: the outputs the org paid out
+/// in `height_range`. The org supplies these because only it knows each
+/// output's blinding factor.
+#[derive(serde::Deserialize)]
+struct DisbursementsSpec {
+    height_range: [u64; 2],
+    outputs: Vec<DisbursementOut>,
+}
+
+#[derive(serde::Deserialize)]
+struct DisbursementOut {
+    value: u64,
+    blinding: String,
+    tx_hash: String,
+    output_index: u8,
+}
+
+/// Decode a hex string into a 32-byte array, with a labeled error.
+fn decode_hex32(s: &str, what: &str) -> Result<[u8; 32], String> {
+    let v = hex::decode(s).map_err(|e| format!("{what}: bad hex: {e}"))?;
+    v.as_slice()
+        .try_into()
+        .map_err(|_| format!("{what}: expected 32 bytes, got {}", v.len()))
+}
+
+/// Org side: build and sign a payroll/settlement audit package for one auditor.
+/// Treasury solvency comes from a real wallet UTXO (its value + blinding); the
+/// optional total-disbursed proof and recipient receipts are org-supplied
+/// (only the org holds the disbursement blindings; recipients hand over their
+/// own receipts). Signed with the org's Ed25519 audit identity.
+#[allow(clippy::too_many_arguments)]
+async fn cmd_disclose_build_payroll_audit(
+    path: &PathBuf,
+    password: Option<String>,
+    org: &str,
+    period: &str,
+    treasury_utxo_index: usize,
+    threshold: u64,
+    signing_seed_hex: Option<String>,
+    auditor: &str,
+    audit_id_hex: Option<String>,
+    expires_at: Option<u64>,
+    disbursements_file: Option<String>,
+    receipt_files: &[String],
+    out: &str,
+) -> Result<(), String> {
+    use coincync::compliance::PayrollRun;
+    use coincync::crypto::{BlindingFactor, DisclosureOutputRef, DisclosureProof, PedersenCommitment};
+    use coincync::primitives::Hash;
+    use coincync::wallet::Wallet;
+    use ed25519_dalek::SigningKey;
+
+    // Org audit signing identity (distinct from wallet keys).
+    let seed_hex = signing_seed_hex.ok_or_else(|| {
+        "missing --signing-seed (or COINCYNC_AUDIT_SIGNING_SEED): the org's ed25519 audit key".to_string()
+    })?;
+    let signing_key = SigningKey::from_bytes(&decode_hex32(&seed_hex, "signing-seed")?);
+    let issuer_hex = hex::encode(signing_key.verifying_key().to_bytes());
+
+    // Single-use id: caller-supplied or random.
+    let audit_id = match audit_id_hex {
+        Some(h) => decode_hex32(&h, "audit-id")?,
+        None => rand::random(),
+    };
+
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut run = PayrollRun::new(org, period, created_at, expires_at);
+
+    // Treasury solvency from a wallet UTXO (real value + blinding).
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+    let balance = wallet.balance();
+    let utxos = balance.unspent_utxos();
+    let utxo = utxos.get(treasury_utxo_index).ok_or_else(|| {
+        format!(
+            "treasury_utxo_index {} out of range (wallet has {} unspent UTXOs)",
+            treasury_utxo_index,
+            utxos.len()
+        )
+    })?;
+    let value = utxo.amount.as_atomic();
+    if value < threshold {
+        return Err(format!(
+            "cannot prove threshold {}: treasury UTXO has only {} atomic",
+            threshold, value
+        ));
+    }
+    let blinding = BlindingFactor::from_bytes(utxo.amount_blinding_bytes);
+    let commitment = PedersenCommitment::commit(value, &blinding);
+    let treasury_ref = DisclosureOutputRef {
+        tx_hash: utxo.tx_hash,
+        output_index: utxo.output_index,
+    };
+    run.treasury_solvency(value, &blinding, &commitment, threshold, treasury_ref)
+        .map_err(|e| format!("treasury_solvency: {}", e))?;
+
+    // Optional total-disbursed proof from an org-supplied disbursements file.
+    if let Some(df) = disbursements_file {
+        let raw = std::fs::read_to_string(&df).map_err(|e| format!("read {df}: {e}"))?;
+        let spec: DisbursementsSpec =
+            serde_json::from_str(&raw).map_err(|e| format!("parse disbursements {df}: {e}"))?;
+        let mut outputs: Vec<(u64, BlindingFactor, Hash, u8)> = Vec::with_capacity(spec.outputs.len());
+        for o in &spec.outputs {
+            let b = decode_hex32(&o.blinding, "disbursement blinding")?;
+            let tx = decode_hex32(&o.tx_hash, "disbursement tx_hash")?;
+            outputs.push((o.value, BlindingFactor::from_bytes(b), Hash::from_bytes(tx), o.output_index));
+        }
+        run.total_disbursed(&outputs, (spec.height_range[0], spec.height_range[1]))
+            .map_err(|e| format!("total_disbursed: {}", e))?;
+    }
+
+    // Recipient receipts (DisclosureProof JSON each).
+    for rf in receipt_files {
+        let raw = std::fs::read_to_string(rf).map_err(|e| format!("read receipt {rf}: {e}"))?;
+        let dp: DisclosureProof =
+            serde_json::from_str(&raw).map_err(|e| format!("parse receipt {rf}: {e}"))?;
+        run.add_recipient_receipt(rf, dp);
+    }
+
+    // Finish, sign, write.
+    let pkg = run.finish();
+    let signed = pkg
+        .sign(&signing_key, audit_id, auditor)
+        .map_err(|e| format!("sign package: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(&signed).map_err(|e| format!("serialize package: {}", e))?;
+    std::fs::write(out, &json).map_err(|e| format!("write {out}: {e}"))?;
+
+    println!("Signed audit package written to {out}");
+    println!("  org:      {org}");
+    println!("  period:   {period}");
+    println!("  auditor:  {auditor}");
+    println!("  audit_id: {}", hex::encode(audit_id));
+    println!("  issuer:   {issuer_hex}");
+    println!();
+    println!("The auditor verifies it against their node with:");
+    println!(
+        "  coincync-wallet disclose verify-audit-package \\\n    --package {out} --issuer {issuer_hex} --auditor \"{auditor}\" --node <url>"
+    );
+    Ok(())
+}
+
 async fn cmd_show_memo(
     path: &PathBuf,
     password: Option<String>,
@@ -3482,5 +3714,31 @@ mod legacy_support_tests {
             json.contains("100") && json.contains("200"),
             "exported JSON carries the disclosed height scope"
         );
+    }
+
+    // ── build-payroll-audit input parsing ───────────────────────────────
+    #[test]
+    fn decode_hex32_validates_length_and_hex() {
+        assert_eq!(decode_hex32(&"ab".repeat(32), "x").unwrap(), [0xabu8; 32]);
+        assert!(decode_hex32("zz", "x").is_err(), "non-hex rejected");
+        assert!(decode_hex32(&"ab".repeat(16), "x").is_err(), "16 bytes rejected");
+        assert!(decode_hex32(&"ab".repeat(33), "x").is_err(), "33 bytes rejected");
+    }
+
+    #[test]
+    fn disbursements_spec_parses_and_decodes() {
+        let b = "11".repeat(32);
+        let tx = "22".repeat(32);
+        let json = format!(
+            r#"{{"height_range":[10,20],"outputs":[{{"value":500,"blinding":"{b}","tx_hash":"{tx}","output_index":3}}]}}"#
+        );
+        let spec: DisbursementsSpec = serde_json::from_str(&json).expect("parse disbursements spec");
+        assert_eq!(spec.height_range, [10, 20]);
+        assert_eq!(spec.outputs.len(), 1);
+        let o = &spec.outputs[0];
+        assert_eq!(o.value, 500);
+        assert_eq!(o.output_index, 3);
+        assert_eq!(decode_hex32(&o.blinding, "b").unwrap(), [0x11u8; 32]);
+        assert_eq!(decode_hex32(&o.tx_hash, "t").unwrap(), [0x22u8; 32]);
     }
 }
