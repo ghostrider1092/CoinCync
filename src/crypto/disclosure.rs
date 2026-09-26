@@ -128,6 +128,17 @@ use crate::crypto::{
     create_range_proof, hash_to_point, hash_to_scalar, verify_range_proof, BlindingFactor,
     KeyImage, PedersenCommitment, PublicPoint, RangeProof, SecretScalar,
 };
+
+// Unlinkable solvency rests on the (unaudited) Groth-Kohlweiss one-of-many, which
+// is only compiled under `sketch-gk-proof`, so the feature is gated identically.
+#[cfg(feature = "sketch-gk-proof")]
+use crate::crypto::bulletproofs::{blinding_generator, value_generator};
+#[cfg(feature = "sketch-gk-proof")]
+use crate::crypto::groth_kohlweiss::{
+    prove_one_of_many_gen_ctx, verify_one_of_many_gen_ctx, GkOneOfManyProof,
+};
+#[cfg(feature = "sketch-gk-proof")]
+use curve25519_dalek::ristretto::RistrettoPoint;
 use crate::error::{Error, Result};
 use crate::primitives::{hash_domain, Hash, PublicKey, SecretKey};
 use subtle::ConstantTimeEq;
@@ -361,6 +372,416 @@ pub fn verify_balance_proof(proof: &BalanceProof) -> Result<bool> {
     let adj_commitment = PedersenCommitment::from_bytes_checked(proof.adjusted_commitment)
         .ok_or_else(|| Error::CryptoError("Invalid adjusted commitment for range proof".into()))?;
     Ok(verify_range_proof(&adj_commitment, &proof.range_proof))
+}
+
+// =============================================================================
+// 1b. UNLINKABLE SOLVENCY PROOF - "one of these outputs is mine and holds >= X"
+// =============================================================================
+
+/// Proof that **one** on-chain output in an anonymity set holds `value >=
+/// threshold`, **without revealing which** — so an org can prove treasury
+/// solvency without exposing which UTXO is the treasury.
+///
+/// Construction (all in the transparent Pedersen basis `C = v·H + r·G`):
+/// - `V = value·H + value_blinding·G` — a fresh commitment to the treasury value.
+/// - **membership**: a Groth-Kohlweiss one-of-many over `{Cᵢ − V}` with blinding
+///   generator `G` (via [`prove_one_of_many_gen_ctx`]). It succeeds only at the
+///   hidden `l` where `Cₗ − V ∈ ⟨G⟩`, i.e. `Cₗ` and `V` commit to the **same
+///   value** (the `H` component cancels ⟺ `vₗ = value`).
+/// - **balance**: the existing range proof over `V` proving `value >= threshold`.
+///
+/// Together: some real output has value ≥ threshold, hidden which. SOUNDNESS
+/// note: this is only a trust decision once every `anonymity_set` member is
+/// confirmed to be a real on-chain commitment (the anchored/compliance layer);
+/// on its own it proves a statement about a *caller-supplied* set.
+#[cfg(feature = "sketch-gk-proof")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UnlinkableSolvencyProof {
+    /// The candidate on-chain output commitments (power-of-two count), the
+    /// treasury hidden at one index.
+    pub anonymity_set: Vec<[u8; 32]>,
+    /// `V = value·H + value_blinding·G`.
+    pub value_commitment: [u8; 32],
+    /// One-of-many over `{Cᵢ − V}` (blinding generator `G`).
+    pub membership: GkOneOfManyProof,
+    /// Range proof over `V` proving `value >= threshold`.
+    pub balance: BalanceProof,
+    /// The disclosed lower bound.
+    pub threshold: u64,
+    /// Chain height the proof is asserted "as of" (bound into the challenge).
+    /// The claim is that some anonymity-set member **held** `>= threshold` at
+    /// this height — NOT that it is currently unspent. The auditor should treat
+    /// a stale height with suspicion (a freshness policy) and remember that a
+    /// current-unspent guarantee is impossible without revealing the treasury's
+    /// key image (which would break unlinkability).
+    pub as_of_height: u64,
+}
+
+/// Domain-separated Fiat-Shamir context binding `V` and the threshold into the
+/// membership proof (the set itself is bound via the GK challenge).
+#[cfg(feature = "sketch-gk-proof")]
+fn unlinkable_solvency_ctx(v_bytes: &[u8; 32], threshold: u64, as_of_height: u64) -> Vec<u8> {
+    let mut c = Vec::with_capacity(72);
+    c.extend_from_slice(b"COINCYNC_UNLINKABLE_SOLVENCY_v1");
+    c.extend_from_slice(v_bytes);
+    c.extend_from_slice(&threshold.to_le_bytes());
+    c.extend_from_slice(&as_of_height.to_le_bytes());
+    c
+}
+
+/// Build an [`UnlinkableSolvencyProof`]. `treasury_blinding` is the blinding of
+/// the on-chain treasury commitment `anonymity_set[l]`; `value` is its amount.
+/// The set size must be a power of two ≥ 2.
+#[cfg(feature = "sketch-gk-proof")]
+pub fn create_unlinkable_solvency_proof(
+    value: u64,
+    treasury_blinding: &BlindingFactor,
+    anonymity_set: &[[u8; 32]],
+    l: usize,
+    threshold: u64,
+    as_of_height: u64,
+) -> Result<UnlinkableSolvencyProof> {
+    let n = anonymity_set.len();
+    if n < 2 || !n.is_power_of_two() {
+        return Err(Error::CryptoError(
+            "unlinkable solvency: anonymity set size must be a power of two >= 2".into(),
+        ));
+    }
+    if l >= n {
+        return Err(Error::CryptoError(
+            "unlinkable solvency: treasury index out of range".into(),
+        ));
+    }
+    if value < threshold {
+        return Err(Error::CryptoError(
+            "unlinkable solvency: value is below the threshold".into(),
+        ));
+    }
+
+    // The caller's opening must match the on-chain treasury commitment.
+    let expected_cl = PedersenCommitment::commit(value, treasury_blinding);
+    if expected_cl.to_bytes() != anonymity_set[l] {
+        return Err(Error::CryptoError(
+            "unlinkable solvency: (value, blinding) does not open anonymity_set[l]".into(),
+        ));
+    }
+
+    // Decompress the candidate set.
+    let mut set_points = Vec::with_capacity(n);
+    for c in anonymity_set {
+        let p = CompressedRistretto(*c).decompress().ok_or_else(|| {
+            Error::CryptoError("unlinkable solvency: non-canonical commitment in set".into())
+        })?;
+        set_points.push(p);
+    }
+
+    // V and its point.
+    let mut rng = OsRng;
+    let value_blinding = BlindingFactor::random(&mut rng);
+    let v_commitment = PedersenCommitment::commit(value, &value_blinding);
+    let v_point = v_commitment
+        .as_point()
+        .decompress()
+        .ok_or_else(|| Error::CryptoError("unlinkable solvency: V decompress failed".into()))?;
+
+    // W_i = C_i − V ; at l, W_l = (r_l − value_blinding)·G.
+    let shifted: Vec<RistrettoPoint> = set_points.iter().map(|c| *c - v_point).collect();
+    let witness = treasury_blinding.as_scalar() - value_blinding.as_scalar();
+    let ctx = unlinkable_solvency_ctx(&v_commitment.to_bytes(), threshold, as_of_height);
+    let membership = prove_one_of_many_gen_ctx(
+        &shifted,
+        l,
+        &witness,
+        value_generator(),
+        blinding_generator(),
+        &ctx,
+        &mut rng,
+    )?;
+
+    // Range/threshold proof over V.
+    let balance = create_balance_proof(value, &value_blinding, &v_commitment, threshold)?;
+
+    Ok(UnlinkableSolvencyProof {
+        anonymity_set: anonymity_set.to_vec(),
+        value_commitment: v_commitment.to_bytes(),
+        membership,
+        balance,
+        threshold,
+        as_of_height,
+    })
+}
+
+/// Verify an [`UnlinkableSolvencyProof`]: some member of `anonymity_set` holds
+/// `value >= threshold`, hidden which. Fail-closed. **Trust caveat:** the
+/// caller must independently confirm every `anonymity_set` member is a real
+/// on-chain commitment (the anchored layer) — this checks only the crypto over
+/// the supplied set.
+#[cfg(feature = "sketch-gk-proof")]
+pub fn verify_unlinkable_solvency_proof(proof: &UnlinkableSolvencyProof) -> Result<bool> {
+    let n = proof.anonymity_set.len();
+    if n < 2 || !n.is_power_of_two() {
+        return Ok(false);
+    }
+    // V and the balance proof must be about the same commitment + threshold.
+    if proof.balance.original_commitment != proof.value_commitment
+        || proof.balance.threshold != proof.threshold
+    {
+        return Ok(false);
+    }
+
+    let v_point = match CompressedRistretto(proof.value_commitment).decompress() {
+        Some(p) => p,
+        None => return Ok(false),
+    };
+    let mut shifted = Vec::with_capacity(n);
+    for c in &proof.anonymity_set {
+        match CompressedRistretto(*c).decompress() {
+            Some(p) => shifted.push(p - v_point),
+            None => return Ok(false),
+        }
+    }
+
+    let ctx = unlinkable_solvency_ctx(&proof.value_commitment, proof.threshold, proof.as_of_height);
+    if verify_one_of_many_gen_ctx(
+        &shifted,
+        &proof.membership,
+        value_generator(),
+        blinding_generator(),
+        &ctx,
+    )
+    .is_err()
+    {
+        return Ok(false);
+    }
+
+    // Range proof: V hides value >= threshold.
+    verify_balance_proof(&proof.balance)
+}
+
+// =============================================================================
+// 1c. MULTI-OUTPUT UNLINKABLE SOLVENCY - "K hidden outputs sum to >= X"
+// =============================================================================
+
+/// One hidden treasury output: its anonymity set, the value commitment `Vᵢ`, and
+/// the one-of-many binding `Vᵢ` to a real member of the set.
+#[cfg(feature = "sketch-gk-proof")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UnlinkableMember {
+    pub anonymity_set: Vec<[u8; 32]>,
+    pub value_commitment: [u8; 32],
+    pub membership: GkOneOfManyProof,
+}
+
+/// Proof that the **sum** of `K` hidden treasury outputs is `>= threshold`, each
+/// output hidden in its own anonymity set.
+///
+/// ## Double-count soundness
+/// The `K` anonymity sets are required to be **pairwise disjoint**. Combined with
+/// the per-member one-of-many (which needs the *opening* of a real set member to
+/// forge), this forces the `K` proven outputs to be **distinct**: a prover who
+/// owns one output cannot count it as several, because a second member would
+/// need an output in a disjoint set it does not own. So `K` valid members ⟹ `K`
+/// distinct real outputs whose values sum over the balance commitment.
+#[cfg(feature = "sketch-gk-proof")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MultiUnlinkableSolvencyProof {
+    pub members: Vec<UnlinkableMember>,
+    /// Range proof over `V = Σ Vᵢ` proving `Σ value >= threshold`.
+    pub balance: BalanceProof,
+    pub threshold: u64,
+    pub as_of_height: u64,
+}
+
+#[cfg(feature = "sketch-gk-proof")]
+fn multi_unlinkable_ctx(
+    v_bytes: &[u8; 32],
+    member_index: usize,
+    threshold: u64,
+    as_of_height: u64,
+) -> Vec<u8> {
+    let mut c = Vec::with_capacity(96);
+    c.extend_from_slice(b"COINCYNC_MULTI_UNLINKABLE_SOLVENCY_v1");
+    c.extend_from_slice(v_bytes);
+    c.extend_from_slice(&(member_index as u64).to_le_bytes());
+    c.extend_from_slice(&threshold.to_le_bytes());
+    c.extend_from_slice(&as_of_height.to_le_bytes());
+    c
+}
+
+/// Reject overlapping anonymity sets (the double-count guard): every commitment
+/// must appear in at most one member's set.
+#[cfg(feature = "sketch-gk-proof")]
+fn sets_are_pairwise_disjoint<'a>(sets: impl Iterator<Item = &'a Vec<[u8; 32]>>) -> bool {
+    let mut seen = HashSet::new();
+    for set in sets {
+        for c in set {
+            if !seen.insert(*c) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Build a [`MultiUnlinkableSolvencyProof`]. Each `treasury_*[i]` describes one
+/// owned output and its (disjoint) anonymity set.
+#[cfg(feature = "sketch-gk-proof")]
+pub fn create_multi_unlinkable_solvency_proof(
+    treasury_values: &[u64],
+    treasury_blindings: &[BlindingFactor],
+    anonymity_sets: &[Vec<[u8; 32]>],
+    treasury_indices: &[usize],
+    threshold: u64,
+    as_of_height: u64,
+) -> Result<MultiUnlinkableSolvencyProof> {
+    let k = treasury_values.len();
+    if k == 0 {
+        return Err(Error::CryptoError("multi solvency: no treasury outputs".into()));
+    }
+    if treasury_blindings.len() != k || anonymity_sets.len() != k || treasury_indices.len() != k {
+        return Err(Error::CryptoError("multi solvency: mismatched input lengths".into()));
+    }
+    let total: u128 = treasury_values.iter().map(|v| *v as u128).sum();
+    if total < threshold as u128 {
+        return Err(Error::CryptoError("multi solvency: sum is below the threshold".into()));
+    }
+    if !sets_are_pairwise_disjoint(anonymity_sets.iter()) {
+        return Err(Error::CryptoError(
+            "multi solvency: anonymity sets must be pairwise disjoint (double-count guard)".into(),
+        ));
+    }
+
+    let mut rng = OsRng;
+    let mut members = Vec::with_capacity(k);
+    let mut v_sum = RistrettoPoint::default();
+    let mut value_sum: u64 = 0;
+    let mut vb_sum = BlindingFactor::zero();
+
+    for i in 0..k {
+        let v = treasury_values[i];
+        let tb = &treasury_blindings[i];
+        let set = &anonymity_sets[i];
+        let l = treasury_indices[i];
+        let n = set.len();
+        if n < 2 || !n.is_power_of_two() {
+            return Err(Error::CryptoError(
+                "multi solvency: each anonymity set size must be a power of two >= 2".into(),
+            ));
+        }
+        if l >= n {
+            return Err(Error::CryptoError("multi solvency: treasury index out of range".into()));
+        }
+        if PedersenCommitment::commit(v, tb).to_bytes() != set[l] {
+            return Err(Error::CryptoError(
+                "multi solvency: (value, blinding) does not open anonymity_set[i][l]".into(),
+            ));
+        }
+
+        let vb = BlindingFactor::random(&mut rng);
+        let v_commit = PedersenCommitment::commit(v, &vb);
+        let v_point = v_commit
+            .as_point()
+            .decompress()
+            .ok_or_else(|| Error::CryptoError("multi solvency: V decompress".into()))?;
+
+        let mut shifted = Vec::with_capacity(n);
+        for c in set {
+            let p = CompressedRistretto(*c).decompress().ok_or_else(|| {
+                Error::CryptoError("multi solvency: non-canonical commitment in set".into())
+            })?;
+            shifted.push(p - v_point);
+        }
+        let witness = tb.as_scalar() - vb.as_scalar();
+        let ctx = multi_unlinkable_ctx(&v_commit.to_bytes(), i, threshold, as_of_height);
+        let membership = prove_one_of_many_gen_ctx(
+            &shifted,
+            l,
+            &witness,
+            value_generator(),
+            blinding_generator(),
+            &ctx,
+            &mut rng,
+        )?;
+
+        v_sum += v_point;
+        value_sum = value_sum
+            .checked_add(v)
+            .ok_or_else(|| Error::CryptoError("multi solvency: value sum overflow".into()))?;
+        vb_sum = vb_sum.add(&vb);
+        members.push(UnlinkableMember {
+            anonymity_set: set.clone(),
+            value_commitment: v_commit.to_bytes(),
+            membership,
+        });
+    }
+
+    // Balance proof over V = Σ Vᵢ = value_sum·H + vb_sum·G.
+    let v_total = PedersenCommitment::from_bytes_unchecked(v_sum.compress().to_bytes());
+    let balance = create_balance_proof(value_sum, &vb_sum, &v_total, threshold)?;
+
+    Ok(MultiUnlinkableSolvencyProof {
+        members,
+        balance,
+        threshold,
+        as_of_height,
+    })
+}
+
+/// Verify a [`MultiUnlinkableSolvencyProof`]: disjoint sets, each member binds a
+/// value commitment to a real set member, and the sum meets the threshold.
+/// Fail-closed. The caller still anchors every set member on-chain.
+#[cfg(feature = "sketch-gk-proof")]
+pub fn verify_multi_unlinkable_solvency_proof(
+    proof: &MultiUnlinkableSolvencyProof,
+) -> Result<bool> {
+    if proof.members.is_empty() {
+        return Ok(false);
+    }
+    for m in &proof.members {
+        let n = m.anonymity_set.len();
+        if n < 2 || !n.is_power_of_two() {
+            return Ok(false);
+        }
+    }
+    // Double-count guard: the K sets must be pairwise disjoint.
+    if !sets_are_pairwise_disjoint(proof.members.iter().map(|m| &m.anonymity_set)) {
+        return Ok(false);
+    }
+
+    let mut v_sum = RistrettoPoint::default();
+    for (i, m) in proof.members.iter().enumerate() {
+        let v_point = match CompressedRistretto(m.value_commitment).decompress() {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+        let mut shifted = Vec::with_capacity(m.anonymity_set.len());
+        for c in &m.anonymity_set {
+            match CompressedRistretto(*c).decompress() {
+                Some(p) => shifted.push(p - v_point),
+                None => return Ok(false),
+            }
+        }
+        let ctx = multi_unlinkable_ctx(&m.value_commitment, i, proof.threshold, proof.as_of_height);
+        if verify_one_of_many_gen_ctx(
+            &shifted,
+            &m.membership,
+            value_generator(),
+            blinding_generator(),
+            &ctx,
+        )
+        .is_err()
+        {
+            return Ok(false);
+        }
+        v_sum += v_point;
+    }
+
+    if proof.balance.original_commitment != v_sum.compress().to_bytes()
+        || proof.balance.threshold != proof.threshold
+    {
+        return Ok(false);
+    }
+    verify_balance_proof(&proof.balance)
 }
 
 // =============================================================================
@@ -1315,6 +1736,227 @@ mod tests {
         let sk = SecretKey::from_bytes(secret.to_bytes());
         let pk = PublicKey::from_bytes(public.to_bytes());
         (sk, pk)
+    }
+
+    // ---- Unlinkable Solvency Proof ----
+
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn unlinkable_solvency_proves_hidden_output_over_threshold_and_is_fail_closed() {
+        // A 4-output anonymity set; the treasury (value 5_000_000) is hidden at
+        // index 2, the others are unrelated outputs of varying value.
+        let vals = [1_000_000u64, 250_000, 5_000_000, 900_000];
+        let blindings: Vec<BlindingFactor> =
+            (0..4).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+        let set: Vec<[u8; 32]> = vals
+            .iter()
+            .zip(&blindings)
+            .map(|(v, b)| PedersenCommitment::commit(*v, b).to_bytes())
+            .collect();
+        let l = 2usize;
+        let threshold = 3_000_000u64;
+
+        let proof =
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, l, threshold, 1000).unwrap();
+        assert!(
+            verify_unlinkable_solvency_proof(&proof).unwrap(),
+            "honest unlinkable solvency proof must verify"
+        );
+        // The proof reveals the threshold but not which output is the treasury.
+        assert_eq!(proof.threshold, threshold);
+        assert_eq!(proof.anonymity_set.len(), 4);
+
+        // Can't prove a threshold above the actual value.
+        assert!(
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, l, 6_000_000, 1000).is_err(),
+            "threshold above value must be refused"
+        );
+        // Can't claim the treasury is an output you don't open (wrong index).
+        assert!(
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, 0, threshold, 1000).is_err(),
+            "opening must match anonymity_set[l]"
+        );
+
+        // Swapping in a different anonymity set breaks membership (V no longer
+        // matches any member) — a proof is bound to its exact set.
+        let mut foreign = proof.clone();
+        foreign.anonymity_set[l] =
+            PedersenCommitment::commit(5_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes();
+        assert!(
+            !verify_unlinkable_solvency_proof(&foreign).unwrap(),
+            "a mismatched anonymity set must be rejected"
+        );
+
+        // Tampering with the range proof's threshold binding fails.
+        let mut bad = proof.clone();
+        bad.threshold = 1_000_000;
+        assert!(
+            !verify_unlinkable_solvency_proof(&bad).unwrap(),
+            "threshold/balance mismatch must be rejected"
+        );
+
+        // A non-power-of-two set is refused at creation.
+        assert!(
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set[..3], l.min(2), threshold, 1000)
+                .is_err(),
+            "non-power-of-two set refused"
+        );
+    }
+
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn unlinkable_solvency_adversarial_attacks() {
+        let n = 8usize;
+        let l = 3usize;
+        let threshold = 5_000_000u64;
+        let mk = |treasury_val: u64| {
+            let vals: Vec<u64> = (0..n)
+                .map(|i| if i == l { treasury_val } else { 1_000_000 + (i as u64) * 111 })
+                .collect();
+            let bs: Vec<BlindingFactor> = (0..n).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+            let set: Vec<[u8; 32]> = vals
+                .iter()
+                .zip(&bs)
+                .map(|(v, b)| PedersenCommitment::commit(*v, b).to_bytes())
+                .collect();
+            (vals, bs, set)
+        };
+        let (vals, bs, set) = mk(8_000_000);
+        let proof = create_unlinkable_solvency_proof(vals[l], &bs[l], &set, l, threshold, 1000).unwrap();
+        assert!(verify_unlinkable_solvency_proof(&proof).unwrap());
+
+        // A second, independent proof over a different set — for splicing attacks.
+        let (v2, b2, set2) = mk(7_000_000);
+        let proof2 = create_unlinkable_solvency_proof(v2[l], &b2[l], &set2, l, threshold, 1000).unwrap();
+
+        // (a) Inflate the claimed threshold above the real value: the range proof
+        // and the membership context both no longer hold.
+        let mut hi = proof.clone();
+        hi.threshold = 9_000_000;
+        hi.balance.threshold = 9_000_000;
+        assert!(!verify_unlinkable_solvency_proof(&hi).unwrap(), "cannot inflate threshold");
+
+        // (b) Threshold/balance mismatch.
+        let mut mm = proof.clone();
+        mm.threshold = 4_000_000;
+        assert!(!verify_unlinkable_solvency_proof(&mm).unwrap(), "threshold mismatch rejected");
+
+        // (c) Splice a foreign membership proof onto this V/set.
+        let mut spliced = proof.clone();
+        spliced.membership = proof2.membership.clone();
+        assert!(!verify_unlinkable_solvency_proof(&spliced).unwrap(), "spliced membership rejected");
+
+        // (d) Swap the value commitment V from another proof.
+        let mut swapv = proof.clone();
+        swapv.value_commitment = proof2.value_commitment;
+        assert!(!verify_unlinkable_solvency_proof(&swapv).unwrap(), "swapped V rejected");
+
+        // (e) Verify a valid proof against a foreign anonymity set.
+        let mut foreign = proof.clone();
+        foreign.anonymity_set = set2.clone();
+        assert!(!verify_unlinkable_solvency_proof(&foreign).unwrap(), "foreign set rejected");
+
+        // (f) A non-canonical set member (cannot decompress).
+        let mut malformed = proof.clone();
+        malformed.anonymity_set[0] = [0xFFu8; 32];
+        assert!(!verify_unlinkable_solvency_proof(&malformed).unwrap(), "malformed member rejected");
+
+        // (i) The "as of" height is bound into the challenge — changing it breaks
+        // the membership proof (a stale claim cannot be re-dated).
+        let mut redated = proof.clone();
+        redated.as_of_height += 1;
+        assert!(!verify_unlinkable_solvency_proof(&redated).unwrap(), "re-dated height rejected");
+
+        // (g) Cannot create a proof claiming more than the treasury holds.
+        assert!(
+            create_unlinkable_solvency_proof(vals[l], &bs[l], &set, l, 8_000_001, 1000).is_err(),
+            "threshold above value refused at creation"
+        );
+        // (h) Cannot create a proof whose (value, blinding) do not open set[l].
+        assert!(
+            create_unlinkable_solvency_proof(vals[l] + 1, &bs[l], &set, l, threshold, 1000).is_err(),
+            "opening must match the on-chain commitment"
+        );
+    }
+
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn multi_unlinkable_solvency_sums_and_blocks_double_count() {
+        let n = 4usize;
+        // Build one owned output hidden in its own 4-set. `base` keeps the sets
+        // disjoint (distinct decoy values => distinct commitments).
+        let mk = |treasury_val: u64, base: u64, tl: usize| {
+            let vals: Vec<u64> = (0..n)
+                .map(|i| if i == tl { treasury_val } else { base + i as u64 })
+                .collect();
+            let bs: Vec<BlindingFactor> = (0..n).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+            let set: Vec<[u8; 32]> = vals
+                .iter()
+                .zip(&bs)
+                .map(|(v, b)| PedersenCommitment::commit(*v, b).to_bytes())
+                .collect();
+            (vals[tl], bs[tl].clone(), set, tl)
+        };
+        let (v0, b0, set0, l0) = mk(3_000_000, 10, 1);
+        let (v1, b1, set1, l1) = mk(4_000_000, 5000, 2);
+        let threshold = 5_000_000u64; // 3M + 4M = 7M >= 5M
+
+        let proof = create_multi_unlinkable_solvency_proof(
+            &[v0, v1],
+            &[b0.clone(), b1.clone()],
+            &[set0.clone(), set1.clone()],
+            &[l0, l1],
+            threshold,
+            1000,
+        )
+        .unwrap();
+        assert!(
+            verify_multi_unlinkable_solvency_proof(&proof).unwrap(),
+            "honest 2-output sum verifies"
+        );
+
+        // Double-count: reuse the SAME output/set twice -> overlapping sets ->
+        // refused at creation (the core soundness guard).
+        assert!(
+            create_multi_unlinkable_solvency_proof(
+                &[v0, v0],
+                &[b0.clone(), b0.clone()],
+                &[set0.clone(), set0.clone()],
+                &[l0, l0],
+                threshold,
+                1000,
+            )
+            .is_err(),
+            "overlapping sets (double-count) refused"
+        );
+
+        // Threshold above the true sum.
+        assert!(
+            create_multi_unlinkable_solvency_proof(
+                &[v0, v1],
+                &[b0, b1],
+                &[set0.clone(), set1.clone()],
+                &[l0, l1],
+                8_000_000,
+                1000,
+            )
+            .is_err(),
+            "threshold above the sum refused"
+        );
+
+        // Inflating the claimed threshold after the fact.
+        let mut hi = proof.clone();
+        hi.threshold = 8_000_000;
+        hi.balance.threshold = 8_000_000;
+        assert!(!verify_multi_unlinkable_solvency_proof(&hi).unwrap(), "inflated threshold rejected");
+
+        // Making two sets overlap after the fact is rejected at verify.
+        let mut overlap = proof.clone();
+        overlap.members[1].anonymity_set[0] = overlap.members[0].anonymity_set[0];
+        assert!(
+            !verify_multi_unlinkable_solvency_proof(&overlap).unwrap(),
+            "post-hoc overlapping sets rejected"
+        );
     }
 
     // ---- Balance Proof ----

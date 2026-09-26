@@ -168,4 +168,12 @@ pub use disclosure::{
     OutputRef as DisclosureOutputRef, OwnershipProof, SourceProof, SumProof,
 };
 
+// Unlinkable solvency is built on the unaudited `sketch-gk-proof` primitive.
+#[cfg(feature = "sketch-gk-proof")]
+pub use disclosure::{
+    create_multi_unlinkable_solvency_proof, create_unlinkable_solvency_proof,
+    verify_multi_unlinkable_solvency_proof, verify_unlinkable_solvency_proof,
+    MultiUnlinkableSolvencyProof, UnlinkableMember, UnlinkableSolvencyProof,
+};
+
 pub use memo::{decrypt_memo, encrypt_memo, MAX_ENCRYPTED_MEMO_SIZE, MAX_MEMO_SIZE, MEMO_OVERHEAD};
