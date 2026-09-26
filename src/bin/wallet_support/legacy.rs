@@ -443,6 +443,20 @@ enum TreasuryAction {
         #[arg(long)]
         policy: String,
     },
+    /// Set a per-window outflow cap in a policy file. `send --policy <file>` then
+    /// refuses a send whose amount, plus everything already sent in the trailing
+    /// window, would exceed the cap. A compromised signer still can't drain fast.
+    Velocity {
+        /// Maximum total outflow per window, in atomic CYNC units.
+        #[arg(long)]
+        max_atomic: u64,
+        /// Rolling window length in seconds (e.g. 86400 = 24h).
+        #[arg(long)]
+        window_secs: u64,
+        /// Policy file to create/update.
+        #[arg(long)]
+        policy: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -909,6 +923,11 @@ async fn main() {
                 label,
                 policy,
             } => cmd_treasury_allow(&spend, &view, label, &policy),
+            TreasuryAction::Velocity {
+                max_atomic,
+                window_secs,
+                policy,
+            } => cmd_treasury_velocity(max_atomic, window_secs, &policy),
         },
     };
 
@@ -1101,6 +1120,108 @@ fn enforce_send_policy(
             &want_spend[..want_spend.len().min(12)]
         ))
     }
+}
+
+/// Set the per-window outflow cap in a policy file (created if missing).
+fn cmd_treasury_velocity(max_atomic: u64, window_secs: u64, policy: &str) -> Result<(), String> {
+    if window_secs == 0 {
+        return Err("window_secs must be > 0".into());
+    }
+    let mut doc: serde_json::Value = if std::path::Path::new(policy).exists() {
+        let raw = std::fs::read_to_string(policy).map_err(|e| format!("read {policy}: {e}"))?;
+        serde_json::from_str(&raw).map_err(|e| format!("parse {policy}: {e}"))?
+    } else {
+        serde_json::json!({ "label": "coincync-treasury-policy/v1", "allow": [] })
+    };
+    doc["velocity"] = serde_json::json!({
+        "max_atomic": max_atomic,
+        "window_secs": window_secs,
+    });
+    std::fs::write(
+        policy,
+        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("write {policy}: {e}"))?;
+    println!("Velocity cap set in {policy}: {max_atomic} atomic per {window_secs}s window.");
+    Ok(())
+}
+
+/// The sibling ledger that records accepted-send outflows for velocity.
+fn velocity_ledger_path(policy_file: &str) -> String {
+    format!("{policy_file}.ledger")
+}
+
+/// Load the velocity cap `(max_atomic, window_secs)` from a policy file, if set.
+fn load_velocity(policy_file: &str) -> Result<Option<(u64, u64)>, String> {
+    let raw = std::fs::read_to_string(policy_file)
+        .map_err(|e| format!("read policy {policy_file}: {e}"))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse policy {policy_file}: {e}"))?;
+    match doc.get("velocity") {
+        None => Ok(None),
+        Some(v) => {
+            let max = v
+                .get("max_atomic")
+                .and_then(|x| x.as_u64())
+                .ok_or("policy velocity.max_atomic missing/invalid")?;
+            let window = v
+                .get("window_secs")
+                .and_then(|x| x.as_u64())
+                .ok_or("policy velocity.window_secs missing/invalid")?;
+            Ok(Some((max, window)))
+        }
+    }
+}
+
+/// Sum outflow recorded within the trailing `window_secs` from `now`.
+fn velocity_used(ledger_path: &str, window_secs: u64, now: u64) -> u64 {
+    let raw = std::fs::read_to_string(ledger_path).unwrap_or_default();
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    arr.iter()
+        .filter_map(|e| {
+            let ts = e.get("ts")?.as_u64()?;
+            let amt = e.get("amount")?.as_u64()?;
+            if now.saturating_sub(ts) <= window_secs {
+                Some(amt)
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+/// Refuse the send if it would push trailing-window outflow over the cap.
+fn enforce_send_velocity(policy_file: &str, amount: u64, now: u64) -> Result<(), String> {
+    if let Some((max, window)) = load_velocity(policy_file)? {
+        let used = velocity_used(&velocity_ledger_path(policy_file), window, now);
+        if used.saturating_add(amount) > max {
+            return Err(format!(
+                "BLOCKED by treasury velocity limit ({policy_file}): this {amount} atomic send \
+                 plus {used} already sent in the last {window}s exceeds the cap of {max} atomic.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Append an accepted send to the velocity ledger. Best-effort; no-op if the
+/// policy has no velocity cap. Prunes to the last 1000 entries.
+fn record_send_velocity(policy_file: &str, amount: u64, now: u64) {
+    if load_velocity(policy_file).ok().flatten().is_none() {
+        return;
+    }
+    let ledger_path = velocity_ledger_path(policy_file);
+    let raw = std::fs::read_to_string(&ledger_path).unwrap_or_default();
+    let mut arr: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    arr.push(serde_json::json!({ "ts": now, "amount": amount }));
+    let len = arr.len();
+    if len > 1000 {
+        arr.drain(0..len - 1000);
+    }
+    let _ = std::fs::write(
+        &ledger_path,
+        serde_json::to_string(&arr).unwrap_or_default(),
+    );
 }
 
 fn resolve_home(p: &PathBuf) -> PathBuf {
@@ -3510,6 +3631,20 @@ async fn cmd_disclose_build_payroll_audit(
     let seed_hex = signing_seed_hex.ok_or_else(|| {
         "missing --signing-seed (or COINCYNC_AUDIT_SIGNING_SEED): the org's ed25519 audit key".to_string()
     })?;
+    // Hygiene: `--signing-seed -` reads the hex seed from stdin so the org's
+    // audit key never appears in the process list. Env and stdin are the safe
+    // inputs; a literal on the command line is visible to other local users.
+    let seed_hex = if seed_hex.trim() == "-" {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| format!("read signing-seed from stdin: {e}"))?;
+        line.trim().to_string()
+    } else {
+        seed_hex
+    };
     let signing_key = SigningKey::from_bytes(&decode_hex32(&seed_hex, "signing-seed")?);
     let issuer_hex = hex::encode(signing_key.verifying_key().to_bytes());
 
