@@ -36,7 +36,10 @@ pub fn verify_bundle(bundle: &[u8]) -> Result<()> {
     backend()
         .verify_spend(&[], &SpendBytes(bundle.to_vec()), 0, 0)
         .map(|_nullifiers| ())
-        .map_err(|e| Error::InvalidTransaction(format!("shielded (Spark) bundle verify failed: {e}")))
+        .map_err(|e| {
+            // Keep the "shielded … verifier" wording the consensus fail-closed test asserts.
+            Error::InvalidTransaction(format!("shielded (Spark) bundle verifier rejected: {e}"))
+        })
 }
 
 /// Verify a shielded payload through the connector; fail-closed on any error.
@@ -95,5 +98,54 @@ mod ffi_tests {
         let n = bad.len();
         bad[n - 10] ^= 0x01; // tamper the proof region
         assert!(verify_bundle(&bad).is_err(), "node must reject a tampered spend");
+    }
+
+    /// SOAK (Stage 3e gate): drive the node's shielded verify path — build a
+    /// fresh valid spend bundle, verify it through `verify_bundle` (must accept),
+    /// tamper the proof region, verify again (must reject) — in a tight loop for
+    /// `COINCYNC_SHIELDED_SOAK_SECS` (default 24h). Stresses the libspark FFI
+    /// boundary (memory, exception safety, determinism) under sustained load.
+    /// `#[ignore]` — run explicitly:
+    ///   SPARK_OPENSSL_DIR=... cargo test --release --features testnet,sketch-gk-proof,libspark-ffi \
+    ///     consensus::shielded_connector::ffi_tests::soak_shielded_verify -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn soak_shielded_verify() {
+        use std::time::{Duration, Instant};
+        let secs: u64 = std::env::var("COINCYNC_SHIELDED_SOAK_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(86_400);
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        let (mut ok_count, mut reject_count): (u64, u64) = (0, 0);
+        let mut iters: u64 = 0;
+        eprintln!("{{\"event\":\"soak_start\",\"secs\":{secs}}}");
+        while Instant::now() < deadline {
+            let bundle = spark_connector::ffi::make_verify_bundle()
+                .expect("soak: bundle build failed");
+            if verify_bundle(&bundle).is_err() {
+                panic!("soak: a freshly-built valid bundle FAILED to verify (iter {iters})");
+            }
+            ok_count += 1;
+
+            let mut bad = bundle;
+            let n = bad.len();
+            bad[n - 10] ^= 0x01;
+            if verify_bundle(&bad).is_ok() {
+                panic!("soak: a TAMPERED bundle was ACCEPTED (iter {iters})");
+            }
+            reject_count += 1;
+
+            iters += 1;
+            if iters % 500 == 0 {
+                eprintln!(
+                    "{{\"event\":\"soak_progress\",\"iters\":{iters},\"accepted\":{ok_count},\"rejected\":{reject_count}}}"
+                );
+            }
+        }
+        eprintln!(
+            "{{\"event\":\"soak_done\",\"iters\":{iters},\"accepted\":{ok_count},\"rejected\":{reject_count}}}"
+        );
+        assert!(iters > 0, "soak ran zero iterations");
     }
 }

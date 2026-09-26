@@ -1586,13 +1586,21 @@ fn check_shielded_tx(tx: &Transaction, current_height: u64) -> Result<()> {
     // consensus::shielded::apply_shielded_payload.
     let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
     // ── ACTIVATION SLOT ───────────────────────────────────────────────────
-    // Route the stateless leg through the shielded connector (its own crate).
-    // Today the connector's backend is the fail-closed `StubBackend`, so this
-    // still rejects post-activation — an activation height can never precede a
-    // working, reviewed verifier. When the libspark backend lands inside the
-    // connector, this same call verifies for real. The stateful cover-set +
-    // serial-tag double-spend verify runs at block-apply against ShieldedStore.
-    crate::consensus::shielded_connector::verify_payload(&payload, tx.fee.as_atomic())
+    // Route through the shielded connector (its own crate). Under the
+    // `libspark-ffi` engine the payload's `balance_proof` carries the
+    // self-contained libspark spend bundle (the native gk fields are unused on
+    // this path), verified by the vendored Firo Spark backend. Without the
+    // feature the connector's fail-closed StubBackend rejects — an activation
+    // height can never precede a working, reviewed verifier. The stateful
+    // cover-set + serial-tag double-spend verify runs at block-apply.
+    #[cfg(feature = "libspark-ffi")]
+    {
+        crate::consensus::shielded_connector::verify_bundle(&payload.balance_proof)
+    }
+    #[cfg(not(feature = "libspark-ffi"))]
+    {
+        crate::consensus::shielded_connector::verify_payload(&payload, tx.fee.as_atomic())
+    }
 }
 
 // ── §9–§13  validate_transaction sub-checks (AUDIT 2026-06-30 H1) ──────────
@@ -4616,6 +4624,44 @@ mod tests {
         assert!(
             err_bad.contains("shielded payload decode"),
             "malformed payload must be rejected at decode, got: {err_bad}"
+        );
+    }
+
+    #[cfg(feature = "libspark-ffi")]
+    #[test]
+    fn shielded_tx_with_valid_libspark_bundle_verifies_post_activation() {
+        use crate::consensus::shielded::{ShieldedPayload, SHIELDED_PAYLOAD_VERSION};
+        let bundle = spark_connector::ffi::make_verify_bundle().expect("build libspark bundle");
+
+        let mk = |bp: Vec<u8>| {
+            let payload = ShieldedPayload {
+                version: SHIELDED_PAYLOAD_VERSION,
+                inputs: vec![],
+                outputs: vec![],
+                value_balance: 0,
+                balance_proof: bp, // libspark engine: the spend bundle rides here
+            };
+            let mut tx = coinbase_tx(vec![a_valid_output()]);
+            tx.tx_type = TxType::Shielded;
+            tx.extra = payload.encode();
+            tx
+        };
+        let utxos = UtxoSet::new();
+
+        // A valid libspark spend bundle verifies through the node post-activation
+        // (activation == u64::MAX, so height u64::MAX exercises the active path).
+        assert!(
+            validate_transaction(&mk(bundle.clone()), &utxos, u64::MAX).is_ok(),
+            "a valid libspark spend bundle must verify post-activation"
+        );
+
+        // A proof-region tamper is rejected (fail-closed).
+        let mut bad = bundle;
+        let n = bad.len();
+        bad[n - 10] ^= 0x01;
+        assert!(
+            validate_transaction(&mk(bad), &utxos, u64::MAX).is_err(),
+            "a tampered libspark bundle must be rejected"
         );
     }
 
