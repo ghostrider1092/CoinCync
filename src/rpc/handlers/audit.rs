@@ -434,6 +434,41 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── is_key_image_spent ──────────────────────────────────────
+    // A treasury watch-only monitor calls this per treasury output's key image
+    // to detect the instant funds move: a spent key image for a treasury output
+    // is an outflow. Read-only, single key image per call.
+    module
+        .register_method("is_key_image_spent", |params, state, _ext| {
+            let (hex_ki,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("params: [key_image_hex]: {e}"), None::<()>)
+            })?;
+            // Pre-decode length cap (a 32-byte key image is 64 hex chars).
+            if hex_ki.len() > 128 {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "key image hex too long (max 128 chars)".to_string(),
+                    None::<()>,
+                ));
+            }
+            let bytes = hex::decode(&hex_ki)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, format!("bad hex: {e}"), None::<()>))?;
+            if bytes.len() != 32 {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "key image must be 32 bytes".to_string(),
+                    None::<()>,
+                ));
+            }
+            let mut ki = [0u8; 32];
+            ki.copy_from_slice(&bytes);
+            let spent = state
+                .chain
+                .is_spent(&crate::primitives::KeyImage::from_bytes(ki));
+            Ok::<_, ErrorObjectOwned>(json!({ "key_image": hex::encode(ki), "spent": spent }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
     Ok(())
 }
 

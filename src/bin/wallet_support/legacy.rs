@@ -391,6 +391,35 @@ enum Command {
         #[arg(long)]
         utxo_index: usize,
     },
+
+    /// Treasury protection: watch-only monitoring (and, later, spending policy).
+    Treasury {
+        #[command(subcommand)]
+        action: TreasuryAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TreasuryAction {
+    /// Export a watch file for a monitor: each treasury output's key image plus
+    /// its ref and amount. Contains NO spending secrets — a key image cannot
+    /// spend, only reveal that an output moved — so it is safe to place on a
+    /// separate, less-trusted monitoring box.
+    Watchfile {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Output path for the watch file (JSON).
+        #[arg(long)]
+        out: String,
+    },
+    /// Watch-only: poll the node (`--node`) for any spent treasury output and
+    /// raise an alert. Needs only the watch file — no wallet, no keys. Exits
+    /// non-zero if any watched output has moved, so it can drive cron/alerting.
+    Watch {
+        /// Path to the watch file from `treasury watchfile`.
+        #[arg(long)]
+        watchfile: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -842,11 +871,121 @@ async fn main() {
             password,
             utxo_index,
         } => cmd_show_memo(&wallet_path, password, utxo_index, &cli.node).await,
+        Command::Treasury { action } => match action {
+            TreasuryAction::Watchfile { password, out } => {
+                cmd_treasury_watchfile(&wallet_path, password, &out).await
+            }
+            TreasuryAction::Watch { watchfile } => {
+                cmd_treasury_watch(&watchfile, &cli.node).await
+            }
+        },
     };
 
     if let Err(e) = result {
         error!("{}", e);
         std::process::exit(1);
+    }
+}
+
+/// Export a treasury watch file: each unspent treasury output's key image, ref,
+/// and amount — no spending secrets. A key image can only reveal that an output
+/// moved, never spend it, so the file is safe on a separate monitoring box.
+async fn cmd_treasury_watchfile(
+    path: &PathBuf,
+    password: Option<String>,
+    out: &str,
+) -> Result<(), String> {
+    use coincync::wallet::Wallet;
+
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+
+    let balance = wallet.balance();
+    let utxos = balance.unspent_utxos();
+    let entries: Vec<serde_json::Value> = utxos
+        .iter()
+        .map(|u| {
+            serde_json::json!({
+                "key_image": hex::encode(u.key_image.as_bytes()),
+                "tx_hash": hex::encode(u.tx_hash.as_bytes()),
+                "output_index": u.output_index,
+                "amount": u.amount.as_atomic(),
+            })
+        })
+        .collect();
+    let count = entries.len();
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let doc = serde_json::json!({
+        "label": "coincync-treasury-watch/v1",
+        "created_at": created_at,
+        "outputs": entries,
+    });
+    std::fs::write(
+        out,
+        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("write {out}: {e}"))?;
+    println!("Treasury watch file written to {out} ({count} outputs, no secrets).");
+    println!(
+        "Place it on the monitor and run:\n  coincync-wallet treasury watch --watchfile {out} --node <url>"
+    );
+    Ok(())
+}
+
+/// Watch-only treasury monitor: poll the node for any spent treasury output and
+/// raise an alert. Needs only the watch file — no wallet, no keys. Exits
+/// non-zero if any watched output has moved.
+async fn cmd_treasury_watch(watchfile: &str, node: &str) -> Result<(), String> {
+    let raw = std::fs::read_to_string(watchfile).map_err(|e| format!("read {watchfile}: {e}"))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {watchfile}: {e}"))?;
+    let outputs = doc
+        .get("outputs")
+        .and_then(|v| v.as_array())
+        .ok_or("watch file has no `outputs` array")?;
+
+    let mut spent = Vec::new();
+    let mut checked = 0usize;
+    for o in outputs {
+        let ki = o
+            .get("key_image")
+            .and_then(|v| v.as_str())
+            .ok_or("watch entry missing key_image")?;
+        let res = rpc_call(node, "is_key_image_spent", serde_json::json!([ki])).await?;
+        checked += 1;
+        if res.get("spent").and_then(|v| v.as_bool()).unwrap_or(false) {
+            spent.push(o.clone());
+        }
+    }
+
+    println!("Treasury watch — {checked} outputs checked against {node}");
+    if spent.is_empty() {
+        println!("  OK: no treasury output has moved.");
+        Ok(())
+    } else {
+        println!("  ALERT: {} treasury output(s) SPENT:", spent.len());
+        for o in &spent {
+            let amt = o.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let tx = o.get("tx_hash").and_then(|v| v.as_str()).unwrap_or("?");
+            let idx = o.get("output_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            println!(
+                "    - {amt} atomic  (tx {}… index {idx})",
+                &tx[..tx.len().min(16)]
+            );
+        }
+        Err(format!(
+            "{} treasury output(s) have moved — investigate immediately",
+            spent.len()
+        ))
     }
 }
 
