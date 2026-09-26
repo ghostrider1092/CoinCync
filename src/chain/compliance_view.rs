@@ -74,4 +74,57 @@ impl ChainView for NodeChainView<'_> {
         let node_ki = crate::primitives::KeyImage::from_bytes(key_image.to_bytes());
         Ok(self.chain.is_spent(&node_ki))
     }
+
+    /// Batched anchoring: resolve each ref's `(height, tx_index)`, then fetch
+    /// each DISTINCT block once (instead of once per ref). For an anonymity set
+    /// whose members cluster into a few blocks this is a large win over the
+    /// per-ref default.
+    fn anchor_all(
+        &self,
+        refs: &[DisclosureOutputRef],
+    ) -> Result<Vec<Option<ChainAnchor>>> {
+        use std::collections::HashMap;
+        // 1) Locate each ref (indexed lookup, cheap).
+        let locs: Vec<Option<(u64, u32)>> = refs
+            .iter()
+            .map(|r| self.chain.get_tx_location(r.tx_hash.as_bytes()))
+            .collect();
+        // 2) Fetch each distinct block once.
+        let mut blocks: HashMap<u64, Option<crate::consensus::block::Block>> = HashMap::new();
+        for (h, _) in locs.iter().flatten() {
+            blocks
+                .entry(*h)
+                .or_insert_with(|| self.chain.get_block_by_height(*h));
+        }
+        // 3) Resolve each ref against its (cached) block.
+        let mut out = Vec::with_capacity(refs.len());
+        for (r, loc) in refs.iter().zip(&locs) {
+            let anchor = match loc {
+                Some((h, tx_index)) => blocks.get(h).and_then(|b| b.as_ref()).and_then(|block| {
+                    let tx = block.transactions.get(*tx_index as usize)?;
+                    if tx.hash() != r.tx_hash {
+                        return None;
+                    }
+                    let output = tx.outputs.get(r.output_index as usize)?;
+                    Some(ChainAnchor::new(
+                        r.clone(),
+                        output.commitment,
+                        *output.stealth_address.as_bytes(),
+                        *h,
+                    ))
+                }),
+                None => None,
+            };
+            out.push(anchor);
+        }
+        Ok(out)
+    }
+
+    fn tip_height(&self) -> Result<u64> {
+        Ok(self.chain.height())
+    }
+
+    fn block_hash_at(&self, height: u64) -> Result<Option<[u8; 32]>> {
+        Ok(self.chain.get_block_hash(height).map(|h| *h.as_bytes()))
+    }
 }

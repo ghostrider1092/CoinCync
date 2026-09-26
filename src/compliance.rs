@@ -25,6 +25,11 @@ use crate::crypto::{
     DisclosureOutputRef, DisclosureProof, DisclosureType, KeyImage, OwnershipProof,
     PedersenCommitment, SourceProof, SumProof,
 };
+#[cfg(feature = "sketch-gk-proof")]
+use crate::crypto::{
+    verify_multi_unlinkable_solvency_proof, verify_unlinkable_solvency_proof,
+    MultiUnlinkableSolvencyProof, UnlinkableSolvencyProof,
+};
 use crate::error::{Error, Result};
 use crate::primitives::{Hash, PublicKey, SecretKey};
 use crate::wallet::multisig::{
@@ -49,6 +54,27 @@ pub trait ChainView {
     /// Whether `key_image` has been spent on the canonical chain (for source
     /// proofs — provenance of a spend).
     fn key_image_spent(&self, key_image: &KeyImage) -> Result<bool>;
+
+    /// Resolve many output refs at once. The default calls [`Self::anchor`] per
+    /// ref; a node-backed view overrides this to fetch each underlying block at
+    /// most once — turning an N-member anonymity set from N block reads into one
+    /// read per distinct block. Order matches `refs`.
+    fn anchor_all(&self, refs: &[DisclosureOutputRef]) -> Result<Vec<Option<ChainAnchor>>> {
+        refs.iter().map(|r| self.anchor(r)).collect()
+    }
+
+    /// The auditor's current canonical tip height (for freshness checks). The
+    /// default `0` disables freshness — a node-backed view returns the real tip.
+    fn tip_height(&self) -> Result<u64> {
+        Ok(0)
+    }
+
+    /// The canonical block hash at `height`, or `None` when this view cannot
+    /// resolve it (the height is not on the auditor's chain). Used to pin a proof
+    /// to the exact chain it was made against. Default `None`.
+    fn block_hash_at(&self, _height: u64) -> Result<Option<[u8; 32]>> {
+        Ok(None)
+    }
 }
 
 /// In-process [`ChainView`] for tools and tests. A node wires a real one over
@@ -57,6 +83,8 @@ pub trait ChainView {
 pub struct InMemoryChainView {
     anchors: HashMap<DisclosureOutputRef, ChainAnchor>,
     spent_key_images: HashSet<KeyImage>,
+    tip_height: u64,
+    block_hashes: HashMap<u64, [u8; 32]>,
 }
 
 impl InMemoryChainView {
@@ -73,6 +101,16 @@ impl InMemoryChainView {
         self.spent_key_images.insert(key_image);
         self
     }
+    /// Set the tip height (for freshness checks).
+    pub fn with_tip_height(mut self, height: u64) -> Self {
+        self.tip_height = height;
+        self
+    }
+    /// Record a block hash at a height (for chain-pin checks).
+    pub fn with_block_hash(mut self, height: u64, hash: [u8; 32]) -> Self {
+        self.block_hashes.insert(height, hash);
+        self
+    }
 }
 
 impl ChainView for InMemoryChainView {
@@ -81,6 +119,12 @@ impl ChainView for InMemoryChainView {
     }
     fn key_image_spent(&self, key_image: &KeyImage) -> Result<bool> {
         Ok(self.spent_key_images.contains(key_image))
+    }
+    fn tip_height(&self) -> Result<u64> {
+        Ok(self.tip_height)
+    }
+    fn block_hash_at(&self, height: u64) -> Result<Option<[u8; 32]>> {
+        Ok(self.block_hashes.get(&height).copied())
     }
 }
 
@@ -109,6 +153,75 @@ pub struct AuditPackage {
     /// can move it). `None` = custody not attested in this package.
     #[serde(default)]
     pub custody: Option<CustodyAttestation>,
+    /// Optional unlinkable treasury-solvency proof: the treasury holds
+    /// `>= threshold` while staying hidden among a set of real on-chain outputs
+    /// (no `(tx_hash, output_index)` for the treasury is exposed). Gated on the
+    /// unaudited `sketch-gk-proof` primitive it is built on.
+    #[cfg(feature = "sketch-gk-proof")]
+    #[serde(default)]
+    pub unlinkable_solvency: Option<UnlinkableSolvencyItem>,
+    /// Optional MULTI-output unlinkable solvency: the sum of several hidden
+    /// treasury outputs is `>= threshold`, each hidden in its own disjoint set.
+    #[cfg(feature = "sketch-gk-proof")]
+    #[serde(default)]
+    pub multi_unlinkable_solvency: Option<MultiUnlinkableSolvencyItem>,
+}
+
+/// A [`MultiUnlinkableSolvencyProof`] plus, for each hidden member, the on-chain
+/// refs of that member's anonymity set (parallel to `members[i].anonymity_set`).
+#[cfg(feature = "sketch-gk-proof")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MultiUnlinkableSolvencyItem {
+    pub statement: String,
+    pub proof: MultiUnlinkableSolvencyProof,
+    /// `member_refs[i]` are the refs for `proof.members[i].anonymity_set`.
+    pub member_refs: Vec<Vec<DisclosureOutputRef>>,
+    /// Chain pin at `proof.as_of_height` (see [`UnlinkableSolvencyItem`]).
+    #[serde(default)]
+    pub as_of_block_hash: [u8; 32],
+}
+
+/// An [`UnlinkableSolvencyProof`] plus the on-chain refs of every anonymity-set
+/// member, so an auditor can confirm each set member is a **real** output (the
+/// set is public; only the treasury's index within it is hidden).
+#[cfg(feature = "sketch-gk-proof")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UnlinkableSolvencyItem {
+    pub statement: String,
+    pub proof: UnlinkableSolvencyProof,
+    /// On-chain refs parallel to `proof.anonymity_set` (same order/length).
+    pub anonymity_refs: Vec<DisclosureOutputRef>,
+    /// Canonical block hash at `proof.as_of_height` — a **chain pin**. The
+    /// auditor's node must have this exact block at that height (same canonical
+    /// chain, not a private fork) and the height must be recent. `[0; 32]` =
+    /// unpinned (legacy).
+    #[serde(default)]
+    pub as_of_block_hash: [u8; 32],
+}
+
+/// Maximum blocks a solvency proof may lag the auditor's tip before it is
+/// rejected as stale. Bounds the "held, not currently unspent" gap.
+#[cfg(feature = "sketch-gk-proof")]
+pub const MAX_SOLVENCY_STALENESS_BLOCKS: u64 = 120;
+
+/// Chain-pin + freshness gate: the proof's `as_of_height`/block hash must match
+/// the auditor's canonical chain and be recent. `[0; 32]` pins nothing (only
+/// anchoring applies). Rejects a proof made against a different fork, a height
+/// the auditor's node doesn't have, a future height, or a too-stale one.
+#[cfg(feature = "sketch-gk-proof")]
+fn chain_pin_ok<V: ChainView>(chain: &V, as_of_height: u64, pin: &[u8; 32]) -> Result<bool> {
+    if pin == &[0u8; 32] {
+        return Ok(true);
+    }
+    match chain.block_hash_at(as_of_height)? {
+        Some(h) if &h == pin => {}
+        _ => return Ok(false),
+    }
+    let tip = chain.tip_height()?;
+    if as_of_height > tip || tip.saturating_sub(as_of_height) > MAX_SOLVENCY_STALENESS_BLOCKS {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 impl AuditPackage {
@@ -125,7 +238,99 @@ impl AuditPackage {
             expires_at,
             items: Vec::new(),
             custody: None,
+            #[cfg(feature = "sketch-gk-proof")]
+            unlinkable_solvency: None,
+            #[cfg(feature = "sketch-gk-proof")]
+            multi_unlinkable_solvency: None,
         }
+    }
+
+    /// Attach a multi-output unlinkable solvency proof (sum of hidden outputs).
+    #[cfg(feature = "sketch-gk-proof")]
+    pub fn attach_multi_unlinkable_solvency(&mut self, item: MultiUnlinkableSolvencyItem) -> &mut Self {
+        self.multi_unlinkable_solvency = Some(item);
+        self
+    }
+
+    /// Verify the multi-output unlinkable solvency proof (if present): every set
+    /// member of every hidden output must be a real on-chain commitment, AND the
+    /// proof must hold (disjoint sets, K distinct outputs summing to `>=
+    /// threshold`). `Ok(true)` when absent.
+    #[cfg(feature = "sketch-gk-proof")]
+    fn verify_multi_unlinkable_solvency<V: ChainView>(&self, chain: &V) -> Result<bool> {
+        let item = match &self.multi_unlinkable_solvency {
+            Some(i) => i,
+            None => return Ok(true),
+        };
+        if item.member_refs.len() != item.proof.members.len() {
+            return Ok(false);
+        }
+        for (member, refs) in item.proof.members.iter().zip(&item.member_refs) {
+            if refs.len() != member.anonymity_set.len() {
+                return Ok(false);
+            }
+            let anchors = chain.anchor_all(refs)?;
+            for (i, a) in anchors.iter().enumerate() {
+                match a {
+                    Some(anchor) if anchor.commitment == member.anonymity_set[i] => {}
+                    _ => return Ok(false),
+                }
+            }
+        }
+        // Chain pin + freshness: same canonical chain, recent height.
+        if !chain_pin_ok(chain, item.proof.as_of_height, &item.as_of_block_hash)? {
+            return Ok(false);
+        }
+        verify_multi_unlinkable_solvency_proof(&item.proof)
+    }
+
+    /// No-op without the unaudited primitive.
+    #[cfg(not(feature = "sketch-gk-proof"))]
+    fn verify_multi_unlinkable_solvency<V: ChainView>(&self, _chain: &V) -> Result<bool> {
+        Ok(true)
+    }
+
+    /// Attach an unlinkable treasury-solvency proof (treasury hidden among real
+    /// on-chain outputs). Covered by the package signature.
+    #[cfg(feature = "sketch-gk-proof")]
+    pub fn attach_unlinkable_solvency(&mut self, item: UnlinkableSolvencyItem) -> &mut Self {
+        self.unlinkable_solvency = Some(item);
+        self
+    }
+
+    /// Verify the unlinkable solvency proof (if present) against the chain:
+    /// every anonymity-set member must be a real on-chain output commitment, AND
+    /// the proof must hold (some member holds `>= threshold`, hidden which).
+    /// `Ok(true)` when there is nothing to verify.
+    #[cfg(feature = "sketch-gk-proof")]
+    fn verify_unlinkable_solvency<V: ChainView>(&self, chain: &V) -> Result<bool> {
+        let item = match &self.unlinkable_solvency {
+            Some(i) => i,
+            None => return Ok(true),
+        };
+        if item.anonymity_refs.len() != item.proof.anonymity_set.len() {
+            return Ok(false);
+        }
+        // Each anonymity-set member must be a real on-chain output commitment
+        // (batched: one block read per distinct block, not per member).
+        let anchors = chain.anchor_all(&item.anonymity_refs)?;
+        for (i, a) in anchors.iter().enumerate() {
+            match a {
+                Some(anchor) if anchor.commitment == item.proof.anonymity_set[i] => {}
+                _ => return Ok(false),
+            }
+        }
+        // Chain pin + freshness: same canonical chain, recent height.
+        if !chain_pin_ok(chain, item.proof.as_of_height, &item.as_of_block_hash)? {
+            return Ok(false);
+        }
+        verify_unlinkable_solvency_proof(&item.proof)
+    }
+
+    /// No-op under builds without the unaudited unlinkable-solvency primitive.
+    #[cfg(not(feature = "sketch-gk-proof"))]
+    fn verify_unlinkable_solvency<V: ChainView>(&self, _chain: &V) -> Result<bool> {
+        Ok(true)
     }
 
     /// Attach a treasury custody attestation (M-of-N control). It is covered by
@@ -255,11 +460,20 @@ impl AuditPackage {
                 return Ok(false);
             }
         }
-        Ok(true)
+        if !self.verify_unlinkable_solvency(chain)? {
+            return Ok(false);
+        }
+        self.verify_multi_unlinkable_solvency(chain)
     }
 
     fn unexpired_and_nonempty(&self, now: u64) -> bool {
-        if self.items.is_empty() {
+        #[cfg(feature = "sketch-gk-proof")]
+        let has_content = !self.items.is_empty()
+            || self.unlinkable_solvency.is_some()
+            || self.multi_unlinkable_solvency.is_some();
+        #[cfg(not(feature = "sketch-gk-proof"))]
+        let has_content = !self.items.is_empty();
+        if !has_content {
             return false;
         }
         if let Some(exp) = self.expires_at {
@@ -416,6 +630,54 @@ impl AuditPackage {
             }
         }
         let _ = writeln!(s);
+
+        #[cfg(feature = "sketch-gk-proof")]
+        if let Some(item) = &self.unlinkable_solvency {
+            let _ = writeln!(s, "## Treasury solvency (unlinkable)");
+            let _ = writeln!(s);
+            let _ = writeln!(s, "- **Claim:** {}", item.statement);
+            let _ = writeln!(
+                s,
+                "- **Threshold:** {} atomic — the treasury holds at least this",
+                item.proof.threshold
+            );
+            let _ = writeln!(
+                s,
+                "- **Hidden among:** {} real on-chain outputs — which one is the treasury is not revealed",
+                item.proof.anonymity_set.len()
+            );
+            let _ = writeln!(
+                s,
+                "- **As of height:** {} — proves an output *held* this at that height; it is NOT a \
+                 proof the treasury is currently unspent (that would require revealing its key image).",
+                item.proof.as_of_height
+            );
+            let _ = writeln!(s);
+        }
+
+        #[cfg(feature = "sketch-gk-proof")]
+        if let Some(item) = &self.multi_unlinkable_solvency {
+            let _ = writeln!(s, "## Treasury solvency (unlinkable, multi-output)");
+            let _ = writeln!(s);
+            let _ = writeln!(s, "- **Claim:** {}", item.statement);
+            let _ = writeln!(
+                s,
+                "- **Threshold:** {} atomic — the SUM of the treasury outputs is at least this",
+                item.proof.threshold
+            );
+            let _ = writeln!(
+                s,
+                "- **Hidden outputs:** {} — each hidden in its own set; the sets are pairwise \
+                 disjoint, so no output is double-counted",
+                item.proof.members.len()
+            );
+            let _ = writeln!(
+                s,
+                "- **As of height:** {} — proves the outputs *held* this; not a current-unspent proof.",
+                item.proof.as_of_height
+            );
+            let _ = writeln!(s);
+        }
 
         if let Some(att) = &self.custody {
             let _ = writeln!(s, "## Treasury custody");
@@ -1338,5 +1600,170 @@ mod tests {
         b[n - 1] ^= 0x01;
         tampered.blob = hex::encode(b);
         assert!(tampered.open(&aud_sk).is_err(), "tampered ciphertext must fail");
+    }
+
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn unlinkable_solvency_anchors_and_requires_real_outputs() {
+        use crate::crypto::create_unlinkable_solvency_proof;
+
+        // Four transparent outputs; the treasury (value 8M) is hidden at index 1.
+        let vals = [1_000_000u64, 8_000_000, 500_000, 3_000_000];
+        let blindings: Vec<BlindingFactor> =
+            (0..4).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+        let commits: Vec<[u8; 32]> = vals
+            .iter()
+            .zip(&blindings)
+            .map(|(v, b)| PedersenCommitment::commit(*v, b).to_bytes())
+            .collect();
+        let l = 1usize;
+        let threshold = 5_000_000u64;
+        let proof =
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &commits, l, threshold, 1000)
+                .unwrap();
+
+        let refs: Vec<DisclosureOutputRef> = (0..4).map(|i| oref(20 + i as u8, 0)).collect();
+        let item = UnlinkableSolvencyItem {
+            statement: "treasury >= 5,000,000".into(),
+            proof,
+            anonymity_refs: refs.clone(),
+            as_of_block_hash: [0u8; 32],
+        };
+        let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
+        pkg.attach_unlinkable_solvency(item);
+
+        // Chain view: every set member anchors to its real on-chain commitment.
+        let mut good = InMemoryChainView::new();
+        for (i, r) in refs.iter().enumerate() {
+            good = good.with_anchor(ChainAnchor::new(r.clone(), commits[i], [0u8; 32], 10));
+        }
+        assert!(
+            pkg.verify_anchored(1_000_000, &good).unwrap(),
+            "unlinkable solvency must anchor + verify"
+        );
+        assert!(pkg.to_report(1_000_000).contains("unlinkable"));
+
+        // Missing a set member on-chain => rejected (can't confirm it is real).
+        let mut short = InMemoryChainView::new();
+        for (i, r) in refs.iter().enumerate().take(3) {
+            short = short.with_anchor(ChainAnchor::new(r.clone(), commits[i], [0u8; 32], 10));
+        }
+        assert!(!pkg.verify_anchored(1_000_000, &short).unwrap());
+
+        // A member whose on-chain commitment doesn't match the set => rejected
+        // (blocks stuffing the set with an invented commitment).
+        let mut wrong = InMemoryChainView::new();
+        for (i, r) in refs.iter().enumerate() {
+            let c = if i == 3 { [9u8; 32] } else { commits[i] };
+            wrong = wrong.with_anchor(ChainAnchor::new(r.clone(), c, [0u8; 32], 10));
+        }
+        assert!(!pkg.verify_anchored(1_000_000, &wrong).unwrap());
+    }
+
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn unlinkable_solvency_chain_pin_and_freshness() {
+        use crate::crypto::create_unlinkable_solvency_proof;
+        let vals = [8_000_000u64, 1_000_000, 500_000, 3_000_000];
+        let blindings: Vec<BlindingFactor> =
+            (0..4).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+        let commits: Vec<[u8; 32]> = vals
+            .iter()
+            .zip(&blindings)
+            .map(|(v, b)| PedersenCommitment::commit(*v, b).to_bytes())
+            .collect();
+        let (l, threshold, as_of) = (0usize, 5_000_000u64, 1000u64);
+        let proof =
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &commits, l, threshold, as_of)
+                .unwrap();
+        let refs: Vec<DisclosureOutputRef> = (0..4).map(|i| oref(50 + i as u8, 0)).collect();
+        let pin = [7u8; 32];
+        let item = UnlinkableSolvencyItem {
+            statement: "s".into(),
+            proof,
+            anonymity_refs: refs.clone(),
+            as_of_block_hash: pin,
+        };
+        let mut pkg = AuditPackage::new("Acme", "Q", 1_000, Some(2_000_000_000));
+        pkg.attach_unlinkable_solvency(item);
+
+        let base = || {
+            let mut v = InMemoryChainView::new();
+            for (i, r) in refs.iter().enumerate() {
+                v = v.with_anchor(ChainAnchor::new(r.clone(), commits[i], [0u8; 32], 10));
+            }
+            v
+        };
+        // Correct pin at a recent height verifies.
+        let good = base().with_block_hash(as_of, pin).with_tip_height(as_of + 5);
+        assert!(pkg.verify_anchored(1_000_000, &good).unwrap(), "pinned + fresh verifies");
+        // Different block at that height (a fork) is rejected.
+        let fork = base().with_block_hash(as_of, [9u8; 32]).with_tip_height(as_of + 5);
+        assert!(!pkg.verify_anchored(1_000_000, &fork).unwrap(), "wrong-fork pin rejected");
+        // Too stale (tip far past as_of) is rejected.
+        let stale = base()
+            .with_block_hash(as_of, pin)
+            .with_tip_height(as_of + MAX_SOLVENCY_STALENESS_BLOCKS + 1);
+        assert!(!pkg.verify_anchored(1_000_000, &stale).unwrap(), "stale proof rejected");
+        // Node has no block at that height (pin unverifiable) is rejected.
+        let missing = base().with_tip_height(as_of + 5);
+        assert!(!pkg.verify_anchored(1_000_000, &missing).unwrap(), "unverifiable pin rejected");
+    }
+
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn multi_unlinkable_solvency_anchors_every_member() {
+        use crate::crypto::create_multi_unlinkable_solvency_proof;
+        let n = 4usize;
+        let mk = |tv: u64, base: u64, tl: usize, tag: u8| {
+            let vals: Vec<u64> = (0..n)
+                .map(|i| if i == tl { tv } else { base + i as u64 })
+                .collect();
+            let bs: Vec<BlindingFactor> = (0..n).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+            let commits: Vec<[u8; 32]> = vals
+                .iter()
+                .zip(&bs)
+                .map(|(v, b)| PedersenCommitment::commit(*v, b).to_bytes())
+                .collect();
+            let refs: Vec<DisclosureOutputRef> = (0..n).map(|i| oref(tag, i as u8)).collect();
+            (vals[tl], bs[tl].clone(), commits, refs, tl)
+        };
+        let (v0, b0, c0, r0, l0) = mk(3_000_000, 10, 1, 30);
+        let (v1, b1, c1, r1, l1) = mk(4_000_000, 5000, 2, 40);
+        let threshold = 5_000_000u64;
+        let proof = create_multi_unlinkable_solvency_proof(
+            &[v0, v1],
+            &[b0, b1],
+            &[c0.clone(), c1.clone()],
+            &[l0, l1],
+            threshold,
+            900,
+        )
+        .unwrap();
+        let item = MultiUnlinkableSolvencyItem {
+            statement: "treasury sum >= 5,000,000".into(),
+            proof,
+            member_refs: vec![r0.clone(), r1.clone()],
+            as_of_block_hash: [0u8; 32],
+        };
+        let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
+        pkg.attach_multi_unlinkable_solvency(item);
+
+        // Every member of both sets anchors on-chain.
+        let mut good = InMemoryChainView::new();
+        for (refs, commits) in [(&r0, &c0), (&r1, &c1)] {
+            for (i, r) in refs.iter().enumerate() {
+                good = good.with_anchor(ChainAnchor::new(r.clone(), commits[i], [0u8; 32], 10));
+            }
+        }
+        assert!(pkg.verify_anchored(1_000_000, &good).unwrap(), "multi-output anchors + verifies");
+        assert!(pkg.to_report(1_000_000).contains("multi-output"));
+
+        // A member whose set isn't fully anchored on-chain => rejected.
+        let mut partial = InMemoryChainView::new();
+        for (i, r) in r0.iter().enumerate() {
+            partial = partial.with_anchor(ChainAnchor::new(r.clone(), c0[i], [0u8; 32], 10));
+        }
+        assert!(!pkg.verify_anchored(1_000_000, &partial).unwrap(), "unanchored member rejected");
     }
 }
