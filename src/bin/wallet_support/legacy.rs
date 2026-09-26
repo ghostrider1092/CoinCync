@@ -538,6 +538,36 @@ enum DiscloseAction {
         #[arg(long)]
         out: String,
     },
+    /// Recipient side: export one received output as a disbursement entry
+    /// ({value, blinding, tx_hash, output_index}) for the payer's
+    /// `build-payroll-audit --disbursements` file. Reveals this output's amount
+    /// and blinding to the payer (who paid it), so share it only with them.
+    ExportOutput {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Index of the received UTXO in the wallet's unspent list.
+        #[arg(long)]
+        utxo_index: usize,
+    },
+    /// Recipient side: produce an ownership receipt (a DisclosureProof) for one
+    /// received output, proving control of it without revealing the one-time
+    /// key. Hand this to the payer for their audit package.
+    Receipt {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Index of the received UTXO in the wallet's unspent list.
+        #[arg(long)]
+        utxo_index: usize,
+        /// Optional memo bound into the proof (e.g. "2026-Q3 salary").
+        #[arg(long)]
+        memo: Option<String>,
+        /// Proof expiry as a unix timestamp (seconds). Never expires if unset.
+        #[arg(long)]
+        expires_at: Option<u64>,
+        /// Output path for the receipt JSON.
+        #[arg(long)]
+        out: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -796,6 +826,17 @@ async fn main() {
                 )
                 .await
             }
+            DiscloseAction::ExportOutput {
+                password,
+                utxo_index,
+            } => cmd_disclose_export_output(&wallet_path, password, utxo_index).await,
+            DiscloseAction::Receipt {
+                password,
+                utxo_index,
+                memo,
+                expires_at,
+                out,
+            } => cmd_disclose_receipt(&wallet_path, password, utxo_index, memo, expires_at, &out).await,
         },
         Command::ShowMemo {
             password,
@@ -3279,7 +3320,12 @@ async fn cmd_disclose_build_payroll_audit(
         let raw = std::fs::read_to_string(rf).map_err(|e| format!("read receipt {rf}: {e}"))?;
         let dp: DisclosureProof =
             serde_json::from_str(&raw).map_err(|e| format!("parse receipt {rf}: {e}"))?;
-        run.add_recipient_receipt(rf, dp);
+        // Label the receipt by the file's name stem (e.g. "alice"), not its full path.
+        let label = std::path::Path::new(rf)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(rf);
+        run.add_recipient_receipt(label, dp);
     }
 
     // Finish, sign, write.
@@ -3301,6 +3347,130 @@ async fn cmd_disclose_build_payroll_audit(
     println!("The auditor verifies it against their node with:");
     println!(
         "  coincync-wallet disclose verify-audit-package \\\n    --package {out} --issuer {issuer_hex} --auditor \"{auditor}\" --node <url>"
+    );
+    Ok(())
+}
+
+/// Recipient side: export one received output as a disbursement entry the payer
+/// folds into their `build-payroll-audit --disbursements` file. This reveals
+/// the output's amount and blinding — share it only with the payer, who already
+/// knows both (they paid it).
+async fn cmd_disclose_export_output(
+    path: &PathBuf,
+    password: Option<String>,
+    utxo_index: usize,
+) -> Result<(), String> {
+    use coincync::wallet::Wallet;
+
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+    let balance = wallet.balance();
+    let utxos = balance.unspent_utxos();
+    let utxo = utxos.get(utxo_index).ok_or_else(|| {
+        format!(
+            "utxo_index {} out of range (wallet has {} unspent UTXOs)",
+            utxo_index,
+            utxos.len()
+        )
+    })?;
+
+    let entry = serde_json::json!({
+        "value": utxo.amount.as_atomic(),
+        "blinding": hex::encode(utxo.amount_blinding_bytes),
+        "tx_hash": hex::encode(utxo.tx_hash.as_bytes()),
+        "output_index": utxo.output_index,
+    });
+    // A single object; the payer collects these into the "outputs" array of the
+    // disbursements file.
+    println!("{}", serde_json::to_string(&entry).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// Recipient side: build an ownership receipt (a DisclosureProof) for one
+/// received output. Derives the output's one-time secret from wallet keys,
+/// proves control of the on-chain stealth address, and writes the receipt the
+/// payer attaches to their audit package.
+async fn cmd_disclose_receipt(
+    path: &PathBuf,
+    password: Option<String>,
+    utxo_index: usize,
+    memo: Option<String>,
+    expires_at: Option<u64>,
+    out: &str,
+) -> Result<(), String> {
+    use coincync::compliance::recipient_receipt;
+    use coincync::crypto::{compute_one_time_secret, StealthAddress};
+    use coincync::wallet::subaddress::{compute_subaddress_spend_secret, SubaddressIndex};
+    use coincync::wallet::Wallet;
+
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+    let keys = wallet
+        .current_keys()
+        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
+    let view_secret = keys.view_secret.clone();
+    let spend_secret = keys.spend_secret.clone();
+
+    let balance = wallet.balance();
+    let utxos = balance.unspent_utxos();
+    let utxo = utxos.get(utxo_index).ok_or_else(|| {
+        format!(
+            "utxo_index {} out of range (wallet has {} unspent UTXOs)",
+            utxo_index,
+            utxos.len()
+        )
+    })?;
+
+    // Per-subaddress spend offset, if this output landed on a subaddress.
+    let effective_spend = match (utxo.subaddress_account, utxo.subaddress_index) {
+        (Some(account), Some(index)) => compute_subaddress_spend_secret(
+            &spend_secret,
+            &view_secret,
+            SubaddressIndex::new(account, index),
+        ),
+        _ => spend_secret.clone(),
+    };
+
+    // Recompute the one-time secret; its public key is the on-chain stealth
+    // address the receipt proves control of (only tx_public_key is used).
+    let stealth = StealthAddress {
+        public_key: utxo.tx_public_key.clone(),
+        tx_public_key: utxo.tx_public_key.clone(),
+    };
+    let one_time = compute_one_time_secret(&stealth, &view_secret, &effective_spend, utxo.output_index)
+        .map_err(|e| format!("derive one-time secret: {}", e))?;
+    let stealth_pub = one_time.public_key();
+
+    let memo_bytes = memo.as_deref().unwrap_or("").as_bytes();
+    let receipt = recipient_receipt(
+        &utxo.tx_hash,
+        utxo.output_index,
+        &stealth_pub,
+        &one_time,
+        memo_bytes,
+        expires_at,
+    )
+    .map_err(|e| format!("build receipt: {}", e))?;
+
+    let json = serde_json::to_string_pretty(&receipt).map_err(|e| format!("serialize receipt: {}", e))?;
+    std::fs::write(out, &json).map_err(|e| format!("write {out}: {e}"))?;
+    println!("Ownership receipt written to {out}");
+    println!(
+        "  output: tx {} · index {}",
+        hex::encode(utxo.tx_hash.as_bytes()),
+        utxo.output_index
     );
     Ok(())
 }
