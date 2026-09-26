@@ -771,6 +771,21 @@ impl Blockchain {
                 Ok(p) => p,
                 Err(_) => continue, // not a v2 payload (native v1 handled elsewhere)
             };
+            // Transparent↔shielded value bridge: the tx's public value_balance
+            // must be backed by its transparent commitments (no cross-veil
+            // inflation). The shielded side's own conservation is proven by the
+            // libspark bundle in verify_spark_payload below.
+            let pseudo_outputs: Vec<[u8; 32]> =
+                tx.inputs.iter().map(|i| i.pseudo_output_commitment).collect();
+            let output_commitments: Vec<[u8; 32]> =
+                tx.outputs.iter().map(|o| o.commitment).collect();
+            crate::consensus::spark_payload::verify_transparent_shielded_balance(
+                &pseudo_outputs,
+                &output_commitments,
+                tx.fee.as_atomic(),
+                payload.value_balance,
+            )
+            .map_err(|e| format!("spark v2 tx {idx}: value bridge: {e}"))?;
             let tags = crate::consensus::spark_payload::verify_spark_payload(
                 store.as_ref(),
                 &backend,

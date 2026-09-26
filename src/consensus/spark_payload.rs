@@ -171,6 +171,89 @@ pub fn apply_spark_payload(
     Ok(())
 }
 
+/// The transparent↔shielded value BRIDGE. A shielded tx's public
+/// `value_balance` must be backed by its transparent commitments, or value
+/// could be shielded/unshielded that the transparent side never moved. This
+/// extends the homomorphic transparent balance equation
+/// `Σ pseudo_outputs == Σ outputs + fee·H` with the value crossing the veil:
+///
+/// ```text
+///   Σ pseudo_outputs == Σ outputs + (fee − value_balance)·H
+/// ```
+///
+/// - `value_balance > 0` (UNSHIELD out): transparent outputs exceed inputs by
+///   it — the pool paid it out.
+/// - `value_balance < 0` (SHIELD in): transparent inputs exceed outputs+fee by
+///   |it| — that value went into the pool.
+/// - `value_balance == 0`: reduces exactly to the plain transparent balance.
+///
+/// This is the CoinCync-side half of value conservation: it ties `value_balance`
+/// to the transparent commitments. The SHIELDED-side half (that the shielded
+/// inputs/outputs themselves net to `value_balance`) is proven by the libspark
+/// spend bundle's own internal balance proof; the per-MINT value/range binding
+/// (mint coin values sum to the shielded-in amount) is the remaining
+/// libspark-value-model follow-up noted in cip-spark-block-format.md.
+///
+/// Blinding factors must still balance (`Σ in_blinding == Σ out_blinding`), since
+/// the `(fee − value_balance)·H` term carries zero blinding — exactly as the
+/// transparent equation requires. Fail-closed on any non-canonical point or a
+/// mismatch.
+pub fn verify_transparent_shielded_balance(
+    pseudo_outputs: &[[u8; 32]],
+    output_commitments: &[[u8; 32]],
+    fee: u64,
+    value_balance: i64,
+) -> Result<()> {
+    use crate::crypto::{BlindingFactor, PedersenCommitment};
+    use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+    use curve25519_dalek::traits::Identity;
+
+    let decode = |b: &[u8; 32]| -> Result<RistrettoPoint> {
+        CompressedRistretto(*b)
+            .decompress()
+            .ok_or(Error::SparkVerifyFailed)
+    };
+
+    // Σ pseudo-output commitments (reject identity — an identity input collapses
+    // the balance equation, the same inflation hole §44 guards in validation).
+    let mut input_sum = RistrettoPoint::identity();
+    for p in pseudo_outputs {
+        let pt = decode(p)?;
+        if pt == RistrettoPoint::identity() {
+            return Err(Error::SparkVerifyFailed);
+        }
+        input_sum += pt;
+    }
+    let mut output_sum = RistrettoPoint::identity();
+    for c in output_commitments {
+        output_sum += decode(c)?;
+    }
+
+    let fee_pt = PedersenCommitment::commit(fee, &BlindingFactor::zero())
+        .as_point()
+        .decompress()
+        .ok_or(Error::SparkVerifyFailed)?;
+    let vb_pt = PedersenCommitment::commit(value_balance.unsigned_abs(), &BlindingFactor::zero())
+        .as_point()
+        .decompress()
+        .ok_or(Error::SparkVerifyFailed)?;
+
+    // expected = Σ outputs + (fee − value_balance)·H
+    let expected = if value_balance >= 0 {
+        output_sum + fee_pt - vb_pt
+    } else {
+        output_sum + fee_pt + vb_pt
+    };
+    if input_sum != expected {
+        return Err(Error::CryptoError(
+            "shielded value bridge: transparent commitments do not back value_balance \
+             (possible cross-veil inflation)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Mint- and spend-side v2 payload BUILDERS (the wallet side). Gated on
 /// `libspark-ffi` — they call the real backend to mint coins and build spend
 /// bundles. This is the send-side counterpart to the verify/apply feed:
@@ -249,6 +332,76 @@ pub mod build {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn commit_bytes(value: u64, blinding: [u8; 32]) -> [u8; 32] {
+        use crate::crypto::{BlindingFactor, PedersenCommitment};
+        PedersenCommitment::commit(value, &BlindingFactor::from_bytes(blinding)).to_bytes()
+    }
+
+    #[test]
+    fn value_bridge_balances_shield_unshield_and_zero() {
+        let r = [7u8; 32]; // equal blinding in/out so the blinding side cancels
+
+        // SHIELD 100 in (value_balance = -100), fee 0: transparent inputs (150)
+        // exceed outputs (50) by 100 → that 100 went into the pool.
+        assert!(verify_transparent_shielded_balance(
+            &[commit_bytes(150, r)],
+            &[commit_bytes(50, r)],
+            0,
+            -100,
+        )
+        .is_ok());
+
+        // UNSHIELD 120 out (value_balance = +120), fee 0: outputs (170) exceed
+        // inputs (50) by 120 → the pool paid 120 out.
+        assert!(verify_transparent_shielded_balance(
+            &[commit_bytes(50, r)],
+            &[commit_bytes(170, r)],
+            0,
+            120,
+        )
+        .is_ok());
+
+        // value_balance 0 with a fee: reduces to the plain transparent balance
+        // (input == output + fee).
+        assert!(verify_transparent_shielded_balance(
+            &[commit_bytes(100, r)],
+            &[commit_bytes(90, r)],
+            10,
+            0,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn value_bridge_rejects_unbacked_value_and_identity() {
+        let r = [9u8; 32];
+        // Claim to shield 100 but transparent side only moved 99 → rejected
+        // (cross-veil inflation of 1).
+        assert!(verify_transparent_shielded_balance(
+            &[commit_bytes(150, r)],
+            &[commit_bytes(50, r)],
+            0,
+            -99,
+        )
+        .is_err());
+        // Wrong sign (claims unshield when the transparent side shielded).
+        assert!(verify_transparent_shielded_balance(
+            &[commit_bytes(150, r)],
+            &[commit_bytes(50, r)],
+            0,
+            100,
+        )
+        .is_err());
+        // Identity pseudo-output is rejected (balance-collapse guard).
+        assert!(verify_transparent_shielded_balance(
+            &[[0u8; 32]],
+            &[commit_bytes(50, r)],
+            0,
+            -100,
+        )
+        .is_err());
+    }
 
     #[test]
     fn payload_round_trips_and_version_gate() {
