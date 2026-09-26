@@ -27,6 +27,10 @@ pub mod shielded;
 /// activation slot. Non-gated scaffolding; production verifier rejects all.
 pub mod shielded_pipeline;
 pub mod shielded_connector; // bridge to the isolated spark-connector crate
+/// The libspark Spark block format (v2 payload) + the pool feed logic.
+/// Gated + inert; see `docs/design/cip-spark-block-format.md`.
+#[cfg(feature = "sketch-gk-proof")]
+pub mod spark_payload;
 pub mod fee_market;
 pub mod finality;
 pub mod fork_signal;
