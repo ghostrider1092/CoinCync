@@ -322,6 +322,322 @@ pub fn verify_one_of_many_gen_ctx(
     Ok(())
 }
 
+// ── Fused key-image binding (CIP-Triptych-KI step 1) ─────────────────────────
+// Binds a revealed linking tag `T = x_l·ki_gen` to the SAME hidden index `l`
+// the one-of-many proves value-membership over, so "solvent output" and "the
+// output whose spend key I know" are provably one output (enforces l == l';
+// rejects the split-output attack). See docs/design/cip-triptych-ki-binding.md.
+// Gated `sketch-gk-proof`, UNAUDITED, unwired from consensus. The base
+// `prove/verify_one_of_many*` above are untouched (inert for existing callers).
+
+/// Fiat-Shamir challenge for the fused proof: everything the base [`challenge`]
+/// binds PLUS the public-key ring, `ki_gen`, the revealed tag, and the
+/// `gkp`/`gkt` round-1 commitments. Domain-separated from the base challenge so
+/// a fused transcript can never collide with a base one.
+#[allow(clippy::too_many_arguments)]
+fn challenge_ki(
+    context: &[u8],
+    commitments: &[RistrettoPoint],
+    pubkeys: &[RistrettoPoint],
+    ki_gen: &RistrettoPoint,
+    tag: &[u8; 32],
+    cl: &[[u8; 32]],
+    ca: &[[u8; 32]],
+    cb: &[[u8; 32]],
+    gk: &[[u8; 32]],
+    gkp: &[[u8; 32]],
+    gkt: &[[u8; 32]],
+) -> Scalar {
+    let mut h = Sha3_512::new();
+    h.update(b"COINCYNC_GK_KI_FS_v1");
+    h.update((context.len() as u64).to_le_bytes());
+    h.update(context);
+    for c in commitments {
+        h.update(c.compress().as_bytes());
+    }
+    for p in pubkeys {
+        h.update(p.compress().as_bytes());
+    }
+    h.update(ki_gen.compress().as_bytes());
+    h.update(tag);
+    for v in [cl, ca, cb, gk, gkp, gkt] {
+        for p in v {
+            h.update(p);
+        }
+    }
+    let mut wide = [0u8; 64];
+    wide.copy_from_slice(&h.finalize());
+    Scalar::from_bytes_mod_order_wide(&wide)
+}
+
+/// Prove the fused key-image-binding one-of-many: at a single hidden index `l`,
+/// `commitments[l]` is a commitment to zero in `blind_gen` AND the revealed tag
+/// `T = x_l·ki_gen` was formed with the spend key `x_l` of
+/// `pubkeys[l] = x_l·pk_gen`. The same polynomial coefficients `p_{i,k}` (hence
+/// the same `f_j`/`x`/`l`) drive both accumulators, so the value-index and the
+/// key-image-index are provably equal. SOUNDNESS: `value_gen`/`blind_gen`
+/// independent (base requirement) and `pk_gen`/`ki_gen` independent (no known
+/// dlog); the verifier MUST pass the identical four generators (they are not
+/// hashed into the challenge).
+#[allow(clippy::too_many_arguments)]
+pub fn prove_one_of_many_ki_gen_ctx<R: CryptoRng + RngCore>(
+    commitments: &[RistrettoPoint],
+    pubkeys: &[RistrettoPoint],
+    l: usize,
+    r: &Scalar,
+    x_l: &Scalar,
+    value_gen: RistrettoPoint,
+    blind_gen: RistrettoPoint,
+    pk_gen: RistrettoPoint,
+    ki_gen: RistrettoPoint,
+    context: &[u8],
+    rng: &mut R,
+) -> Result<GkOneOfManyKiProof> {
+    let n = commitments.len();
+    if n == 0 || !n.is_power_of_two() {
+        return Err(Error::CryptoError(
+            "GK-KI: commitment set size must be a power of two >= 1".into(),
+        ));
+    }
+    if pubkeys.len() != n {
+        return Err(Error::CryptoError(
+            "GK-KI: pubkey ring length must equal commitment ring length".into(),
+        ));
+    }
+    let m = n.trailing_zeros() as usize;
+    if m == 0 || m > MAX_GK_ROUNDS {
+        return Err(Error::CryptoError("GK-KI: rounds out of range".into()));
+    }
+    if l >= n {
+        return Err(Error::CryptoError("GK-KI: index out of range".into()));
+    }
+    // Prover-side guard: `x_l` must actually open `pubkeys[l]`, else the tag
+    // would bind to a key not in the ring at `l`.
+    if pubkeys[l] != pk_gen * x_l {
+        return Err(Error::CryptoError(
+            "GK-KI: x_l does not open pubkeys[l]".into(),
+        ));
+    }
+
+    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+
+    // Round 1: per-bit commitments (identical to the base proof).
+    let mut lj = Vec::with_capacity(m);
+    let mut aj = Vec::with_capacity(m);
+    let mut rj = Vec::with_capacity(m);
+    let mut sj = Vec::with_capacity(m);
+    let mut tj = Vec::with_capacity(m);
+    let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
+    for j in 0..m {
+        let l_j = Scalar::from(bit(j) as u64);
+        let a_j = Scalar::random(&mut *rng);
+        let r_j = Scalar::random(&mut *rng);
+        let s_j = Scalar::random(&mut *rng);
+        let t_j = Scalar::random(&mut *rng);
+        cl.push(commit_gen(&l_j, &r_j, value_gen, blind_gen).compress().to_bytes());
+        ca.push(commit_gen(&a_j, &s_j, value_gen, blind_gen).compress().to_bytes());
+        cb.push(commit_gen(&(l_j * a_j), &t_j, value_gen, blind_gen).compress().to_bytes());
+        lj.push(l_j);
+        aj.push(a_j);
+        rj.push(r_j);
+        sj.push(s_j);
+        tj.push(t_j);
+    }
+
+    // Accumulate Σ_i p_{i,k}·C_i AND Σ_i p_{i,k}·P_i with the SAME p_{i,k}.
+    let rho: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
+    let sigma: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
+    let mut coeff_c = vec![RistrettoPoint::default(); m];
+    let mut coeff_p = vec![RistrettoPoint::default(); m];
+    for (i, (c_i, p_i)) in commitments.iter().zip(pubkeys.iter()).enumerate() {
+        let mut poly = vec![Scalar::ONE];
+        for j in 0..m {
+            let i_j = (i >> j) & 1;
+            let (c0, c1) = if i_j == 1 {
+                (aj[j], lj[j])
+            } else {
+                (-aj[j], Scalar::ONE - lj[j])
+            };
+            poly = poly_mul_linear(&poly, c0, c1);
+        }
+        for k in 0..m {
+            coeff_c[k] += c_i * poly[k];
+            coeff_p[k] += p_i * poly[k];
+        }
+    }
+    let mut gk = Vec::with_capacity(m);
+    let mut gkp = Vec::with_capacity(m);
+    let mut gkt = Vec::with_capacity(m);
+    for k in 0..m {
+        gk.push((coeff_c[k] + blind_gen * rho[k]).compress().to_bytes());
+        gkp.push((coeff_p[k] + pk_gen * sigma[k]).compress().to_bytes());
+        gkt.push((ki_gen * sigma[k]).compress().to_bytes());
+    }
+    let tag = (ki_gen * x_l).compress().to_bytes();
+
+    let x = challenge_ki(
+        context, commitments, pubkeys, &ki_gen, &tag, &cl, &ca, &cb, &gk, &gkp, &gkt,
+    );
+
+    // Round 2 responses.
+    let mut f = Vec::with_capacity(m);
+    let mut za = Vec::with_capacity(m);
+    let mut zb = Vec::with_capacity(m);
+    for j in 0..m {
+        let f_j = lj[j] * x + aj[j];
+        f.push(f_j.to_bytes());
+        za.push((rj[j] * x + sj[j]).to_bytes());
+        zb.push((rj[j] * (x - f_j) + tj[j]).to_bytes());
+    }
+    // x^m plus the low-order blinding sums Σ_k ρ_k·x^k and Σ_k σ_k·x^k.
+    let mut x_pow = Scalar::ONE;
+    let mut sum_rho = Scalar::ZERO;
+    let mut sum_sigma = Scalar::ZERO;
+    for k in 0..m {
+        sum_rho += rho[k] * x_pow;
+        sum_sigma += sigma[k] * x_pow;
+        x_pow *= x;
+    }
+    // x_pow == x^m
+    let zd = (*r * x_pow - sum_rho).to_bytes();
+    let zp = (*x_l * x_pow - sum_sigma).to_bytes();
+
+    Ok(GkOneOfManyKiProof {
+        base: GkOneOfManyProof {
+            cl,
+            ca,
+            cb,
+            gk,
+            f,
+            za,
+            zb,
+            zd,
+        },
+        gkp,
+        gkt,
+        zp,
+        tag,
+    })
+}
+
+/// Verify a fused key-image-binding one-of-many proof. Fail-closed. MUST be
+/// called with the same `(value_gen, blind_gen, pk_gen, ki_gen)` used at prove
+/// time. On success the caller learns: some hidden `l` has `commitments[l]` a
+/// commitment to zero in `blind_gen`, and `proof.tag == x_l·ki_gen` for the
+/// spend key of that SAME `pubkeys[l]`. Returns the decoded tag point so the
+/// caller can run its (out-of-scope, step 2) spent-tag-set check.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_one_of_many_ki_gen_ctx(
+    commitments: &[RistrettoPoint],
+    pubkeys: &[RistrettoPoint],
+    proof: &GkOneOfManyKiProof,
+    value_gen: RistrettoPoint,
+    blind_gen: RistrettoPoint,
+    pk_gen: RistrettoPoint,
+    ki_gen: RistrettoPoint,
+    context: &[u8],
+) -> Result<RistrettoPoint> {
+    let n = commitments.len();
+    if n == 0 || !n.is_power_of_two() || pubkeys.len() != n {
+        return Err(Error::SparkVerifyFailed);
+    }
+    let m = n.trailing_zeros() as usize;
+    let d = proof.base.decode()?;
+    if d.m != m {
+        return Err(Error::SparkVerifyFailed);
+    }
+    // Shape + canonical-decode the fused fields (reject identity / non-canonical).
+    if proof.gkp.len() != m || proof.gkt.len() != m {
+        return Err(Error::SparkVerifyFailed);
+    }
+    let decode_points = |v: &[[u8; 32]]| -> Result<Vec<RistrettoPoint>> {
+        v.iter()
+            .copied()
+            .map(PeerPoint::decode_non_identity)
+            .map(|r| r.map(|p| *p.as_point()))
+            .collect()
+    };
+    let gkp = decode_points(&proof.gkp)?;
+    let gkt = decode_points(&proof.gkt)?;
+    let zp = *PeerScalar::decode(proof.zp)?.as_scalar();
+    let tag = *PeerPoint::decode_non_identity(proof.tag)?.as_point();
+
+    let g = value_gen;
+    let k_gen = blind_gen;
+    let x = challenge_ki(
+        context,
+        commitments,
+        pubkeys,
+        &ki_gen,
+        &proof.tag,
+        &proof.base.cl,
+        &proof.base.ca,
+        &proof.base.cb,
+        &proof.base.gk,
+        &proof.gkp,
+        &proof.gkt,
+    );
+
+    // Per-bit checks (identical to the base proof).
+    for j in 0..m {
+        let cl_j = *d.cl[j].as_point();
+        let f_j = *d.f[j].as_scalar();
+        if x * cl_j + *d.ca[j].as_point() != g * f_j + k_gen * *d.za[j].as_scalar() {
+            return Err(Error::SparkVerifyFailed);
+        }
+        if (x - f_j) * cl_j + *d.cb[j].as_point() != k_gen * *d.zb[j].as_scalar() {
+            return Err(Error::SparkVerifyFailed);
+        }
+    }
+
+    // The shared polynomial products P_i(x) — computed ONCE, reused for both the
+    // value and the public-key accumulators. This sharing is exactly why the
+    // value-index and the key-image-index cannot differ (l == l').
+    let f_scalars: Vec<Scalar> = d.f.iter().map(|s| *s.as_scalar()).collect();
+    let mut prods = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut prod = Scalar::ONE;
+        for (j, f_j) in f_scalars.iter().enumerate() {
+            let factor = if (i >> j) & 1 == 1 { *f_j } else { x - f_j };
+            prod *= factor;
+        }
+        prods.push(prod);
+    }
+
+    let mut lhs_c = RistrettoPoint::default();
+    let mut lhs_p = RistrettoPoint::default();
+    for ((c_i, p_i), prod) in commitments.iter().zip(pubkeys.iter()).zip(&prods) {
+        lhs_c += c_i * prod;
+        lhs_p += p_i * prod;
+    }
+    let mut x_pow = Scalar::ONE;
+    for k in 0..m {
+        lhs_c -= *d.gk[k].as_point() * x_pow;
+        lhs_p -= gkp[k] * x_pow;
+        x_pow *= x;
+    }
+    // x_pow == x^m
+    // (value/membership) Σ_i P_i(x)·C_i − Σ_k x^k·gk_k == z_d·blind_gen
+    if lhs_c != k_gen * *d.zd.as_scalar() {
+        return Err(Error::SparkVerifyFailed);
+    }
+    // (public key) Σ_i P_i(x)·P_i − Σ_k x^k·gkp_k == zp·pk_gen
+    if lhs_p != pk_gen * zp {
+        return Err(Error::SparkVerifyFailed);
+    }
+    // (tag) x^m·T − Σ_k x^k·gkt_k == zp·ki_gen
+    let mut lhs_t = tag * x_pow;
+    let mut x_pow2 = Scalar::ONE;
+    for gkt_k in gkt.iter() {
+        lhs_t -= gkt_k * x_pow2;
+        x_pow2 *= x;
+    }
+    if lhs_t != ki_gen * zp {
+        return Err(Error::SparkVerifyFailed);
+    }
+    Ok(tag)
+}
+
 /// The log-size one-out-of-many proof, in wire form (canonical 32-byte
 /// encodings). Decode with [`GkOneOfManyProof::decode`] before use — the raw
 /// bytes are peer-controlled and must never be trusted without canonical
@@ -418,6 +734,27 @@ impl GkOneOfManyProof {
             zd: PeerScalar::decode(self.zd)?,
         })
     }
+}
+
+/// Fused key-image-binding one-of-many proof (CIP-Triptych-KI step 1), wire
+/// form. Embeds the base [`GkOneOfManyProof`] and adds: `gkp` (the public-key
+/// accumulator's polynomial-coefficient commitments, blinded in `pk_gen`),
+/// `gkt` (the same blindings over `ki_gen`), `zp` (the fused response tying the
+/// spend key `x_l` across `pk_gen`/`ki_gen`), and `tag` (the revealed linking
+/// tag `x_l·ki_gen`). Decode/verify only via
+/// [`verify_one_of_many_ki_gen_ctx`], which canonically decodes every field.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct GkOneOfManyKiProof {
+    /// The base one-of-many (value/membership) proof over the commitment ring.
+    pub base: GkOneOfManyProof,
+    /// Public-key accumulator coefficient commitments (`Σ_i p_{i,k}·P_i + σ_k·pk_gen`).
+    pub gkp: Vec<[u8; 32]>,
+    /// Tag-blinding commitments (`σ_k·ki_gen`) — same `σ_k` as `gkp`.
+    pub gkt: Vec<[u8; 32]>,
+    /// Fused response `zp = x_l·x^m − Σ_k σ_k·x^k`.
+    pub zp: [u8; 32],
+    /// Revealed linking tag `T = x_l·ki_gen`.
+    pub tag: [u8; 32],
 }
 
 /// The full shielded spend proof, wire form — a Zerocoin/Lelantus serial-reveal
@@ -1532,6 +1869,176 @@ mod tests {
         assert!(
             verify_one_of_many_gen_ctx(&commits, &bad, value_gen, blind_gen, &[]).is_err(),
             "tampered zd must be rejected"
+        );
+    }
+
+    // ── Fused key-image binding (CIP-Triptych-KI step 1) ─────────────────────
+    // The unlinkable-solvency instance: value_gen = H (NUMS), blind_gen = G,
+    // one-time keys on pk_gen = G, and the linking tag over an independent NUMS
+    // ki_gen = Gv. These tests are the acceptance suite for step 1: honest
+    // round-trip, the adversarial rejections, and the split-output attack.
+
+    #[test]
+    fn ki_binding_round_trips_and_returns_tag() {
+        let mut rng = ChaCha20Rng::seed_from_u64(90210);
+        let value_gen = gen_h();
+        let blind_gen = gen_g(); // = G
+        let pk_gen = gen_g(); // one-time keys live on G
+        let ki_gen = gen_gv(); // independent NUMS tag generator U
+        let (m, l) = (3usize, 5usize);
+        let n = 1usize << m;
+        let r = Scalar::random(&mut rng);
+        let x_l = Scalar::random(&mut rng);
+        let mut commits: Vec<RistrettoPoint> = (0..n).map(|i| filler(i as u64)).collect();
+        commits[l] = blind_gen * r; // commitment to zero in G (value-part zero)
+        let mut pubkeys: Vec<RistrettoPoint> = (0..n)
+            .map(|i| RISTRETTO_BASEPOINT_POINT * Scalar::from(i as u64 * 13 + 7))
+            .collect();
+        pubkeys[l] = pk_gen * x_l;
+
+        let proof = prove_one_of_many_ki_gen_ctx(
+            &commits, &pubkeys, l, &r, &x_l, value_gen, blind_gen, pk_gen, ki_gen, b"audit",
+            &mut rng,
+        )
+        .unwrap();
+        let tag = verify_one_of_many_ki_gen_ctx(
+            &commits, &pubkeys, &proof, value_gen, blind_gen, pk_gen, ki_gen, b"audit",
+        )
+        .expect("honest fused proof verifies");
+        assert_eq!(tag, ki_gen * x_l, "verifier returns the linking tag T = x_l·U");
+
+        // The base sub-proof is bound to the FUSED transcript: it cannot be
+        // lifted out and replayed as a standalone base one-of-many (its f_j were
+        // derived from the fused challenge, not the base challenge).
+        assert!(
+            verify_one_of_many_gen_ctx(&commits, &proof.base, value_gen, blind_gen, b"audit")
+                .is_err(),
+            "embedded base proof must not verify under the base challenge"
+        );
+    }
+
+    #[test]
+    fn ki_binding_adversarial() {
+        let mut rng = ChaCha20Rng::seed_from_u64(1337);
+        let value_gen = gen_h();
+        let blind_gen = gen_g();
+        let pk_gen = gen_g();
+        let ki_gen = gen_gv();
+        let (m, l) = (2usize, 1usize);
+        let n = 1usize << m;
+        let r = Scalar::random(&mut rng);
+        let x_l = Scalar::random(&mut rng);
+        let mut commits: Vec<RistrettoPoint> = (0..n).map(|i| filler(i as u64 + 100)).collect();
+        commits[l] = blind_gen * r;
+        let mut pubkeys: Vec<RistrettoPoint> = (0..n)
+            .map(|i| RISTRETTO_BASEPOINT_POINT * Scalar::from(i as u64 * 13 + 7))
+            .collect();
+        pubkeys[l] = pk_gen * x_l;
+        let ok = |p: &GkOneOfManyKiProof, kg: RistrettoPoint, ctx: &[u8]| {
+            verify_one_of_many_ki_gen_ctx(
+                &commits, &pubkeys, p, value_gen, blind_gen, pk_gen, kg, ctx,
+            )
+            .is_ok()
+        };
+        let proof = prove_one_of_many_ki_gen_ctx(
+            &commits, &pubkeys, l, &r, &x_l, value_gen, blind_gen, pk_gen, ki_gen, b"a", &mut rng,
+        )
+        .unwrap();
+        assert!(ok(&proof, ki_gen, b"a"), "honest proof verifies");
+
+        // (1) wrong ki_gen at verify.
+        assert!(!ok(&proof, gen_h(), b"a"), "wrong ki_gen rejected");
+        // (2) wrong context.
+        assert!(!ok(&proof, ki_gen, b"b"), "wrong context rejected");
+        // (3) tampered tag (a different key's tag) — bound to the value-index's key.
+        let mut bad_tag = proof.clone();
+        bad_tag.tag = (ki_gen * (x_l + Scalar::ONE)).compress().to_bytes();
+        assert!(!ok(&bad_tag, ki_gen, b"a"), "tampered tag rejected");
+        // (4) tampered fused response zp.
+        let mut bad_zp = proof.clone();
+        bad_zp.zp = tweak(bad_zp.zp);
+        assert!(!ok(&bad_zp, ki_gen, b"a"), "tampered zp rejected");
+        // (5) swap gkp <-> gkt.
+        let mut swapped = proof.clone();
+        std::mem::swap(&mut swapped.gkp, &mut swapped.gkt);
+        assert!(!ok(&swapped, ki_gen, b"a"), "swapped gkp/gkt rejected");
+        // (6) identity tag (x_l = 0 degenerate) rejected at decode.
+        let mut ident = proof.clone();
+        ident.tag = RistrettoPoint::default().compress().to_bytes();
+        assert!(!ok(&ident, ki_gen, b"a"), "identity tag rejected");
+        // (7) prover-side guard: x_l must open pubkeys[l].
+        let wrong_key = Scalar::random(&mut rng);
+        assert!(
+            prove_one_of_many_ki_gen_ctx(
+                &commits, &pubkeys, l, &r, &wrong_key, value_gen, blind_gen, pk_gen, ki_gen, b"a",
+                &mut rng,
+            )
+            .is_err(),
+            "x_l not opening pubkeys[l] rejected at prove time"
+        );
+    }
+
+    #[test]
+    fn ki_binding_rejects_split_output() {
+        // The attack the whole construction exists to stop: value-prove a large
+        // (solvent) output at index `la`, but key-image-prove a DIFFERENT
+        // (unspent) output at `lb != la`, claiming "solvent AND unspent" when no
+        // single output is both. We splice the value half of one honest proof
+        // with the key-image half of another and require rejection.
+        let mut rng = ChaCha20Rng::seed_from_u64(555);
+        let value_gen = gen_h();
+        let blind_gen = gen_g();
+        let pk_gen = gen_g();
+        let ki_gen = gen_gv();
+        let (m, la, lb) = (3usize, 2usize, 6usize);
+        let n = 1usize << m;
+
+        let mut pubkeys: Vec<RistrettoPoint> = (0..n)
+            .map(|i| RISTRETTO_BASEPOINT_POINT * Scalar::from(i as u64 * 29 + 5))
+            .collect();
+        let x_a = Scalar::random(&mut rng);
+        let x_b = Scalar::random(&mut rng);
+        pubkeys[la] = pk_gen * x_a;
+        pubkeys[lb] = pk_gen * x_b;
+
+        // Proof A: value-zero + key-image both at `la` (over ring `commits`).
+        let r_a = Scalar::random(&mut rng);
+        let mut commits: Vec<RistrettoPoint> = (0..n).map(|i| filler(i as u64 + 20)).collect();
+        commits[la] = blind_gen * r_a;
+        let proof_a = prove_one_of_many_ki_gen_ctx(
+            &commits, &pubkeys, la, &r_a, &x_a, value_gen, blind_gen, pk_gen, ki_gen, b"s", &mut rng,
+        )
+        .unwrap();
+
+        // Proof B: value-zero + key-image both at `lb` (over a ring where `lb`
+        // is the zero-commitment), so proof B is itself valid and we can lift its
+        // key-image half.
+        let mut commits_b = commits.clone();
+        commits_b[la] = filler(777);
+        let r_b = Scalar::random(&mut rng);
+        commits_b[lb] = blind_gen * r_b;
+        let proof_b = prove_one_of_many_ki_gen_ctx(
+            &commits_b, &pubkeys, lb, &r_b, &x_b, value_gen, blind_gen, pk_gen, ki_gen, b"s",
+            &mut rng,
+        )
+        .unwrap();
+
+        // Splice: value membership from A (index la over `commits`), key-image
+        // parts from B (index lb). The shared-transcript Fiat-Shamir binding and
+        // the single set of `f_j` (which telescope to ONE index) both reject it.
+        let spliced = GkOneOfManyKiProof {
+            base: proof_a.base.clone(),
+            gkp: proof_b.gkp.clone(),
+            gkt: proof_b.gkt.clone(),
+            zp: proof_b.zp,
+            tag: proof_b.tag,
+        };
+        assert!(
+            verify_one_of_many_ki_gen_ctx(
+                &commits, &pubkeys, &spliced, value_gen, blind_gen, pk_gen, ki_gen, b"s",
+            )
+            .is_err(),
+            "split-output (value at la, key-image at lb) must be rejected"
         );
     }
 
