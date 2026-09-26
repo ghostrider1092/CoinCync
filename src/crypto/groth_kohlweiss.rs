@@ -34,7 +34,21 @@ use crate::crypto::spark_generators::{gen_g, gen_gv, gen_h, gen_k};
 
 /// Auxiliary Pedersen commitment `Com(b; r) = b·G + r·K`.
 fn commit(b: &Scalar, r: &Scalar) -> RistrettoPoint {
-    gen_g() * b + gen_k() * r
+    commit_gen(b, r, gen_g(), gen_k())
+}
+
+/// The internal Pedersen commitment `b·value_gen + r·blind_gen` with an explicit
+/// generator pair. `commit` is the `(gen_g, gen_k)` instance the shielded path
+/// uses; the disclosure/unlinkable-solvency path instantiates it over the
+/// transparent Pedersen basis `(H_POINT, G)` instead. Soundness requires the two
+/// generators to be independent (no known discrete-log relation).
+fn commit_gen(
+    b: &Scalar,
+    r: &Scalar,
+    value_gen: RistrettoPoint,
+    blind_gen: RistrettoPoint,
+) -> RistrettoPoint {
+    value_gen * b + blind_gen * r
 }
 
 /// Fiat-Shamir challenge over an optional caller `context` + the full statement
@@ -104,6 +118,27 @@ pub fn prove_one_of_many_ctx<R: CryptoRng + RngCore>(
     context: &[u8],
     rng: &mut R,
 ) -> Result<GkOneOfManyProof> {
+    prove_one_of_many_gen_ctx(commitments, l, r, gen_g(), gen_k(), context, rng)
+}
+
+/// Generator-parameterized [`prove_one_of_many_ctx`]: proves `commitments[l]` is
+/// a commitment to zero in `blind_gen` (`commitments[l] = r·blind_gen`), with the
+/// internal bit commitments in the `(value_gen, blind_gen)` basis.
+/// [`prove_one_of_many_ctx`] is the `(gen_g, gen_k)` instance the shielded path
+/// uses; the transparent unlinkable-solvency path instantiates it over
+/// `(H_POINT, G)`. SOUNDNESS: `value_gen` and `blind_gen` must be independent (no
+/// known discrete-log relation). The generators are NOT bound into the
+/// Fiat-Shamir challenge, so the verifier MUST pass the identical pair to
+/// [`verify_one_of_many_gen_ctx`].
+pub fn prove_one_of_many_gen_ctx<R: CryptoRng + RngCore>(
+    commitments: &[RistrettoPoint],
+    l: usize,
+    r: &Scalar,
+    value_gen: RistrettoPoint,
+    blind_gen: RistrettoPoint,
+    context: &[u8],
+    rng: &mut R,
+) -> Result<GkOneOfManyProof> {
     let n = commitments.len();
     if n == 0 || !n.is_power_of_two() {
         return Err(Error::CryptoError(
@@ -118,10 +153,11 @@ pub fn prove_one_of_many_ctx<R: CryptoRng + RngCore>(
         return Err(Error::CryptoError("GK: index out of range".into()));
     }
 
-    let k_gen = gen_k();
+    let k_gen = blind_gen;
     let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
 
-    // Round 1: per-bit commitments + saved randomness.
+    // Round 1: per-bit commitments + saved randomness (in the (value_gen,
+    // blind_gen) basis).
     let mut lj = Vec::with_capacity(m);
     let mut aj = Vec::with_capacity(m);
     let mut rj = Vec::with_capacity(m);
@@ -134,9 +170,9 @@ pub fn prove_one_of_many_ctx<R: CryptoRng + RngCore>(
         let r_j = Scalar::random(&mut *rng);
         let s_j = Scalar::random(&mut *rng);
         let t_j = Scalar::random(&mut *rng);
-        cl.push(commit(&l_j, &r_j).compress().to_bytes());
-        ca.push(commit(&a_j, &s_j).compress().to_bytes());
-        cb.push(commit(&(l_j * a_j), &t_j).compress().to_bytes());
+        cl.push(commit_gen(&l_j, &r_j, value_gen, blind_gen).compress().to_bytes());
+        ca.push(commit_gen(&a_j, &s_j, value_gen, blind_gen).compress().to_bytes());
+        cb.push(commit_gen(&(l_j * a_j), &t_j, value_gen, blind_gen).compress().to_bytes());
         lj.push(l_j);
         aj.push(a_j);
         rj.push(r_j);
@@ -220,6 +256,21 @@ pub fn verify_one_of_many_ctx(
     proof: &GkOneOfManyProof,
     context: &[u8],
 ) -> Result<()> {
+    verify_one_of_many_gen_ctx(commitments, proof, gen_g(), gen_k(), context)
+}
+
+/// Generator-parameterized [`verify_one_of_many_ctx`]. MUST be called with the
+/// same `(value_gen, blind_gen)` pair used by [`prove_one_of_many_gen_ctx`] (they
+/// are not bound into the challenge). [`verify_one_of_many_ctx`] is the
+/// `(gen_g, gen_k)` instance; the transparent unlinkable-solvency path uses
+/// `(H_POINT, G)`.
+pub fn verify_one_of_many_gen_ctx(
+    commitments: &[RistrettoPoint],
+    proof: &GkOneOfManyProof,
+    value_gen: RistrettoPoint,
+    blind_gen: RistrettoPoint,
+    context: &[u8],
+) -> Result<()> {
     let n = commitments.len();
     if n == 0 || !n.is_power_of_two() {
         return Err(Error::SparkVerifyFailed);
@@ -230,8 +281,8 @@ pub fn verify_one_of_many_ctx(
         return Err(Error::SparkVerifyFailed);
     }
 
-    let g = gen_g();
-    let k_gen = gen_k();
+    let g = value_gen;
+    let k_gen = blind_gen;
     let x = challenge(context, commitments, &proof.cl, &proof.ca, &proof.cb, &proof.gk);
 
     // Per-bit checks (bit-ness).
@@ -1431,6 +1482,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gen_one_of_many_round_trips_with_g_blinding_and_is_fail_closed() {
+        // The unlinkable-solvency instance: blinding generator = G (the
+        // transparent Pedersen blinding generator), value generator = an
+        // independent NUMS point. Proves the generalized one-of-many is complete
+        // and sound with a NON-default generator pair, and that the pair must
+        // match (it is not bound into the Fiat-Shamir challenge).
+        let mut rng = ChaCha20Rng::seed_from_u64(4242);
+        let value_gen = gen_h(); // independent NUMS
+        let blind_gen = gen_g(); // = RISTRETTO_BASEPOINT, the transparent blinding gen
+        let (m, l) = (3usize, 5usize);
+        let n = 1usize << m;
+        let r = Scalar::random(&mut rng);
+        let mut commits: Vec<RistrettoPoint> = (0..n).map(|i| filler(i as u64)).collect();
+        commits[l] = blind_gen * r; // a commitment to zero in blind_gen
+
+        let proof =
+            prove_one_of_many_gen_ctx(&commits, l, &r, value_gen, blind_gen, &[], &mut rng).unwrap();
+        assert!(
+            verify_one_of_many_gen_ctx(&commits, &proof, value_gen, blind_gen, &[]).is_ok(),
+            "honest (H,G) proof must verify"
+        );
+
+        // Verifying with the wrong generator pair fails — the default (gen_g,
+        // gen_k) instance must reject an (H,G) proof, and vice versa.
+        assert!(
+            verify_one_of_many_gen_ctx(&commits, &proof, gen_g(), gen_k(), &[]).is_err(),
+            "wrong generator pair must be rejected"
+        );
+        assert!(
+            verify_one_of_many_ctx(&commits, &proof, &[]).is_err(),
+            "default-generator verify must reject an (H,G) proof"
+        );
+
+        // Non-member set (index l no longer a commitment to zero in G) fails.
+        let mut non_member = commits.clone();
+        non_member[l] = filler(999);
+        assert!(
+            verify_one_of_many_gen_ctx(&non_member, &proof, value_gen, blind_gen, &[]).is_err(),
+            "non-member set must be rejected"
+        );
+
+        // Tampered final response fails.
+        let mut bad = proof.clone();
+        bad.zd = tweak(bad.zd);
+        assert!(
+            verify_one_of_many_gen_ctx(&commits, &bad, value_gen, blind_gen, &[]).is_err(),
+            "tampered zd must be rejected"
+        );
     }
 
     #[test]
