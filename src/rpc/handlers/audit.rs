@@ -469,6 +469,58 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── get_solvency_decoys ─────────────────────────────────────
+    // Sample real on-chain outputs (ref + commitment) to hide a treasury among
+    // for an unlinkable solvency proof — so the anonymity set is drawn from the
+    // whole chain (other parties' outputs), not just the prover's own wallet.
+    module
+        .register_blocking_method("get_solvency_decoys", |params, state, _ext| {
+            let (count,): (usize,) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("params: [count]: {e}"), None::<()>)
+            })?;
+            if count == 0 || count > 256 {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "count must be in 1..=256".to_string(),
+                    None::<()>,
+                ));
+            }
+            let tip = state.chain.height();
+            // Collect candidates from a bounded recent window, then sample.
+            let start = tip.saturating_sub(4096);
+            let mut candidates: Vec<serde_json::Value> = Vec::new();
+            let mut h = start;
+            while h <= tip && candidates.len() < count.saturating_mul(8).max(64) {
+                if let Some(block) = state.chain.get_block_by_height(h) {
+                    for tx in &block.transactions {
+                        let txh = tx.hash().to_hex();
+                        for (idx, o) in tx.outputs.iter().enumerate() {
+                            candidates.push(json!({
+                                "tx_hash": txh,
+                                "output_index": idx,
+                                "commitment": hex::encode(o.commitment),
+                            }));
+                        }
+                    }
+                }
+                h += 1;
+            }
+            {
+                use rand::seq::SliceRandom;
+                candidates.shuffle(&mut rand::rngs::OsRng);
+            }
+            candidates.truncate(count);
+            // The block hash at `tip` — the prover pins the proof to it, and the
+            // auditor confirms their node has the same block at that height.
+            let tip_hash = state
+                .chain
+                .get_block_hash(tip)
+                .map(|h| h.to_hex())
+                .unwrap_or_default();
+            Ok::<_, ErrorObjectOwned>(json!({ "decoys": candidates, "tip": tip, "tip_hash": tip_hash }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
     Ok(())
 }
 

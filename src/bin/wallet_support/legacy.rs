@@ -600,6 +600,20 @@ enum DiscloseAction {
         /// Recipient receipt file (a DisclosureProof JSON). Repeatable.
         #[arg(long = "receipt")]
         receipts: Vec<String>,
+        /// Prove treasury solvency WITHOUT revealing which output is the
+        /// treasury: hide it among `--anon-size` real on-chain outputs (a
+        /// Groth-Kohlweiss one-of-many). Replaces the linkable balance proof.
+        #[arg(long)]
+        unlinkable_solvency: bool,
+        /// Anonymity-set size for `--unlinkable-solvency` (power of two >= 2).
+        #[arg(long, default_value = "8")]
+        anon_size: usize,
+        /// Number of treasury outputs to prove over (K). With `K > 1`, proves the
+        /// SUM of K hidden outputs `>= threshold`, each hidden in its own disjoint
+        /// set (multi-output unlinkable solvency). Uses wallet UTXOs
+        /// `[treasury-utxo-index .. +K]`. Default 1.
+        #[arg(long, default_value = "1")]
+        treasury_count: usize,
         /// Output path for the signed package JSON.
         #[arg(long)]
         out: String,
@@ -875,6 +889,9 @@ async fn main() {
                 expires_at,
                 disbursements,
                 receipts,
+                unlinkable_solvency,
+                anon_size,
+                treasury_count,
                 out,
             } => {
                 cmd_disclose_build_payroll_audit(
@@ -890,6 +907,10 @@ async fn main() {
                     expires_at,
                     disbursements,
                     &receipts,
+                    unlinkable_solvency,
+                    anon_size,
+                    treasury_count,
+                    &cli.node,
                     &out,
                 )
                 .await
@@ -3619,10 +3640,20 @@ async fn cmd_disclose_build_payroll_audit(
     expires_at: Option<u64>,
     disbursements_file: Option<String>,
     receipt_files: &[String],
+    unlinkable_solvency: bool,
+    anon_size: usize,
+    treasury_count: usize,
+    node: &str,
     out: &str,
 ) -> Result<(), String> {
     use coincync::compliance::PayrollRun;
-    use coincync::crypto::{BlindingFactor, DisclosureOutputRef, DisclosureProof, PedersenCommitment};
+    #[cfg(feature = "sketch-gk-proof")]
+    use coincync::compliance::{MultiUnlinkableSolvencyItem, UnlinkableSolvencyItem};
+    use coincync::crypto::{
+        BlindingFactor, DisclosureOutputRef, DisclosureProof, PedersenCommitment,
+    };
+    #[cfg(feature = "sketch-gk-proof")]
+    use coincync::crypto::{create_multi_unlinkable_solvency_proof, create_unlinkable_solvency_proof};
     use coincync::primitives::Hash;
     use coincync::wallet::Wallet;
     use ed25519_dalek::SigningKey;
@@ -3680,20 +3711,253 @@ async fn cmd_disclose_build_payroll_audit(
         )
     })?;
     let value = utxo.amount.as_atomic();
-    if value < threshold {
+    if treasury_count <= 1 && value < threshold {
         return Err(format!(
             "cannot prove threshold {}: treasury UTXO has only {} atomic",
             threshold, value
         ));
     }
-    let blinding = BlindingFactor::from_bytes(utxo.amount_blinding_bytes);
-    let commitment = PedersenCommitment::commit(value, &blinding);
-    let treasury_ref = DisclosureOutputRef {
-        tx_hash: utxo.tx_hash,
-        output_index: utxo.output_index,
-    };
-    run.treasury_solvency(value, &blinding, &commitment, threshold, treasury_ref)
-        .map_err(|e| format!("treasury_solvency: {}", e))?;
+    let treasury_blinding = BlindingFactor::from_bytes(utxo.amount_blinding_bytes);
+
+    // Treasury solvency: either UNLINKABLE (hidden among real on-chain outputs)
+    // or the linkable balance proof over the treasury output itself. Built here;
+    // the unlinkable item is attached to the finished package below. Unlinkable
+    // solvency is only available under the (unaudited) `sketch-gk-proof` feature.
+    #[cfg(feature = "sketch-gk-proof")]
+    let mut unlinkable_item: Option<UnlinkableSolvencyItem> = None;
+    #[cfg(feature = "sketch-gk-proof")]
+    let mut multi_item: Option<MultiUnlinkableSolvencyItem> = None;
+    #[cfg(feature = "sketch-gk-proof")]
+    if unlinkable_solvency && treasury_count <= 1 {
+        if anon_size < 2 || !anon_size.is_power_of_two() {
+            return Err(format!("--anon-size must be a power of two >= 2 (got {anon_size})"));
+        }
+        // Draw (anon_size - 1) real on-chain outputs from ACROSS THE CHAIN as
+        // decoys, so the treasury hides among other parties' outputs — not just
+        // the org's own wallet. The treasury is the remaining set member.
+        let treasury_ref = DisclosureOutputRef {
+            tx_hash: utxo.tx_hash,
+            output_index: utxo.output_index,
+        };
+        let treasury_commitment = PedersenCommitment::commit(value, &treasury_blinding).to_bytes();
+        let resp = rpc_call(node, "get_solvency_decoys", serde_json::json!([anon_size - 1])).await?;
+        let tip = resp.get("tip").and_then(|v| v.as_u64()).unwrap_or(0);
+        let decoys = resp
+            .get("decoys")
+            .and_then(|v| v.as_array())
+            .ok_or("get_solvency_decoys: response missing `decoys`")?;
+
+        let mut commitments: Vec<[u8; 32]> = Vec::with_capacity(anon_size);
+        let mut refs: Vec<DisclosureOutputRef> = Vec::with_capacity(anon_size);
+        commitments.push(treasury_commitment);
+        refs.push(treasury_ref.clone());
+        for d in decoys {
+            if commitments.len() == anon_size {
+                break;
+            }
+            let tx_hex = d.get("tx_hash").and_then(|v| v.as_str()).ok_or("decoy missing tx_hash")?;
+            let oi = d
+                .get("output_index")
+                .and_then(|v| v.as_u64())
+                .ok_or("decoy missing output_index")? as u8;
+            let ch = d
+                .get("commitment")
+                .and_then(|v| v.as_str())
+                .ok_or("decoy missing commitment")?;
+            let dref = DisclosureOutputRef {
+                tx_hash: Hash::from_bytes(decode_hex32(tx_hex, "decoy tx_hash")?),
+                output_index: oi,
+            };
+            if dref == treasury_ref {
+                continue; // never let the treasury double as its own decoy
+            }
+            commitments.push(decode_hex32(ch, "decoy commitment")?);
+            refs.push(dref);
+        }
+        if commitments.len() < anon_size {
+            return Err(format!(
+                "node returned too few distinct decoys ({}) for --anon-size {anon_size}",
+                commitments.len()
+            ));
+        }
+
+        // Shuffle so the treasury's position in the set is not fixed; track it.
+        let mut order: Vec<usize> = (0..anon_size).collect();
+        {
+            use rand::seq::SliceRandom;
+            order.shuffle(&mut rand::rngs::OsRng);
+        }
+        let commitments: Vec<[u8; 32]> = order.iter().map(|&i| commitments[i]).collect();
+        let refs: Vec<DisclosureOutputRef> = order.iter().map(|&i| refs[i].clone()).collect();
+        let l = order
+            .iter()
+            .position(|&i| i == 0)
+            .expect("treasury (member 0) is in the set");
+
+        let proof =
+            create_unlinkable_solvency_proof(value, &treasury_blinding, &commitments, l, threshold, tip)
+                .map_err(|e| format!("unlinkable solvency proof: {}", e))?;
+        let pin = resp
+            .get("tip_hash")
+            .and_then(|v| v.as_str())
+            .and_then(|s| decode_hex32(s, "tip_hash").ok())
+            .unwrap_or([0u8; 32]);
+        unlinkable_item = Some(UnlinkableSolvencyItem {
+            statement: format!(
+                "treasury solvency >= {threshold} (hidden among {anon_size} on-chain outputs)"
+            ),
+            proof,
+            anonymity_refs: refs,
+            as_of_block_hash: pin,
+        });
+    } else if unlinkable_solvency {
+        // MULTI-output: K treasury outputs, each hidden in its OWN disjoint set;
+        // prove their SUM >= threshold. Disjoint sets prevent double-counting.
+        if anon_size < 2 || !anon_size.is_power_of_two() {
+            return Err(format!("--anon-size must be a power of two >= 2 (got {anon_size})"));
+        }
+        let k = treasury_count;
+        if treasury_utxo_index + k > utxos.len() {
+            return Err(format!(
+                "need {k} consecutive UTXOs from index {treasury_utxo_index}; wallet has {}",
+                utxos.len()
+            ));
+        }
+        let need = k * (anon_size - 1);
+        let resp = rpc_call(
+            node,
+            "get_solvency_decoys",
+            serde_json::json!([(need + 2 * k).min(256)]),
+        )
+        .await?;
+        let tip = resp.get("tip").and_then(|v| v.as_u64()).unwrap_or(0);
+        let decoys = resp
+            .get("decoys")
+            .and_then(|v| v.as_array())
+            .ok_or("get_solvency_decoys: response missing `decoys`")?;
+        // Treasury refs, to exclude from the decoy pool.
+        let mut treasury_keys = std::collections::HashSet::new();
+        for j in 0..k {
+            let u = utxos[treasury_utxo_index + j];
+            treasury_keys.insert((hex::encode(u.tx_hash.as_bytes()), u.output_index));
+        }
+        // Distinct decoy pool (disjoint across all sets).
+        let mut pool: Vec<(DisclosureOutputRef, [u8; 32])> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for d in decoys {
+            let tx_hex = d.get("tx_hash").and_then(|v| v.as_str()).ok_or("decoy missing tx_hash")?;
+            let oi = d
+                .get("output_index")
+                .and_then(|v| v.as_u64())
+                .ok_or("decoy missing output_index")? as u8;
+            let ch = d
+                .get("commitment")
+                .and_then(|v| v.as_str())
+                .ok_or("decoy missing commitment")?;
+            let key = (tx_hex.to_string(), oi);
+            if treasury_keys.contains(&key) || !seen.insert(key) {
+                continue;
+            }
+            pool.push((
+                DisclosureOutputRef {
+                    tx_hash: Hash::from_bytes(decode_hex32(tx_hex, "decoy tx_hash")?),
+                    output_index: oi,
+                },
+                decode_hex32(ch, "decoy commitment")?,
+            ));
+        }
+        if pool.len() < need {
+            return Err(format!(
+                "node returned too few distinct decoys ({}) for {k}×{anon_size} disjoint sets",
+                pool.len()
+            ));
+        }
+
+        let mut tvals = Vec::with_capacity(k);
+        let mut tblindings = Vec::with_capacity(k);
+        let mut sets: Vec<Vec<[u8; 32]>> = Vec::with_capacity(k);
+        let mut indices = Vec::with_capacity(k);
+        let mut member_refs: Vec<Vec<DisclosureOutputRef>> = Vec::with_capacity(k);
+        let mut cursor = 0usize;
+        for j in 0..k {
+            let u = utxos[treasury_utxo_index + j];
+            let vj = u.amount.as_atomic();
+            let bj = BlindingFactor::from_bytes(u.amount_blinding_bytes);
+            let mut commits = vec![PedersenCommitment::commit(vj, &bj).to_bytes()];
+            let mut refs = vec![DisclosureOutputRef {
+                tx_hash: u.tx_hash,
+                output_index: u.output_index,
+            }];
+            for _ in 0..(anon_size - 1) {
+                let (dref, dc) = pool[cursor].clone();
+                cursor += 1;
+                commits.push(dc);
+                refs.push(dref);
+            }
+            let mut order: Vec<usize> = (0..anon_size).collect();
+            {
+                use rand::seq::SliceRandom;
+                order.shuffle(&mut rand::rngs::OsRng);
+            }
+            let commits: Vec<[u8; 32]> = order.iter().map(|&i| commits[i]).collect();
+            let refs: Vec<DisclosureOutputRef> = order.iter().map(|&i| refs[i].clone()).collect();
+            let l = order.iter().position(|&i| i == 0).expect("treasury member 0 in set");
+            tvals.push(vj);
+            tblindings.push(bj);
+            sets.push(commits);
+            indices.push(l);
+            member_refs.push(refs);
+        }
+        let proof = create_multi_unlinkable_solvency_proof(
+            &tvals,
+            &tblindings,
+            &sets,
+            &indices,
+            threshold,
+            tip,
+        )
+        .map_err(|e| format!("multi unlinkable solvency proof: {}", e))?;
+        let pin = resp
+            .get("tip_hash")
+            .and_then(|v| v.as_str())
+            .and_then(|s| decode_hex32(s, "tip_hash").ok())
+            .unwrap_or([0u8; 32]);
+        multi_item = Some(MultiUnlinkableSolvencyItem {
+            statement: format!(
+                "treasury solvency (sum of {k} outputs) >= {threshold}, each hidden among {anon_size}"
+            ),
+            proof,
+            member_refs,
+            as_of_block_hash: pin,
+        });
+    } else {
+        let commitment = PedersenCommitment::commit(value, &treasury_blinding);
+        let treasury_ref = DisclosureOutputRef {
+            tx_hash: utxo.tx_hash,
+            output_index: utxo.output_index,
+        };
+        run.treasury_solvency(value, &treasury_blinding, &commitment, threshold, treasury_ref)
+            .map_err(|e| format!("treasury_solvency: {}", e))?;
+    }
+
+    // Builds without the unaudited unlinkable primitive: linkable balance proof
+    // only, and refuse `--unlinkable-solvency`.
+    #[cfg(not(feature = "sketch-gk-proof"))]
+    {
+        if unlinkable_solvency {
+            return Err(
+                "--unlinkable-solvency requires a build with the `sketch-gk-proof` feature".into(),
+            );
+        }
+        let _ = (anon_size, treasury_count, node);
+        let commitment = PedersenCommitment::commit(value, &treasury_blinding);
+        let treasury_ref = DisclosureOutputRef {
+            tx_hash: utxo.tx_hash,
+            output_index: utxo.output_index,
+        };
+        run.treasury_solvency(value, &treasury_blinding, &commitment, threshold, treasury_ref)
+            .map_err(|e| format!("treasury_solvency: {}", e))?;
+    }
 
     // Optional total-disbursed proof from an org-supplied disbursements file.
     if let Some(df) = disbursements_file {
@@ -3724,7 +3988,16 @@ async fn cmd_disclose_build_payroll_audit(
     }
 
     // Finish, sign, write.
-    let pkg = run.finish();
+    #[allow(unused_mut)]
+    let mut pkg = run.finish();
+    #[cfg(feature = "sketch-gk-proof")]
+    if let Some(item) = unlinkable_item {
+        pkg.attach_unlinkable_solvency(item);
+    }
+    #[cfg(feature = "sketch-gk-proof")]
+    if let Some(item) = multi_item {
+        pkg.attach_multi_unlinkable_solvency(item);
+    }
     let signed = pkg
         .sign(&signing_key, audit_id, auditor)
         .map_err(|e| format!("sign package: {}", e))?;
