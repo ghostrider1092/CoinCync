@@ -27,6 +27,10 @@ use crate::crypto::{
 };
 use crate::error::{Error, Result};
 use crate::primitives::{Hash, PublicKey, SecretKey};
+use crate::wallet::multisig::{
+    aggregate_signature, signing_round1, signing_round2, verify_signature as verify_multisig,
+    KeyShare, MultisigConfig, MultisigSignature,
+};
 use ed25519_dalek::{Signature as EdSignature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -101,6 +105,10 @@ pub struct AuditPackage {
     pub created_at: u64,
     pub expires_at: Option<u64>,
     pub items: Vec<AuditItem>,
+    /// Optional proof that the treasury is under M-of-N custody (no single key
+    /// can move it). `None` = custody not attested in this package.
+    #[serde(default)]
+    pub custody: Option<CustodyAttestation>,
 }
 
 impl AuditPackage {
@@ -110,7 +118,46 @@ impl AuditPackage {
         created_at: u64,
         expires_at: Option<u64>,
     ) -> Self {
-        Self { org: org.into(), period: period.into(), created_at, expires_at, items: Vec::new() }
+        Self {
+            org: org.into(),
+            period: period.into(),
+            created_at,
+            expires_at,
+            items: Vec::new(),
+            custody: None,
+        }
+    }
+
+    /// Attach a treasury custody attestation (M-of-N control). It is covered by
+    /// the package signature, so it cannot be swapped without breaking it.
+    pub fn attach_custody(&mut self, custody: CustodyAttestation) -> &mut Self {
+        self.custody = Some(custody);
+        self
+    }
+
+    /// Verify the treasury custody attestation against the group key the auditor
+    /// trusts out of band: the treasury is genuinely M-of-N controlled and at
+    /// least M signers approved the policy. `Ok(false)` if there is no
+    /// attestation, the group key mismatches, or the threshold signature fails.
+    pub fn verify_custody(&self, expected_group_pubkey: &[u8; 32]) -> Result<bool> {
+        match &self.custody {
+            Some(att) => att.verify(expected_group_pubkey),
+            None => Ok(false),
+        }
+    }
+
+    /// Whether the custody attestation governs the SAME on-chain output a
+    /// Balance (treasury solvency) proof anchors to — so "the treasury is M-of-N
+    /// controlled" and "the treasury holds >= X" are about one output, not two.
+    pub fn custody_governs_solvency(&self) -> bool {
+        let att = match &self.custody {
+            Some(a) => a,
+            None => return false,
+        };
+        self.items.iter().any(|it| {
+            matches!(it.proof.proof_type, DisclosureType::Balance)
+                && it.output_ref.as_ref() == Some(&att.treasury_ref)
+        })
     }
 
     /// Attach a proof whose on-chain reference is carried by the proof (Ownership,
@@ -370,6 +417,30 @@ impl AuditPackage {
         }
         let _ = writeln!(s);
 
+        if let Some(att) = &self.custody {
+            let _ = writeln!(s, "## Treasury custody");
+            let _ = writeln!(s);
+            let _ = writeln!(
+                s,
+                "- **Policy:** {}-of-{} multisig — no single key can move the treasury",
+                att.threshold, att.participants
+            );
+            let _ = writeln!(s, "- **Group key:** `{}`", hex::encode(att.group_pubkey));
+            let _ = writeln!(
+                s,
+                "- **Governs treasury output:** tx {} · index {}",
+                hex::encode(att.treasury_ref.tx_hash.as_bytes()),
+                att.treasury_ref.output_index
+            );
+            let tie = if self.custody_governs_solvency() {
+                "✅ same output as the solvency proof"
+            } else {
+                "⚠️ not tied to a solvency proof in this package"
+            };
+            let _ = writeln!(s, "- **Solvency binding:** {tie}");
+            let _ = writeln!(s);
+        }
+
         let _ = writeln!(
             s,
             "> Verification note: this report is descriptive. Trust requires \
@@ -454,6 +525,137 @@ impl Reconciliation {
     /// output — the package reconciles against itself. Requires a total.
     pub fn is_fully_reconciled(&self) -> bool {
         self.has_total && self.missing_receipts.is_empty() && self.unexpected_receipts.is_empty()
+    }
+}
+
+/// A threshold-signed attestation that an org's treasury is under **M-of-N
+/// custody** — no single key can move the funds. The custody group (holders of
+/// the FROST shares for `group_pubkey`) threshold-signs a statement binding the
+/// org, the policy (M of N), the group key, and the treasury output it governs.
+///
+/// ## What it proves
+/// An auditor who knows `group_pubkey` out of band verifies that **at least M**
+/// signers approved the statement: a single compromised share cannot forge it,
+/// because a threshold Schnorr signature for the group key requires M shares.
+/// Pair it with the package's anchored solvency proof over the same
+/// `treasury_ref` (see [`AuditPackage::custody_governs_solvency`]) so the
+/// protected key and the funded output are one and the same — a single-key
+/// wallet cannot produce this signature for a group key it does not control.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CustodyAttestation {
+    pub org: String,
+    /// Signers required to move funds (M).
+    pub threshold: u16,
+    /// Total signers in the custody group (N).
+    pub participants: u16,
+    /// FROST group verifying key the treasury is controlled by.
+    pub group_pubkey: [u8; 32],
+    /// The on-chain treasury output this policy governs.
+    pub treasury_ref: DisclosureOutputRef,
+    /// Threshold signature over [`Self::statement_bytes`] by the custody group.
+    pub signature: MultisigSignature,
+}
+
+impl CustodyAttestation {
+    /// Canonical, domain-separated bytes the custody group threshold-signs.
+    /// Deterministic; length-prefixed so fields cannot blur together.
+    pub fn statement_bytes(
+        org: &str,
+        threshold: u16,
+        participants: u16,
+        group_pubkey: &[u8; 32],
+        treasury_ref: &DisclosureOutputRef,
+    ) -> Vec<u8> {
+        let mut m = Vec::with_capacity(org.len() + 96);
+        m.extend_from_slice(b"coincync/treasury-custody/v1");
+        m.extend_from_slice(&(org.len() as u64).to_le_bytes());
+        m.extend_from_slice(org.as_bytes());
+        m.extend_from_slice(&threshold.to_le_bytes());
+        m.extend_from_slice(&participants.to_le_bytes());
+        m.extend_from_slice(group_pubkey);
+        m.extend_from_slice(treasury_ref.tx_hash.as_bytes());
+        m.push(treasury_ref.output_index);
+        m
+    }
+
+    /// The exact message this attestation's signature must cover.
+    pub fn message(&self) -> Vec<u8> {
+        Self::statement_bytes(
+            &self.org,
+            self.threshold,
+            self.participants,
+            &self.group_pubkey,
+            &self.treasury_ref,
+        )
+    }
+
+    /// Produce an attestation by running the FROST signing flow over the custody
+    /// statement with `signers` (at least `config.threshold` of the group's
+    /// shares). In production these signers are separate parties coordinating
+    /// through the multisig coordinator; here they are the shares in hand.
+    pub fn create_with_shares(
+        org: impl Into<String>,
+        treasury_ref: DisclosureOutputRef,
+        config: &MultisigConfig,
+        signers: &[KeyShare],
+    ) -> Result<Self> {
+        let org = org.into();
+        if (signers.len() as u16) < config.threshold {
+            return Err(Error::InvalidState(format!(
+                "custody attestation needs >= {} signers, got {}",
+                config.threshold,
+                signers.len()
+            )));
+        }
+        let msg = Self::statement_bytes(
+            &org,
+            config.threshold,
+            config.total,
+            &config.group_public_key,
+            &treasury_ref,
+        );
+
+        let mut commitments = Vec::with_capacity(signers.len());
+        let mut secrets = Vec::with_capacity(signers.len());
+        for s in signers {
+            let (out, secret) = signing_round1(s)?;
+            commitments.push(out);
+            secrets.push(secret);
+        }
+        let mut shares = Vec::with_capacity(signers.len());
+        for (s, secret) in signers.iter().zip(secrets) {
+            shares.push(signing_round2(s, secret, &commitments, &msg)?);
+        }
+        let signature = aggregate_signature(&commitments, &shares, config, signers, &msg)?;
+
+        Ok(Self {
+            org,
+            threshold: config.threshold,
+            participants: config.total,
+            group_pubkey: config.group_public_key,
+            treasury_ref,
+            signature,
+        })
+    }
+
+    /// Verify against the treasury group key the auditor trusts out of band.
+    /// Fail-closed: rejects a non-custody policy (`M < 2` or `N < M`), a group
+    /// mismatch, or an invalid threshold signature.
+    pub fn verify(&self, expected_group_pubkey: &[u8; 32]) -> Result<bool> {
+        if self.threshold < 2 || self.participants < self.threshold {
+            return Ok(false);
+        }
+        if &self.group_pubkey != expected_group_pubkey {
+            return Ok(false);
+        }
+        // The signature must itself carry the expected group key, not a different
+        // group the prover happens to control.
+        if &self.signature.group_public_key != expected_group_pubkey {
+            return Ok(false);
+        }
+        // Fail-closed: a bad/forged signature makes multisig verify return Err;
+        // treat that as "not verified", never a hard error.
+        Ok(verify_multisig(&self.signature, &self.message()).unwrap_or(false))
     }
 }
 
@@ -549,6 +751,113 @@ impl SignedAuditPackage {
         let _ = writeln!(s);
         s.push_str(&self.package.to_report(now));
         s
+    }
+}
+
+/// A [`SignedAuditPackage`] sealed to one auditor's public key — an encrypted
+/// envelope only that auditor can open. This is the **leak barrier**: if the
+/// sealed file is intercepted, forwarded, or left at rest, it reveals nothing
+/// (not the org, the amounts, the treasury output, nor the receipts) without
+/// the auditor's secret key. Sealing is ECDH (a fresh ephemeral key × the
+/// auditor's key) into ChaCha20-Poly1305 — the same construction CoinCync uses
+/// for on-chain memos, with a fresh random nonce per seal.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SealedAuditPackage {
+    /// Ephemeral public key for the ECDH (hex, 32 bytes).
+    pub ephemeral_pubkey: String,
+    /// nonce (12 bytes) || ChaCha20-Poly1305 ciphertext+tag (hex).
+    pub blob: String,
+}
+
+/// Derive the seal's AEAD key from the ECDH shared point, domain-separated so it
+/// can never collide with the memo key or any other derived key.
+fn derive_seal_key(shared_bytes: &[u8; 32]) -> [u8; 32] {
+    *crate::primitives::hash_domain(b"COINCYNC_AUDIT_SEAL_v1", shared_bytes).as_bytes()
+}
+
+impl SignedAuditPackage {
+    /// Seal this signed package to `auditor_pubkey` so only the holder of the
+    /// matching secret key can open it. The signature and every disclosure stay
+    /// intact inside the envelope; the envelope adds confidentiality on top.
+    pub fn seal_to(&self, auditor_pubkey: &PublicKey) -> Result<SealedAuditPackage> {
+        use crate::crypto::{PublicPoint, SecretScalar};
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+        use rand::{rngs::OsRng, RngCore};
+        use zeroize::Zeroize;
+
+        let plaintext =
+            serde_json::to_vec(self).map_err(|e| Error::SerializationError(e.to_string()))?;
+        let recipient = PublicPoint::from_bytes(*auditor_pubkey.as_bytes())
+            .ok_or_else(|| Error::CryptoError("invalid auditor public key".into()))?;
+
+        let eph_secret = SecretScalar::random(&mut OsRng);
+        let eph_public = eph_secret.to_public().to_bytes();
+        let mut shared = recipient.mul(&eph_secret);
+        let mut shared_bytes = shared.to_bytes();
+        let mut key = derive_seal_key(&shared_bytes);
+        shared_bytes.zeroize();
+        shared.zeroize();
+
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let ct = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_slice())
+            .map_err(|e| Error::CryptoError(format!("seal failed: {e}")))?;
+        key.zeroize();
+
+        let mut blob = Vec::with_capacity(12 + ct.len());
+        blob.extend_from_slice(&nonce_bytes);
+        blob.extend_from_slice(&ct);
+        Ok(SealedAuditPackage {
+            ephemeral_pubkey: hex::encode(eph_public),
+            blob: hex::encode(blob),
+        })
+    }
+}
+
+impl SealedAuditPackage {
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(self).map_err(|e| Error::SerializationError(e.to_string()))
+    }
+
+    pub fn from_json(s: &str) -> Result<Self> {
+        serde_json::from_str(s).map_err(|e| Error::SerializationError(e.to_string()))
+    }
+
+    /// Open the sealed package with the auditor's secret key. Fails closed on a
+    /// wrong key or any tampering (the AEAD tag will not verify).
+    pub fn open(&self, auditor_secret: &SecretKey) -> Result<SignedAuditPackage> {
+        use crate::crypto::{PublicPoint, SecretScalar};
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+        use zeroize::Zeroize;
+
+        let eph_bytes = decode_hex_array::<32>(&self.ephemeral_pubkey)?;
+        let eph_point = PublicPoint::from_bytes(eph_bytes)
+            .ok_or_else(|| Error::CryptoError("invalid ephemeral key".into()))?;
+        let secret = SecretScalar::from_bytes(*auditor_secret.as_bytes());
+        let mut shared = eph_point.mul(&secret);
+        let mut shared_bytes = shared.to_bytes();
+        let mut key = derive_seal_key(&shared_bytes);
+        shared_bytes.zeroize();
+        shared.zeroize();
+
+        let raw = hex::decode(&self.blob).map_err(|e| Error::SerializationError(e.to_string()))?;
+        if raw.len() < 12 + 16 {
+            return Err(Error::CryptoError("sealed blob too short".into()));
+        }
+        let (nonce, ct) = raw.split_at(12);
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let pt = cipher
+            .decrypt(Nonce::from_slice(nonce), ct)
+            .map_err(|_| Error::CryptoError("seal open failed (wrong key or tampered)".into()));
+        key.zeroize();
+        let pt = pt?;
+
+        let json = String::from_utf8(pt).map_err(|e| Error::SerializationError(e.to_string()))?;
+        SignedAuditPackage::from_json(&json)
     }
 }
 
@@ -938,5 +1247,96 @@ mod tests {
         assert!(report.contains("Ownership"));
         // Expiry note fires past the window.
         assert!(pkg.to_report(3_000_000_000).contains("EXPIRED"));
+    }
+
+    #[test]
+    fn custody_attestation_proves_m_of_n_and_is_tamper_evident() {
+        use crate::wallet::multisig::generate_shares;
+
+        let t_ref = oref(9, 0);
+        // A 2-of-3 treasury custody group.
+        let kg = generate_shares(2, 3).unwrap();
+        let att = CustodyAttestation::create_with_shares(
+            "Acme DAO",
+            t_ref.clone(),
+            &kg.config,
+            &kg.shares[..2], // any 2 of 3 signers
+        )
+        .unwrap();
+
+        // Verifies against the true group key.
+        assert!(att.verify(&kg.config.group_public_key).unwrap());
+        assert_eq!(att.threshold, 2);
+        assert_eq!(att.participants, 3);
+
+        // Wrong group key => rejected.
+        assert!(!att.verify(&[9u8; 32]).unwrap());
+
+        // Tampering with any bound field breaks the threshold signature.
+        let mut tampered = att.clone();
+        tampered.org = "Evil DAO".to_string();
+        assert!(!tampered.verify(&kg.config.group_public_key).unwrap());
+        let mut tampered2 = att.clone();
+        tampered2.threshold = 1; // a non-custody policy is refused outright
+        assert!(!tampered2.verify(&kg.config.group_public_key).unwrap());
+
+        // In a package: custody ties to the solvency proof over the same output.
+        let (dp, _c) = treasury_solvency_proof(1_000_000);
+        let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
+        pkg.add_anchored("treasury solvency >= 1,000,000", dp, t_ref.clone());
+        pkg.attach_custody(att);
+        assert!(pkg.verify_custody(&kg.config.group_public_key).unwrap());
+        assert!(pkg.custody_governs_solvency(), "custody governs the solvency output");
+        assert!(pkg.to_report(1_000_000).contains("2-of-3 multisig"));
+
+        // Custody rides inside the signed package: tampering breaks the signature.
+        let key = SigningKey::generate(&mut OsRng);
+        let vk = key.verifying_key();
+        let signed = pkg.sign(&key, [3u8; 32], "Auditor One").unwrap();
+        assert!(signed.verify_signature(&vk, "Auditor One").unwrap());
+        let mut swapped = signed.clone();
+        swapped.package.custody = None; // drop the custody proof
+        assert!(!swapped.verify_signature(&vk, "Auditor One").unwrap());
+    }
+
+    #[test]
+    fn sealed_package_opens_only_for_the_intended_auditor() {
+        let (dp, _c) = treasury_solvency_proof(1_000_000);
+        let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
+        pkg.add_anchored("treasury solvency >= 1,000,000", dp, oref(9, 0));
+        let orgkey = SigningKey::generate(&mut OsRng);
+        let signed = pkg.sign(&orgkey, [7u8; 32], "Auditor One").unwrap();
+
+        // Auditor's encryption keypair.
+        let (aud_sk, aud_pk, _) = keypair();
+        let sealed = signed.seal_to(&aud_pk).unwrap();
+
+        // The sealed envelope leaks nothing in the clear.
+        let j = sealed.to_json().unwrap();
+        assert!(!j.contains("Acme DAO"), "org name must not appear in the sealed blob");
+        assert!(!j.contains("Auditor One"));
+        assert!(!j.contains("solvency"));
+
+        // The intended auditor opens it and recovers the exact signed package.
+        let opened = sealed.open(&aud_sk).unwrap();
+        assert_eq!(opened.package.org, "Acme DAO");
+        assert!(opened
+            .verify_signature(&orgkey.verifying_key(), "Auditor One")
+            .unwrap());
+        // Survives a JSON round trip of the sealed form.
+        let received = SealedAuditPackage::from_json(&sealed.to_json().unwrap()).unwrap();
+        assert_eq!(received.open(&aud_sk).unwrap().package.org, "Acme DAO");
+
+        // A different key cannot open it.
+        let (other_sk, _o, _) = keypair();
+        assert!(sealed.open(&other_sk).is_err(), "wrong auditor key must fail");
+
+        // Tampering with the ciphertext fails the AEAD tag.
+        let mut tampered = sealed.clone();
+        let mut b = hex::decode(&tampered.blob).unwrap();
+        let n = b.len();
+        b[n - 1] ^= 0x01;
+        tampered.blob = hex::encode(b);
+        assert!(tampered.open(&aud_sk).is_err(), "tampered ciphertext must fail");
     }
 }
