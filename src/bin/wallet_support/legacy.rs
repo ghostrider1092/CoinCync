@@ -392,11 +392,15 @@ enum Command {
         /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
-        /// Index of the UTXO in the wallet's UTXO list (0-based).
-        /// Run `scan` first to populate; the order is the persisted
-        /// order. Use the same index you'd pass to `disclose balance`.
+        /// Stable selector for the UTXO: `TXID:VOUT`. Preferred — an outpoint
+        /// does not shift as the chain grows and the wallet rescans. Give this
+        /// OR `--utxo-index`.
         #[arg(long)]
-        utxo_index: usize,
+        utxo: Option<String>,
+        /// Legacy positional index into the wallet's unspent list (0-based;
+        /// fragile across rescans — prefer `--utxo`). Give this OR `--utxo`.
+        #[arg(long)]
+        utxo_index: Option<usize>,
     },
 
     /// Treasury protection: watch-only monitoring (and, later, spending policy).
@@ -471,10 +475,15 @@ enum DiscloseAction {
         /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
-        /// Index of the UTXO in the wallet's UTXO list (0-based).
-        /// Run `scan` first; the order is the persisted order.
+        /// Stable selector for the UTXO: `TXID:VOUT`. Preferred — an outpoint
+        /// does not shift as the chain grows and the wallet rescans. Give this
+        /// OR `--utxo-index`.
         #[arg(long)]
-        utxo_index: usize,
+        utxo: Option<String>,
+        /// Legacy positional index into the wallet's unspent list (0-based;
+        /// fragile across rescans — prefer `--utxo`). Give this OR `--utxo`.
+        #[arg(long)]
+        utxo_index: Option<usize>,
         /// Threshold value in atomic units. Asserts
         /// `utxo.amount >= threshold`. Must be <= actual value.
         #[arg(long)]
@@ -571,10 +580,18 @@ enum DiscloseAction {
         /// Period label (e.g. "2026-Q3").
         #[arg(long)]
         period: String,
-        /// Index of the treasury UTXO in the wallet's unspent list (run `scan`
-        /// first); its value + blinding back the solvency proof.
+        /// Stable selector for the treasury UTXO: `TXID:VOUT`. Preferred over
+        /// `--treasury-utxo-index` because an outpoint does not shift as the
+        /// chain grows and the wallet rescans. With `--treasury-count K > 1`,
+        /// this names the FIRST of the K outputs (the rest follow it in the
+        /// unspent list). Give this OR `--treasury-utxo-index`.
         #[arg(long)]
-        treasury_utxo_index: usize,
+        treasury_utxo: Option<String>,
+        /// Legacy positional index of the treasury UTXO in the wallet's unspent
+        /// list (run `scan` first). Fragile across rescans — prefer
+        /// `--treasury-utxo TXID:VOUT`. Give this OR `--treasury-utxo`.
+        #[arg(long)]
+        treasury_utxo_index: Option<usize>,
         /// Solvency threshold in atomic units (asserts treasury >= threshold).
         #[arg(long)]
         threshold: u64,
@@ -625,9 +642,15 @@ enum DiscloseAction {
     ExportOutput {
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
-        /// Index of the received UTXO in the wallet's unspent list.
+        /// Stable selector for the received UTXO: `TXID:VOUT`. Preferred — an
+        /// outpoint does not shift as the chain grows / rescans. Give this OR
+        /// `--utxo-index`.
         #[arg(long)]
-        utxo_index: usize,
+        utxo: Option<String>,
+        /// Legacy positional index into the unspent list (fragile across
+        /// rescans — prefer `--utxo`). Give this OR `--utxo`.
+        #[arg(long)]
+        utxo_index: Option<usize>,
     },
     /// Recipient side: produce an ownership receipt (a DisclosureProof) for one
     /// received output, proving control of it without revealing the one-time
@@ -635,9 +658,15 @@ enum DiscloseAction {
     Receipt {
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
-        /// Index of the received UTXO in the wallet's unspent list.
+        /// Stable selector for the received UTXO: `TXID:VOUT`. Preferred — an
+        /// outpoint does not shift as the chain grows / rescans. Give this OR
+        /// `--utxo-index`.
         #[arg(long)]
-        utxo_index: usize,
+        utxo: Option<String>,
+        /// Legacy positional index into the unspent list (fragile across
+        /// rescans — prefer `--utxo`). Give this OR `--utxo`.
+        #[arg(long)]
+        utxo_index: Option<usize>,
         /// Optional memo bound into the proof (e.g. "2026-Q3 salary").
         #[arg(long)]
         memo: Option<String>,
@@ -851,9 +880,10 @@ async fn main() {
         Command::Disclose { action } => match action {
             DiscloseAction::Balance {
                 password,
+                utxo,
                 utxo_index,
                 threshold,
-            } => cmd_disclose_balance(&wallet_path, password, utxo_index, threshold).await,
+            } => cmd_disclose_balance(&wallet_path, password, utxo, utxo_index, threshold).await,
             DiscloseAction::VerifyBalance {
                 proof,
                 anchor_tx,
@@ -881,6 +911,7 @@ async fn main() {
                 password,
                 org,
                 period,
+                treasury_utxo,
                 treasury_utxo_index,
                 threshold,
                 signing_seed,
@@ -899,6 +930,7 @@ async fn main() {
                     password,
                     &org,
                     &period,
+                    treasury_utxo,
                     treasury_utxo_index,
                     threshold,
                     signing_seed,
@@ -917,20 +949,28 @@ async fn main() {
             }
             DiscloseAction::ExportOutput {
                 password,
+                utxo,
                 utxo_index,
-            } => cmd_disclose_export_output(&wallet_path, password, utxo_index).await,
+            } => cmd_disclose_export_output(&wallet_path, password, utxo, utxo_index).await,
             DiscloseAction::Receipt {
                 password,
+                utxo,
                 utxo_index,
                 memo,
                 expires_at,
                 out,
-            } => cmd_disclose_receipt(&wallet_path, password, utxo_index, memo, expires_at, &out).await,
+            } => {
+                cmd_disclose_receipt(
+                    &wallet_path, password, utxo, utxo_index, memo, expires_at, &out,
+                )
+                .await
+            }
         },
         Command::ShowMemo {
             password,
+            utxo,
             utxo_index,
-        } => cmd_show_memo(&wallet_path, password, utxo_index, &cli.node).await,
+        } => cmd_show_memo(&wallet_path, password, utxo, utxo_index, &cli.node).await,
         Command::Treasury { action } => match action {
             TreasuryAction::Watchfile { password, out } => {
                 cmd_treasury_watchfile(&wallet_path, password, &out).await
@@ -1306,6 +1346,65 @@ fn prompt_password(confirm: bool) -> Result<zeroize::Zeroizing<String>, String> 
 ///
 /// `confirm` only applies to the interactive path — piping is assumed to
 /// be deliberate, and re-typing for confirmation is hostile to automation.
+/// Parse a stable outpoint selector `TXID:VOUT` (64-hex tx hash + output index)
+/// into `(tx_hash_bytes, output_index)`. An outpoint names a UTXO by its
+/// on-chain identity, which — unlike a positional index into the wallet's
+/// scanned unspent list — does NOT shift as the blockchain grows and the wallet
+/// rescans. This is the chain-stable selector the compliance commands prefer.
+fn parse_outpoint(s: &str) -> Result<([u8; 32], u8), String> {
+    let (tx, vout) = s
+        .rsplit_once(':')
+        .ok_or_else(|| format!("outpoint must be TXID:VOUT (got {s:?})"))?;
+    let hash = coincync::primitives::Hash::from_hex(tx)
+        .ok_or_else(|| format!("bad txid hex in outpoint {s:?} (need 64 hex chars)"))?;
+    let vout: u8 = vout
+        .parse()
+        .map_err(|e| format!("bad output index in outpoint {s:?}: {e}"))?;
+    Ok((*hash.as_bytes(), vout))
+}
+
+/// Resolve a UTXO's positional index in the wallet's unspent list from EITHER a
+/// stable `--…-utxo TXID:VOUT` outpoint (preferred — survives chain growth /
+/// rescans) OR a legacy positional `--…-utxo-index N`. Exactly one must be
+/// given. `ops` is the unspent list's `(tx_hash, output_index)` in order.
+fn resolve_unspent_index(
+    ops: &[([u8; 32], u8)],
+    index: Option<usize>,
+    outpoint: Option<&str>,
+    utxo_flag: &str,
+    index_flag: &str,
+) -> Result<usize, String> {
+    match (index, outpoint) {
+        (Some(_), Some(_)) => Err(format!(
+            "give either {utxo_flag} (TXID:VOUT, stable) or {index_flag} N, not both"
+        )),
+        (None, None) => Err(format!(
+            "select the UTXO with {utxo_flag} TXID:VOUT (stable across chain growth) or \
+             {index_flag} N"
+        )),
+        (Some(i), None) => {
+            if i >= ops.len() {
+                return Err(format!(
+                    "{index_flag} {i} out of range (wallet has {} unspent UTXOs)",
+                    ops.len()
+                ));
+            }
+            Ok(i)
+        }
+        (None, Some(op)) => {
+            let (h, vout) = parse_outpoint(op)?;
+            ops.iter()
+                .position(|(t, o)| *t == h && *o == vout)
+                .ok_or_else(|| {
+                    format!(
+                        "no unspent UTXO {op} in this wallet — rescan (`scan`), or it may be \
+                         already spent"
+                    )
+                })
+        }
+    }
+}
+
 fn resolve_password(
     opt: Option<String>,
     confirm: bool,
@@ -3072,7 +3171,8 @@ async fn cmd_subaddress_create(
 async fn cmd_disclose_balance(
     path: &PathBuf,
     password: Option<String>,
-    utxo_index: usize,
+    utxo: Option<String>,
+    utxo_index: Option<usize>,
     threshold: u64,
 ) -> Result<(), String> {
     use coincync::crypto::{create_balance_proof, BlindingFactor, PedersenCommitment};
@@ -3091,6 +3191,12 @@ async fn cmd_disclose_balance(
     if utxos.is_empty() {
         return Err("wallet has no unspent UTXOs to prove balance over".into());
     }
+    let ops: Vec<([u8; 32], u8)> = utxos
+        .iter()
+        .map(|u| (*u.tx_hash.as_bytes(), u.output_index))
+        .collect();
+    let utxo_index =
+        resolve_unspent_index(&ops, utxo_index, utxo.as_deref(), "--utxo", "--utxo-index")?;
     let utxo = utxos.get(utxo_index).ok_or_else(|| {
         format!(
             "utxo_index {} out of range (wallet has {} unspent UTXOs)",
@@ -3632,7 +3738,8 @@ async fn cmd_disclose_build_payroll_audit(
     password: Option<String>,
     org: &str,
     period: &str,
-    treasury_utxo_index: usize,
+    treasury_utxo: Option<String>,
+    treasury_utxo_index: Option<usize>,
     threshold: u64,
     signing_seed_hex: Option<String>,
     auditor: &str,
@@ -3703,6 +3810,21 @@ async fn cmd_disclose_build_payroll_audit(
         .map_err(|e| format!("unlock wallet: {}", e))?;
     let balance = wallet.balance();
     let utxos = balance.unspent_utxos();
+    // Resolve the treasury selector (stable outpoint preferred) to a concrete
+    // index in the current unspent list, so the command survives chain growth
+    // and rescans instead of chasing a shifting positional index.
+    let ops: Vec<([u8; 32], u8)> = utxos
+        .iter()
+        .map(|u| (*u.tx_hash.as_bytes(), u.output_index))
+        .collect();
+    let treasury_utxo_index =
+        resolve_unspent_index(
+            &ops,
+            treasury_utxo_index,
+            treasury_utxo.as_deref(),
+            "--treasury-utxo",
+            "--treasury-utxo-index",
+        )?;
     let utxo = utxos.get(treasury_utxo_index).ok_or_else(|| {
         format!(
             "treasury_utxo_index {} out of range (wallet has {} unspent UTXOs)",
@@ -4026,7 +4148,8 @@ async fn cmd_disclose_build_payroll_audit(
 async fn cmd_disclose_export_output(
     path: &PathBuf,
     password: Option<String>,
-    utxo_index: usize,
+    utxo: Option<String>,
+    utxo_index: Option<usize>,
 ) -> Result<(), String> {
     use coincync::wallet::Wallet;
 
@@ -4040,6 +4163,12 @@ async fn cmd_disclose_export_output(
         .map_err(|e| format!("unlock wallet: {}", e))?;
     let balance = wallet.balance();
     let utxos = balance.unspent_utxos();
+    let ops: Vec<([u8; 32], u8)> = utxos
+        .iter()
+        .map(|u| (*u.tx_hash.as_bytes(), u.output_index))
+        .collect();
+    let utxo_index =
+        resolve_unspent_index(&ops, utxo_index, utxo.as_deref(), "--utxo", "--utxo-index")?;
     let utxo = utxos.get(utxo_index).ok_or_else(|| {
         format!(
             "utxo_index {} out of range (wallet has {} unspent UTXOs)",
@@ -4067,7 +4196,8 @@ async fn cmd_disclose_export_output(
 async fn cmd_disclose_receipt(
     path: &PathBuf,
     password: Option<String>,
-    utxo_index: usize,
+    utxo: Option<String>,
+    utxo_index: Option<usize>,
     memo: Option<String>,
     expires_at: Option<u64>,
     out: &str,
@@ -4093,6 +4223,12 @@ async fn cmd_disclose_receipt(
 
     let balance = wallet.balance();
     let utxos = balance.unspent_utxos();
+    let ops: Vec<([u8; 32], u8)> = utxos
+        .iter()
+        .map(|u| (*u.tx_hash.as_bytes(), u.output_index))
+        .collect();
+    let utxo_index =
+        resolve_unspent_index(&ops, utxo_index, utxo.as_deref(), "--utxo", "--utxo-index")?;
     let utxo = utxos.get(utxo_index).ok_or_else(|| {
         format!(
             "utxo_index {} out of range (wallet has {} unspent UTXOs)",
@@ -4146,7 +4282,8 @@ async fn cmd_disclose_receipt(
 async fn cmd_show_memo(
     path: &PathBuf,
     password: Option<String>,
-    utxo_index: usize,
+    utxo: Option<String>,
+    utxo_index: Option<usize>,
     node: &str,
 ) -> Result<(), String> {
     use coincync::crypto::decrypt_memo;
@@ -4168,6 +4305,12 @@ async fn cmd_show_memo(
 
     let balance = wallet.balance();
     let utxos = balance.unspent_utxos();
+    let ops: Vec<([u8; 32], u8)> = utxos
+        .iter()
+        .map(|u| (*u.tx_hash.as_bytes(), u.output_index))
+        .collect();
+    let utxo_index =
+        resolve_unspent_index(&ops, utxo_index, utxo.as_deref(), "--utxo", "--utxo-index")?;
     let utxo = utxos.get(utxo_index).ok_or_else(|| {
         format!(
             "utxo_index {} out of range (wallet has {} unspent UTXOs)",
