@@ -3126,28 +3126,24 @@ async fn cmd_disclose_verify_audit_package(
     });
     let result = rpc_call(node, "verify_audit_package", serde_json::json!([req])).await?;
 
-    let flag = |k: &str| result.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
-    let accepted = flag("accepted");
-    println!(
-        "{} — signature_valid={}, anchored_valid={}",
-        if accepted { "ACCEPTED" } else { "REJECTED" },
-        flag("signature_valid"),
-        flag("anchored_valid"),
-    );
-    if let Some(rec) = result.get("reconciliation") {
-        let n = |k: &str| rec.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-        println!(
-            "  reconciliation: total={} disbursed={} receipted={} missing={} unexpected={} fully_reconciled={}",
-            n("claimed_total"),
-            n("disbursed_outputs"),
-            n("receipted_outputs"),
-            n("missing_receipts"),
-            n("unexpected_receipts"),
-            rec.get("fully_reconciled").and_then(|v| v.as_bool()).unwrap_or(false),
-        );
+    let accepted = result.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Verdict block: the node's structured result, minus the large embedded
+    // report string (rendered separately below so it stays readable).
+    let mut verdict = result.clone();
+    if let Some(obj) = verdict.as_object_mut() {
+        obj.remove("report");
     }
+    println!("================ VERIFY VERDICT ================");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string())
+    );
+
+    // Human-readable report block.
     if let Some(report) = result.get("report").and_then(|v| v.as_str()) {
-        println!("\n{report}");
+        println!("\n================ AUDITOR REPORT ================");
+        println!("{report}");
     }
 
     if accepted {
