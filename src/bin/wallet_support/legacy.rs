@@ -471,6 +471,24 @@ enum DiscloseAction {
         #[arg(long)]
         view_key: String,
     },
+    /// Auditor side (stateless, no wallet): verify an org-signed audit package
+    /// against a node. The org produces a signed package with the library
+    /// (`PayrollRun` → `sign`); the auditor points this at their node, which
+    /// checks the org signature and anchors every disclosure proof against real
+    /// chain state, then returns the verdict, reconciliation, and a report.
+    VerifyAuditPackage {
+        /// Path to the SignedAuditPackage JSON file.
+        #[arg(long)]
+        package: String,
+        /// Ed25519 public key (hex, 32 bytes) the auditor expects the issuing
+        /// org to have signed with — known out of band, never from the package.
+        #[arg(long)]
+        issuer: String,
+        /// The auditor identity this package must be addressed to (its
+        /// `audience`); a package issued to anyone else is rejected.
+        #[arg(long)]
+        auditor: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -693,6 +711,11 @@ async fn main() {
             DiscloseAction::VerifyOwnership { proof, anchor } => {
                 cmd_disclose_verify_ownership(&proof, &cli.node, anchor).await
             }
+            DiscloseAction::VerifyAuditPackage {
+                package,
+                issuer,
+                auditor,
+            } => cmd_disclose_verify_audit_package(&package, &issuer, &auditor, &cli.node).await,
         },
         Command::ShowMemo {
             password,
@@ -2996,6 +3019,61 @@ async fn cmd_disclose_verify_ownership(
         } else {
             Err("INVALID: proof verification failed".into())
         }
+    }
+}
+
+/// Auditor side (stateless, no wallet): verify an org-signed audit package
+/// against a node. Reads the `SignedAuditPackage` JSON from `package_file` and
+/// asks the node's `verify_audit_package` RPC to check the org signature +
+/// audience and anchor every disclosure proof against real chain state. Prints
+/// the verdict, the reconciliation summary, and the human-readable report.
+/// Exits non-zero when the package is not accepted (usable in scripts).
+async fn cmd_disclose_verify_audit_package(
+    package_file: &str,
+    issuer_pubkey_hex: &str,
+    auditor: &str,
+    node: &str,
+) -> Result<(), String> {
+    let raw = std::fs::read_to_string(package_file)
+        .map_err(|e| format!("read {package_file}: {e}"))?;
+    let package: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse signed package JSON: {e}"))?;
+
+    let req = serde_json::json!({
+        "package": package,
+        "issuer_pubkey": issuer_pubkey_hex,
+        "auditor": auditor,
+    });
+    let result = rpc_call(node, "verify_audit_package", serde_json::json!([req])).await?;
+
+    let flag = |k: &str| result.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    let accepted = flag("accepted");
+    println!(
+        "{} — signature_valid={}, anchored_valid={}",
+        if accepted { "ACCEPTED" } else { "REJECTED" },
+        flag("signature_valid"),
+        flag("anchored_valid"),
+    );
+    if let Some(rec) = result.get("reconciliation") {
+        let n = |k: &str| rec.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        println!(
+            "  reconciliation: total={} disbursed={} receipted={} missing={} unexpected={} fully_reconciled={}",
+            n("claimed_total"),
+            n("disbursed_outputs"),
+            n("receipted_outputs"),
+            n("missing_receipts"),
+            n("unexpected_receipts"),
+            rec.get("fully_reconciled").and_then(|v| v.as_bool()).unwrap_or(false),
+        );
+    }
+    if let Some(report) = result.get("report").and_then(|v| v.as_str()) {
+        println!("\n{report}");
+    }
+
+    if accepted {
+        Ok(())
+    } else {
+        Err("audit package NOT accepted (see verdict above)".into())
     }
 }
 

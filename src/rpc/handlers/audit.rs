@@ -436,3 +436,120 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{create_rpc_module, RpcState};
+    use crate::compliance::AuditPackage;
+    use crate::crypto::{
+        create_balance_proof, BlindingFactor, DisclosureOutputRef, DisclosureProof,
+        PedersenCommitment,
+    };
+    use crate::mempool::SharedMempool;
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn rpc_state(chain: crate::chain::Blockchain) -> RpcState {
+        RpcState {
+            chain: Arc::new(chain),
+            mempool: SharedMempool::new(),
+            p2p: None,
+            network_name: "test".to_string(),
+            auth_enabled: false,
+            minimize_metadata: false,
+            stratum_public_bind_requested: false,
+            stratum_public_bind_ack: false,
+            stratum_native_tls_enabled: false,
+            stratum_tls_proxy_ack: false,
+            stratum_transport_hardened: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_audit_package_accepts_signed_and_anchored_package() {
+        // A balance proof plus an on-chain output that carries its commitment.
+        let value = 5_000_000u64;
+        let blinding = BlindingFactor::random(&mut OsRng);
+        let commitment = PedersenCommitment::commit(value, &blinding);
+        let bp = create_balance_proof(value, &blinding, &commitment, 1_000_000).unwrap();
+        let dp = DisclosureProof::from_balance(&bp, "treasury solvency >= 1,000,000", Some(2_000_000_000))
+            .unwrap();
+
+        // Take the genesis block and overwrite one output's commitment to the
+        // proof's, so the proof anchors to a real (DB-resident) output.
+        let mut block = crate::testnet::testnet_genesis();
+        assert!(!block.transactions.is_empty() && !block.transactions[0].outputs.is_empty());
+        block.transactions[0].outputs[0].commitment = commitment.to_bytes();
+        let tx_hash = block.transactions[0].hash();
+        let output_ref = DisclosureOutputRef { tx_hash, output_index: 0 };
+
+        // Org signs the package for one named auditor.
+        let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
+        pkg.add_anchored("treasury solvency >= 1,000,000", dp, output_ref);
+        let key = SigningKey::generate(&mut OsRng);
+        let issuer_hex = hex::encode(key.verifying_key().to_bytes());
+        let signed = pkg.sign(&key, [5u8; 32], "Auditor One").unwrap();
+        let signed_json = serde_json::to_value(&signed).unwrap();
+
+        // A node whose DB holds that block + its tx index, so NodeChainView's
+        // anchor() resolves via the DB fallback (no in-memory cache access).
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Database::open(dir.path()).unwrap());
+        db.blocks.insert(&block).unwrap();
+        db.blocks.set_height_hash(0, &block.hash()).unwrap();
+        db.index_tx(tx_hash.as_bytes(), 0, 0).unwrap();
+        let chain =
+            crate::chain::Blockchain::with_database(Arc::clone(&db), crate::config::NetworkType::Testnet);
+
+        let module = create_rpc_module(rpc_state(chain)).unwrap();
+
+        // Correct issuer + auditor => signature valid, anchors on chain, accepted.
+        let req = json!({
+            "package": signed_json,
+            "issuer_pubkey": issuer_hex,
+            "auditor": "Auditor One",
+            "now": 1_000_000,
+        });
+        let resp: serde_json::Value = module
+            .call("verify_audit_package", jsonrpsee::rpc_params![req])
+            .await
+            .unwrap();
+        assert_eq!(resp["accepted"], json!(true), "resp: {resp}");
+        assert_eq!(resp["signature_valid"], json!(true));
+        assert_eq!(resp["anchored_valid"], json!(true));
+        assert!(resp["report"].as_str().unwrap().contains("Acme DAO"));
+
+        // Wrong auditor (non-transferable) => signature invalid, not accepted.
+        let req2 = json!({
+            "package": signed_json,
+            "issuer_pubkey": issuer_hex,
+            "auditor": "Someone Else",
+            "now": 1_000_000,
+        });
+        let resp2: serde_json::Value = module
+            .call("verify_audit_package", jsonrpsee::rpc_params![req2])
+            .await
+            .unwrap();
+        assert_eq!(resp2["signature_valid"], json!(false));
+        assert_eq!(resp2["accepted"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn verify_audit_package_rejects_bad_issuer_hex() {
+        // A well-formed signed package but a malformed issuer key => param error.
+        let key = SigningKey::generate(&mut OsRng);
+        let pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
+        let signed = pkg.sign(&key, [1u8; 32], "Auditor One").unwrap();
+        let signed_json = serde_json::to_value(&signed).unwrap();
+
+        let module = create_rpc_module(rpc_state(crate::chain::Blockchain::new())).unwrap();
+        let req = json!({ "package": signed_json, "issuer_pubkey": "not-hex", "auditor": "Auditor One" });
+        let err = module
+            .call::<_, serde_json::Value>("verify_audit_package", jsonrpsee::rpc_params![req])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("issuer_pubkey"), "err: {err}");
+    }
+}
