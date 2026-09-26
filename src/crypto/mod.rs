@@ -54,8 +54,21 @@ pub mod mw_cutthrough;
 // explicitly enabled. See docs/cip/ for activation paths.
 #[cfg(feature = "sketch-kernel-offsets")]
 pub mod kernel_offset; // CIP-004
+/// Shared Spark commitment generators G/H/K (single source of truth for the
+/// commitment + the one-of-many proof). Non-gated.
+pub mod spark_generators;
 #[cfg(feature = "sketch-lelantus-spark")]
 pub mod lelantus_spark; // CIP-005
+#[cfg(feature = "sketch-gk-proof")]
+pub mod groth_kohlweiss; // CIP-Shielded 2c#1 (real log-size spend proof)
+#[cfg(feature = "sketch-gk-proof")]
+pub mod spark_balance; // CIP-Shielded (value-balance / excess proof)
+#[cfg(feature = "sketch-gk-proof")]
+pub mod spark_range; // CIP-Shielded (value range binding via BP+)
+#[cfg(feature = "sketch-gk-proof")]
+pub mod spark_turnstile; // CIP-Shielded (transparent⇄shielded value turnstile)
+#[cfg(feature = "sketch-gk-proof")]
+pub mod spark_note; // CIP-Shielded (Note Connector: stealth⇄bound-coin detect/recover)
 
 pub use bulletproofs::{
     batch_verify_range_proofs, commit, create_aggregated_range_proof,
@@ -153,6 +166,14 @@ pub use disclosure::{
     verify_sum_proof, verify_sum_proof_anchored, AnchorVerdict,
     BalanceProof as DisclosureBalanceProof, ChainAnchor, DisclosureProof, DisclosureType,
     OutputRef as DisclosureOutputRef, OwnershipProof, SourceProof, SumProof,
+};
+
+// Unlinkable solvency is built on the unaudited `sketch-gk-proof` primitive.
+#[cfg(feature = "sketch-gk-proof")]
+pub use disclosure::{
+    create_multi_unlinkable_solvency_proof, create_unlinkable_solvency_proof,
+    verify_multi_unlinkable_solvency_proof, verify_unlinkable_solvency_proof,
+    MultiUnlinkableSolvencyProof, UnlinkableMember, UnlinkableSolvencyProof,
 };
 
 pub use memo::{decrypt_memo, encrypt_memo, MAX_ENCRYPTED_MEMO_SIZE, MAX_MEMO_SIZE, MEMO_OVERHEAD};

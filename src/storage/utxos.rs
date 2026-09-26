@@ -829,6 +829,19 @@ impl UtxoSet {
             let tx_hash = tx.hash();
             let is_coinbase = tx.is_coinbase();
 
+            // Shielded (Spark) transactions do NOT live in the transparent UTXO
+            // set: their outputs are Spark notes appended to the accumulator and
+            // their spends burn a serial tag, neither of which belongs here.
+            // Applying them via this transparent path would wrongly insert Spark
+            // outputs as spendable UTXOs and ignore the spend. When shielded is
+            // activated, its apply routes to the Spark accumulator/serial store
+            // (see consensus::validation::check_shielded_tx). Until then shielded
+            // txs are rejected in validation and never reach apply; this guard
+            // keeps the transparent path correct regardless.
+            if tx.is_shielded() {
+                continue;
+            }
+
             // Add outputs (with coinbase flag for maturity tracking - CRIT-5)
             for (idx, output) in tx.outputs.iter().enumerate() {
                 batch.add_output_ext(

@@ -11,7 +11,13 @@
 // as `error[E0275]: overflow evaluating the requirement`; the compiler
 // itself suggests this fix. Remove once tari_bulletproofs_plus 0.5+
 // is adopted (blocked on utoipa-swagger-ui 9.0.2 compat).
-#![recursion_limit = "1024"]
+//
+// Bumped 1024 -> 8192: enabling the bulletproofs/halo2-heavy sketch features
+// (`sketch-lelantus-spark`, `sketch-gk-proof`, and combinations) re-triggers the
+// same `&'v Simd: Add` overflow at a deeper type-recursion depth. 8192 covers
+// every current feature combination; it is a compile-time-only limit with no
+// runtime or consensus effect.
+#![recursion_limit = "8192"]
 #![doc = "CoinCync 1.0 — compliant privacy cryptocurrency with CPU-only proof of work."]
 
 // CoinCync's proof of work is RandomX-only by design: the non-`randomx` PoW
@@ -91,6 +97,7 @@ pub mod tick_adapter;
 // coincync-tick sidecar. Phase 1: forager in observe mode (scores peers on
 // public block/tip signals; sends nothing). See docs/architecture/colony.md.
 pub mod colony;
+pub mod compliance; // auditor-facing disclosure packages (compliant-privacy use case)
 
 // ── Network genesis definitions ─────────────────────────────
 pub mod mainnet;

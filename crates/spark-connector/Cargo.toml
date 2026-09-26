@@ -1,0 +1,26 @@
+[package]
+name = "spark-connector"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+description = "Isolated Spark shielded-engine connector for CoinCync: a clean Rust API with a fail-closed stub; the Firo libspark FFI backend fills in behind the `libspark-ffi` feature."
+
+# This crate is the shielded engine's OWN SECTION. The rest of CoinCync depends
+# only on the Rust API here — never on secp256k1, OpenSSL, or the C++ toolchain.
+# Those land only inside the (default-off) `libspark-ffi` backend, so a normal
+# build never pulls them in.
+
+[features]
+default = []
+# Build the vendored Firo `libspark` FFI backend (vendor/). Pulls the C++
+# toolchain + secp256k1 + OpenSSL. Requires the env var SPARK_OPENSSL_DIR to
+# point at an OpenSSL install (dir with include/ and lib/). OFF by default;
+# unwired from consensus until externally reviewed.
+# See docs/design/cip-shielded-libspark-ffi.md.
+libspark-ffi = []
+
+[dependencies]
+
+[build-dependencies]
+# Only used when the `libspark-ffi` feature is on (build.rs early-returns otherwise).
+cc = "1"

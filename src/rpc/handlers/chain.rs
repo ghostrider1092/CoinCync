@@ -37,6 +37,7 @@ fn serialize_block(block: &crate::consensus::Block, height: u64) -> Value {
                 crate::transaction::TxType::Coinbase => "coinbase",
                 crate::transaction::TxType::Transfer => "transfer",
                 crate::transaction::TxType::Churn => "churn",
+                crate::transaction::TxType::Shielded => "shielded",
             };
             json!({
                 "hash":     hex::encode(tx.hash().as_bytes()),

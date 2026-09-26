@@ -44,6 +44,7 @@ fn run_send_command_v2(cli: Cli) {
         memo,
         recovery_address,
         recovery_timeout,
+        policy,
     } = command
     else {
         unreachable!("send dispatcher called for a non-send command");
@@ -61,6 +62,7 @@ fn run_send_command_v2(cli: Cli) {
         memo,
         recovery_address,
         recovery_timeout,
+        policy,
         node,
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -94,6 +96,7 @@ struct SendCommandArguments {
     memo: Option<String>,
     recovery_address: Option<String>,
     recovery_timeout: Option<u64>,
+    policy: Option<String>,
     node: String,
 }
 
@@ -110,10 +113,23 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
         memo,
         recovery_address: recovery_address_hex,
         recovery_timeout,
+        policy,
         node,
     } = arguments;
     use coincync::wallet::spend::{SpendCoordinator, SpendIntent, SpendSubmission};
     use coincync::wallet::{KeyEpoch, Wallet};
+
+    // Treasury policy: refuse before touching keys if the recipient is not
+    // approved (redirect guard) or this send would exceed the per-window
+    // outflow cap (velocity guard).
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Some(policy_file) = policy.as_deref() {
+        enforce_send_policy(policy_file, &to_spend_hex, &to_view_hex)?;
+        enforce_send_velocity(policy_file, amount, now_secs)?;
+    }
 
     let to_spend = parse_public_key_v2(&to_spend_hex, "to-spend")?;
     let to_view = parse_public_key_v2(&to_view_hex, "to-view")?;
@@ -232,6 +248,11 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
                 "  Inputs: {} reservation(s) retained until confirmation (expiry height {}).",
                 retained_reservations, reservation_expires_at
             );
+            // Record the outflow against the velocity ledger only after the send
+            // is accepted, so a failed send never consumes budget. Best-effort.
+            if let Some(policy_file) = policy.as_deref() {
+                record_send_velocity(policy_file, amount, now_secs);
+            }
             Ok(())
         }
         SpendSubmission::Rejected {

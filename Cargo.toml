@@ -1,5 +1,5 @@
 [workspace]
-members  = [".", "crates/auxpow", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality", "crates/orchard-side", "crates/tick"]
+members  = [".", "crates/auxpow", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality", "crates/orchard-side", "crates/spark-connector", "crates/tick"]
 # crates/cynchub: CIP-002 skeleton (post-mainnet merge-mined liquidity layer).
 # Doesn't define the workspace's "randomx"/"testnet" features, so workspace-
 # wide builds with --features error on its Cargo.toml. Build standalone:
@@ -92,8 +92,17 @@ sketch-cut-through        = []   # CIP-003 (also see existing src/crypto/mw_cutt
 sketch-block-aggregation  = []   # CIP-003 (pairs with cut-through)
 sketch-kernel-offsets     = []   # CIP-004
 sketch-lelantus-spark     = []   # CIP-005 (gates src/crypto/lelantus_spark.rs)
+sketch-gk-proof           = []   # CIP-Shielded 2c#1 (gates src/crypto/groth_kohlweiss.rs)
+shielded-soak-stub        = []   # CIP-Shielded: inert prover/verifier for the assembly-line soak (NEVER production)
+# CIP-Shielded: use the vendored Firo libspark FFI backend as the shielded engine.
+# Forwards to spark-connector's feature (pulls the C++ toolchain + OpenSSL — needs
+# env SPARK_OPENSSL_DIR). Off by default; consensus stays activation-gated (u64::MAX).
+libspark-ffi              = ["spark-connector/libspark-ffi"]
 
 [dependencies]
+# Shielded engine's own section — a clean Rust API; secp256k1/OpenSSL/C++ stay
+# behind its default-off `libspark-ffi` feature (see crates/spark-connector).
+spark-connector     = { path = "crates/spark-connector" }
 # â”€â”€ Elliptic curves â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 curve25519-dalek    = { version = "4", features = ["serde", "rand_core", "zeroize"] }
 ed25519-dalek       = { version = "2", features = ["serde", "rand_core"] }

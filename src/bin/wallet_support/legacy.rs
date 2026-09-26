@@ -216,6 +216,13 @@ enum Command {
         /// is set; ignored otherwise.
         #[arg(long)]
         recovery_timeout: Option<u64>,
+        /// Treasury allowlist policy file (from `treasury allow`). When set, the
+        /// send is REFUSED unless the recipient (spend+view) is on the list — a
+        /// guard against a compromised host or operator redirecting funds. This
+        /// is enforced by this wallet binary; pair it with M-of-N custody for
+        /// protection a single compromised signer cannot bypass.
+        #[arg(long)]
+        policy: Option<String>,
     },
 
     /// Generate M-of-N multi-sig key shares using FROST.
@@ -385,11 +392,74 @@ enum Command {
         /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
-        /// Index of the UTXO in the wallet's UTXO list (0-based).
-        /// Run `scan` first to populate; the order is the persisted
-        /// order. Use the same index you'd pass to `disclose balance`.
+        /// Stable selector for the UTXO: `TXID:VOUT`. Preferred — an outpoint
+        /// does not shift as the chain grows and the wallet rescans. Give this
+        /// OR `--utxo-index`.
         #[arg(long)]
-        utxo_index: usize,
+        utxo: Option<String>,
+        /// Legacy positional index into the wallet's unspent list (0-based;
+        /// fragile across rescans — prefer `--utxo`). Give this OR `--utxo`.
+        #[arg(long)]
+        utxo_index: Option<usize>,
+    },
+
+    /// Treasury protection: watch-only monitoring (and, later, spending policy).
+    Treasury {
+        #[command(subcommand)]
+        action: TreasuryAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TreasuryAction {
+    /// Export a watch file for a monitor: each treasury output's key image plus
+    /// its ref and amount. Contains NO spending secrets — a key image cannot
+    /// spend, only reveal that an output moved — so it is safe to place on a
+    /// separate, less-trusted monitoring box.
+    Watchfile {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Output path for the watch file (JSON).
+        #[arg(long)]
+        out: String,
+    },
+    /// Watch-only: poll the node (`--node`) for any spent treasury output and
+    /// raise an alert. Needs only the watch file — no wallet, no keys. Exits
+    /// non-zero if any watched output has moved, so it can drive cron/alerting.
+    Watch {
+        /// Path to the watch file from `treasury watchfile`.
+        #[arg(long)]
+        watchfile: String,
+    },
+    /// Add an approved recipient to a treasury allowlist policy file (created if
+    /// missing). `send --policy <file>` then refuses any recipient not listed.
+    Allow {
+        /// Recipient spend public key (64-hex).
+        #[arg(long)]
+        spend: String,
+        /// Recipient view public key (64-hex).
+        #[arg(long)]
+        view: String,
+        /// Optional human label (e.g. "payroll:bob").
+        #[arg(long)]
+        label: Option<String>,
+        /// Policy file to create/append.
+        #[arg(long)]
+        policy: String,
+    },
+    /// Set a per-window outflow cap in a policy file. `send --policy <file>` then
+    /// refuses a send whose amount, plus everything already sent in the trailing
+    /// window, would exceed the cap. A compromised signer still can't drain fast.
+    Velocity {
+        /// Maximum total outflow per window, in atomic CYNC units.
+        #[arg(long)]
+        max_atomic: u64,
+        /// Rolling window length in seconds (e.g. 86400 = 24h).
+        #[arg(long)]
+        window_secs: u64,
+        /// Policy file to create/update.
+        #[arg(long)]
+        policy: String,
     },
 }
 
@@ -405,10 +475,15 @@ enum DiscloseAction {
         /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
-        /// Index of the UTXO in the wallet's UTXO list (0-based).
-        /// Run `scan` first; the order is the persisted order.
+        /// Stable selector for the UTXO: `TXID:VOUT`. Preferred — an outpoint
+        /// does not shift as the chain grows and the wallet rescans. Give this
+        /// OR `--utxo-index`.
         #[arg(long)]
-        utxo_index: usize,
+        utxo: Option<String>,
+        /// Legacy positional index into the wallet's unspent list (0-based;
+        /// fragile across rescans — prefer `--utxo`). Give this OR `--utxo`.
+        #[arg(long)]
+        utxo_index: Option<usize>,
         /// Threshold value in atomic units. Asserts
         /// `utxo.amount >= threshold`. Must be <= actual value.
         #[arg(long)]
@@ -470,6 +545,137 @@ enum DiscloseAction {
         /// The scoped view key JSON (from `disclose scoped-view-key`).
         #[arg(long)]
         view_key: String,
+    },
+    /// Auditor side (stateless, no wallet): verify an org-signed audit package
+    /// against a node. The org produces a signed package with the library
+    /// (`PayrollRun` → `sign`); the auditor points this at their node, which
+    /// checks the org signature and anchors every disclosure proof against real
+    /// chain state, then returns the verdict, reconciliation, and a report.
+    VerifyAuditPackage {
+        /// Path to the SignedAuditPackage JSON file.
+        #[arg(long)]
+        package: String,
+        /// Ed25519 public key (hex, 32 bytes) the auditor expects the issuing
+        /// org to have signed with — known out of band, never from the package.
+        #[arg(long)]
+        issuer: String,
+        /// The auditor identity this package must be addressed to (its
+        /// `audience`); a package issued to anyone else is rejected.
+        #[arg(long)]
+        auditor: String,
+    },
+    /// Org side: build and sign a payroll/settlement audit package for one
+    /// named auditor. Proves treasury solvency from one of this wallet's UTXOs;
+    /// optionally adds a total-disbursed proof (from a disbursements file the
+    /// org holds, since only it knows those outputs' blindings) and recipient
+    /// receipts (DisclosureProof JSON the recipients handed over). Signs with
+    /// the org's Ed25519 audit key and writes a SignedAuditPackage the auditor
+    /// verifies with `verify-audit-package`.
+    BuildPayrollAudit {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Organization name recorded in the package.
+        #[arg(long)]
+        org: String,
+        /// Period label (e.g. "2026-Q3").
+        #[arg(long)]
+        period: String,
+        /// Stable selector for the treasury UTXO: `TXID:VOUT`. Preferred over
+        /// `--treasury-utxo-index` because an outpoint does not shift as the
+        /// chain grows and the wallet rescans. With `--treasury-count K > 1`,
+        /// this names the FIRST of the K outputs (the rest follow it in the
+        /// unspent list). Give this OR `--treasury-utxo-index`.
+        #[arg(long)]
+        treasury_utxo: Option<String>,
+        /// Legacy positional index of the treasury UTXO in the wallet's unspent
+        /// list (run `scan` first). Fragile across rescans — prefer
+        /// `--treasury-utxo TXID:VOUT`. Give this OR `--treasury-utxo`.
+        #[arg(long)]
+        treasury_utxo_index: Option<usize>,
+        /// Solvency threshold in atomic units (asserts treasury >= threshold).
+        #[arg(long)]
+        threshold: u64,
+        /// The org's Ed25519 audit signing seed (hex, 32 bytes). Distinct from
+        /// wallet keys — it is the org's audit identity. Reads
+        /// `COINCYNC_AUDIT_SIGNING_SEED` if the flag is omitted.
+        #[arg(long, env = "COINCYNC_AUDIT_SIGNING_SEED", hide_env_values = true)]
+        signing_seed: Option<String>,
+        /// The single auditor this package is addressed to (its `audience`).
+        #[arg(long)]
+        auditor: String,
+        /// Unique single-use id (hex, 32 bytes). Random if omitted.
+        #[arg(long)]
+        audit_id: Option<String>,
+        /// Package expiry as a unix timestamp (seconds). Never expires if unset.
+        #[arg(long)]
+        expires_at: Option<u64>,
+        /// Optional disbursements JSON file adding a total-disbursed proof:
+        /// {"height_range":[start,end],"outputs":[{"value":u64,
+        /// "blinding":"hex32","tx_hash":"hex32","output_index":u8}, …]}.
+        #[arg(long)]
+        disbursements: Option<String>,
+        /// Recipient receipt file (a DisclosureProof JSON). Repeatable.
+        #[arg(long = "receipt")]
+        receipts: Vec<String>,
+        /// Prove treasury solvency WITHOUT revealing which output is the
+        /// treasury: hide it among `--anon-size` real on-chain outputs (a
+        /// Groth-Kohlweiss one-of-many). Replaces the linkable balance proof.
+        #[arg(long)]
+        unlinkable_solvency: bool,
+        /// Anonymity-set size for `--unlinkable-solvency` (power of two >= 2).
+        #[arg(long, default_value = "8")]
+        anon_size: usize,
+        /// Number of treasury outputs to prove over (K). With `K > 1`, proves the
+        /// SUM of K hidden outputs `>= threshold`, each hidden in its own disjoint
+        /// set (multi-output unlinkable solvency). Uses wallet UTXOs
+        /// `[treasury-utxo-index .. +K]`. Default 1.
+        #[arg(long, default_value = "1")]
+        treasury_count: usize,
+        /// Output path for the signed package JSON.
+        #[arg(long)]
+        out: String,
+    },
+    /// Recipient side: export one received output as a disbursement entry
+    /// ({value, blinding, tx_hash, output_index}) for the payer's
+    /// `build-payroll-audit --disbursements` file. Reveals this output's amount
+    /// and blinding to the payer (who paid it), so share it only with them.
+    ExportOutput {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Stable selector for the received UTXO: `TXID:VOUT`. Preferred — an
+        /// outpoint does not shift as the chain grows / rescans. Give this OR
+        /// `--utxo-index`.
+        #[arg(long)]
+        utxo: Option<String>,
+        /// Legacy positional index into the unspent list (fragile across
+        /// rescans — prefer `--utxo`). Give this OR `--utxo`.
+        #[arg(long)]
+        utxo_index: Option<usize>,
+    },
+    /// Recipient side: produce an ownership receipt (a DisclosureProof) for one
+    /// received output, proving control of it without revealing the one-time
+    /// key. Hand this to the payer for their audit package.
+    Receipt {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Stable selector for the received UTXO: `TXID:VOUT`. Preferred — an
+        /// outpoint does not shift as the chain grows / rescans. Give this OR
+        /// `--utxo-index`.
+        #[arg(long)]
+        utxo: Option<String>,
+        /// Legacy positional index into the unspent list (fragile across
+        /// rescans — prefer `--utxo`). Give this OR `--utxo`.
+        #[arg(long)]
+        utxo_index: Option<usize>,
+        /// Optional memo bound into the proof (e.g. "2026-Q3 salary").
+        #[arg(long)]
+        memo: Option<String>,
+        /// Proof expiry as a unix timestamp (seconds). Never expires if unset.
+        #[arg(long)]
+        expires_at: Option<u64>,
+        /// Output path for the receipt JSON.
+        #[arg(long)]
+        out: String,
     },
 }
 
@@ -565,6 +771,7 @@ async fn main() {
             memo,
             recovery_address,
             recovery_timeout,
+            policy,
         } => {
             cmd_send(
                 &wallet_path,
@@ -578,6 +785,7 @@ async fn main() {
                 memo,
                 recovery_address,
                 recovery_timeout,
+                policy,
                 &cli.node,
             )
             .await
@@ -672,9 +880,10 @@ async fn main() {
         Command::Disclose { action } => match action {
             DiscloseAction::Balance {
                 password,
+                utxo,
                 utxo_index,
                 threshold,
-            } => cmd_disclose_balance(&wallet_path, password, utxo_index, threshold).await,
+            } => cmd_disclose_balance(&wallet_path, password, utxo, utxo_index, threshold).await,
             DiscloseAction::VerifyBalance {
                 proof,
                 anchor_tx,
@@ -693,17 +902,387 @@ async fn main() {
             DiscloseAction::VerifyOwnership { proof, anchor } => {
                 cmd_disclose_verify_ownership(&proof, &cli.node, anchor).await
             }
+            DiscloseAction::VerifyAuditPackage {
+                package,
+                issuer,
+                auditor,
+            } => cmd_disclose_verify_audit_package(&package, &issuer, &auditor, &cli.node).await,
+            DiscloseAction::BuildPayrollAudit {
+                password,
+                org,
+                period,
+                treasury_utxo,
+                treasury_utxo_index,
+                threshold,
+                signing_seed,
+                auditor,
+                audit_id,
+                expires_at,
+                disbursements,
+                receipts,
+                unlinkable_solvency,
+                anon_size,
+                treasury_count,
+                out,
+            } => {
+                cmd_disclose_build_payroll_audit(
+                    &wallet_path,
+                    password,
+                    &org,
+                    &period,
+                    treasury_utxo,
+                    treasury_utxo_index,
+                    threshold,
+                    signing_seed,
+                    &auditor,
+                    audit_id,
+                    expires_at,
+                    disbursements,
+                    &receipts,
+                    unlinkable_solvency,
+                    anon_size,
+                    treasury_count,
+                    &cli.node,
+                    &out,
+                )
+                .await
+            }
+            DiscloseAction::ExportOutput {
+                password,
+                utxo,
+                utxo_index,
+            } => cmd_disclose_export_output(&wallet_path, password, utxo, utxo_index).await,
+            DiscloseAction::Receipt {
+                password,
+                utxo,
+                utxo_index,
+                memo,
+                expires_at,
+                out,
+            } => {
+                cmd_disclose_receipt(
+                    &wallet_path, password, utxo, utxo_index, memo, expires_at, &out,
+                )
+                .await
+            }
         },
         Command::ShowMemo {
             password,
+            utxo,
             utxo_index,
-        } => cmd_show_memo(&wallet_path, password, utxo_index, &cli.node).await,
+        } => cmd_show_memo(&wallet_path, password, utxo, utxo_index, &cli.node).await,
+        Command::Treasury { action } => match action {
+            TreasuryAction::Watchfile { password, out } => {
+                cmd_treasury_watchfile(&wallet_path, password, &out).await
+            }
+            TreasuryAction::Watch { watchfile } => {
+                cmd_treasury_watch(&watchfile, &cli.node).await
+            }
+            TreasuryAction::Allow {
+                spend,
+                view,
+                label,
+                policy,
+            } => cmd_treasury_allow(&spend, &view, label, &policy),
+            TreasuryAction::Velocity {
+                max_atomic,
+                window_secs,
+                policy,
+            } => cmd_treasury_velocity(max_atomic, window_secs, &policy),
+        },
     };
 
     if let Err(e) = result {
         error!("{}", e);
         std::process::exit(1);
     }
+}
+
+/// Export a treasury watch file: each unspent treasury output's key image, ref,
+/// and amount — no spending secrets. A key image can only reveal that an output
+/// moved, never spend it, so the file is safe on a separate monitoring box.
+async fn cmd_treasury_watchfile(
+    path: &PathBuf,
+    password: Option<String>,
+    out: &str,
+) -> Result<(), String> {
+    use coincync::wallet::Wallet;
+
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+
+    let balance = wallet.balance();
+    let utxos = balance.unspent_utxos();
+    let entries: Vec<serde_json::Value> = utxos
+        .iter()
+        .map(|u| {
+            serde_json::json!({
+                "key_image": hex::encode(u.key_image.as_bytes()),
+                "tx_hash": hex::encode(u.tx_hash.as_bytes()),
+                "output_index": u.output_index,
+                "amount": u.amount.as_atomic(),
+            })
+        })
+        .collect();
+    let count = entries.len();
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let doc = serde_json::json!({
+        "label": "coincync-treasury-watch/v1",
+        "created_at": created_at,
+        "outputs": entries,
+    });
+    std::fs::write(
+        out,
+        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("write {out}: {e}"))?;
+    println!("Treasury watch file written to {out} ({count} outputs, no secrets).");
+    println!(
+        "Place it on the monitor and run:\n  coincync-wallet treasury watch --watchfile {out} --node <url>"
+    );
+    Ok(())
+}
+
+/// Watch-only treasury monitor: poll the node for any spent treasury output and
+/// raise an alert. Needs only the watch file — no wallet, no keys. Exits
+/// non-zero if any watched output has moved.
+async fn cmd_treasury_watch(watchfile: &str, node: &str) -> Result<(), String> {
+    let raw = std::fs::read_to_string(watchfile).map_err(|e| format!("read {watchfile}: {e}"))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {watchfile}: {e}"))?;
+    let outputs = doc
+        .get("outputs")
+        .and_then(|v| v.as_array())
+        .ok_or("watch file has no `outputs` array")?;
+
+    let mut spent = Vec::new();
+    let mut checked = 0usize;
+    for o in outputs {
+        let ki = o
+            .get("key_image")
+            .and_then(|v| v.as_str())
+            .ok_or("watch entry missing key_image")?;
+        let res = rpc_call(node, "is_key_image_spent", serde_json::json!([ki])).await?;
+        checked += 1;
+        if res.get("spent").and_then(|v| v.as_bool()).unwrap_or(false) {
+            spent.push(o.clone());
+        }
+    }
+
+    println!("Treasury watch — {checked} outputs checked against {node}");
+    if spent.is_empty() {
+        println!("  OK: no treasury output has moved.");
+        Ok(())
+    } else {
+        println!("  ALERT: {} treasury output(s) SPENT:", spent.len());
+        for o in &spent {
+            let amt = o.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let tx = o.get("tx_hash").and_then(|v| v.as_str()).unwrap_or("?");
+            let idx = o.get("output_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            println!(
+                "    - {amt} atomic  (tx {}… index {idx})",
+                &tx[..tx.len().min(16)]
+            );
+        }
+        Err(format!(
+            "{} treasury output(s) have moved — investigate immediately",
+            spent.len()
+        ))
+    }
+}
+
+/// Add an approved recipient to a treasury allowlist policy file (created if
+/// missing). Keys are validated and stored lowercase for stable matching.
+fn cmd_treasury_allow(
+    spend: &str,
+    view: &str,
+    label: Option<String>,
+    policy: &str,
+) -> Result<(), String> {
+    for (h, name) in [(spend, "spend"), (view, "view")] {
+        let b = hex::decode(h).map_err(|e| format!("{name} hex: {e}"))?;
+        if b.len() != 32 {
+            return Err(format!("{name} must be 32 bytes"));
+        }
+    }
+    let spend = spend.to_lowercase();
+    let view = view.to_lowercase();
+
+    let mut doc: serde_json::Value = if std::path::Path::new(policy).exists() {
+        let raw = std::fs::read_to_string(policy).map_err(|e| format!("read {policy}: {e}"))?;
+        serde_json::from_str(&raw).map_err(|e| format!("parse {policy}: {e}"))?
+    } else {
+        serde_json::json!({ "label": "coincync-treasury-policy/v1", "allow": [] })
+    };
+    let allow = doc
+        .get_mut("allow")
+        .and_then(|v| v.as_array_mut())
+        .ok_or("policy has no `allow` array")?;
+    let exists = allow.iter().any(|e| {
+        e.get("spend").and_then(|v| v.as_str()) == Some(spend.as_str())
+            && e.get("view").and_then(|v| v.as_str()) == Some(view.as_str())
+    });
+    if exists {
+        println!("Recipient already on the allowlist ({policy}).");
+        return Ok(());
+    }
+    allow.push(serde_json::json!({
+        "spend": spend,
+        "view": view,
+        "label": label.unwrap_or_default(),
+    }));
+    let n = allow.len();
+    std::fs::write(
+        policy,
+        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("write {policy}: {e}"))?;
+    println!("Added recipient to {policy} ({n} approved).");
+    Ok(())
+}
+
+/// Enforce a treasury allowlist: the (spend, view) recipient must be listed, or
+/// the send is refused. Advisory — enforced by this wallet binary; pair with
+/// M-of-N custody for protection a single compromised signer cannot bypass.
+fn enforce_send_policy(
+    policy_file: &str,
+    to_spend_hex: &str,
+    to_view_hex: &str,
+) -> Result<(), String> {
+    let raw =
+        std::fs::read_to_string(policy_file).map_err(|e| format!("read policy {policy_file}: {e}"))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse policy {policy_file}: {e}"))?;
+    let allow = doc
+        .get("allow")
+        .and_then(|v| v.as_array())
+        .ok_or("policy has no `allow` array")?;
+    let want_spend = to_spend_hex.to_lowercase();
+    let want_view = to_view_hex.to_lowercase();
+    let approved = allow.iter().any(|e| {
+        e.get("spend").and_then(|v| v.as_str()).map(str::to_lowercase) == Some(want_spend.clone())
+            && e.get("view").and_then(|v| v.as_str()).map(str::to_lowercase) == Some(want_view.clone())
+    });
+    if approved {
+        Ok(())
+    } else {
+        Err(format!(
+            "BLOCKED by treasury allowlist ({policy_file}): recipient spend {}… is not approved. \
+             Add it with `treasury allow --spend <hex> --view <hex> --policy {policy_file}`.",
+            &want_spend[..want_spend.len().min(12)]
+        ))
+    }
+}
+
+/// Set the per-window outflow cap in a policy file (created if missing).
+fn cmd_treasury_velocity(max_atomic: u64, window_secs: u64, policy: &str) -> Result<(), String> {
+    if window_secs == 0 {
+        return Err("window_secs must be > 0".into());
+    }
+    let mut doc: serde_json::Value = if std::path::Path::new(policy).exists() {
+        let raw = std::fs::read_to_string(policy).map_err(|e| format!("read {policy}: {e}"))?;
+        serde_json::from_str(&raw).map_err(|e| format!("parse {policy}: {e}"))?
+    } else {
+        serde_json::json!({ "label": "coincync-treasury-policy/v1", "allow": [] })
+    };
+    doc["velocity"] = serde_json::json!({
+        "max_atomic": max_atomic,
+        "window_secs": window_secs,
+    });
+    std::fs::write(
+        policy,
+        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("write {policy}: {e}"))?;
+    println!("Velocity cap set in {policy}: {max_atomic} atomic per {window_secs}s window.");
+    Ok(())
+}
+
+/// The sibling ledger that records accepted-send outflows for velocity.
+fn velocity_ledger_path(policy_file: &str) -> String {
+    format!("{policy_file}.ledger")
+}
+
+/// Load the velocity cap `(max_atomic, window_secs)` from a policy file, if set.
+fn load_velocity(policy_file: &str) -> Result<Option<(u64, u64)>, String> {
+    let raw = std::fs::read_to_string(policy_file)
+        .map_err(|e| format!("read policy {policy_file}: {e}"))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse policy {policy_file}: {e}"))?;
+    match doc.get("velocity") {
+        None => Ok(None),
+        Some(v) => {
+            let max = v
+                .get("max_atomic")
+                .and_then(|x| x.as_u64())
+                .ok_or("policy velocity.max_atomic missing/invalid")?;
+            let window = v
+                .get("window_secs")
+                .and_then(|x| x.as_u64())
+                .ok_or("policy velocity.window_secs missing/invalid")?;
+            Ok(Some((max, window)))
+        }
+    }
+}
+
+/// Sum outflow recorded within the trailing `window_secs` from `now`.
+fn velocity_used(ledger_path: &str, window_secs: u64, now: u64) -> u64 {
+    let raw = std::fs::read_to_string(ledger_path).unwrap_or_default();
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    arr.iter()
+        .filter_map(|e| {
+            let ts = e.get("ts")?.as_u64()?;
+            let amt = e.get("amount")?.as_u64()?;
+            if now.saturating_sub(ts) <= window_secs {
+                Some(amt)
+            } else {
+                None
+            }
+        })
+        .sum()
+}
+
+/// Refuse the send if it would push trailing-window outflow over the cap.
+fn enforce_send_velocity(policy_file: &str, amount: u64, now: u64) -> Result<(), String> {
+    if let Some((max, window)) = load_velocity(policy_file)? {
+        let used = velocity_used(&velocity_ledger_path(policy_file), window, now);
+        if used.saturating_add(amount) > max {
+            return Err(format!(
+                "BLOCKED by treasury velocity limit ({policy_file}): this {amount} atomic send \
+                 plus {used} already sent in the last {window}s exceeds the cap of {max} atomic.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Append an accepted send to the velocity ledger. Best-effort; no-op if the
+/// policy has no velocity cap. Prunes to the last 1000 entries.
+fn record_send_velocity(policy_file: &str, amount: u64, now: u64) {
+    if load_velocity(policy_file).ok().flatten().is_none() {
+        return;
+    }
+    let ledger_path = velocity_ledger_path(policy_file);
+    let raw = std::fs::read_to_string(&ledger_path).unwrap_or_default();
+    let mut arr: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    arr.push(serde_json::json!({ "ts": now, "amount": amount }));
+    let len = arr.len();
+    if len > 1000 {
+        arr.drain(0..len - 1000);
+    }
+    let _ = std::fs::write(
+        &ledger_path,
+        serde_json::to_string(&arr).unwrap_or_default(),
+    );
 }
 
 fn resolve_home(p: &PathBuf) -> PathBuf {
@@ -767,6 +1346,65 @@ fn prompt_password(confirm: bool) -> Result<zeroize::Zeroizing<String>, String> 
 ///
 /// `confirm` only applies to the interactive path — piping is assumed to
 /// be deliberate, and re-typing for confirmation is hostile to automation.
+/// Parse a stable outpoint selector `TXID:VOUT` (64-hex tx hash + output index)
+/// into `(tx_hash_bytes, output_index)`. An outpoint names a UTXO by its
+/// on-chain identity, which — unlike a positional index into the wallet's
+/// scanned unspent list — does NOT shift as the blockchain grows and the wallet
+/// rescans. This is the chain-stable selector the compliance commands prefer.
+fn parse_outpoint(s: &str) -> Result<([u8; 32], u8), String> {
+    let (tx, vout) = s
+        .rsplit_once(':')
+        .ok_or_else(|| format!("outpoint must be TXID:VOUT (got {s:?})"))?;
+    let hash = coincync::primitives::Hash::from_hex(tx)
+        .ok_or_else(|| format!("bad txid hex in outpoint {s:?} (need 64 hex chars)"))?;
+    let vout: u8 = vout
+        .parse()
+        .map_err(|e| format!("bad output index in outpoint {s:?}: {e}"))?;
+    Ok((*hash.as_bytes(), vout))
+}
+
+/// Resolve a UTXO's positional index in the wallet's unspent list from EITHER a
+/// stable `--…-utxo TXID:VOUT` outpoint (preferred — survives chain growth /
+/// rescans) OR a legacy positional `--…-utxo-index N`. Exactly one must be
+/// given. `ops` is the unspent list's `(tx_hash, output_index)` in order.
+fn resolve_unspent_index(
+    ops: &[([u8; 32], u8)],
+    index: Option<usize>,
+    outpoint: Option<&str>,
+    utxo_flag: &str,
+    index_flag: &str,
+) -> Result<usize, String> {
+    match (index, outpoint) {
+        (Some(_), Some(_)) => Err(format!(
+            "give either {utxo_flag} (TXID:VOUT, stable) or {index_flag} N, not both"
+        )),
+        (None, None) => Err(format!(
+            "select the UTXO with {utxo_flag} TXID:VOUT (stable across chain growth) or \
+             {index_flag} N"
+        )),
+        (Some(i), None) => {
+            if i >= ops.len() {
+                return Err(format!(
+                    "{index_flag} {i} out of range (wallet has {} unspent UTXOs)",
+                    ops.len()
+                ));
+            }
+            Ok(i)
+        }
+        (None, Some(op)) => {
+            let (h, vout) = parse_outpoint(op)?;
+            ops.iter()
+                .position(|(t, o)| *t == h && *o == vout)
+                .ok_or_else(|| {
+                    format!(
+                        "no unspent UTXO {op} in this wallet — rescan (`scan`), or it may be \
+                         already spent"
+                    )
+                })
+        }
+    }
+}
+
 fn resolve_password(
     opt: Option<String>,
     confirm: bool,
@@ -1470,6 +2108,7 @@ async fn cmd_send(
     memo: Option<String>,
     recovery_address_hex: Option<String>,
     recovery_timeout: Option<u64>,
+    policy: Option<String>,
     node: &str,
 ) -> Result<(), String> {
     use coincync::decoy::{DecoyDistributionSnapshot, ResolvedDecoySnapshot};
@@ -1479,6 +2118,12 @@ async fn cmd_send(
         ValidatedDecoySnapshot,
     };
     use coincync::wallet::{KeyEpoch, Wallet};
+
+    // Treasury allowlist: refuse before touching keys if the recipient is not
+    // approved (guards against a compromised host/operator redirecting funds).
+    if let Some(policy_file) = policy.as_deref() {
+        enforce_send_policy(policy_file, &to_spend_hex, &to_view_hex)?;
+    }
 
     // Parse recipient keys
     let parse_pk = |hex_str: &str, label: &str| -> Result<PublicKey, String> {
@@ -2526,7 +3171,8 @@ async fn cmd_subaddress_create(
 async fn cmd_disclose_balance(
     path: &PathBuf,
     password: Option<String>,
-    utxo_index: usize,
+    utxo: Option<String>,
+    utxo_index: Option<usize>,
     threshold: u64,
 ) -> Result<(), String> {
     use coincync::crypto::{create_balance_proof, BlindingFactor, PedersenCommitment};
@@ -2545,6 +3191,12 @@ async fn cmd_disclose_balance(
     if utxos.is_empty() {
         return Err("wallet has no unspent UTXOs to prove balance over".into());
     }
+    let ops: Vec<([u8; 32], u8)> = utxos
+        .iter()
+        .map(|u| (*u.tx_hash.as_bytes(), u.output_index))
+        .collect();
+    let utxo_index =
+        resolve_unspent_index(&ops, utxo_index, utxo.as_deref(), "--utxo", "--utxo-index")?;
     let utxo = utxos.get(utxo_index).ok_or_else(|| {
         format!(
             "utxo_index {} out of range (wallet has {} unspent UTXOs)",
@@ -2999,10 +3651,639 @@ async fn cmd_disclose_verify_ownership(
     }
 }
 
+/// Auditor side (stateless, no wallet): verify an org-signed audit package
+/// against a node. Reads the `SignedAuditPackage` JSON from `package_file` and
+/// asks the node's `verify_audit_package` RPC to check the org signature +
+/// audience and anchor every disclosure proof against real chain state. Prints
+/// the verdict, the reconciliation summary, and the human-readable report.
+/// Exits non-zero when the package is not accepted (usable in scripts).
+async fn cmd_disclose_verify_audit_package(
+    package_file: &str,
+    issuer_pubkey_hex: &str,
+    auditor: &str,
+    node: &str,
+) -> Result<(), String> {
+    let raw = std::fs::read_to_string(package_file)
+        .map_err(|e| format!("read {package_file}: {e}"))?;
+    let package: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse signed package JSON: {e}"))?;
+
+    let req = serde_json::json!({
+        "package": package,
+        "issuer_pubkey": issuer_pubkey_hex,
+        "auditor": auditor,
+    });
+    let result = rpc_call(node, "verify_audit_package", serde_json::json!([req])).await?;
+
+    let accepted = result.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Verdict block: the node's structured result, minus the large embedded
+    // report string (rendered separately below so it stays readable).
+    let mut verdict = result.clone();
+    if let Some(obj) = verdict.as_object_mut() {
+        obj.remove("report");
+    }
+    println!("================ VERIFY VERDICT ================");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string())
+    );
+
+    // Human-readable report block.
+    if let Some(report) = result.get("report").and_then(|v| v.as_str()) {
+        println!("\n================ AUDITOR REPORT ================");
+        println!("{report}");
+    }
+
+    if accepted {
+        Ok(())
+    } else {
+        Err("audit package NOT accepted (see verdict above)".into())
+    }
+}
+
+/// A disbursements file for `build-payroll-audit`: the outputs the org paid out
+/// in `height_range`. The org supplies these because only it knows each
+/// output's blinding factor.
+#[derive(serde::Deserialize)]
+struct DisbursementsSpec {
+    height_range: [u64; 2],
+    outputs: Vec<DisbursementOut>,
+}
+
+#[derive(serde::Deserialize)]
+struct DisbursementOut {
+    value: u64,
+    blinding: String,
+    tx_hash: String,
+    output_index: u8,
+}
+
+/// Decode a hex string into a 32-byte array, with a labeled error.
+fn decode_hex32(s: &str, what: &str) -> Result<[u8; 32], String> {
+    let v = hex::decode(s).map_err(|e| format!("{what}: bad hex: {e}"))?;
+    v.as_slice()
+        .try_into()
+        .map_err(|_| format!("{what}: expected 32 bytes, got {}", v.len()))
+}
+
+/// Org side: build and sign a payroll/settlement audit package for one auditor.
+/// Treasury solvency comes from a real wallet UTXO (its value + blinding); the
+/// optional total-disbursed proof and recipient receipts are org-supplied
+/// (only the org holds the disbursement blindings; recipients hand over their
+/// own receipts). Signed with the org's Ed25519 audit identity.
+#[allow(clippy::too_many_arguments)]
+async fn cmd_disclose_build_payroll_audit(
+    path: &PathBuf,
+    password: Option<String>,
+    org: &str,
+    period: &str,
+    treasury_utxo: Option<String>,
+    treasury_utxo_index: Option<usize>,
+    threshold: u64,
+    signing_seed_hex: Option<String>,
+    auditor: &str,
+    audit_id_hex: Option<String>,
+    expires_at: Option<u64>,
+    disbursements_file: Option<String>,
+    receipt_files: &[String],
+    unlinkable_solvency: bool,
+    anon_size: usize,
+    treasury_count: usize,
+    node: &str,
+    out: &str,
+) -> Result<(), String> {
+    use coincync::compliance::PayrollRun;
+    #[cfg(feature = "sketch-gk-proof")]
+    use coincync::compliance::{MultiUnlinkableSolvencyItem, UnlinkableSolvencyItem};
+    use coincync::crypto::{
+        BlindingFactor, DisclosureOutputRef, DisclosureProof, PedersenCommitment,
+    };
+    #[cfg(feature = "sketch-gk-proof")]
+    use coincync::crypto::{create_multi_unlinkable_solvency_proof, create_unlinkable_solvency_proof};
+    use coincync::primitives::Hash;
+    use coincync::wallet::Wallet;
+    use ed25519_dalek::SigningKey;
+
+    // Org audit signing identity (distinct from wallet keys).
+    let seed_hex = signing_seed_hex.ok_or_else(|| {
+        "missing --signing-seed (or COINCYNC_AUDIT_SIGNING_SEED): the org's ed25519 audit key".to_string()
+    })?;
+    // Hygiene: `--signing-seed -` reads the hex seed from stdin so the org's
+    // audit key never appears in the process list. Env and stdin are the safe
+    // inputs; a literal on the command line is visible to other local users.
+    let seed_hex = if seed_hex.trim() == "-" {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| format!("read signing-seed from stdin: {e}"))?;
+        line.trim().to_string()
+    } else {
+        seed_hex
+    };
+    let signing_key = SigningKey::from_bytes(&decode_hex32(&seed_hex, "signing-seed")?);
+    let issuer_hex = hex::encode(signing_key.verifying_key().to_bytes());
+
+    // Single-use id: caller-supplied or random.
+    let audit_id = match audit_id_hex {
+        Some(h) => decode_hex32(&h, "audit-id")?,
+        None => rand::random(),
+    };
+
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut run = PayrollRun::new(org, period, created_at, expires_at);
+
+    // Treasury solvency from a wallet UTXO (real value + blinding).
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+    let balance = wallet.balance();
+    let utxos = balance.unspent_utxos();
+    // Resolve the treasury selector (stable outpoint preferred) to a concrete
+    // index in the current unspent list, so the command survives chain growth
+    // and rescans instead of chasing a shifting positional index.
+    let ops: Vec<([u8; 32], u8)> = utxos
+        .iter()
+        .map(|u| (*u.tx_hash.as_bytes(), u.output_index))
+        .collect();
+    let treasury_utxo_index =
+        resolve_unspent_index(
+            &ops,
+            treasury_utxo_index,
+            treasury_utxo.as_deref(),
+            "--treasury-utxo",
+            "--treasury-utxo-index",
+        )?;
+    let utxo = utxos.get(treasury_utxo_index).ok_or_else(|| {
+        format!(
+            "treasury_utxo_index {} out of range (wallet has {} unspent UTXOs)",
+            treasury_utxo_index,
+            utxos.len()
+        )
+    })?;
+    let value = utxo.amount.as_atomic();
+    if treasury_count <= 1 && value < threshold {
+        return Err(format!(
+            "cannot prove threshold {}: treasury UTXO has only {} atomic",
+            threshold, value
+        ));
+    }
+    let treasury_blinding = BlindingFactor::from_bytes(utxo.amount_blinding_bytes);
+
+    // Treasury solvency: either UNLINKABLE (hidden among real on-chain outputs)
+    // or the linkable balance proof over the treasury output itself. Built here;
+    // the unlinkable item is attached to the finished package below. Unlinkable
+    // solvency is only available under the (unaudited) `sketch-gk-proof` feature.
+    #[cfg(feature = "sketch-gk-proof")]
+    let mut unlinkable_item: Option<UnlinkableSolvencyItem> = None;
+    #[cfg(feature = "sketch-gk-proof")]
+    let mut multi_item: Option<MultiUnlinkableSolvencyItem> = None;
+    #[cfg(feature = "sketch-gk-proof")]
+    if unlinkable_solvency && treasury_count <= 1 {
+        if anon_size < 2 || !anon_size.is_power_of_two() {
+            return Err(format!("--anon-size must be a power of two >= 2 (got {anon_size})"));
+        }
+        // Draw (anon_size - 1) real on-chain outputs from ACROSS THE CHAIN as
+        // decoys, so the treasury hides among other parties' outputs — not just
+        // the org's own wallet. The treasury is the remaining set member.
+        let treasury_ref = DisclosureOutputRef {
+            tx_hash: utxo.tx_hash,
+            output_index: utxo.output_index,
+        };
+        let treasury_commitment = PedersenCommitment::commit(value, &treasury_blinding).to_bytes();
+        let resp = rpc_call(node, "get_solvency_decoys", serde_json::json!([anon_size - 1])).await?;
+        let tip = resp.get("tip").and_then(|v| v.as_u64()).unwrap_or(0);
+        let decoys = resp
+            .get("decoys")
+            .and_then(|v| v.as_array())
+            .ok_or("get_solvency_decoys: response missing `decoys`")?;
+
+        let mut commitments: Vec<[u8; 32]> = Vec::with_capacity(anon_size);
+        let mut refs: Vec<DisclosureOutputRef> = Vec::with_capacity(anon_size);
+        commitments.push(treasury_commitment);
+        refs.push(treasury_ref.clone());
+        for d in decoys {
+            if commitments.len() == anon_size {
+                break;
+            }
+            let tx_hex = d.get("tx_hash").and_then(|v| v.as_str()).ok_or("decoy missing tx_hash")?;
+            let oi = d
+                .get("output_index")
+                .and_then(|v| v.as_u64())
+                .ok_or("decoy missing output_index")? as u8;
+            let ch = d
+                .get("commitment")
+                .and_then(|v| v.as_str())
+                .ok_or("decoy missing commitment")?;
+            let dref = DisclosureOutputRef {
+                tx_hash: Hash::from_bytes(decode_hex32(tx_hex, "decoy tx_hash")?),
+                output_index: oi,
+            };
+            if dref == treasury_ref {
+                continue; // never let the treasury double as its own decoy
+            }
+            commitments.push(decode_hex32(ch, "decoy commitment")?);
+            refs.push(dref);
+        }
+        if commitments.len() < anon_size {
+            return Err(format!(
+                "node returned too few distinct decoys ({}) for --anon-size {anon_size}",
+                commitments.len()
+            ));
+        }
+
+        // Shuffle so the treasury's position in the set is not fixed; track it.
+        let mut order: Vec<usize> = (0..anon_size).collect();
+        {
+            use rand::seq::SliceRandom;
+            order.shuffle(&mut rand::rngs::OsRng);
+        }
+        let commitments: Vec<[u8; 32]> = order.iter().map(|&i| commitments[i]).collect();
+        let refs: Vec<DisclosureOutputRef> = order.iter().map(|&i| refs[i].clone()).collect();
+        let l = order
+            .iter()
+            .position(|&i| i == 0)
+            .expect("treasury (member 0) is in the set");
+
+        let proof =
+            create_unlinkable_solvency_proof(value, &treasury_blinding, &commitments, l, threshold, tip)
+                .map_err(|e| format!("unlinkable solvency proof: {}", e))?;
+        let pin = resp
+            .get("tip_hash")
+            .and_then(|v| v.as_str())
+            .and_then(|s| decode_hex32(s, "tip_hash").ok())
+            .unwrap_or([0u8; 32]);
+        unlinkable_item = Some(UnlinkableSolvencyItem {
+            statement: format!(
+                "treasury solvency >= {threshold} (hidden among {anon_size} on-chain outputs)"
+            ),
+            proof,
+            anonymity_refs: refs,
+            as_of_block_hash: pin,
+        });
+    } else if unlinkable_solvency {
+        // MULTI-output: K treasury outputs, each hidden in its OWN disjoint set;
+        // prove their SUM >= threshold. Disjoint sets prevent double-counting.
+        if anon_size < 2 || !anon_size.is_power_of_two() {
+            return Err(format!("--anon-size must be a power of two >= 2 (got {anon_size})"));
+        }
+        let k = treasury_count;
+        if treasury_utxo_index + k > utxos.len() {
+            return Err(format!(
+                "need {k} consecutive UTXOs from index {treasury_utxo_index}; wallet has {}",
+                utxos.len()
+            ));
+        }
+        let need = k * (anon_size - 1);
+        let resp = rpc_call(
+            node,
+            "get_solvency_decoys",
+            serde_json::json!([(need + 2 * k).min(256)]),
+        )
+        .await?;
+        let tip = resp.get("tip").and_then(|v| v.as_u64()).unwrap_or(0);
+        let decoys = resp
+            .get("decoys")
+            .and_then(|v| v.as_array())
+            .ok_or("get_solvency_decoys: response missing `decoys`")?;
+        // Treasury refs, to exclude from the decoy pool.
+        let mut treasury_keys = std::collections::HashSet::new();
+        for j in 0..k {
+            let u = utxos[treasury_utxo_index + j];
+            treasury_keys.insert((hex::encode(u.tx_hash.as_bytes()), u.output_index));
+        }
+        // Distinct decoy pool (disjoint across all sets).
+        let mut pool: Vec<(DisclosureOutputRef, [u8; 32])> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for d in decoys {
+            let tx_hex = d.get("tx_hash").and_then(|v| v.as_str()).ok_or("decoy missing tx_hash")?;
+            let oi = d
+                .get("output_index")
+                .and_then(|v| v.as_u64())
+                .ok_or("decoy missing output_index")? as u8;
+            let ch = d
+                .get("commitment")
+                .and_then(|v| v.as_str())
+                .ok_or("decoy missing commitment")?;
+            let key = (tx_hex.to_string(), oi);
+            if treasury_keys.contains(&key) || !seen.insert(key) {
+                continue;
+            }
+            pool.push((
+                DisclosureOutputRef {
+                    tx_hash: Hash::from_bytes(decode_hex32(tx_hex, "decoy tx_hash")?),
+                    output_index: oi,
+                },
+                decode_hex32(ch, "decoy commitment")?,
+            ));
+        }
+        if pool.len() < need {
+            return Err(format!(
+                "node returned too few distinct decoys ({}) for {k}×{anon_size} disjoint sets",
+                pool.len()
+            ));
+        }
+
+        let mut tvals = Vec::with_capacity(k);
+        let mut tblindings = Vec::with_capacity(k);
+        let mut sets: Vec<Vec<[u8; 32]>> = Vec::with_capacity(k);
+        let mut indices = Vec::with_capacity(k);
+        let mut member_refs: Vec<Vec<DisclosureOutputRef>> = Vec::with_capacity(k);
+        let mut cursor = 0usize;
+        for j in 0..k {
+            let u = utxos[treasury_utxo_index + j];
+            let vj = u.amount.as_atomic();
+            let bj = BlindingFactor::from_bytes(u.amount_blinding_bytes);
+            let mut commits = vec![PedersenCommitment::commit(vj, &bj).to_bytes()];
+            let mut refs = vec![DisclosureOutputRef {
+                tx_hash: u.tx_hash,
+                output_index: u.output_index,
+            }];
+            for _ in 0..(anon_size - 1) {
+                let (dref, dc) = pool[cursor].clone();
+                cursor += 1;
+                commits.push(dc);
+                refs.push(dref);
+            }
+            let mut order: Vec<usize> = (0..anon_size).collect();
+            {
+                use rand::seq::SliceRandom;
+                order.shuffle(&mut rand::rngs::OsRng);
+            }
+            let commits: Vec<[u8; 32]> = order.iter().map(|&i| commits[i]).collect();
+            let refs: Vec<DisclosureOutputRef> = order.iter().map(|&i| refs[i].clone()).collect();
+            let l = order.iter().position(|&i| i == 0).expect("treasury member 0 in set");
+            tvals.push(vj);
+            tblindings.push(bj);
+            sets.push(commits);
+            indices.push(l);
+            member_refs.push(refs);
+        }
+        let proof = create_multi_unlinkable_solvency_proof(
+            &tvals,
+            &tblindings,
+            &sets,
+            &indices,
+            threshold,
+            tip,
+        )
+        .map_err(|e| format!("multi unlinkable solvency proof: {}", e))?;
+        let pin = resp
+            .get("tip_hash")
+            .and_then(|v| v.as_str())
+            .and_then(|s| decode_hex32(s, "tip_hash").ok())
+            .unwrap_or([0u8; 32]);
+        multi_item = Some(MultiUnlinkableSolvencyItem {
+            statement: format!(
+                "treasury solvency (sum of {k} outputs) >= {threshold}, each hidden among {anon_size}"
+            ),
+            proof,
+            member_refs,
+            as_of_block_hash: pin,
+        });
+    } else {
+        let commitment = PedersenCommitment::commit(value, &treasury_blinding);
+        let treasury_ref = DisclosureOutputRef {
+            tx_hash: utxo.tx_hash,
+            output_index: utxo.output_index,
+        };
+        run.treasury_solvency(value, &treasury_blinding, &commitment, threshold, treasury_ref)
+            .map_err(|e| format!("treasury_solvency: {}", e))?;
+    }
+
+    // Builds without the unaudited unlinkable primitive: linkable balance proof
+    // only, and refuse `--unlinkable-solvency`.
+    #[cfg(not(feature = "sketch-gk-proof"))]
+    {
+        if unlinkable_solvency {
+            return Err(
+                "--unlinkable-solvency requires a build with the `sketch-gk-proof` feature".into(),
+            );
+        }
+        let _ = (anon_size, treasury_count, node);
+        let commitment = PedersenCommitment::commit(value, &treasury_blinding);
+        let treasury_ref = DisclosureOutputRef {
+            tx_hash: utxo.tx_hash,
+            output_index: utxo.output_index,
+        };
+        run.treasury_solvency(value, &treasury_blinding, &commitment, threshold, treasury_ref)
+            .map_err(|e| format!("treasury_solvency: {}", e))?;
+    }
+
+    // Optional total-disbursed proof from an org-supplied disbursements file.
+    if let Some(df) = disbursements_file {
+        let raw = std::fs::read_to_string(&df).map_err(|e| format!("read {df}: {e}"))?;
+        let spec: DisbursementsSpec =
+            serde_json::from_str(&raw).map_err(|e| format!("parse disbursements {df}: {e}"))?;
+        let mut outputs: Vec<(u64, BlindingFactor, Hash, u8)> = Vec::with_capacity(spec.outputs.len());
+        for o in &spec.outputs {
+            let b = decode_hex32(&o.blinding, "disbursement blinding")?;
+            let tx = decode_hex32(&o.tx_hash, "disbursement tx_hash")?;
+            outputs.push((o.value, BlindingFactor::from_bytes(b), Hash::from_bytes(tx), o.output_index));
+        }
+        run.total_disbursed(&outputs, (spec.height_range[0], spec.height_range[1]))
+            .map_err(|e| format!("total_disbursed: {}", e))?;
+    }
+
+    // Recipient receipts (DisclosureProof JSON each).
+    for rf in receipt_files {
+        let raw = std::fs::read_to_string(rf).map_err(|e| format!("read receipt {rf}: {e}"))?;
+        let dp: DisclosureProof =
+            serde_json::from_str(&raw).map_err(|e| format!("parse receipt {rf}: {e}"))?;
+        // Label the receipt by the file's name stem (e.g. "alice"), not its full path.
+        let label = std::path::Path::new(rf)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(rf);
+        run.add_recipient_receipt(label, dp);
+    }
+
+    // Finish, sign, write.
+    #[allow(unused_mut)]
+    let mut pkg = run.finish();
+    #[cfg(feature = "sketch-gk-proof")]
+    if let Some(item) = unlinkable_item {
+        pkg.attach_unlinkable_solvency(item);
+    }
+    #[cfg(feature = "sketch-gk-proof")]
+    if let Some(item) = multi_item {
+        pkg.attach_multi_unlinkable_solvency(item);
+    }
+    let signed = pkg
+        .sign(&signing_key, audit_id, auditor)
+        .map_err(|e| format!("sign package: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(&signed).map_err(|e| format!("serialize package: {}", e))?;
+    std::fs::write(out, &json).map_err(|e| format!("write {out}: {e}"))?;
+
+    println!("Signed audit package written to {out}");
+    println!("  org:      {org}");
+    println!("  period:   {period}");
+    println!("  auditor:  {auditor}");
+    println!("  audit_id: {}", hex::encode(audit_id));
+    println!("  issuer:   {issuer_hex}");
+    println!();
+    println!("The auditor verifies it against their node with:");
+    println!(
+        "  coincync-wallet disclose verify-audit-package \\\n    --package {out} --issuer {issuer_hex} --auditor \"{auditor}\" --node <url>"
+    );
+    Ok(())
+}
+
+/// Recipient side: export one received output as a disbursement entry the payer
+/// folds into their `build-payroll-audit --disbursements` file. This reveals
+/// the output's amount and blinding — share it only with the payer, who already
+/// knows both (they paid it).
+async fn cmd_disclose_export_output(
+    path: &PathBuf,
+    password: Option<String>,
+    utxo: Option<String>,
+    utxo_index: Option<usize>,
+) -> Result<(), String> {
+    use coincync::wallet::Wallet;
+
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+    let balance = wallet.balance();
+    let utxos = balance.unspent_utxos();
+    let ops: Vec<([u8; 32], u8)> = utxos
+        .iter()
+        .map(|u| (*u.tx_hash.as_bytes(), u.output_index))
+        .collect();
+    let utxo_index =
+        resolve_unspent_index(&ops, utxo_index, utxo.as_deref(), "--utxo", "--utxo-index")?;
+    let utxo = utxos.get(utxo_index).ok_or_else(|| {
+        format!(
+            "utxo_index {} out of range (wallet has {} unspent UTXOs)",
+            utxo_index,
+            utxos.len()
+        )
+    })?;
+
+    let entry = serde_json::json!({
+        "value": utxo.amount.as_atomic(),
+        "blinding": hex::encode(utxo.amount_blinding_bytes),
+        "tx_hash": hex::encode(utxo.tx_hash.as_bytes()),
+        "output_index": utxo.output_index,
+    });
+    // A single object; the payer collects these into the "outputs" array of the
+    // disbursements file.
+    println!("{}", serde_json::to_string(&entry).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// Recipient side: build an ownership receipt (a DisclosureProof) for one
+/// received output. Derives the output's one-time secret from wallet keys,
+/// proves control of the on-chain stealth address, and writes the receipt the
+/// payer attaches to their audit package.
+async fn cmd_disclose_receipt(
+    path: &PathBuf,
+    password: Option<String>,
+    utxo: Option<String>,
+    utxo_index: Option<usize>,
+    memo: Option<String>,
+    expires_at: Option<u64>,
+    out: &str,
+) -> Result<(), String> {
+    use coincync::compliance::recipient_receipt;
+    use coincync::crypto::{compute_one_time_secret, StealthAddress};
+    use coincync::wallet::subaddress::{compute_subaddress_spend_secret, SubaddressIndex};
+    use coincync::wallet::Wallet;
+
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+    let keys = wallet
+        .current_keys()
+        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
+    let view_secret = keys.view_secret.clone();
+    let spend_secret = keys.spend_secret.clone();
+
+    let balance = wallet.balance();
+    let utxos = balance.unspent_utxos();
+    let ops: Vec<([u8; 32], u8)> = utxos
+        .iter()
+        .map(|u| (*u.tx_hash.as_bytes(), u.output_index))
+        .collect();
+    let utxo_index =
+        resolve_unspent_index(&ops, utxo_index, utxo.as_deref(), "--utxo", "--utxo-index")?;
+    let utxo = utxos.get(utxo_index).ok_or_else(|| {
+        format!(
+            "utxo_index {} out of range (wallet has {} unspent UTXOs)",
+            utxo_index,
+            utxos.len()
+        )
+    })?;
+
+    // Per-subaddress spend offset, if this output landed on a subaddress.
+    let effective_spend = match (utxo.subaddress_account, utxo.subaddress_index) {
+        (Some(account), Some(index)) => compute_subaddress_spend_secret(
+            &spend_secret,
+            &view_secret,
+            SubaddressIndex::new(account, index),
+        ),
+        _ => spend_secret.clone(),
+    };
+
+    // Recompute the one-time secret; its public key is the on-chain stealth
+    // address the receipt proves control of (only tx_public_key is used).
+    let stealth = StealthAddress {
+        public_key: utxo.tx_public_key.clone(),
+        tx_public_key: utxo.tx_public_key.clone(),
+    };
+    let one_time = compute_one_time_secret(&stealth, &view_secret, &effective_spend, utxo.output_index)
+        .map_err(|e| format!("derive one-time secret: {}", e))?;
+    let stealth_pub = one_time.public_key();
+
+    let memo_bytes = memo.as_deref().unwrap_or("").as_bytes();
+    let receipt = recipient_receipt(
+        &utxo.tx_hash,
+        utxo.output_index,
+        &stealth_pub,
+        &one_time,
+        memo_bytes,
+        expires_at,
+    )
+    .map_err(|e| format!("build receipt: {}", e))?;
+
+    let json = serde_json::to_string_pretty(&receipt).map_err(|e| format!("serialize receipt: {}", e))?;
+    std::fs::write(out, &json).map_err(|e| format!("write {out}: {e}"))?;
+    println!("Ownership receipt written to {out}");
+    println!(
+        "  output: tx {} · index {}",
+        hex::encode(utxo.tx_hash.as_bytes()),
+        utxo.output_index
+    );
+    Ok(())
+}
+
 async fn cmd_show_memo(
     path: &PathBuf,
     password: Option<String>,
-    utxo_index: usize,
+    utxo: Option<String>,
+    utxo_index: Option<usize>,
     node: &str,
 ) -> Result<(), String> {
     use coincync::crypto::decrypt_memo;
@@ -3024,6 +4305,12 @@ async fn cmd_show_memo(
 
     let balance = wallet.balance();
     let utxos = balance.unspent_utxos();
+    let ops: Vec<([u8; 32], u8)> = utxos
+        .iter()
+        .map(|u| (*u.tx_hash.as_bytes(), u.output_index))
+        .collect();
+    let utxo_index =
+        resolve_unspent_index(&ops, utxo_index, utxo.as_deref(), "--utxo", "--utxo-index")?;
     let utxo = utxos.get(utxo_index).ok_or_else(|| {
         format!(
             "utxo_index {} out of range (wallet has {} unspent UTXOs)",
@@ -3404,5 +4691,31 @@ mod legacy_support_tests {
             json.contains("100") && json.contains("200"),
             "exported JSON carries the disclosed height scope"
         );
+    }
+
+    // ── build-payroll-audit input parsing ───────────────────────────────
+    #[test]
+    fn decode_hex32_validates_length_and_hex() {
+        assert_eq!(decode_hex32(&"ab".repeat(32), "x").unwrap(), [0xabu8; 32]);
+        assert!(decode_hex32("zz", "x").is_err(), "non-hex rejected");
+        assert!(decode_hex32(&"ab".repeat(16), "x").is_err(), "16 bytes rejected");
+        assert!(decode_hex32(&"ab".repeat(33), "x").is_err(), "33 bytes rejected");
+    }
+
+    #[test]
+    fn disbursements_spec_parses_and_decodes() {
+        let b = "11".repeat(32);
+        let tx = "22".repeat(32);
+        let json = format!(
+            r#"{{"height_range":[10,20],"outputs":[{{"value":500,"blinding":"{b}","tx_hash":"{tx}","output_index":3}}]}}"#
+        );
+        let spec: DisbursementsSpec = serde_json::from_str(&json).expect("parse disbursements spec");
+        assert_eq!(spec.height_range, [10, 20]);
+        assert_eq!(spec.outputs.len(), 1);
+        let o = &spec.outputs[0];
+        assert_eq!(o.value, 500);
+        assert_eq!(o.output_index, 3);
+        assert_eq!(decode_hex32(&o.blinding, "b").unwrap(), [0x11u8; 32]);
+        assert_eq!(decode_hex32(&o.tx_hash, "t").unwrap(), [0x22u8; 32]);
     }
 }
