@@ -276,6 +276,103 @@ pub mod ffi {
             memo_cap: c_int,
             out_memo_len: *mut c_int,
         ) -> c_int;
+        fn spark_ffi_export_incoming_view_key(
+            seed: *const u8,
+            seed_len: c_int,
+            out_s1: *mut u8,
+            s1_cap: c_int,
+            out_s1_len: *mut c_int,
+            out_p2: *mut u8,
+            p2_cap: c_int,
+            out_p2_len: *mut c_int,
+        ) -> c_int;
+        fn spark_ffi_identify_view_only(
+            s1_ptr: *const u8,
+            s1_len: c_int,
+            p2_ptr: *const u8,
+            p2_len: c_int,
+            coin_ptr: *const u8,
+            coin_len: c_int,
+            ctx_ptr: *const u8,
+            ctx_len: c_int,
+            out_value: *mut u64,
+            out_memo: *mut u8,
+            memo_cap: c_int,
+            out_memo_len: *mut c_int,
+        ) -> c_int;
+    }
+
+    /// A wallet's WATCH-ONLY shielded view key: the exported incoming-view-key
+    /// material `(s1, P2)`. It scans/identifies owned coins but carries NO spend
+    /// authority. `s1` is 32 bytes, `P2` 34 bytes.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct IncomingViewKeyBytes {
+        pub s1: Vec<u8>,
+        pub p2: Vec<u8>,
+    }
+
+    /// Export the watch-only incoming view key `(s1, P2)` for the wallet derived
+    /// from `seed`. A holder can [`identify_view_only`] owned coins but cannot
+    /// spend. `None` on error.
+    pub fn export_incoming_view_key(seed: &[u8]) -> Option<IncomingViewKeyBytes> {
+        let mut s1 = vec![0u8; 32];
+        let mut s1_len: c_int = 0;
+        let mut p2 = vec![0u8; 34];
+        let mut p2_len: c_int = 0;
+        // Safety: pointers/lengths valid for the call; shim writes <= caps.
+        let rc = unsafe {
+            spark_ffi_export_incoming_view_key(
+                seed.as_ptr(),
+                seed.len() as c_int,
+                s1.as_mut_ptr(),
+                s1.len() as c_int,
+                &mut s1_len,
+                p2.as_mut_ptr(),
+                p2.len() as c_int,
+                &mut p2_len,
+            )
+        };
+        if rc != 1 {
+            return None;
+        }
+        s1.truncate(s1_len.max(0) as usize);
+        p2.truncate(p2_len.max(0) as usize);
+        Some(IncomingViewKeyBytes { s1, p2 })
+    }
+
+    /// WATCH-ONLY identify: recover a coin's value/memo using only an exported
+    /// view key `(s1, P2)` and the coin's serial context — no seed/spend key.
+    /// `Ok(None)` means "not ours". Never yields spend authority.
+    pub fn identify_view_only(
+        view_key: &IncomingViewKeyBytes,
+        coin: &CoinBytes,
+        serial_context: &[u8],
+    ) -> Result<Option<IdentifiedCoin>> {
+        let mut value: u64 = 0;
+        let mut memo = vec![0u8; 256];
+        let mut memo_len: c_int = 0;
+        // Safety: pointers/lengths valid for the call; shim writes only outputs.
+        let rc = unsafe {
+            spark_ffi_identify_view_only(
+                view_key.s1.as_ptr(),
+                view_key.s1.len() as c_int,
+                view_key.p2.as_ptr(),
+                view_key.p2.len() as c_int,
+                coin.0.as_ptr(),
+                coin.0.len() as c_int,
+                serial_context.as_ptr(),
+                serial_context.len() as c_int,
+                &mut value,
+                memo.as_mut_ptr(),
+                memo.len() as c_int,
+                &mut memo_len,
+            )
+        };
+        if rc != 1 {
+            return Ok(None); // not ours (or malformed) — fail-closed to "not mine"
+        }
+        memo.truncate(memo_len.max(0) as usize);
+        Ok(Some(IdentifiedCoin { value, memo }))
     }
 
     /// The bech32m address of the wallet derived from `seed`. `None` on error.
@@ -799,6 +896,39 @@ pub mod ffi {
                 b.identify(b"wallet-seed-beta", &coin, &[]).unwrap().is_none(),
                 "a foreign wallet must not identify the coin"
             );
+        }
+
+        #[test]
+        fn view_only_key_scans_owned_coin_without_the_seed() {
+            let seed_a = b"view-only-seed-A";
+            let seed_b = b"view-only-seed-B";
+            let ctx = serial_context(b"vk:tx:0").expect("ctx");
+
+            // A coin owned by A, bound to ctx.
+            let coin = mint_to_seed(seed_a, 4_200, &ctx).expect("mint to A");
+
+            // Export A's WATCH-ONLY view key (s1, P2). No seed needed to scan after.
+            let vk_a = export_incoming_view_key(seed_a).expect("export A's view key");
+            assert_eq!(vk_a.s1.len(), 32, "s1 is a 32-byte scalar");
+            assert_eq!(vk_a.p2.len(), 34, "P2 is a 34-byte group element");
+
+            // The view key recovers the coin's value WITHOUT the seed.
+            let owned = identify_view_only(&vk_a, &coin, &ctx)
+                .expect("identify call")
+                .expect("A's view key owns the coin");
+            assert_eq!(owned.value, 4_200);
+
+            // A foreign view key (B's) does NOT recognize A's coin.
+            let vk_b = export_incoming_view_key(seed_b).expect("export B's view key");
+            assert!(
+                identify_view_only(&vk_b, &coin, &ctx).unwrap().is_none(),
+                "a foreign view key must not identify the coin"
+            );
+
+            // View-only recovery matches seed-based recovery (same value).
+            let b = LibsparkBackend;
+            let via_seed = b.identify(seed_a, &coin, &ctx).unwrap().expect("seed identifies");
+            assert_eq!(via_seed.value, owned.value, "view-only sees the same value as the seed");
         }
 
         #[test]

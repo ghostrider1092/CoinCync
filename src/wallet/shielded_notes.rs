@@ -19,7 +19,7 @@
 //!   spend). A full sync that cross-checks the pool's spent-tag set needs each
 //!   note's linking tag (seed-derivable) — a follow-up.
 
-use spark_connector::ffi::LibsparkBackend;
+use spark_connector::ffi::{identify_view_only, IncomingViewKeyBytes, LibsparkBackend};
 use spark_connector::{CoinBytes, SparkBackend};
 
 use crate::consensus::spark_payload::build::{build_spend_payload, build_transfer_payload};
@@ -67,6 +67,36 @@ impl ShieldedNoteStore {
                 continue; // already tracked
             }
             if let Ok(Some(id)) = backend.identify(seed, &coin, &serial_context) {
+                self.notes.push(OwnedNote {
+                    outpoint,
+                    value: id.value,
+                    coin,
+                    serial_context,
+                    height,
+                    spent: false,
+                });
+                found += 1;
+            }
+        }
+        found
+    }
+
+    /// Scan the pool with a WATCH-ONLY view key `(s1, P2)` — no seed. Same as
+    /// [`scan`](Self::scan) but uses `identify_view_only`, so a watch-only wallet
+    /// can report balances it owns. The resulting notes CANNOT be spent (this
+    /// material carries no spend key); `build_self_spend`/`build_transfer` need a
+    /// seed. Returns the number of NEW owned notes found. Idempotent.
+    pub fn scan_view_only(
+        &mut self,
+        view_key: &IncomingViewKeyBytes,
+        pool: &SparkPoolStore,
+    ) -> usize {
+        let mut found = 0;
+        for (outpoint, coin, serial_context, height) in pool.coin_entries() {
+            if self.notes.iter().any(|n| n.outpoint == outpoint) {
+                continue;
+            }
+            if let Ok(Some(id)) = identify_view_only(view_key, &coin, &serial_context) {
                 self.notes.push(OwnedNote {
                     outpoint,
                     value: id.value,
@@ -260,6 +290,30 @@ mod tests {
         assert!(a.mark_spent(&op0));
         assert!(a.balance() < 6_000);
         assert!(!a.mark_spent(&op0), "already spent");
+    }
+
+    #[test]
+    fn scan_view_only_finds_owned_notes_without_the_seed() {
+        use spark_connector::ffi::export_incoming_view_key;
+
+        let pool = SparkPoolStore::new();
+        let seed_a = b"vo-wallet-A";
+        let seed_b = b"vo-wallet-B";
+        mint_to_pool(&pool, seed_a, &[1_000, 2_000]);
+
+        // A watch-only wallet holds only A's exported view key (no seed).
+        let vk_a = export_incoming_view_key(seed_a).expect("export A view key");
+        let mut a = ShieldedNoteStore::new();
+        assert_eq!(a.scan_view_only(&vk_a, &pool), 2, "A's view key sees its 2 coins");
+        assert_eq!(a.balance(), 3_000);
+        // Idempotent.
+        assert_eq!(a.scan_view_only(&vk_a, &pool), 0);
+
+        // A foreign view key sees none of A's coins.
+        let vk_b = export_incoming_view_key(seed_b).expect("export B view key");
+        let mut b = ShieldedNoteStore::new();
+        assert_eq!(b.scan_view_only(&vk_b, &pool), 0);
+        assert_eq!(b.balance(), 0);
     }
 
     #[test]
