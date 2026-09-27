@@ -31,27 +31,30 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         .register_method("get_mempool_transactions", |_params, state, _ext| {
             // Layer 2: mempool iteration up to 500 txs under block_in_place
             // keeps the worker thread reusable during the fetch.
-            let txs = tokio::task::block_in_place(|| {
-                state.mempool.get_block_transactions(
+            // #118: fetch lightweight summaries (cached hash/size/fee, no full-tx
+            // clone or hash/size recomputation) under block_in_place; the read
+            // lock is released before we build JSON below.
+            let summaries = tokio::task::block_in_place(|| {
+                state.mempool.get_transaction_summaries(
                     crate::constants::MAX_BLOCK_SIZE,
                     500, // max 500 txs
                 )
             });
-            let tx_list: Vec<Value> = txs
+            let tx_list: Vec<Value> = summaries
                 .iter()
-                .map(|tx| {
-                    let kind = match tx.tx_type {
+                .map(|s| {
+                    let kind = match s.tx_type {
                         crate::transaction::TxType::Coinbase => "coinbase",
                         crate::transaction::TxType::Transfer => "transfer",
                         crate::transaction::TxType::Churn => "churn",
                     };
                     json!({
-                        "hash":    hex::encode(tx.hash().as_bytes()),
+                        "hash":    hex::encode(s.hash.as_bytes()),
                         "kind":    kind,
-                        "inputs":  tx.input_count(),
-                        "outputs": tx.output_count(),
-                        "fee":     tx.fee.as_atomic(),
-                        "size":    tx.size(),
+                        "inputs":  s.inputs,
+                        "outputs": s.outputs,
+                        "fee":     s.fee.as_atomic(),
+                        "size":    s.size,
                     })
                 })
                 .collect();

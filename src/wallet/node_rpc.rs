@@ -52,7 +52,6 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::fmt;
-use std::str::FromStr;
 use std::time::Duration;
 
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -208,20 +207,28 @@ impl NodeRpcClient {
             .await
             .map_err(|error| RpcCallError::Protocol(format!("invalid JSON response: {error}")))?;
 
-        if let Some(error) = payload.get("error").filter(|error| !error.is_null()) {
-            return Err(RpcCallError::Remote(remote_error_reason(error)));
-        }
-        if !status.is_success() {
-            return Err(RpcCallError::Protocol(format!(
-                "HTTP {status} without a JSON-RPC error"
-            )));
-        }
-
-        payload
-            .get("result")
-            .cloned()
-            .ok_or_else(|| RpcCallError::Protocol("response missing result".into()))
+        parse_rpc_response(status, payload)
     }
+}
+
+fn parse_rpc_response(
+    status: reqwest::StatusCode,
+    mut payload: Value,
+) -> std::result::Result<Value, RpcCallError> {
+    // Preserve node errors even on non-success HTTP responses.
+    if let Some(error) = payload.get("error").filter(|error| !error.is_null()) {
+        return Err(RpcCallError::Remote(remote_error_reason(error)));
+    }
+    if !status.is_success() {
+        return Err(RpcCallError::Protocol(format!(
+            "HTTP {status} without a JSON-RPC error"
+        )));
+    }
+
+    payload
+        .as_object_mut()
+        .and_then(|object| object.remove("result"))
+        .ok_or_else(|| RpcCallError::Protocol("response missing result".into()))
 }
 
 fn classify_submission_result(
@@ -282,6 +289,35 @@ impl fmt::Display for RpcCallError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_response_preserves_result_values() {
+        for result in [json!(true), json!({"outputs": [1, 2]}), Value::Null] {
+            let payload = json!({"result": result, "error": null});
+            assert_eq!(
+                parse_rpc_response(reqwest::StatusCode::OK, payload).unwrap(),
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn rpc_response_preserves_error_precedence() {
+        use reqwest::StatusCode;
+        for status in [StatusCode::OK, StatusCode::BAD_REQUEST] {
+            let payload = json!({"result": true, "error": {"message": "rejected"}});
+            assert!(matches!(parse_rpc_response(status, payload),
+                Err(RpcCallError::Remote(reason)) if reason == "rejected"));
+        }
+        assert!(matches!(
+            parse_rpc_response(StatusCode::BAD_REQUEST, json!({"result": true})),
+            Err(RpcCallError::Protocol(reason)) if reason.starts_with("HTTP 400")
+        ));
+        for payload in [json!({}), json!({"error": null}), Value::Null, json!([])] {
+            assert!(matches!(parse_rpc_response(StatusCode::OK, payload),
+                Err(RpcCallError::Protocol(reason)) if reason == "response missing result"));
+        }
+    }
 
     #[test]
     fn empty_endpoint_is_rejected() {

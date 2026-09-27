@@ -74,9 +74,8 @@ impl Transaction {
     /// borsh error rather than returning a divergent size — a wrong size feeds
     /// fee/congestion math that must be identical across nodes.
     pub fn size(&self) -> usize {
-        borsh::to_vec(self)
-            .map(|v| v.len())
-            .expect("Transaction borsh serialization is infallible into a Vec")
+        // Count serialized bytes without allocating a temporary transaction buffer.
+        borsh::object_length(self).expect("Transaction borsh length calculation failed")
     }
 
     pub fn is_coinbase(&self) -> bool {

@@ -312,6 +312,7 @@ pub(super) async fn handle_chain_work(
     payload: &[u8],
     peers: &DashMap<PeerId, PeerInfo>,
     sync: &RwLock<ChainSync>,
+    chain: &SharedBlockchain,
 ) -> Result<()> {
     // Firework Phase 2: a CAP_CHAINWORK peer told us its cumulative
     // work + tip. Feed it into the sync manager's peer-work table so
@@ -335,9 +336,29 @@ pub(super) async fn handle_chain_work(
                     peer.height = cw.height;
                     peer.tip_hash = cw.best_hash;
                 }
+                // A peer advertising our EXACT tip cannot be on a heavier
+                // chain — equal tip ⇒ equal cumulative work. Numeric
+                // total_difficulty drift (self-heals on restart) must NOT be
+                // treated as "a heavier chain exists", or it latches
+                // work_behind and gates the miner forever (fix for the
+                // 2026-09-07 stuck-`synced=false` wedge). Only a DIFFERENT tip
+                // is a candidate heavier chain, so its claim is fed to the
+                // capped peer-work table. NOTE: this same-tip fix does NOT by
+                // itself substantiate a different-tip claim — a peer advertising
+                // a heavier DIFFERENT tip it cannot back (e.g. answering the
+                // follow-up GetHeaders with an empty/bogus Headers set) is only
+                // partially handled: the subsequent fetch penalizes some, but not
+                // all, non-delivering peers. Fully validating different-tip work
+                // claims (and banning peers that advertise work they can't
+                // deliver) remains a separate, open concern.
+                let on_our_tip = cw.best_hash == chain.tip_hash();
                 {
                     let mut s = sync.write().await;
-                    s.update_peer_difficulty_for(peer_id, cw.total_difficulty);
+                    if on_our_tip {
+                        s.clear_peer_difficulty(peer_id);
+                    } else {
+                        s.update_peer_difficulty_for(peer_id, cw.total_difficulty);
+                    }
                     s.update_peer_height_for(peer_id, cw.height);
                 }
                 trace!(
@@ -377,8 +398,30 @@ pub(super) async fn handle_verack(
         crate::metrics::PEER_HANDSHAKE.observe(elapsed);
     }
 
-    if let Some(mut peer) = peers.get_mut(&peer_id) {
-        peer.state = PeerState::Connected;
+    // M-P1: a Verack completes the handshake ONLY if a valid Version was received
+    // first (state == VersionReceived). A bare Verack must NOT flip a peer to
+    // Connected -- that would skip protocol-version / user-agent / self-connection
+    // validation and expose every post-handshake handler (incl. the C2 freeze) to
+    // a 13-byte pre-handshake frame. Rejecting the out-of-order Verack here also
+    // closes the Verack-replay IBD wedge: a replayed Verack on an already-Connected
+    // peer no longer re-runs the GetHeaders/slot logic below.
+    let advanced = peers
+        .get_mut(&peer_id)
+        .map(|mut peer| {
+            if peer.state == PeerState::VersionReceived {
+                peer.state = PeerState::Connected;
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+    if !advanced {
+        debug!(
+            "Ignoring out-of-order Verack from peer {:?} (no prior Version / already connected)",
+            &peer_id[..4]
+        );
+        return Ok(());
     }
 
     // Register outbound peers for Dandelion++ relay selection
@@ -770,7 +813,8 @@ mod handler_tests {
         let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
 
         let payload = vec![0u8; 257]; // > MAX_CHAINWORK_MSG_SIZE (256)
-        handle_chain_work(peer_id, &payload, &peers, &sync)
+        let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        handle_chain_work(peer_id, &payload, &peers, &sync, &chain)
             .await
             .unwrap();
 
@@ -791,7 +835,8 @@ mod handler_tests {
             best_hash: tip,
         })
         .unwrap();
-        handle_chain_work(peer_id, &payload, &peers, &sync)
+        let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        handle_chain_work(peer_id, &payload, &peers, &sync, &chain)
             .await
             .unwrap();
 
@@ -808,7 +853,8 @@ mod handler_tests {
         let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
 
         let payload = vec![0u8; 3]; // <= 256 but not a valid ChainWorkMessage
-        handle_chain_work(peer_id, &payload, &peers, &sync)
+        let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        handle_chain_work(peer_id, &payload, &peers, &sync, &chain)
             .await
             .unwrap();
 
@@ -877,8 +923,10 @@ mod handler_tests {
         handle_verack(peer_id, MAGIC, &peers, &senders, &dand, &sync, &chain)
             .await
             .unwrap();
-        assert!(srx.try_recv().is_ok(), "GetAddr re-sent on replay");
-        assert!(srx.try_recv().is_err(), "no second GetHeaders on replay");
+        assert!(
+            srx.try_recv().is_err(),
+            "replayed Verack on an already-Connected peer is a no-op (nothing re-sent)"
+        );
         assert!(sync.read().await.headers_request_pending());
     }
 }

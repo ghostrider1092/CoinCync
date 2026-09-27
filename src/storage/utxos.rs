@@ -534,6 +534,49 @@ impl UtxoSet {
         self.total_outputs_ever
     }
 
+    /// A deterministic commitment over the transparent UTXO set — the canonical
+    /// output catalog plus the spent key-image (nullifier) set.
+    ///
+    /// OBSERVABILITY ONLY (gap #3, slice 1): not a consensus value, not in the
+    /// block header, not enforced anywhere. A light wallet may cross-check it
+    /// against a trusted source. It is deterministic across nodes on the same
+    /// tip because it iterates the `locator_index`/`locator_outputs` catalog in
+    /// canonical `(height, OutputKey)` BTree order (insertion-order-independent,
+    /// spend-surviving) and sorts the unordered key-image set before hashing.
+    ///
+    /// Two domain-separated sub-digests (outputs, key images) are combined so
+    /// neither set can be silently substituted for the other.
+    pub fn commitment_hash(&self) -> Hash {
+        // Output-set digest: canonical catalog in (height, OutputKey) order.
+        let mut out_hasher = blake3::Hasher::new();
+        for keys in self.locator_index.values() {
+            for key in keys {
+                let (tx_hash, index) = key;
+                out_hasher.update(tx_hash.as_bytes());
+                out_hasher.update(&[*index]);
+                if let Some(lo) = self.locator_outputs.get(key) {
+                    out_hasher.update(lo.public_key.as_bytes());
+                    out_hasher.update(&lo.commitment);
+                }
+            }
+        }
+        let output_digest = out_hasher.finalize();
+
+        // Key-image digest: the HashSet is unordered, so collect + sort first.
+        let mut kis: Vec<[u8; 32]> = self.key_images.iter().map(|ki| *ki.as_bytes()).collect();
+        kis.sort_unstable();
+        let mut ki_hasher = blake3::Hasher::new();
+        for ki in &kis {
+            ki_hasher.update(ki);
+        }
+        let ki_digest = ki_hasher.finalize();
+
+        let mut combined = [0u8; 64];
+        combined[..32].copy_from_slice(output_digest.as_bytes());
+        combined[32..].copy_from_slice(ki_digest.as_bytes());
+        crate::primitives::hash_domain(b"COINCYNC_UTXO_COMMITMENT_v1", &combined)
+    }
+
     /// Number of outputs disconnected via reorg over the lifetime of this
     /// UtxoSet. L2 (audit fix): added so callers needing "current outputs"
     /// can compute it via subtraction without relying on the monotonic
@@ -889,6 +932,56 @@ mod tests {
         let (hash, output) = make_test_output(id, lock_height);
         utxos.add_output(hash, 0, output, height);
         hash
+    }
+
+    // ── gap #3: UTXO-set commitment determinism ─────────────────────────────
+
+    #[test]
+    fn commitment_hash_is_order_independent() {
+        // Two nodes that ingested the same outputs in different orders must agree
+        // — the whole point of a cross-node commitment.
+        let mut a = UtxoSet::new();
+        add_test_output(&mut a, 1, 10, None);
+        add_test_output(&mut a, 2, 11, None);
+        add_test_output(&mut a, 3, 12, None);
+        let mut b = UtxoSet::new();
+        add_test_output(&mut b, 3, 12, None);
+        add_test_output(&mut b, 1, 10, None);
+        add_test_output(&mut b, 2, 11, None);
+        assert_eq!(a.commitment_hash(), b.commitment_hash());
+    }
+
+    #[test]
+    fn commitment_hash_changes_on_output_then_keyimage() {
+        let mut set = UtxoSet::new();
+        let empty = set.commitment_hash();
+        add_test_output(&mut set, 1, 10, None);
+        let after_output = set.commitment_hash();
+        assert_ne!(after_output, empty, "adding an output must change the commitment");
+        // A spent key image is part of what a wallet trusts; it must move the hash.
+        set.mark_key_image_spent(KeyImage::from_bytes([9u8; 32]));
+        assert_ne!(
+            set.commitment_hash(),
+            after_output,
+            "marking a key image spent must change the commitment"
+        );
+    }
+
+    #[test]
+    fn commitment_hash_round_trips_on_output_add_remove() {
+        // Connect-then-disconnect (reorg) must return the commitment to its prior
+        // value — output add/remove are exact inverses in the catalog.
+        let mut set = UtxoSet::new();
+        add_test_output(&mut set, 1, 10, None);
+        let base = set.commitment_hash();
+        let h = add_test_output(&mut set, 2, 11, None);
+        assert_ne!(set.commitment_hash(), base);
+        set.remove_output(&h, 0);
+        assert_eq!(
+            set.commitment_hash(),
+            base,
+            "disconnecting the output must restore the commitment"
+        );
     }
 
     /// H2 (cross-node divergence + frozen funds): a colliding coinbase that

@@ -121,8 +121,10 @@ impl Miner {
         }
     }
 
-    /// Fill from real rig + node data (solo mining). `reward` (CYNC per block,
-    /// 0 = unknown) turns accepted blocks into an estimated-earned figure. New
+    /// Fill from real rig + node data (solo mining). `reward` is the CYNC-per-block
+    /// override from `--reward`; when it is `0` (the default) the per-block reward is
+    /// derived automatically from the node's own latest block reward, so the earned
+    /// estimate is populated without the operator having to pass `--reward`. New
     /// block-count increments push ledger rows; the first real round primes the
     /// counters silently so a rig that already found blocks doesn't spam.
     pub fn apply_real(&mut self, d: &crate::feed::RealData, reward: f64, clock: String) {
@@ -148,8 +150,21 @@ impl Miner {
         self.blocks_accepted = d.blocks_accepted;
         self.blocks_rejected = d.blocks_rejected;
         self.net_hashrate = d.net_hashrate;
-        self.reward = reward;
-        self.coins_earned = d.blocks_accepted as f64 * reward;
+        // Per-block reward: an explicit `--reward` (CYNC) wins; otherwise derive it
+        // from the node's OWN latest block reward so the earned estimate is never a
+        // misleading 0.0000 next to a nonzero accepted-block count (which reads as a
+        // bug). `recent_blocks` is populated whenever the node answered, so this
+        // needs no extra RPC. Falls back to 0 only when the node is unreachable.
+        const ATOMIC_PER_CYNC: f64 = 1_000_000_000_000.0; // 1 CYNC = 1e12 atomic
+        let node_reward = d
+            .recent_blocks
+            .iter()
+            .max_by_key(|b| b.height)
+            .map(|b| b.reward_atomic as f64 / ATOMIC_PER_CYNC)
+            .unwrap_or(0.0);
+        let effective_reward = if reward > 0.0 { reward } else { node_reward };
+        self.reward = effective_reward;
+        self.coins_earned = d.blocks_accepted as f64 * effective_reward;
 
         self.net_height = d.net_height;
         self.net_diff = d.net_diff;
@@ -271,5 +286,76 @@ impl Miner {
 
         let acc = self.accepted.max(1) as f64;
         self.effort_pct = 100.0 * (acc / (acc + self.rejected as f64 + self.stale as f64));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feed::{ChainBlock, RealData};
+
+    fn block(height: u64, reward_atomic: u64) -> ChainBlock {
+        ChainBlock {
+            height,
+            ts: 0,
+            difficulty: 0.0,
+            reward_atomic,
+            tx_count: 1,
+            size: 0,
+            hash: String::new(),
+        }
+    }
+
+    fn data(blocks_accepted: u64, recent: Vec<ChainBlock>) -> RealData {
+        let mut d = RealData::default();
+        d.ok_rig = true;
+        d.blocks_accepted = blocks_accepted;
+        d.recent_blocks = recent;
+        d
+    }
+
+    /// The bug this fixes: launched WITHOUT `--reward`, the dashboard showed
+    /// 0.0000 CYNC next to a nonzero accepted-block count, which reads as a bug.
+    /// It must instead derive the reward from the node's OWN latest block.
+    #[test]
+    fn reward_auto_derives_from_node_latest_block_when_not_overridden() {
+        // Two blocks; the higher-height one (the real current reward) must win.
+        let d = data(
+            10,
+            vec![block(100, 49_000_000_000_000), block(101, 49_954_021_038_617)],
+        );
+        let mut m = Miner::new("rig-01", 8);
+        m.apply_real(&d, 0.0, "00:00:00".into()); // no --reward
+        assert!(
+            (m.reward - 49.954_021_038_617).abs() < 1e-6,
+            "reward auto-derived from node latest block, got {}",
+            m.reward
+        );
+        assert!(
+            (m.coins_earned - 499.540_210_386_17).abs() < 1e-3,
+            "10 blocks must estimate ~499.5 CYNC, not 0; got {}",
+            m.coins_earned
+        );
+    }
+
+    /// An explicit `--reward` is still honoured as an override.
+    #[test]
+    fn explicit_reward_flag_overrides_node_value() {
+        let d = data(4, vec![block(101, 49_954_021_038_617)]);
+        let mut m = Miner::new("rig-01", 8);
+        m.apply_real(&d, 50.0, "00:00:00".into());
+        assert_eq!(m.reward, 50.0);
+        assert_eq!(m.coins_earned, 200.0);
+    }
+
+    /// Node unreachable (no recent blocks) and no override → reward is honestly
+    /// unknown (0), not a fabricated figure.
+    #[test]
+    fn reward_zero_when_node_unreachable_and_no_override() {
+        let d = data(7, vec![]);
+        let mut m = Miner::new("rig-01", 8);
+        m.apply_real(&d, 0.0, "00:00:00".into());
+        assert_eq!(m.reward, 0.0);
+        assert_eq!(m.coins_earned, 0.0);
     }
 }
