@@ -1093,6 +1093,11 @@ impl Mempool {
         self.transactions.len()
     }
 
+    /// The configured maximum mempool size in bytes (the eviction cap).
+    pub fn max_size(&self) -> usize {
+        self.max_size
+    }
+
     /// Compute fee-per-byte percentiles from current mempool contents.
     ///
     /// Returns a map of percentile → fee_per_byte (e.g., p25, p50, p75, p90).
@@ -1723,6 +1728,89 @@ impl SharedMempool {
         tokio::task::spawn_blocking(move || self.get_block_transactions(max_size, max_count))
             .await
             .unwrap_or_default()
+    }
+}
+
+/// Pure mempool-pressure signal (testable in isolation): what percent full the
+/// mempool is, and whether that reaches the warning threshold. Returns
+/// `Some((pct, message))` at/above the threshold.
+fn mempool_pressure(current_bytes: usize, max_bytes: usize, warn_pct: u64) -> Option<(u64, String)> {
+    if max_bytes == 0 {
+        return None;
+    }
+    let pct = (current_bytes as u128 * 100 / max_bytes as u128) as u64;
+    if pct >= warn_pct {
+        Some((pct, format!("mempool {pct}% full ({current_bytes}/{max_bytes} bytes)")))
+    } else {
+        None
+    }
+}
+
+/// A [`SecurityDetail`](crate::security::SecurityDetail) over the mempool — the
+/// flood/DoS surface. The mempool is node-LOCAL policy, not consensus, so every
+/// alert is **operational** (page, never halt): a false positive must not wedge
+/// the chain. Read-only, O(1).
+pub struct MempoolSecurityDetail<'a> {
+    mempool: &'a Mempool,
+    warn_pct: u64,
+}
+
+impl<'a> MempoolSecurityDetail<'a> {
+    /// Warn when the mempool reaches this percent of its byte cap.
+    pub const DEFAULT_WARN_PCT: u64 = 90;
+
+    pub fn new(mempool: &'a Mempool) -> Self {
+        Self { mempool, warn_pct: Self::DEFAULT_WARN_PCT }
+    }
+
+    pub fn with_warn_pct(mempool: &'a Mempool, warn_pct: u64) -> Self {
+        Self { mempool, warn_pct }
+    }
+}
+
+impl crate::security::SecurityDetail for MempoolSecurityDetail<'_> {
+    fn label(&self) -> &'static str {
+        "mempool"
+    }
+
+    fn sweep(&self) -> crate::security::SecurityReport {
+        use crate::security::{SecurityReport, Severity};
+        let mut r = SecurityReport::clean();
+        if let Some((pct, msg)) =
+            mempool_pressure(self.mempool.size(), self.mempool.max_size(), self.warn_pct)
+        {
+            // Operational only — the mempool is not consensus state.
+            let sev = if pct >= 100 { Severity::Critical } else { Severity::Warning };
+            r.raise_operational("mempool", sev, "mempool-pressure", msg);
+        }
+        r
+    }
+}
+
+#[cfg(test)]
+mod security_detail_tests {
+    use super::*;
+
+    #[test]
+    fn mempool_pressure_pure_signal() {
+        assert!(super::mempool_pressure(270, 300, 90).is_some(), "90% full warns");
+        assert!(super::mempool_pressure(100, 300, 90).is_none(), "33% full is quiet");
+        assert!(super::mempool_pressure(0, 0, 90).is_none(), "empty cap → no divide-by-zero");
+        let (pct, _) = super::mempool_pressure(300, 300, 90).unwrap();
+        assert_eq!(pct, 100);
+    }
+
+    #[test]
+    fn mempool_detail_is_operational_never_consensus() {
+        use crate::security::SecurityDetail;
+        // A tiny cap with nothing in it → clean.
+        let mp = Mempool::with_max_size(1000);
+        let report = MempoolSecurityDetail::new(&mp).sweep();
+        assert!(report.is_clean());
+        // Even a full mempool (simulated via warn_pct 0) is operational, never a
+        // consensus halt — the mempool is node-local.
+        let report2 = MempoolSecurityDetail::with_warn_pct(&mp, 0).sweep();
+        assert!(!report2.has_consensus_halt(), "mempool alerts never halt consensus");
     }
 }
 

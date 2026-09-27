@@ -80,6 +80,72 @@ mod tests {
         assert!(!stats.in_tail);
     }
 
+    /// Independent reference: the naive inclusive sum of per-height
+    /// rewards, exactly the recompute `tests/invariant_pipeline.rs` and
+    /// `tests/common/simkit.rs` run against `total_supply`.
+    fn ref_cumulative(tip: u64) -> u128 {
+        (0..=tip)
+            .map(|h| crate::emission::base_reward(h).as_atomic() as u128)
+            .sum()
+    }
+
+    #[test]
+    fn cumulative_emission_at_genesis_is_one_reward() {
+        // tip 0 => just the genesis block's reward (50 CYNC).
+        assert_eq!(
+            cumulative_emission(0),
+            50 * crate::constants::COIN as u128,
+            "cumulative emission at tip 0 must equal the genesis reward"
+        );
+    }
+
+    #[test]
+    fn cumulative_emission_matches_naive_sum() {
+        // Exact agreement with the block-by-block inclusive sum across a
+        // range of testnet-scale tips. This is the invariant the guard
+        // reconciles `total_supply` against, so exactness (no estimator
+        // drift) is what keeps the guard free of false positives.
+        for &tip in &[0u64, 1, 2, 10, 100, 999, 2_500, 5_000] {
+            assert_eq!(
+                cumulative_emission(tip),
+                ref_cumulative(tip),
+                "cumulative_emission({tip}) diverged from the naive inclusive sum"
+            );
+        }
+    }
+
+    #[test]
+    fn cumulative_emission_is_strictly_increasing_in_the_distribution_phase() {
+        // Every block in the distribution phase pays a positive reward, so
+        // the cumulative sum strictly increases with the tip height.
+        let mut prev = cumulative_emission(0);
+        for tip in [1u64, 50, 500, 5_000] {
+            let cur = cumulative_emission(tip);
+            assert!(
+                cur > prev,
+                "cumulative_emission must increase: tip {tip} gave {cur} <= {prev}"
+            );
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn cumulative_emission_equals_total_supply_accounting_identity() {
+        // The block-connect path maintains total_supply as
+        // `+= calculate_block_reward(height)` per block, which is exactly
+        // this inclusive sum. Prove the two definitions coincide for a
+        // simulated tip, mirroring the runtime guard's comparison.
+        let tip = 1_234u64;
+        let simulated_total_supply: u128 = (0..=tip)
+            .map(|h| crate::emission::calculate_block_reward(h).as_atomic() as u128)
+            .sum();
+        assert_eq!(
+            cumulative_emission(tip),
+            simulated_total_supply,
+            "cumulative_emission must equal the running total_supply the chain maintains"
+        );
+    }
+
     #[test]
     fn test_supply_commitment_deterministic() {
         let stats = SupplyStats::new(
@@ -166,6 +232,63 @@ mod tests {
             "in_tail is not hashed; digest must be unchanged"
         );
     }
+}
+
+/// Exact cumulative **gross** emission through `tip_height`, inclusive:
+/// `Σ_{h=0}^{tip_height} base_reward(h)` in atomic units, saturating.
+///
+/// This is the independent recompute of the chain's `total_supply`
+/// counter. The block-connect path maintains `total_supply` as exactly
+/// this running sum (`total_supply += calculate_block_reward(height)` on
+/// connect, `-=` on disconnect — see `chain.rs`), so for an honest chain
+/// `total_supply == cumulative_emission(tip)` holds bit-for-bit.
+///
+/// Reconciling the two — see
+/// [`crate::security::supply::supply_reconciliation`] — turns the
+/// previously *test-only* supply-conservation invariant
+/// (`tests/invariant_pipeline.rs`, `tests/common/simkit.rs`) into a
+/// **live** guard and an auditor-verifiable RPC value. It catches drift
+/// in the incremental `+=` / `-=` bookkeeping across connects,
+/// disconnects, reorgs, and restart replay — i.e. a recorded supply that
+/// diverges from the deterministic emission schedule.
+///
+/// It does **NOT** re-derive value from the cryptography: a block that
+/// emits exactly its scheduled reward while the *coins themselves* are
+/// inflated by a balance/range proof that verifies-but-shouldn't is
+/// invisible to this check. That residual is the external audit's job
+/// (see `docs/design/cip-security-threat-model.md`). It also shares the
+/// `base_reward` primitive with the counter it reconciles, so a bug
+/// *inside* `base_reward` is not caught — only accounting-path drift is.
+///
+/// Cost: O(min(tip_height, tail-onset)). `base_reward` is monotone
+/// non-increasing and floored at `TAIL_EMISSION`; once it reaches that
+/// floor every further block contributes exactly `TAIL_EMISSION`, summed
+/// in O(1). Intended to be called with the real chain tip (bounded by
+/// chain length), not with arbitrary caller-supplied heights.
+pub fn cumulative_emission(tip_height: u64) -> u128 {
+    use crate::constants::TAIL_EMISSION;
+
+    let tail = TAIL_EMISSION as u128;
+    let mut total: u128 = 0;
+    let mut h: u64 = 0;
+    loop {
+        let reward = crate::emission::base_reward(h).as_atomic();
+        // Tail fast-path: `base_reward` is monotone non-increasing and
+        // floored at TAIL_EMISSION (curve.rs §3/§4). Reaching the floor
+        // is absorbing — the estimated supply only grows — so every
+        // remaining block `h..=tip_height` contributes exactly the tail.
+        if reward == TAIL_EMISSION {
+            let remaining_inclusive = (tip_height - h) as u128 + 1;
+            total = total.saturating_add(tail.saturating_mul(remaining_inclusive));
+            break;
+        }
+        total = total.saturating_add(reward as u128);
+        if h == tip_height {
+            break;
+        }
+        h += 1;
+    }
+    total
 }
 
 /// Calculate Pedersen commitment to supply (for auditing)

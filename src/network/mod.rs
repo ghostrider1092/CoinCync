@@ -22,6 +22,8 @@ pub mod firework;
 pub mod framing;
 pub mod orphan;
 pub mod peer;
+/// Peer-set security detail (eclipse/isolation surface). Operational-only.
+pub mod peer_security;
 pub mod proxy;
 pub mod relay_score;
 pub mod scoring;

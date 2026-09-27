@@ -114,7 +114,6 @@
 //!   `build_anon_set_contains_real_idx_when_pool_sufficient`.
 
 use curve25519_dalek::{
-    constants::RISTRETTO_BASEPOINT_POINT as G,
     ristretto::{CompressedRistretto, RistrettoPoint},
     scalar::Scalar,
     traits::Identity,
@@ -132,29 +131,18 @@ use crate::error::{Error, Result};
 
 /// Value generator `G` (Ristretto base).
 #[inline]
+// Generators G/H/K now come from the shared single-source-of-truth module
+// (crypto/spark_generators.rs), so the commitment and the Groth-Kohlweiss
+// one-of-many proof use the identical basis. Points are unchanged (same
+// basepoint + same NUMS domain tags).
 fn gen_g() -> RistrettoPoint {
-    G
+    crate::crypto::spark_generators::gen_g()
 }
-
-/// Serial generator `H`, deterministic but independent of `G`.
-/// Derived with a nothing-up-my-sleeve hash.
 fn gen_h() -> RistrettoPoint {
-    let mut hasher = Sha3_512::new();
-    hasher.update(b"COINCYNC_SPARK_GEN_H_v1");
-    let digest = hasher.finalize();
-    let mut wide = [0u8; 64];
-    wide.copy_from_slice(&digest);
-    RistrettoPoint::from_uniform_bytes(&wide)
+    crate::crypto::spark_generators::gen_h()
 }
-
-/// Blinding generator `K`, independent of `G` and `H`.
 fn gen_k() -> RistrettoPoint {
-    let mut hasher = Sha3_512::new();
-    hasher.update(b"COINCYNC_SPARK_GEN_K_v1");
-    let digest = hasher.finalize();
-    let mut wide = [0u8; 64];
-    wide.copy_from_slice(&digest);
-    RistrettoPoint::from_uniform_bytes(&wide)
+    crate::crypto::spark_generators::gen_k()
 }
 
 /// Commit `(value, serial, randomness)` as `C = v*G + s*H + r*K`.
