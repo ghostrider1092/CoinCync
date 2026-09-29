@@ -33,9 +33,9 @@
 //!   THREAT: pre-fix, entries were inserted per peer but never removed on
 //!   disconnect, so a long-running node with peer churn leaked memory
 //!   unboundedly (P5-N3).
-//!   TESTS: (gap — no test asserts the tracker map is actually pruned/bounded
-//!   over churn; `processor_continues_after_a_bad_message` exercises the
-//!   surrounding rate-limit/scoring path but not the prune cadence itself).
+//!   TESTS: `prune_rate_trackers_drops_only_absent_peers` (the extracted prune
+//!   helper; the 1000-msg cadence that calls it is still driven only indirectly
+//!   by `processor_continues_after_a_bad_message`).
 //! - **§5 `spawn_message_processor` rate-limit / misbehavior scoring** —
 //!   INVARIANT: a peer that exceeds its per-message-type rate limit has the
 //!   offending message dropped (not processed) and is scored
@@ -200,6 +200,18 @@ pub(super) struct MessageProcessorContext {
     pub magic: [u8; 4],
 }
 
+/// Prune rate-tracker entries whose peer is no longer connected (P5-N3, §4):
+/// retain only trackers for which `is_live` returns true. Extracted as a pure
+/// helper so the memory bound can be unit-tested without driving the async
+/// processor; the processor calls it every `RATE_PRUNE_EVERY` messages with
+/// `is_live = |pid| processor_peers.contains_key(pid)`.
+fn prune_rate_trackers<V, F: Fn(&super::super::peer::PeerId) -> bool>(
+    rate_trackers: &mut std::collections::HashMap<super::super::peer::PeerId, V>,
+    is_live: F,
+) {
+    rate_trackers.retain(|pid, _| is_live(pid));
+}
+
 /// The processor exits as soon as the node runtime is cancelled or every
 /// producer closes the channel.
 pub(super) fn spawn_message_processor(
@@ -256,7 +268,9 @@ pub(super) fn spawn_message_processor(
                     // P5-N3: periodic prune of dead peers.
                     rate_prune_ctr = rate_prune_ctr.wrapping_add(1);
                     if rate_prune_ctr.is_multiple_of(RATE_PRUNE_EVERY) {
-                        rate_trackers.retain(|pid, _| processor_peers.contains_key(pid));
+                        prune_rate_trackers(&mut rate_trackers, |pid| {
+                            processor_peers.contains_key(pid)
+                        });
                     }
                     // Rate-limit check (before expensive processing)
                     let tracker = rate_trackers
@@ -310,6 +324,26 @@ pub(super) fn spawn_message_processor(
 mod runtime_tests {
     use super::*;
     use crate::chain::Blockchain;
+
+    // §4 P5-N3: the rate-tracker map keeps entries for live peers and drops any
+    // whose peer is no longer connected, bounding it to roughly the live set.
+    #[test]
+    fn prune_rate_trackers_drops_only_absent_peers() {
+        let (live_a, live_b, gone): (PeerId, PeerId, PeerId) =
+            ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let mut trackers: std::collections::HashMap<PeerId, u8> =
+            std::collections::HashMap::new();
+        trackers.insert(live_a, 0);
+        trackers.insert(live_b, 0);
+        trackers.insert(gone, 0);
+
+        let live = [live_a, live_b];
+        prune_rate_trackers(&mut trackers, |pid| live.contains(pid));
+
+        assert_eq!(trackers.len(), 2, "only live peers' trackers remain");
+        assert!(trackers.contains_key(&live_a) && trackers.contains_key(&live_b));
+        assert!(!trackers.contains_key(&gone), "the disconnected peer's tracker is pruned");
+    }
     use crate::network::protocol::MessageType;
     use crate::primitives::Hash;
     use std::net::SocketAddr;
