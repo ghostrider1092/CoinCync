@@ -372,6 +372,12 @@ mod recovery;
 /// apply_lock, so lock scope is unchanged.
 mod events;
 
+/// Block-application helpers (issue #108). First `add_block` decomposition
+/// slice: the pre-application classifier (`classify_incoming`). Pure reads +
+/// the orphan-event record; called under `apply_lock` by `add_block` exactly
+/// where the inline checks ran, so lock scope is unchanged.
+mod apply;
+
 /// Blockchain state machine with interior mutability
 pub struct Blockchain {
     /// Coarse serialization lock for the ENTIRE block-application operation
@@ -1217,32 +1223,15 @@ impl Blockchain {
         let _state_update = self.begin_state_update();
         let hash = block.hash();
 
-        // Check if already known
-        {
-            let inner = self.inner.read();
-            if inner.blocks.contains_key(&hash) {
-                return Ok(BlockStatus::AlreadyKnown);
-            }
-        }
-        if let Some(ref db) = self.db {
-            if db.blocks.contains(&hash)? {
-                return Ok(BlockStatus::AlreadyKnown);
-            }
-        }
-
-        // Check parent exists
+        // Cheap pre-checks (already-known / orphan) + parent resolution, run
+        // under apply_lock exactly where the inline checks used to (issue #108,
+        // see chain/apply.rs::classify_incoming — no lock-lifetime change).
+        let parent = match self.classify_incoming(&block, &hash)? {
+            apply::IncomingClass::AlreadyKnown => return Ok(BlockStatus::AlreadyKnown),
+            apply::IncomingClass::Orphan => return Ok(BlockStatus::Orphan),
+            apply::IncomingClass::Proceed { parent } => parent,
+        };
         let parent_hash = block.header.prev_hash;
-        let parent = self.get_block(&parent_hash);
-
-        if parent.is_none() && block.header.height > 0 {
-            self.record_event(
-                ChainEventType::OrphanReceived,
-                block.header.height,
-                &hash,
-                serde_json::json!({}),
-            );
-            return Ok(BlockStatus::Orphan);
-        }
 
         // Validate block height
         let expected_height = if block.header.height == 0 {
