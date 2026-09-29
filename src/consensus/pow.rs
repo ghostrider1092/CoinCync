@@ -515,10 +515,20 @@ mod randomx_cache {
         seed: &[u8; 32],
         input: &[u8],
     ) -> std::result::Result<[u8; 32], crate::error::Error> {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_secs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_secs(),
+            Err(_) => {
+                // Clock is before the Unix epoch (misconfigured). A zero timestamp
+                // would falsely and *permanently* satisfy `now_secs < retry_at`,
+                // wedging PoW in a fake backoff — clear any pending backoff and
+                // proceed rather than throttle forever.
+                tracing::warn!(
+                    "system clock is before UNIX_EPOCH; treating RandomX backoff as inactive"
+                );
+                RETRY_AFTER.store(0, Ordering::Relaxed);
+                0
+            }
+        };
         let retry_at = RETRY_AFTER.load(Ordering::Relaxed);
         if retry_at != 0 && now_secs < retry_at {
             return Err(crate::error::Error::Internal(format!(
@@ -594,10 +604,20 @@ mod randomx_cache {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_secs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_secs(),
+            Err(_) => {
+                // Clock is before the Unix epoch (misconfigured). A zero timestamp
+                // would falsely and *permanently* satisfy `now_secs < retry_at`,
+                // wedging PoW in a fake backoff — clear any pending backoff and
+                // proceed rather than throttle forever.
+                tracing::warn!(
+                    "system clock is before UNIX_EPOCH; treating RandomX backoff as inactive"
+                );
+                RETRY_AFTER.store(0, Ordering::Relaxed);
+                0
+            }
+        };
         let retry_at = RETRY_AFTER.load(Ordering::Relaxed);
         if retry_at != 0 && now_secs < retry_at {
             return Err(crate::error::Error::Internal(format!(
