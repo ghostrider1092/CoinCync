@@ -444,7 +444,7 @@ pub const SHIELDED_REGTEST_ACTIVATION_HEIGHT: u64 = 100;
 /// testnet/mainnet (see [`shielded_activation_height`], which returns `u64::MAX`
 /// for every non-regtest, non-beta network). The beta network has no economic
 /// value, so activating unaudited shielded consensus there is contained.
-pub const SHIELDED_BETA_ACTIVATION_HEIGHT: u64 = 100;
+pub const SHIELDED_BETA_ACTIVATION_HEIGHT: u64 = 5;
 
 /// Network-scoped shielded activation height. **Regtest** activates at
 /// [`SHIELDED_REGTEST_ACTIVATION_HEIGHT`]; **testnet and mainnet stay
