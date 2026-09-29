@@ -921,7 +921,17 @@ impl Blockchain {
         // FINALITY: Refuse to rollback past a checkpoint.
         // Checkpoints are final — no amount of hashpower can undo them.
         if let Some(ref db) = self.db {
-            if let Ok(Some(state)) = db.state.get_state() {
+            let state_res = db.state.get_state();
+            if let Err(ref e) = state_res {
+                // Don't let a DB read error silently disable the finality-rollback
+                // guard — surface it loudly. (Hardcoded checkpoints and the
+                // fork-point finality floor still apply independently.)
+                tracing::error!(
+                    "finality guard: chain-state read failed while checking rollback to {}: {}",
+                    target_height, e
+                );
+            }
+            if let Ok(Some(state)) = state_res {
                 if target_height < state.last_checkpoint {
                     tracing::error!(
                         "FINALITY VIOLATION: attempted rollback to {} but checkpoint at {} is final",
@@ -1628,7 +1638,16 @@ impl Blockchain {
 
                     // Compute last_checkpoint from DB if we didn't just set one
                     if last_checkpoint_height == 0 {
-                        if let Ok(Some(prev_state)) = db.state.get_state() {
+                        let prev_res = db.state.get_state();
+                        if let Err(ref e) = prev_res {
+                            // A DB read error here silently leaves last_checkpoint
+                            // at 0 (weaker tracking); log rather than swallow.
+                            tracing::warn!(
+                                "checkpoint tracking: chain-state read failed at height {}, leaving last_checkpoint=0: {}",
+                                block.header.height, e
+                            );
+                        }
+                        if let Ok(Some(prev_state)) = prev_res {
                             last_checkpoint_height = prev_state.last_checkpoint;
                         }
                     }
@@ -1723,7 +1742,28 @@ impl Blockchain {
                             .first()
                             .filter(|tx| tx.is_coinbase())
                             .map_or(&[][..], |tx| &tx.extra);
-                        let _ = rf.on_accepted_block(block.header.height, coinbase_extra);
+                        // The tracker's soft-final state is updated inside
+                        // on_accepted_block regardless of the returned outcome; we
+                        // only need to surface the diagnostic variants (previously
+                        // dropped with `let _ =`) rather than silently ignore a
+                        // malformed/rejected attestation during the ENABLE phase.
+                        use crate::consensus::rolling_finality::OnBlockOutcome;
+                        match rf.on_accepted_block(block.header.height, coinbase_extra) {
+                            OnBlockOutcome::Malformed(e) => tracing::warn!(
+                                "finality: malformed CIP-009.D attestation in block {}: {:?}",
+                                block.header.height, e
+                            ),
+                            OnBlockOutcome::Rejected(e) => tracing::warn!(
+                                "finality: attestation rejected in block {}: {:?}",
+                                block.header.height, e
+                            ),
+                            OnBlockOutcome::NewlyFinalized { height, .. } => tracing::info!(
+                                "finality: soft-final height advanced to {} (via block {})",
+                                height, block.header.height
+                            ),
+                            // NoAttestation (normal in ENABLE) / Recorded: nothing to surface.
+                            OnBlockOutcome::NoAttestation | OnBlockOutcome::Recorded => {}
+                        }
                     }
                 }
 
