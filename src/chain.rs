@@ -4333,10 +4333,9 @@ mod generation_tests {
 /// Create the genesis block for a specific network (runtime selection).
 pub fn create_genesis_block_for(network: NetworkType) -> Block {
     match network {
-        // BETA: reuses testnet genesis for now — see TODO(beta-genesis) in pow.rs.
-        NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => {
-            crate::testnet::testnet_genesis()
-        }
+        NetworkType::Testnet | NetworkType::Regtest => crate::testnet::testnet_genesis(),
+        // Beta: testnet genesis with BETA_MAGIC swapped in → distinct hash.
+        NetworkType::Beta => crate::beta::beta_genesis(),
         NetworkType::Mainnet => crate::mainnet::mainnet_genesis(),
     }
 }
