@@ -322,6 +322,7 @@ async fn main() {
         "mainnet" => Network::Mainnet,
         "testnet" => Network::Testnet,
         "regtest" => Network::Regtest,
+        "beta" => Network::Beta,
         _ => Network::Testnet,
     };
 
@@ -351,6 +352,7 @@ async fn main() {
                 Network::Mainnet => "mainnet",
                 Network::Testnet => "testnet",
                 Network::Regtest => "regtest",
+                Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
             let expected_genesis = match network {
@@ -392,6 +394,7 @@ async fn main() {
                 Network::Mainnet => "mainnet",
                 Network::Testnet => "testnet",
                 Network::Regtest => "regtest",
+                Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
 
@@ -520,6 +523,7 @@ async fn main() {
                 Network::Mainnet => "mainnet",
                 Network::Testnet => "testnet",
                 Network::Regtest => "regtest",
+                Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
             let genesis = match network {
@@ -729,6 +733,7 @@ fn print_genesis_hash(network: Network) {
             Network::Mainnet => "mainnet",
             Network::Testnet => "testnet",
             Network::Regtest => "testnet",
+            Network::Beta => "testnet",
         }
     );
 }
@@ -1091,6 +1096,7 @@ async fn show_status(network: Network, data_dir: &PathBuf) {
         Network::Mainnet => "mainnet",
         Network::Testnet => "testnet",
         Network::Regtest => "regtest",
+        Network::Beta => "beta",
     });
 
     match Database::open(&db_path) {
@@ -1146,6 +1152,14 @@ async fn start_node(
 ) -> coincync::Result<()> {
     info!("CoinCync 1.0 node starting");
     info!("Network:  {:?}", network);
+    if matches!(network, Network::Beta) {
+        tracing::warn!("╔════════════════════════════════════════════════════════════════╗");
+        tracing::warn!("║  BETA CHANNEL — EXPERIMENTAL, UNAUDITED consensus features are    ║");
+        tracing::warn!("║  ACTIVE on this network. Coins have NO value. It is isolated by   ║");
+        tracing::warn!("║  its own magic bytes and CANNOT affect testnet or mainnet.        ║");
+        tracing::warn!("║  Opt-in testing only — do NOT use for anything real.             ║");
+        tracing::warn!("╚════════════════════════════════════════════════════════════════╝");
+    }
     info!("Data dir: {:?}", data_dir);
 
     // #132/#186: pick the RandomX mode default before any validation/PoW. EVERY
@@ -1381,6 +1395,7 @@ async fn start_node(
         Network::Mainnet => "mainnet",
         Network::Testnet => "testnet",
         Network::Regtest => "regtest",
+        Network::Beta => "beta",
     });
     // Crash-recovery: if a prior snapshot import was interrupted (crash after
     // the operator's chaindata was moved to a .pre-snapshot-* backup but before

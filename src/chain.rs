@@ -2035,7 +2035,9 @@ impl Blockchain {
             crate::config::NetworkType::Mainnet => {
                 crate::mainnet::verify_checkpoint(block.header.height.as_u64(), &hash)
             }
-            crate::config::NetworkType::Testnet | crate::config::NetworkType::Regtest => {
+            crate::config::NetworkType::Testnet
+            | crate::config::NetworkType::Regtest
+            | crate::config::NetworkType::Beta => {
                 crate::testnet::verify_checkpoint(block.header.height.as_u64(), &hash)
             }
         };
@@ -4331,7 +4333,10 @@ mod generation_tests {
 /// Create the genesis block for a specific network (runtime selection).
 pub fn create_genesis_block_for(network: NetworkType) -> Block {
     match network {
-        NetworkType::Testnet | NetworkType::Regtest => crate::testnet::testnet_genesis(),
+        // BETA: reuses testnet genesis for now — see TODO(beta-genesis) in pow.rs.
+        NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => {
+            crate::testnet::testnet_genesis()
+        }
         NetworkType::Mainnet => crate::mainnet::mainnet_genesis(),
     }
 }

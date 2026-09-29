@@ -138,7 +138,9 @@ impl BootstrapConfig {
         let (dns_seeds, seed_nodes): (&[&str], &[&str]) = match network {
             Network::Mainnet => (MAINNET_DNS_SEEDS, MAINNET_FALLBACK),
             Network::Testnet => (TESTNET_DNS_SEEDS, TESTNET_SEED_NODES),
-            Network::Regtest => (&[], &[]),
+            // Beta: no seed nodes yet (opt-in beta users pass --add-peer / a beta
+            // seed once one is deployed). TODO(beta-seeds): add BETA_SEED_NODES.
+            Network::Regtest | Network::Beta => (&[], &[]),
         };
         BootstrapConfig {
             dns_seeds: dns_seeds.iter().map(|s| s.to_string()).collect(),

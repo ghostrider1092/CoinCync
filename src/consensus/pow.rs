@@ -247,7 +247,13 @@ pub fn bind_randomx_genesis_for_network(network: crate::config::NetworkType) {
     {
         let genesis: [u8; 32] = match network {
             crate::config::NetworkType::Mainnet => crate::mainnet::MAINNET_GENESIS_HASH,
-            crate::config::NetworkType::Testnet | crate::config::NetworkType::Regtest => {
+            // BETA: reuses testnet's genesis binding for now. TODO(beta-genesis):
+            // beta needs its OWN genesis (BETA_MAGIC → distinct hash) + BETA_GENESIS_HASH
+            // before a beta node can boot (the height-0 magic check will reject a
+            // testnet-magic genesis on the beta network). Compiles; not yet bootable.
+            crate::config::NetworkType::Testnet
+            | crate::config::NetworkType::Regtest
+            | crate::config::NetworkType::Beta => {
                 crate::testnet::TESTNET_GENESIS_HASH
             }
         };
