@@ -34,8 +34,11 @@
 //!   THREAT: 2026-07-09 idle/limp-while-behind — `peer_heights`-derived
 //!   `is_synced()`/`target_height` empties under connection churn and every
 //!   recovery path stops firing, leaving the node idle indefinitely.
-//!   TESTS: (gap — the tick loop itself is not unit-tested; only the pure
-//!   `emergency_recovery_due` gating predicate in §1 is covered).
+//!   TESTS: `sync_driver_blocks_tick_requests_queued_hashes_from_eligible_peer`
+//!   drives the real tick loop end-to-end for the Blocks branch (queued hash →
+//!   GetBlocks emitted to an eligible peer); the §3 EMERGENCY-TIER-3 deep-reset
+//!   branch specifically is still exercised only via the pure
+//!   `emergency_recovery_due` predicate (§1).
 //! - **§4 Tier-1/2/3 stall escalation (`stall_count`, `tier2_fires_since_progress`,
 //!   `tier3_fires_since_progress`, `N_T3_BEFORE_BACKOFF` backoff)** —
 //!   INVARIANT: escalation counters reset on real progress and only climb
@@ -44,8 +47,10 @@
 //!   hammering peers and flooding logs.
 //!   THREAT: 2026-06-01/02 (barns1253, coincync-lon) — Tier-2 alone cycled
 //!   thousands of times without ever clearing a stuck sync.
-//!   TESTS: (gap — no unit or integration test drives the tick-loop
-//!   escalation counters directly).
+//!   TESTS: the tick loop is now exercised end-to-end by
+//!   `sync_driver_blocks_tick_requests_queued_hashes_from_eligible_peer`, though
+//!   the Tier-1/2/3 escalation counters specifically are still not asserted
+//!   directly (they need a multi-tick stall fixture).
 //! - **§5 `send_block_spans` peer eligibility (P-3 + #126)** — INVARIANT:
 //!   block-hash spans are distributed only to peers that are either strictly
 //!   TALLER than local height OR advertise strictly greater cumulative WORK
@@ -929,5 +934,89 @@ mod tests {
 
         assert_eq!(sent, 0, "an equal-height, equal-work peer must not be sent a span");
         assert!(rx.try_recv().is_err(), "no GetBlocks should be emitted");
+    }
+
+    fn mk_connected_peer(id: PeerId, height: u64) -> PeerInfo {
+        let now = std::time::Instant::now();
+        PeerInfo {
+            id,
+            addr: "127.0.0.1:28080".parse().unwrap(),
+            state: PeerState::Connected,
+            height,
+            tip_hash: Hash::zero(),
+            version: 1,
+            user_agent: String::new(),
+            last_seen: now,
+            connected_at: now,
+            reputation: 0,
+            outbound: true,
+            bytes_recv: 0,
+            bytes_sent: 0,
+            encrypted: true,
+            remote_static_key: None,
+            capabilities: 0,
+            consecutive_full: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            connection_token: std::sync::Arc::new(()),
+            eclipse_slot: None,
+        }
+    }
+
+    // Orchestration test for the tick loop's Blocks branch (previously a
+    // documented gap — the helpers were unit-tested, the glue was not). Spawns
+    // the real driver with ChainSync in Blocks state holding one queued hash and
+    // a single Connected, taller peer with an open sender, and asserts the tick
+    // wires get_blocks_to_request -> live_block_peers -> send_block_spans and
+    // emits a GetBlocks to that peer's channel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_driver_blocks_tick_requests_queued_hashes_from_eligible_peer() {
+        use std::sync::Arc;
+
+        let chain = crate::chain::Blockchain::new_with_network(crate::config::NetworkType::Testnet);
+        chain.init_genesis().expect("genesis init");
+        let chain: SharedBlockchain = Arc::new(chain);
+        let local_h = chain.height();
+
+        let peer_id: PeerId = [9u8; 32];
+        let mut cs = ChainSync::new(local_h, Hash::zero());
+        cs.queue_headers_from_peer(peer_id, vec![Hash::from_bytes([0xAB; 32])]);
+        cs.set_state(SyncState::Blocks);
+        let sync = Arc::new(RwLock::new(cs));
+
+        let peers: Arc<DashMap<PeerId, PeerInfo>> = Arc::new(DashMap::new());
+        peers.insert(peer_id, mk_connected_peer(peer_id, local_h + 10));
+        let senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>> = Arc::new(DashMap::new());
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(16);
+        senders.insert(peer_id, tx);
+
+        let scorer = Arc::new(RwLock::new(PeerScorer::new()));
+        let addresses = Arc::new(RwLock::new(AddressManager::new(1024)));
+
+        let (sd_tx, sd_rx) = watch::channel(false);
+        let handle = spawn_sync_driver(
+            SyncDriverContext {
+                peers,
+                senders,
+                chain,
+                sync,
+                scorer,
+                addresses,
+                magic: [0xC0, 0x15, 0x11, 0x00],
+            },
+            sd_rx,
+        );
+
+        // The 500ms Blocks tick should emit a GetBlocks to the eligible peer well
+        // within this window (returns as soon as the message arrives).
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await;
+        let _ = sd_tx.send(true);
+        let _ = handle.await;
+
+        let bytes = got
+            .expect("driver emitted no message within 5s")
+            .expect("sender channel closed unexpectedly");
+        assert!(
+            !bytes.is_empty(),
+            "the Blocks tick sent a GetBlocks message to the eligible peer"
+        );
     }
 }
