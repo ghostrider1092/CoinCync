@@ -260,7 +260,9 @@ impl BlockValidation {
 pub const fn v1_0_12_rules_active(network: crate::config::NetworkType, height: u64) -> bool {
     match network {
         crate::config::NetworkType::Mainnet | crate::config::NetworkType::Regtest => true,
-        crate::config::NetworkType::Testnet => height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT,
+        crate::config::NetworkType::Testnet | crate::config::NetworkType::Beta => {
+            height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT
+        }
     }
 }
 

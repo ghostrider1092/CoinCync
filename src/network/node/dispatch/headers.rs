@@ -259,7 +259,9 @@ impl HeaderBatchValidator {
                 crate::config::NetworkType::Mainnet => {
                     crate::mainnet::verify_checkpoint(header.height.as_u64(), &hash)
                 }
-                crate::config::NetworkType::Testnet | crate::config::NetworkType::Regtest => {
+                crate::config::NetworkType::Testnet
+                | crate::config::NetworkType::Regtest
+                | crate::config::NetworkType::Beta => {
                     crate::testnet::verify_checkpoint(header.height.as_u64(), &hash)
                 }
             };
