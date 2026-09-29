@@ -49,7 +49,7 @@ struct Cli {
     data_dir: PathBuf,
 
     /// Network.
-    #[arg(long, default_value = "testnet", value_parser = ["mainnet", "testnet", "regtest"])]
+    #[arg(long, default_value = "testnet", value_parser = ["mainnet", "testnet", "regtest", "beta"])]
     network: String,
 
     /// Log level.
