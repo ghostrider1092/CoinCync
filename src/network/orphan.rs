@@ -22,20 +22,14 @@
 //!   the new block is inserted.
 //!   THREAT: an unbounded orphan pool lets an attacker flood a node with
 //!   parentless blocks to exhaust memory.
-//!   TESTS: (gap — no test in `src/` or `tests/` constructs an `OrphanPool`
-//!   directly and drives it past `MAX_ORPHAN_SIZE`; grep for `OrphanPool`
-//!   found only this file. `tier5_orphan_block_without_parent_not_added_to_main`
-//!   in `tests/tier5_chain_reorg.rs` exercises orphan detection at the
-//!   `chain::add_block` level, not this pool's capacity bound).
+//!   TESTS: `add_never_exceeds_max_orphan_size_under_flood`.
 //! - **§2 `evict_oldest`** — INVARIANT: eviction always removes the entry
 //!   with the smallest insertion sequence number (strict oldest-first LRU),
 //!   via the `oldest_first` BTreeMap index rather than a linear scan.
 //!   THREAT: evicting anything other than the true oldest entry would let a
 //!   flood of new orphans push out arbitrary (possibly still-relevant)
 //!   entries, or regress to the prior O(n²) scan under load.
-//!   TESTS: (gap — no test exists for this function; candidate name
-//!   `mark_block_orphan_lru_evicts_at_max_orphan_blocks` was checked via
-//!   grep across `src/` and `tests/` and does not exist).
+//!   TESTS: `evict_oldest_removes_the_first_inserted_at_capacity`.
 //! - **§3 `take_children`** — INVARIANT: reconnecting a parent's children
 //!   removes each returned block from all three indices
 //!   (`by_parent`, `parent_by_hash`, `seq_by_hash`/`oldest_first`) together,
@@ -43,14 +37,14 @@
 //!   THREAT: a partial removal would leak index entries, letting a stale
 //!   `parent_by_hash`/`seq_by_hash` pair reference a block no longer in
 //!   `by_parent`, corrupting later `contains`/eviction decisions.
-//!   TESTS: (gap — no test exists for this function).
+//!   TESTS: `take_children_clears_all_indices_for_reconnected_blocks`.
 //! - **§4 `expire`** — INVARIANT: only entries received strictly before
 //!   `current_height - ORPHAN_TTL_BLOCKS` are dropped, and only after
 //!   `current_height >= ORPHAN_TTL_BLOCKS` (no underflow on a young chain).
 //!   THREAT: an unguarded subtraction would underflow `current_height` on a
 //!   short chain (panic/wraparound); no TTL at all would let stale orphans
 //!   accumulate forever.
-//!   TESTS: (gap — no test exists for this function).
+//!   TESTS: `expire_respects_ttl_and_does_not_underflow_on_young_chain`.
 
 use crate::consensus::Block;
 use crate::primitives::Hash;
@@ -215,5 +209,126 @@ impl OrphanPool {
                 self.by_parent.remove(&parent);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::consensus::BlockHeader;
+    use crate::primitives::PublicKey;
+
+    /// Minimal orphan block: parent = `prev`, unique hash via `nonce`. Only the
+    /// fields OrphanPool reads (prev_hash, height) plus a hash-distinguishing
+    /// nonce matter here.
+    fn orphan_block(prev: Hash, height: u64, nonce: u64) -> Block {
+        let header = BlockHeader {
+            network_magic: [0, 0, 0, 0],
+            version: 1,
+            height,
+            timestamp: 0,
+            prev_hash: prev,
+            tx_root: Hash::zero(),
+            anchor: Hash::zero(),
+            algorithm: 0,
+            nonce,
+            target: Hash::from_bytes([0xFF; 32]),
+            miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+            supply_commitment: [0u8; 32],
+            checkpoint_vote: None,
+            spark_set_root: [0u8; 32],
+            mw_kernel_root: [0u8; 32],
+        };
+        Block::new(header, vec![])
+    }
+
+    // §1: the pool never holds more than MAX_ORPHAN_SIZE entries, even under a
+    // parentless-block flood — eviction runs before each over-cap insert.
+    #[test]
+    fn add_never_exceeds_max_orphan_size_under_flood() {
+        let mut pool = OrphanPool::new();
+        let parent = Hash::from_bytes([1u8; 32]);
+        for i in 0..(MAX_ORPHAN_SIZE as u64 + 50) {
+            pool.add(orphan_block(parent, 1, i), 0);
+            assert!(pool.len() <= MAX_ORPHAN_SIZE, "pool exceeded cap at insert {}", i);
+        }
+        assert_eq!(pool.len(), MAX_ORPHAN_SIZE, "pool settles exactly at the cap");
+    }
+
+    // §2: eviction removes the strict oldest (smallest insertion sequence),
+    // leaving newer entries intact.
+    #[test]
+    fn evict_oldest_removes_the_first_inserted_at_capacity() {
+        let mut pool = OrphanPool::new();
+        let parent = Hash::from_bytes([2u8; 32]);
+        let first = orphan_block(parent, 1, 0);
+        let first_hash = first.hash();
+        pool.add(first, 0);
+        for i in 1..MAX_ORPHAN_SIZE as u64 {
+            pool.add(orphan_block(parent, 1, i), 0);
+        }
+        assert_eq!(pool.len(), MAX_ORPHAN_SIZE);
+        assert!(pool.contains(&first_hash), "oldest still present at exactly cap");
+
+        let newest = orphan_block(parent, 1, 9_999);
+        let newest_hash = newest.hash();
+        pool.add(newest, 0); // over cap → evict oldest, then insert
+        assert_eq!(pool.len(), MAX_ORPHAN_SIZE);
+        assert!(!pool.contains(&first_hash), "the oldest entry was evicted");
+        assert!(pool.contains(&newest_hash), "the newest entry is present");
+    }
+
+    // §3: take_children removes each reconnected block from ALL indices, leaving
+    // no dangling entries, and does not touch other parents' children.
+    #[test]
+    fn take_children_clears_all_indices_for_reconnected_blocks() {
+        let mut pool = OrphanPool::new();
+        let parent = Hash::from_bytes([7u8; 32]);
+        let c1 = orphan_block(parent, 5, 1);
+        let c2 = orphan_block(parent, 5, 2);
+        let other = orphan_block(Hash::from_bytes([8u8; 32]), 5, 3);
+        let (h1, h2, ho) = (c1.hash(), c2.hash(), other.hash());
+        pool.add(c1, 0);
+        pool.add(c2, 0);
+        pool.add(other, 0);
+        assert_eq!(pool.len(), 3);
+
+        let taken: Vec<Hash> = pool.take_children(&parent).iter().map(|b| b.hash()).collect();
+        assert_eq!(taken.len(), 2);
+        assert!(taken.contains(&h1) && taken.contains(&h2));
+
+        assert!(!pool.contains(&h1) && !pool.contains(&h2), "taken children gone from pool");
+        assert!(pool.contains(&ho), "other parent's child untouched");
+        assert_eq!(pool.len(), 1);
+        // No dangling secondary-index entries (in-module test can read privates).
+        for h in [h1, h2] {
+            assert!(!pool.parent_by_hash.contains_key(&h));
+            assert!(!pool.seq_by_hash.contains_key(&h));
+            assert!(!pool.oldest_first.values().any(|v| *v == h));
+        }
+    }
+
+    // §4: expire drops only entries older than the TTL window, and never
+    // underflows on a chain shorter than ORPHAN_TTL_BLOCKS.
+    #[test]
+    fn expire_respects_ttl_and_does_not_underflow_on_young_chain() {
+        // Young chain: current_height < TTL → early return, no panic, nothing dropped.
+        let mut pool = OrphanPool::new();
+        pool.add(orphan_block(Hash::from_bytes([3u8; 32]), 1, 1), 0);
+        pool.expire(ORPHAN_TTL_BLOCKS - 1);
+        assert_eq!(pool.len(), 1, "no expiry (and no underflow) below the TTL floor");
+
+        // Mature chain: an old orphan expires, a recent one survives.
+        let mut pool = OrphanPool::new();
+        let parent = Hash::from_bytes([4u8; 32]);
+        let old = orphan_block(parent, 1, 10);
+        let recent = orphan_block(parent, 1, 11);
+        let (old_h, recent_h) = (old.hash(), recent.hash());
+        pool.add(old, 0); // received_at_height 0
+        pool.add(recent, ORPHAN_TTL_BLOCKS + 5); // received_at_height 105
+        pool.expire(ORPHAN_TTL_BLOCKS + 10); // cutoff = 10
+        assert!(!pool.contains(&old_h), "orphan older than the TTL window is dropped");
+        assert!(pool.contains(&recent_h), "recent orphan survives");
+        assert_eq!(pool.len(), 1);
     }
 }
