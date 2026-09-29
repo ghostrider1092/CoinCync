@@ -67,13 +67,19 @@
 //!   slot and delays legitimate catch-up.
 //!   TESTS: (gap — requires a live DashMap/sender/scorer harness not present
 //!   in the test suite).
-//! - **§7 `run_synced_tick` safety net** — INVARIANT: a `Synced` node whose
-//!   `true_best_height` is more than 2 blocks above local (or local is 0
-//!   with peers present) re-triggers a resync rather than sitting idle.
-//!   THREAT: a node that settles into `Synced` prematurely (e.g. after a
-//!   peer_heights reset) would otherwise never re-check for real work.
-//!   TESTS: (gap — exercises `ChainSync::trigger_resync` transitively but no
-//!   test drives `run_synced_tick` itself).
+//! - **§7 `run_synced_tick` + coarse recovery predicates (work-aware, #126)** —
+//!   INVARIANT: the drained-recovery, `no_progress_ticks ≥ 60` net, and
+//!   `run_synced_tick` all re-trigger discovery via
+//!   `ChainSync::should_retrigger_sync` — when a peer is more than `slack`
+//!   blocks TALLER, OR a vetted peer advertises more cumulative WORK
+//!   (`work_behind_substantiated`) — rather than sitting idle. (Also: local 0
+//!   with peers present still re-triggers.)
+//!   THREAT: a node on a shorter-but-heavier fork settled as "synced on height"
+//!   while a heavier chain went unfetched — the height-only predicates never
+//!   fired for it. The substantiation gate keeps a phantom claim from forcing
+//!   perpetual resync.
+//!   TESTS: `should_retrigger_sync_covers_height_and_work_126` (the predicate;
+//!   the async tick loop itself remains unit-test-gapped).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -542,13 +548,18 @@ pub(super) fn spawn_sync_driver(
                         let sg = sync_sync.read().await;
                         let pending = sg.pending_count();
                         let true_best = sg.true_best_height();
+                        // #126: retrigger when behind by HEIGHT or by cumulative
+                        // WORK (a shorter-but-heavier fork). The old height-only
+                        // `our_h < true_best` never fired for the work case, so a
+                        // drained node sitting below a heavier tip stayed wedged.
+                        let retrigger = sg.should_retrigger_sync(our_h, 0);
+                        let work_behind = sg.work_behind_now();
                         drop(sg);
 
-                        if pending == 0 && our_h < true_best {
-                            // Drained with no work but still behind — go back to Headers
+                        if pending == 0 && retrigger {
                             warn!(
-                            "[IBD] Blocks drained at height {} but target is {}. Re-requesting headers.",
-                            our_h, true_best
+                            "[IBD] Blocks drained at height {} (target {}, work_behind={}). Re-requesting headers.",
+                            our_h, true_best, work_behind
                         );
                             let mut sg = sync_sync.write().await;
                             sg.set_state(SyncState::Headers);
@@ -594,11 +605,16 @@ pub(super) fn spawn_sync_driver(
                     // Safety net: if stuck for 60+ ticks (5min) with no progress,
                     // force back to Headers
                     if driver.no_progress_ticks >= 60 {
-                        let true_best = sync_sync.read().await.true_best_height();
-                        if true_best > our_h + 2 {
+                        let sg = sync_sync.read().await;
+                        let true_best = sg.true_best_height();
+                        // #126: force Headers when behind by height OR work.
+                        let retrigger = sg.should_retrigger_sync(our_h, 2);
+                        let work_behind = sg.work_behind_now();
+                        drop(sg);
+                        if retrigger {
                             warn!(
-                            "[IBD] No progress for {} ticks at height {} (target {}). Forcing Headers.",
-                            driver.no_progress_ticks, our_h, true_best
+                            "[IBD] No progress for {} ticks at height {} (target {}, work_behind={}). Forcing Headers.",
+                            driver.no_progress_ticks, our_h, true_best, work_behind
                         );
                             let mut sg = sync_sync.write().await;
                             sg.set_state(SyncState::Headers);
@@ -829,12 +845,20 @@ async fn run_synced_tick(
 ) {
     driver.stall_count = 0;
     let local_height = chain.height();
-    let target_height = sync.read().await.true_best_height();
+    let sg = sync.read().await;
+    let target_height = sg.true_best_height();
+    // #126: a Synced node also re-triggers when it is work-behind (a
+    // shorter-but-heavier fork advertised by a peer), not only when a taller
+    // peer exists — otherwise it settles as "synced on height" while a heavier
+    // chain goes unfetched.
+    let retrigger = sg.should_retrigger_sync(local_height, 2);
+    let work_behind = sg.work_behind_now();
+    drop(sg);
     let has_peers = peers.iter().any(|peer| peer.state == PeerState::Connected);
-    if (local_height == 0 && has_peers) || target_height > local_height + 2 {
+    if (local_height == 0 && has_peers) || retrigger {
         debug!(
-            "Safety net: local={} true_best={} has_peers={}, re-triggering sync",
-            local_height, target_height, has_peers
+            "Safety net: local={} true_best={} work_behind={} has_peers={}, re-triggering sync",
+            local_height, target_height, work_behind, has_peers
         );
         sync.write().await.trigger_resync();
     }

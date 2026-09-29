@@ -718,6 +718,26 @@ impl ChainSync {
             .max(self.peer_heights.values().copied().max().unwrap_or(0))
     }
 
+    /// #126 recovery hardening: should the sync driver (re-)trigger discovery?
+    /// True when a peer is more than `height_slack` blocks TALLER than us, OR a
+    /// vetted peer advertises more cumulative WORK than our tip (a
+    /// shorter-but-heavier fork — height alone never surfaces it, which left the
+    /// coarse recovery predicates dead for that case). The work arm reuses the
+    /// substantiated signal, so a phantom over-claim cannot pin us in perpetual
+    /// resync once the grace elapses (the same guarantee that protects the miner
+    /// veto). `#136` fixed the *download* selection; this makes the *recovery*
+    /// predicates that decide "are we behind, keep trying" work-aware too.
+    pub fn should_retrigger_sync_at(&self, local_height: u64, height_slack: u64, now: u64) -> bool {
+        self.true_best_height() > local_height.saturating_add(height_slack)
+            || self.work_behind_substantiated(now)
+    }
+
+    /// Production wrapper for [`Self::should_retrigger_sync_at`] using the system
+    /// clock; unit tests drive the `_at(now)` form for deterministic time.
+    pub fn should_retrigger_sync(&self, local_height: u64, height_slack: u64) -> bool {
+        self.should_retrigger_sync_at(local_height, height_slack, unix_now())
+    }
+
     /// Drop a peer's cumulative-work claim WITHOUT touching its height.
     ///
     /// Called when a peer advertises our EXACT tip hash: an equal tip means
@@ -2560,6 +2580,46 @@ mod tests {
         assert!(
             !sync.work_behind_substantiated(WORK_SUBSTANTIATION_GRACE_SECS + 1),
             "no progress past the grace → veto lifts, miner resumes on our own tip"
+        );
+    }
+
+    /// #126 recovery hardening: `should_retrigger_sync` fires on a TALLER peer
+    /// (height) OR a work-heavier peer (a shorter-but-heavier fork) — and, like
+    /// the miner veto, its work arm self-heals past the substantiation grace so a
+    /// phantom over-claim can't force perpetual resync.
+    #[test]
+    fn should_retrigger_sync_covers_height_and_work_126() {
+        let peers = peer_pool();
+
+        // (a) Not behind: equal height, no work claim → do not retrigger.
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        assert!(!sync.should_retrigger_sync_at(100, 2, 0), "equal height, no work claim");
+
+        // (b) Height arm: a peer more than `slack` blocks taller → retrigger.
+        sync.update_peer_height_for(peers[0], 110);
+        assert!(sync.should_retrigger_sync_at(100, 2, 0), "taller peer beyond slack");
+
+        // (c) Work arm (#126): a peer NOT taller in height but heavier in
+        // cumulative work → retrigger, which the old height-only test never did.
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        sync.update_peer_difficulty_for(peers[0], 9_000); // heavier; height untouched
+        assert!(
+            sync.true_best_height() <= 100 + 2,
+            "precondition: the heavier peer is not taller by height"
+        );
+        sync.set_work_substantiation_for_test(Some(0), 0);
+        assert!(
+            sync.should_retrigger_sync_at(100, 2, 0),
+            "a work-heavier (shorter) fork must retrigger recovery"
+        );
+
+        // (d) Phantom safety: same claim, past the grace with no progress →
+        // stop retriggering (mirrors the miner-veto self-heal).
+        assert!(
+            !sync.should_retrigger_sync_at(100, 2, WORK_SUBSTANTIATION_GRACE_SECS + 1),
+            "an unsubstantiated work claim must not force perpetual resync"
         );
     }
 

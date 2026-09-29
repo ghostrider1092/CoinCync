@@ -66,14 +66,19 @@ learned from `ChainWork` advertisements and observed blocks, which is sufficient
 close #126. Covered by `send_block_spans_admits_work_heavier_shorter_peer_126` and
 the control `send_block_spans_rejects_equal_height_equal_work_peer`.
 
-**Follow-up (not in this change).** The coarse height-only recovery predicates
-still assume "behind ⇒ taller": the Blocks-drained recovery and the
+**Follow-up — DONE (2026-09-29).** The coarse height-only recovery predicates
+previously assumed "behind ⇒ taller": the Blocks-drained recovery and the
 `no_progress_ticks ≥ 60` safety net in the sync-driver tick loop, and
-`run_synced_tick`'s `true_best_height` check, all compare *heights*, so they never
-*fire* for a shorter-heavier fork. They are not on the critical path — the
-work-triggered `Headers` flip drives discovery and the per-request
-`recover_block_requests` retry is hash-based, not height-gated — but making them
-work-aware would harden coarse recovery. Tracked for a follow-up.
+`run_synced_tick`'s `true_best_height` check, all compared *heights*, so they
+never *fired* for a shorter-heavier fork. They were never on the critical path —
+the work-triggered `Headers` flip drives discovery and the per-request
+`recover_block_requests` retry is hash-based, not height-gated — but they are now
+work-aware for belt-and-suspenders coverage: all three route through
+`ChainSync::should_retrigger_sync(local_height, slack)`, which fires when a peer
+is more than `slack` blocks taller OR `work_behind_substantiated` holds (a vetted,
+non-phantom heavier claim). The substantiation gate means a phantom over-claim
+cannot force perpetual resync. Covered by
+`should_retrigger_sync_covers_height_and_work_126`.
 
 ---
 
