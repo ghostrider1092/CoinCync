@@ -31,6 +31,67 @@ impl ShadowEvictChain for crate::chain::Blockchain {
     }
 }
 
+/// #149: whether the mempool needs a FULL `shadow_evict_invalid` revalidation
+/// after applying a block at `new_height`.
+///
+/// `remove_confirmed` already drops mined txs + key-image shadow-conflicts. The
+/// O(mempool) full sweep is only needed when a remaining tx's consensus VALIDITY
+/// can change WITHOUT a key-image collision — exactly the two cases the
+/// `shadow_evict_invalid` doc lists:
+/// 1. a **reorg** (`is_reorg`) — the UTXO set / member heights change under
+///    already-admitted txs; and
+/// 2. crossing the **output-age hard-fork** height — age-gated inputs that were
+///    valid become invalid.
+///
+/// On a normal tip extension neither holds (the UTXO set only grows, ring
+/// members only age up, spends surface as key-image conflicts), so the sweep is
+/// skipped. On current networks the age fork is at genesis (mainnet) or never
+/// (testnet/regtest), so this reduces to `is_reorg` today; the age check is a
+/// forward-safe guard for any network that sets a finite mid-chain fork height.
+/// A FUTURE fork that gates mempool-tx validity MUST be added here.
+pub fn needs_full_revalidation_after_block(
+    is_reorg: bool,
+    net: crate::config::NetworkType,
+    new_height: u64,
+) -> bool {
+    is_reorg
+        || net.min_output_age(new_height) != net.min_output_age(new_height.saturating_sub(1))
+}
+
+#[cfg(test)]
+mod revalidation_gate_tests {
+    use super::needs_full_revalidation_after_block;
+    use crate::config::NetworkType;
+
+    #[test]
+    fn needs_full_revalidation_after_block_149() {
+        // A reorg ALWAYS needs the full sweep (UTXO set changes under txs).
+        for net in [NetworkType::Testnet, NetworkType::Regtest, NetworkType::Mainnet] {
+            assert!(
+                needs_full_revalidation_after_block(true, net, 1_000),
+                "reorg must force a full mempool revalidation"
+            );
+        }
+        // A NORMAL tip extension (no reorg) skips the sweep at every non-boundary
+        // height. On testnet the output-age fork never activates, so a normal
+        // extend never needs the sweep.
+        let net = NetworkType::Testnet;
+        for h in [1u64, 100, 10_000, 1_000_000] {
+            assert!(
+                !needs_full_revalidation_after_block(false, net, h),
+                "normal tip extension at height {h} must skip the O(mempool) sweep"
+            );
+        }
+        // The predicate keys the boundary off `min_output_age` changing between
+        // h-1 and h: a network with a finite mid-chain output-age fork flips this
+        // true at the crossing height even without a reorg.
+        assert_eq!(
+            needs_full_revalidation_after_block(false, net, 5),
+            net.min_output_age(5) != net.min_output_age(4),
+        );
+    }
+}
+
 const MAX_CHAIN_GENERATION_ATTEMPTS: usize = 4;
 
 trait GenerationSource {

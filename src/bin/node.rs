@@ -1188,6 +1188,28 @@ async fn start_node(
                             | BlockStatus::AcceptedFork
                             | BlockStatus::AcceptedReorg { .. }),
                         ) => {
+                            // #149: the full mempool revalidation (shadow_evict
+                            // below) is O(mempool) per block. `remove_confirmed`
+                            // already drops mined txs + key-image shadow-
+                            // conflicts, and on a NORMAL tip extension nothing
+                            // else can newly invalidate a mempool tx: the UTXO
+                            // set only grows, ring members only age UP, and spent
+                            // outputs surface as key-image conflicts. The full
+                            // sweep is only needed on a REORG (the UTXO set
+                            // changes under existing txs) or when this block
+                            // crosses the output-age hard-fork height (age-10..99
+                            // inputs become invalid) — the exact two cases the
+                            // shadow_evict doc lists. A FUTURE fork that gates
+                            // mempool-tx validity MUST extend this predicate.
+                            let needs_full_revalidation = {
+                                let is_reorg =
+                                    matches!(status, BlockStatus::AcceptedReorg { .. });
+                                coincync::mempool::needs_full_revalidation_after_block(
+                                    is_reorg,
+                                    event_chain.network(),
+                                    event_chain.height(),
+                                )
+                            };
                             // Keep mempool aligned with chain state: remove mined txs and
                             // advance mempool height so activation-gated checks stay correct.
                             event_mempool.remove_confirmed(&block_txs);
@@ -1226,12 +1248,16 @@ async fn start_node(
                             // notifications below see the updated
                             // mempool state, but the worker is freed
                             // during the blocking work.
-                            let evict_mempool = event_mempool.clone();
-                            let evict_chain = event_chain.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                evict_mempool.shadow_evict_invalid(evict_chain.as_ref());
-                            })
-                            .await;
+                            // #149: skip the O(mempool) sweep on a normal tip
+                            // extension (see needs_full_revalidation above).
+                            if needs_full_revalidation {
+                                let evict_mempool = event_mempool.clone();
+                                let evict_chain = event_chain.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    evict_mempool.shadow_evict_invalid(evict_chain.as_ref());
+                                })
+                                .await;
+                            }
 
                             // Notify IBD sync manager so it advances its
                             // local_height cursor and releases the next
