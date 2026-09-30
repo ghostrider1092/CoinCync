@@ -41,6 +41,49 @@ impl Blockchain {
         self.inner.read().utxos.output_count()
     }
 
+    /// Cheap boot-time integrity canary (observability + fail-fast). Complements
+    /// the genesis / schema guards on the load path by cross-checking that, for a
+    /// non-genesis chain: (1) the tip block is actually retrievable, and (2) the
+    /// height→hash index agrees with the tip. Both mismatches indicate a
+    /// corrupted or truncated store and are fatal (refuse to serve a broken
+    /// chain). An empty UTXO set at height > 0 is a softer signal and only warns.
+    /// Logs a one-line integrity summary on success. Read-only; no consensus
+    /// effect. See docs/design/boot-integrity-canary.md.
+    pub fn boot_integrity_check(&self) -> Result<()> {
+        let tip = self.tip();
+        if tip.height > 0 {
+            if self.get_block(&tip.hash).is_none() {
+                return Err(Error::DatabaseError(format!(
+                    "boot integrity: tip block {} (height {}) is not retrievable — store truncated/corrupt",
+                    tip.hash, tip.height
+                )));
+            }
+            match self.get_block_hash(tip.height) {
+                Some(h) if h == tip.hash => {}
+                other => {
+                    return Err(Error::DatabaseError(format!(
+                        "boot integrity: height index at {} = {:?}, but tip is {} — index/tip disagree",
+                        tip.height, other, tip.hash
+                    )));
+                }
+            }
+        }
+        let utxos = self.available_output_count();
+        if tip.height > 0 && utxos == 0 {
+            tracing::warn!(
+                "boot integrity: chain at height {} but the UTXO set is empty — possible corruption",
+                tip.height
+            );
+        }
+        tracing::info!(
+            "boot integrity check OK: height={} tip={} utxos={}",
+            tip.height,
+            &tip.hash.to_hex()[..tip.hash.to_hex().len().min(16)],
+            utxos
+        );
+        Ok(())
+    }
+
     /// A deterministic commitment over the transparent UTXO set at the current
     /// tip (output catalog + spent key-image set). OBSERVABILITY ONLY (gap #3):
     /// not a consensus value, not in the block header, not enforced anywhere — a

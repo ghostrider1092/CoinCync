@@ -124,6 +124,26 @@ fn empirical_sampler_respects_min_age_and_uniqueness() {
 }
 
 #[test]
+fn ring_audit_flags_clustered_ages_and_passes_spread() {
+    // Clustered ring: every decoy age is in the same order of magnitude
+    // (ages 100..500 for spend_height 10_000) → flagged as weak.
+    let clustered = vec![9900u64, 9850, 9800, 9700, 9500];
+    let a = audit_ring_ages(&clustered, 10_000);
+    assert!(!a.ok, "clustered ring should be flagged");
+    assert_eq!(a.distinct_age_decades, 1);
+    assert!(a.reason.is_some());
+
+    // Well-spread ring: ages span several orders of magnitude → OK.
+    let spread = vec![9995u64, 9900, 9000, 5000, 1]; // ages 5,100,1000,5000,9999
+    let b = audit_ring_ages(&spread, 10_000);
+    assert!(b.ok, "spread ring should pass");
+    assert!(b.distinct_age_decades >= 2);
+
+    // Rings smaller than 3 are treated as OK (bootstrap).
+    assert!(audit_ring_ages(&[9990u64, 9980], 10_000).ok);
+}
+
+#[test]
 fn validated_snapshot_rejects_unsupported_policy() {
     let mut raw = raw_snapshot(10, 1);
     raw.policy_version += 1;

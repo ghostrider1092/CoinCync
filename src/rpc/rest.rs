@@ -221,6 +221,8 @@ const RPC_ALLOWED_METHODS: &[&str] = &[
     "get_vitals",
     // Non-consensus difficulty / block-interval telemetry. Read-only.
     "get_difficulty_health",
+    // Non-consensus mempool-health schema. Read-only.
+    "get_mempool_health",
     "get_blockchain_info",
     "get_network_info",
     "get_sync_status",

@@ -1206,6 +1206,74 @@ impl Blockchain {
         self.add_block(block)
     }
 
+    /// TEST-ONLY: seed a linear main chain of `n_blocks` empty blocks on top of
+    /// the current tip (genesis), writing them straight to the block store +
+    /// height index and advancing the tip WITHOUT consensus validation (no PoW,
+    /// no signatures). For load/perf tests that need a mature chain height — e.g.
+    /// exercising `get_difficulty_health`'s 144-block window scan — without
+    /// minutes of real RandomX mining. Timestamps are spaced `block_time` apart
+    /// and a fixed target gives a constant, non-degenerate difficulty.
+    ///
+    /// Gated behind `test`/`test-utilities`; never compiled into a release node.
+    #[cfg(any(test, feature = "test-utilities"))]
+    pub fn seed_linear_chain_for_testing(&self, n_blocks: u64, block_time: u64) {
+        use crate::consensus::header::BlockHeader;
+        use crate::primitives::PublicKey;
+
+        // Target ~2^-16 of max ⇒ difficulty ≈ 65_536 (finite, positive).
+        let mut tb = [0xffu8; 32];
+        tb[0] = 0;
+        tb[1] = 0;
+        let target = Hash::from_bytes(tb);
+
+        let mut inner = self.inner.write();
+        let magic = self.network.magic_bytes();
+        let base_ts = inner.tip.timestamp;
+        let start_height = inner.tip.height + 1;
+        let mut prev_hash = inner.tip.hash;
+        let mut last_hash = prev_hash;
+
+        for h in start_height..(start_height + n_blocks) {
+            let header = BlockHeader {
+                network_magic: magic,
+                version: 1,
+                height: h,
+                timestamp: base_ts + (h - start_height + 1) * block_time,
+                prev_hash,
+                tx_root: Hash::zero(),
+                anchor: Hash::zero(),
+                algorithm: 0,
+                nonce: 0,
+                target,
+                miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+                supply_commitment: [0u8; 32],
+                checkpoint_vote: None,
+                spark_set_root: [0u8; 32],
+                mw_kernel_root: [0u8; 32],
+            };
+            let block = Block::new(header, Vec::new());
+            let hash = block.hash();
+            if let Some(ref db) = self.db {
+                let _ = db.blocks.insert(&block);
+                let _ = db.blocks.set_height_hash(h, &hash);
+            }
+            inner.height_to_hash.insert(h, hash);
+            prev_hash = hash;
+            last_hash = hash;
+        }
+
+        let final_height = start_height + n_blocks - 1;
+        inner.tip = ChainTip {
+            hash: last_hash,
+            height: final_height,
+            difficulty: calculate_difficulty_from_target(&target),
+            timestamp: base_ts + n_blocks * block_time,
+        };
+        inner.stats.height = final_height;
+        inner.stats.tip_hash = last_hash;
+        inner.stats.total_blocks = final_height + 1;
+    }
+
     /// Add block to chain
     pub fn add_block(&self, block: Block) -> Result<BlockStatus> {
         // Serialize the ENTIRE block-application operation against other writers
@@ -3511,6 +3579,27 @@ mod tests {
         let genesis_hash = chain.init_genesis().unwrap();
         assert_eq!(chain.height(), 0);
         assert_eq!(chain.tip().hash, genesis_hash);
+    }
+
+    #[test]
+    fn boot_integrity_check_passes_on_genesis_and_seeded_chains() {
+        // Fresh genesis chain: canary passes (height 0 path).
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        assert!(chain.boot_integrity_check().is_ok());
+
+        // A DB-backed seeded chain at height > 0: tip retrievable + height index
+        // agrees with the tip, so the canary passes.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let seeded = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        seeded.init_genesis().unwrap();
+        seeded.seed_linear_chain_for_testing(50, 120);
+        assert_eq!(seeded.height(), 50);
+        assert!(
+            seeded.boot_integrity_check().is_ok(),
+            "seeded height-50 chain must pass the integrity canary"
+        );
     }
 
     #[test]
