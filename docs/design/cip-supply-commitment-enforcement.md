@@ -84,3 +84,78 @@ Untestable for ~15h (soak owns the lane). A consensus rule with a
 producer/validator stats-consistency requirement is exactly the kind of change
 that must be validated before it exists in committed form. This note makes the
 post-soak implementation a fast, low-risk drop-in.
+
+---
+
+## Implementation refinements (2026-09-29) — DONE + resolved plumbing
+
+Two findings from reading the real seams; the first two items below are already
+CODED on this branch (staged, validate post-soak).
+
+### 1. u64 overflow → use a `u128` consensus commitment (CODED)
+`calculate_supply_commitment(&SupplyStats)` hashes `Amount` (u64) fields.
+Cumulative emitted supply reaches MAX_SUPPLY = 100M × 10^12 = 10^20 atomic,
+which **overflows u64 (~1.84e19) at ~18.4M CYNC** (height ~408k) — the exact
+reason `ChainStats::{total_supply,total_burned}` are `u128`. The u64 helper is
+therefore fine for RPC display today but **wrong as a consensus commitment**.
+
+→ Added `emission::supply::supply_commitment_consensus(total_emitted: u128,
+total_burned: u128, emission_remaining: u128) -> [u8;32]` — hashes the u128
+values, domain-separated by `COINCYNC_SUPPLY_COMMITMENT_CONSENSUS_V1` (distinct
+tag so it can never collide with the u64 audit digest). Tests cover determinism,
+per-field sensitivity, saturation, domain separation, and **exactness above
+u64::MAX** (the whole point). Producer + validator MUST use THIS function.
+
+### 2. Activation gate (CODED)
+`NetworkType::supply_commitment_enforce_height(&self)` added to `config.rs`,
+**`u64::MAX` on every network** (gated OFF). Below it the field stays `[0u8;32]`
+and is unchecked → no live chain changes. A finite height is a coordinated hard
+fork and needs audit-gate clearance. Post-soak: add the
+`constants::SUPPLY_COMMITMENT_ENFORCE_HEIGHT` mirror + drift-guard.
+
+### 3. Plumbing gap RESOLVED — validate at the apply site (post-soak wiring)
+The chain has **no per-height stored `SupplyStats`** — only a single running
+accumulator (`inner.stats.{total_supply,total_burned}`, u128) that moves with
+the tip and unwinds on reorg. So `supply_stats_at(arbitrary parent)` is not
+cheaply available. BUT: at **every apply site**, `inner.stats` already equals
+the **parent's** cumulative supply, because blocks are applied in parent→child
+order onto the active chain — including during reorg. So validate at apply-time,
+right where the delta is added, using the POST-apply totals:
+
+```
+// after inner.stats.total_supply += reward and inner.stats.total_burned += burns:
+let expected = supply_commitment_consensus(
+    inner.stats.total_supply,
+    inner.stats.total_burned,
+    MAX_SUPPLY_ATOMIC - inner.stats.total_supply,   // emission_remaining
+);
+if block.header.height >= net.supply_commitment_enforce_height()
+    && block.header.supply_commitment != expected {
+    // reject / roll back this connect
+}
+```
+
+This needs **no new storage** and **covers fork blocks for free** — a fork block
+is checked when the reorg applies it (at which point `inner.stats` is its
+parent's cumulative). This supersedes the earlier "restrict to tip-extend
+blocks" option 2.
+
+**Apply sites to wire (chain.rs)** — the sites where `total_supply`/
+`total_burned` are `+=`'d on connect (NOT the disconnect `-=` sites):
+- normal block connect (~1495: `inner.stats.total_burned += …`)
+- reorg fork-block connect (~2255)
+- reorg tip apply (~2683)
+Factor a single `check_supply_commitment(height, header_commitment, &stats)` helper
+and call it at each `+=` site to avoid drift between the three paths.
+
+**Producer** (`mining/block_builder.rs`): compute the same post-apply totals for
+the block being built (parent cumulative + this block's reward/burns) and write
+`supply_commitment_consensus(...)` when `height >= enforce_height`, else `[0;32]`.
+
+### Remaining post-soak steps
+1. `check_supply_commitment` helper + calls at the 3 connect sites.
+2. Producer in `block_builder.rs`.
+3. `constants::SUPPLY_COMMITMENT_ENFORCE_HEIGHT` mirror + drift-guard.
+4. Tests: producer non-zero at/after height; validator accept-match / reject-tamper;
+   below-height `[0;32]` accepted; fork-block competing commit validates; full lib
+   suite; regen `critical_files.lock` (constants/header/validation/config touched).

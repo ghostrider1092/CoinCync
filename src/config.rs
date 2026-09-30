@@ -247,6 +247,26 @@ impl NetworkType {
         }
     }
 
+    /// Height at which `BlockHeader.supply_commitment` begins being PRODUCED
+    /// (non-zero) and ENFORCED (validated). Below this height the field stays
+    /// `[0u8; 32]` and is not checked, so pre-fork chains are unaffected — this
+    /// is a hard fork (see `docs/design/cip-supply-commitment-enforcement.md`).
+    ///
+    /// GATED OFF on every network (`u64::MAX`) until an activation height is
+    /// explicitly cleared: producing/validating is a pure no-op until then, so
+    /// the rule can land, build, and be tested without changing any live chain.
+    /// Mirrors the shielded-activation "finite under clearance, else u64::MAX"
+    /// pattern. Do NOT set a finite height without audit-gate clearance —
+    /// activating a new consensus rule on testnet is a coordinated hard fork.
+    /// (post-soak: add the `constants::SUPPLY_COMMITMENT_ENFORCE_HEIGHT` mirror
+    /// + drift-guard, matching the other activation heights.)
+    pub const fn supply_commitment_enforce_height(&self) -> u64 {
+        match self {
+            NetworkType::Mainnet => u64::MAX,
+            NetworkType::Testnet | NetworkType::Regtest => u64::MAX,
+        }
+    }
+
     /// Minimum age (in blocks) a ring-member/decoy output must have, resolved
     /// from the runtime network. Mirrors `constants::min_output_age_at_height`
     /// but keyed on this network's hard-fork height rather than the compile-time

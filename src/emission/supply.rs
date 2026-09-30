@@ -166,6 +166,87 @@ mod tests {
             "in_tail is not hashed; digest must be unchanged"
         );
     }
+
+    // ── consensus (u128) commitment ──────────────────────────────────────
+
+    #[test]
+    fn supply_commitment_consensus_is_deterministic() {
+        let a = supply_commitment_consensus(1_000, 100, 500);
+        let b = supply_commitment_consensus(1_000, 100, 500);
+        assert_eq!(a, b, "identical inputs must hash identically");
+    }
+
+    #[test]
+    fn supply_commitment_consensus_is_exact_above_u64_max() {
+        // THE POINT of the u128 variant: cumulative emitted reaches ~1e20,
+        // which overflows u64 (~1.84e19). Values past u64::MAX must be
+        // representable and must change the digest — a u64-based commitment
+        // would truncate/wrap here and alias distinct supply states.
+        let over = (u64::MAX as u128) + 1;
+        let d_over = supply_commitment_consensus(over, 0, 0);
+        // A distinct value one atomic unit higher must produce a distinct digest
+        // (no truncation to a common u64 residue).
+        let d_over_plus = supply_commitment_consensus(over + 1, 0, 0);
+        assert_ne!(
+            d_over, d_over_plus,
+            "distinct >u64::MAX emitted values must not collide"
+        );
+        // And the low 64 bits matching a smaller value must NOT alias it.
+        let d_low = supply_commitment_consensus(1, 0, 0);
+        assert_ne!(
+            d_over_plus, d_low,
+            "over-u64 value must not alias its low-64-bit residue"
+        );
+    }
+
+    #[test]
+    fn supply_commitment_consensus_sensitive_to_each_field() {
+        let base = supply_commitment_consensus(1_000, 100, 500);
+        assert_ne!(
+            supply_commitment_consensus(1_001, 100, 500),
+            base,
+            "sensitive to total_emitted"
+        );
+        assert_ne!(
+            supply_commitment_consensus(1_000, 101, 500),
+            base,
+            "sensitive to total_burned (also moves circulating)"
+        );
+        assert_ne!(
+            supply_commitment_consensus(1_000, 100, 501),
+            base,
+            "sensitive to emission_remaining"
+        );
+    }
+
+    #[test]
+    fn supply_commitment_consensus_circulating_saturates() {
+        // burned > emitted must clamp circulating to zero, never underflow-wrap.
+        let a = supply_commitment_consensus(100, 500, 0);
+        let b = supply_commitment_consensus(100, 100, 0); // circulating 0 both
+        // Different burned totals still differ (burned is hashed directly), but
+        // neither panics / wraps — the call returning is the assertion.
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn supply_commitment_consensus_domain_separated_from_u64_helper() {
+        // The two digests must not collide even on numerically-equal small
+        // inputs, thanks to the distinct domain tag + width.
+        let stats = SupplyStats::new(
+            Amount::from_atomic(1_000),
+            Amount::from_atomic(100),
+            Amount::from_atomic(500),
+            false,
+        );
+        let u64_digest = calculate_supply_commitment(&stats);
+        // emitted=1000, burned=100, remaining=500 — same numbers, u128 path.
+        let consensus_digest = supply_commitment_consensus(1_000, 100, 500);
+        assert_ne!(
+            u64_digest, consensus_digest,
+            "consensus (u128) and RPC (u64) commitments must be domain-separated"
+        );
+    }
 }
 
 /// Calculate Pedersen commitment to supply (for auditing)
@@ -181,4 +262,43 @@ pub fn calculate_supply_commitment(stats: &SupplyStats) -> [u8; 32] {
     .concat();
 
     *hash_concat(&[&data, b"COINCYNC_SUPPLY_COMMITMENT"]).as_bytes()
+}
+
+/// **Consensus** supply commitment — the value bound into
+/// `BlockHeader.supply_commitment` (see
+/// `docs/design/cip-supply-commitment-enforcement.md`). GATED OFF until an
+/// activation height is cleared; producing/validating it is a no-op below the
+/// `supply_commitment_enforce_height`.
+///
+/// ## Why a SEPARATE function from `calculate_supply_commitment` above
+/// That helper hashes `SupplyStats`' `Amount` (u64) fields. Cumulative emitted
+/// supply reaches MAX_SUPPLY = 100M CYNC × 10^12 = 10^20 atomic, which OVERFLOWS
+/// u64 (~1.8×10^19) at ~18.4M CYNC (height ~408k) — the exact reason
+/// `ChainStats::total_supply`/`total_burned` are `u128`. A consensus commitment
+/// MUST be exact across the whole supply range, so it hashes the `u128`
+/// cumulative values directly and is domain-separated by a DISTINCT tag
+/// (`…_CONSENSUS_V1`) so it can never collide with the u64 RPC/audit digest.
+///
+/// ## What it binds (post-apply)
+/// The cumulative supply as the block LEAVES it: `total_emitted` and
+/// `total_burned` are the running totals AFTER this block's coinbase emission
+/// and fee burns are applied. `circulating = total_emitted - total_burned`
+/// (saturating); `emission_remaining = MAX_SUPPLY - total_emitted`. Producer and
+/// validator MUST feed identical inputs for an identical block or honest blocks
+/// self-reject — see the CIP.
+pub fn supply_commitment_consensus(
+    total_emitted: u128,
+    total_burned: u128,
+    emission_remaining: u128,
+) -> [u8; 32] {
+    use crate::primitives::hash_concat;
+
+    let circulating = total_emitted.saturating_sub(total_burned);
+    let mut data = Vec::with_capacity(64);
+    data.extend_from_slice(&total_emitted.to_le_bytes());
+    data.extend_from_slice(&total_burned.to_le_bytes());
+    data.extend_from_slice(&circulating.to_le_bytes());
+    data.extend_from_slice(&emission_remaining.to_le_bytes());
+
+    *hash_concat(&[&data, b"COINCYNC_SUPPLY_COMMITMENT_CONSENSUS_V1"]).as_bytes()
 }
