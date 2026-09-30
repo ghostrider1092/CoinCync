@@ -195,6 +195,14 @@ pub fn set_node_mining_active(active: bool) {
     NODE_MINING_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Whether the built-in miner has been declared active in this process (see
+/// [`set_node_mining_active`]). Observability + lets non-node consumers of the
+/// shared RandomX cache (e.g. `coincync-rig`) assert they selected full-mem
+/// mode. Does NOT affect consensus — hashes are byte-identical across modes.
+pub fn node_mining_active() -> bool {
+    NODE_MINING_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Bind RandomX epoch keys to the genesis hash for the selected network.
 /// Call once at process startup from `coincync-node` and `coincync-miner` (before PoW).
 pub fn bind_randomx_genesis_for_network(network: crate::config::NetworkType) {
