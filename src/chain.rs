@@ -3357,7 +3357,7 @@ fn check_supply_commitment(
 ///     `congested = congestion_pct >= CONGESTION_THRESHOLD` — the same
 ///     `size = block.size()` the validator uses.
 ///   * burn = `distribute_fee(total_fees, congested).burned`.
-fn block_fee_burn(network: crate::config::NetworkType, block: &Block) -> u128 {
+pub(crate) fn block_fee_burn(network: crate::config::NetworkType, block: &Block) -> u128 {
     let total_fees: crate::primitives::Amount = block
         .transactions
         .iter()
@@ -4178,6 +4178,43 @@ mod tests {
         // The anti-lie guarantee: a header carrying the commitment for `emitted`
         // is rejected when the block actually emitted one more unit.
         assert!(super::check_supply_commitment(100, 100, &good, emitted + 1, burned).is_err());
+    }
+
+    #[test]
+    fn producer_commitment_matches_validator_check() {
+        // The producer (block_builder) and the validator (add_block) MUST agree,
+        // or honest blocks self-reject. Both compute post = parent + (emission,
+        // burn) and hash it with supply_commitment_consensus; both take `burn`
+        // from the SAME block_fee_burn. This test drives that exact path with a
+        // finite enforce height (production ships gated OFF) and asserts the
+        // validator accepts the producer's commitment and rejects a tamper.
+        let parent_emitted: u128 = 5_000_000;
+        let parent_burned: u128 = 999;
+        let height = 200u64;
+        let blk = burn_test_block(height, 7, &[100, 250]);
+        // burn EXACTLY as both producer and validator compute it.
+        let burn = super::block_fee_burn(TEST_NET, &blk);
+        let emission = crate::emission::calculate_block_reward(height).as_atomic() as u128;
+        let post_emitted = parent_emitted + emission;
+        let post_burned = parent_burned + burn;
+        // Producer side: what block_builder writes into the header.
+        let produced = crate::emission::supply::supply_commitment_consensus(
+            post_emitted,
+            post_burned,
+            crate::constants::MAX_SUPPLY.saturating_sub(post_emitted),
+        );
+        // Validator accepts it (enforce_height = 0 here so the check runs).
+        assert!(
+            super::check_supply_commitment(0, height, &produced, post_emitted, post_burned).is_ok(),
+            "validator must accept the producer's commitment — else honest blocks self-reject"
+        );
+        // A tampered commitment is rejected.
+        let mut bad = produced;
+        bad[0] ^= 0xFF;
+        assert!(
+            super::check_supply_commitment(0, height, &bad, post_emitted, post_burned).is_err(),
+            "validator must reject a tampered commitment"
+        );
     }
 
     #[test]

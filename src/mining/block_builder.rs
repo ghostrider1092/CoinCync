@@ -350,6 +350,48 @@ pub fn build_block_from_template(
         mw_kernel_root: [0u8; 32],
     };
 
+    // #supply-commitment: bind the block's RESULTING cumulative supply into the
+    // header, BEFORE pow_binding below, so the PoW commits to it. GATED OFF
+    // (enforce_height = u64::MAX) → stays [0u8;32], the historical value, so
+    // nothing changes until an activation height is cleared.
+    //
+    // Correctness (no honest-block self-reject): the burn is computed with the
+    // SAME `chain::block_fee_burn` the validator uses, on a temp block carrying
+    // this exact tx set. The 32-byte `supply_commitment` field does not change
+    // the serialized block size, so the burn computed here (with the [0;32]
+    // placeholder still in `header`) equals the burn the validator computes on
+    // the received block — and emission is deterministic from height. The parent
+    // cumulative totals come from the node's template (u128, as strings).
+    if height >= fallback_network.supply_commitment_enforce_height() {
+        let parse_u128 = |k: &str| -> Result<u128> {
+            template[k]
+                .as_str()
+                .and_then(|s| s.parse::<u128>().ok())
+                .or_else(|| template[k].as_u64().map(|v| v as u128))
+                .ok_or_else(|| {
+                    Error::Internal(format!(
+                        "supply_commitment enforced at height {height} but template lacks \
+                         u128 '{k}' (node getblocktemplate must supply it)"
+                    ))
+                })
+        };
+        let parent_emitted = parse_u128("total_supply")?;
+        let parent_burned = parse_u128("total_burned")?;
+        let tmp_block = crate::consensus::block::Block {
+            header: header.clone(),
+            transactions: all_txs.clone(),
+        };
+        let burn = crate::chain::block_fee_burn(fallback_network, &tmp_block);
+        let emission = crate::emission::calculate_block_reward(height).as_atomic() as u128;
+        let post_emitted = parent_emitted.saturating_add(emission);
+        let post_burned = parent_burned.saturating_add(burn);
+        header.supply_commitment = crate::emission::supply::supply_commitment_consensus(
+            post_emitted,
+            post_burned,
+            crate::constants::MAX_SUPPLY.saturating_sub(post_emitted),
+        );
+    }
+
     // audit §1: derive the anchor from the header binding so every consensus
     // field is committed to by the PoW. The validator recomputes the SAME
     // binding from this header, so the anchor matches.
