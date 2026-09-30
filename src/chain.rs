@@ -2233,6 +2233,40 @@ impl Blockchain {
                             }
                         }
 
+                        // #supply-commitment: validate this fork block's
+                        // commitment against its POST-apply cumulative supply
+                        // BEFORE applying it. inner.stats here is this block's
+                        // PARENT cumulative (the fork point, or the prior fork
+                        // block already applied earlier in this loop), so
+                        // post_emitted/post_burned are its resulting totals. On
+                        // mismatch, abort the reorg via the same reorg_error +
+                        // break path any invalid fork block uses — no partial
+                        // mutation for this block. Gated OFF today.
+                        {
+                            let post_emitted = inner.stats.total_supply.saturating_add(
+                                calculate_block_reward(fork_block.header.height).as_atomic() as u128,
+                            );
+                            let post_burned = inner
+                                .stats
+                                .total_burned
+                                .saturating_add(block_fee_burn(self.network, fork_block));
+                            if let Err(e) = check_supply_commitment(
+                                self.network.supply_commitment_enforce_height(),
+                                fork_block.header.height,
+                                &fork_block.header.supply_commitment,
+                                post_emitted,
+                                post_burned,
+                            ) {
+                                tracing::warn!(
+                                    "Fork block {} rejected during reorg: {}",
+                                    fork_block.hash().to_hex(),
+                                    e
+                                );
+                                reorg_error = Some(format!("Invalid fork block: {}", e));
+                                break;
+                            }
+                        }
+
                         let fork_hash = fork_block.hash();
                         inner
                             .height_to_hash
@@ -2340,6 +2374,33 @@ impl Blockchain {
                                 reorg_error =
                                     Some(format!("Reorg tip validation error: {}", e));
                             }
+                        }
+                    }
+
+                    // #supply-commitment: also validate the reorg TIP's
+                    // commitment. All fork blocks are applied, so inner.stats is
+                    // the tip's parent cumulative supply. On mismatch, set
+                    // reorg_error so the unconditional rollback below undoes the
+                    // partially-applied reorg — the same cleanup fork-block and
+                    // tip-validation failures use. Gated OFF today. Guarded on
+                    // `reorg_error.is_none()` so a prior failure's message wins.
+                    if reorg_error.is_none() {
+                        let post_emitted = inner.stats.total_supply.saturating_add(
+                            calculate_block_reward(block.header.height).as_atomic() as u128,
+                        );
+                        let post_burned = inner
+                            .stats
+                            .total_burned
+                            .saturating_add(block_fee_burn(self.network, &block));
+                        if let Err(e) = check_supply_commitment(
+                            self.network.supply_commitment_enforce_height(),
+                            block.header.height,
+                            &block.header.supply_commitment,
+                            post_emitted,
+                            post_burned,
+                        ) {
+                            tracing::warn!("Reorg tip block {} rejected: {}", hash.to_hex(), e);
+                            reorg_error = Some(format!("Invalid reorg tip block: {}", e));
                         }
                     }
 
