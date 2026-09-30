@@ -1679,14 +1679,27 @@ async fn start_node(
                     let mut nonce_base: u64 = 0;
                     loop {
                         // Mine-gate: never build a private fork. Mine on regtest
-                        // (always), when synced, or with 0 peers ONLY if the
-                        // operator opted in via --allow-solo-mine (a bootstrap
-                        // seed). A home node that loses peers must NOT keep mining
-                        // at 0 peers by default — that builds a private fork it
-                        // can't currently reorg off (issue #126).
-                        let allowed = matches!(nt, coincync::config::NetworkType::Regtest)
-                            || chain_m.is_synced()
-                            || (p2p_m.peer_count() == 0 && allow_solo_mine);
+                        // (always), when synced WITH at least one peer, or with 0
+                        // peers ONLY if the operator opted in via
+                        // --allow-solo-mine (a bootstrap seed). A home node that
+                        // loses peers must NOT keep mining at 0 peers by default —
+                        // that builds a private fork it can't currently reorg off
+                        // (issue #126).
+                        //
+                        // #147: the "synced" path is GATED on having a live peer.
+                        // When the last peer drops, its height leaves peer_heights
+                        // and best_known_height recomputes to local_height, so
+                        // `synced = local >= best_known` flips true — which, with
+                        // the old unguarded `|| is_synced()`, silently bypassed the
+                        // 0-peer solo-mine opt-in and let an isolated node mine a
+                        // private fork. The predicate + its regression test live in
+                        // `mining::solo_mine_gate_allowed`.
+                        let allowed = coincync::mining::solo_mine_gate_allowed(
+                            matches!(nt, coincync::config::NetworkType::Regtest),
+                            p2p_m.peer_count() > 0,
+                            chain_m.is_synced(),
+                            allow_solo_mine,
+                        );
                         if !allowed {
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             continue;
