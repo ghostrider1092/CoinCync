@@ -1350,6 +1350,41 @@ impl Blockchain {
                 );
                 return Ok(BlockStatus::Invalid(errors));
             }
+
+            // #supply-commitment: for a TIP-EXTENDING block the active-tip stats
+            // (`inner.stats`) ARE the parent's cumulative supply, so validate the
+            // block's commitment against the post-apply totals here — BEFORE any
+            // mutation, so a mismatch rejects cleanly. Gated OFF today
+            // (enforce_height = u64::MAX) → no-op. A competing FORK block is NOT
+            // checked here (inner.stats is the active tip, not its parent); it is
+            // validated at the reorg apply site where the rewound stats equal its
+            // parent's cumulative supply.
+            if is_main_chain {
+                let post_emitted = inner.stats.total_supply.saturating_add(
+                    calculate_block_reward(block.header.height).as_atomic() as u128,
+                );
+                let post_burned = inner
+                    .stats
+                    .total_burned
+                    .saturating_add(block_fee_burn(self.network, &block));
+                if let Err(e) = check_supply_commitment(
+                    self.network.supply_commitment_enforce_height(),
+                    block.header.height,
+                    &block.header.supply_commitment,
+                    post_emitted,
+                    post_burned,
+                ) {
+                    tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], e);
+                    drop(inner);
+                    self.record_event(
+                        ChainEventType::BlockRejected,
+                        block.header.height,
+                        &hash,
+                        serde_json::json!({"reason": &e}),
+                    );
+                    return Ok(BlockStatus::Invalid(e));
+                }
+            }
         }
 
         // SECURITY: Median-Time-Past (MTP) validation.
@@ -3202,6 +3237,45 @@ fn calculate_difficulty_from_target(target: &Hash) -> u128 {
     u128::MAX / target_value
 }
 
+/// #supply-commitment: validate a block's `supply_commitment` header field
+/// against the cumulative supply the block LEAVES behind (post-apply).
+///
+/// `post_emitted` / `post_burned` are the running cumulative totals AFTER this
+/// block's coinbase emission and fee burns are applied — i.e. the PARENT's
+/// cumulative supply plus this block's delta. At every point this is called,
+/// the caller holds the parent's cumulative supply (the active-tip stats for a
+/// tip-extending block, or the reorg-apply stats for a fork block), so no
+/// per-height storage is needed.
+///
+/// GATED: below `enforce_height` the header field is expected to stay `[0u8;32]`
+/// and is NOT read, so pre-fork chains are unaffected and the whole rule is a
+/// no-op until an activation height is cleared (today `u64::MAX` everywhere).
+/// Uses the `u128`-exact consensus commitment (the u64 audit helper overflows
+/// past ~18.4M CYNC).
+fn check_supply_commitment(
+    enforce_height: u64,
+    height: u64,
+    header_commitment: &[u8; 32],
+    post_emitted: u128,
+    post_burned: u128,
+) -> std::result::Result<(), String> {
+    if height < enforce_height {
+        return Ok(());
+    }
+    let expected = crate::emission::supply::supply_commitment_consensus(
+        post_emitted,
+        post_burned,
+        crate::constants::MAX_SUPPLY.saturating_sub(post_emitted),
+    );
+    if header_commitment != &expected {
+        return Err(format!(
+            "supply_commitment mismatch at height {height}: header does not match \
+             the post-apply cumulative supply (emitted={post_emitted}, burned={post_burned})"
+        ));
+    }
+    Ok(())
+}
+
 /// Total fees BURNED by `block`, in atomic units.
 ///
 /// Computed EXACTLY as the consensus validator computes the coinbase burn (see
@@ -3998,6 +4072,51 @@ mod tests {
         }
         b.transactions = txs;
         b
+    }
+
+    // ── #supply-commitment: commitment enforcement (helper) ─────────────
+    // Exercise the enforcement LOGIC with an EXPLICIT finite enforce_height, so
+    // the accept / reject / gated-off paths are all covered even though every
+    // network ships gated OFF (enforce_height = u64::MAX).
+
+    #[test]
+    fn check_supply_commitment_below_enforce_height_is_noop() {
+        // Below the enforce height the header field is not read — even all-ones
+        // garbage is accepted, so pre-fork chains are unaffected.
+        let garbage = [0xABu8; 32];
+        assert!(super::check_supply_commitment(100, 99, &garbage, 1_000, 10).is_ok());
+        assert!(super::check_supply_commitment(100, 0, &[0u8; 32], 0, 0).is_ok());
+    }
+
+    #[test]
+    fn check_supply_commitment_accepts_matching_commitment() {
+        let (emitted, burned) = (7_000_000u128, 1_234u128);
+        let expected = crate::emission::supply::supply_commitment_consensus(
+            emitted,
+            burned,
+            crate::constants::MAX_SUPPLY.saturating_sub(emitted),
+        );
+        // At and after the enforce height, a header matching the post-apply
+        // totals is accepted.
+        assert!(super::check_supply_commitment(100, 100, &expected, emitted, burned).is_ok());
+        assert!(super::check_supply_commitment(100, 500, &expected, emitted, burned).is_ok());
+    }
+
+    #[test]
+    fn check_supply_commitment_rejects_tampered_commitment() {
+        let (emitted, burned) = (7_000_000u128, 1_234u128);
+        let good = crate::emission::supply::supply_commitment_consensus(
+            emitted,
+            burned,
+            crate::constants::MAX_SUPPLY.saturating_sub(emitted),
+        );
+        // A one-bit-flipped commitment is rejected at the enforce height.
+        let mut bad = good;
+        bad[0] ^= 0x01;
+        assert!(super::check_supply_commitment(100, 100, &bad, emitted, burned).is_err());
+        // The anti-lie guarantee: a header carrying the commitment for `emitted`
+        // is rejected when the block actually emitted one more unit.
+        assert!(super::check_supply_commitment(100, 100, &good, emitted + 1, burned).is_err());
     }
 
     #[test]
