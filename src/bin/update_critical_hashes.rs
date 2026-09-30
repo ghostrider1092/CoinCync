@@ -38,6 +38,10 @@ const CRITICAL_FILES: &[&str] = &[
     "src/consensus/block.rs",
     "src/primitives/hash.rs",
     "src/consensus/finality.rs",
+    // Added 2026-09-29: further consensus surface that was still unlocked.
+    "src/config.rs",
+    "src/emission/supply.rs",
+    "src/consensus/mod.rs",
 ];
 
 fn main() {
