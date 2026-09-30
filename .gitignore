@@ -184,7 +184,11 @@ __pycache__/
 # Local dev/soak node data dirs (scripts/start-all.ps1, scripts/soak-local.ps1)
 .localnet/
 .localnet-soak/
+.localnet-soak24/
 .localnet-testnet/
 .localnet-smoke/
 .localnet-diag/
 .gtest/
+
+# Alternate cargo target dir used by the local 24h soak harness
+target-soak/
