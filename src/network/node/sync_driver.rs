@@ -117,6 +117,11 @@ struct SyncDriverState {
     tier2_last_height: u64,
     last_progress_time_secs: u64,
     emergency_t3_fires: u32,
+    /// #137 — last observed `ChainSync::blocks_delivered()`. Download progress
+    /// (including fork blocks that do not advance the active tip) is a rise in
+    /// this value between ticks; the stall detector treats that as progress so a
+    /// heavier-fork download is not aborted by the 60-tick Headers bounce.
+    last_blocks_delivered: u64,
 }
 
 impl SyncDriverState {
@@ -131,6 +136,7 @@ impl SyncDriverState {
             tier2_last_height: height,
             last_progress_time_secs: 0,
             emergency_t3_fires: 0,
+            last_blocks_delivered: 0,
         }
     }
 
@@ -232,6 +238,23 @@ pub(super) fn spawn_sync_driver(
             let now = chrono::Utc::now().timestamp() as u64;
             let monotonic_now = driver.elapsed_secs();
 
+            // #137 false-stall fix: sample the monotonic count of blocks
+            // DELIVERED to the chain layer once per tick. A rise means the
+            // download pipeline is doing real work — INCLUDING pulling down a
+            // shorter-but-heavier fork, whose requested blocks are delivered
+            // (and stored side-chain) without advancing the ACTIVE TIP until the
+            // branch completes and reorgs. Every height-keyed progress check
+            // below OR-s this in, so a frozen-tip fork download is not misread as
+            // a stall (which would bounce to Headers / fire emergency Tier-3 and
+            // abandon the half-downloaded fork). Sampled ONCE per tick so no site
+            // consumes the increase before another site can see it.
+            let blocks_flowing = {
+                let delivered = sync_sync.read().await.blocks_delivered();
+                let flowing = delivered > driver.last_blocks_delivered;
+                driver.last_blocks_delivered = delivered;
+                flowing
+            };
+
             // Clean up expired sync bans periodically
             sync_sync.write().await.cleanup_sync_bans(now);
 
@@ -271,7 +294,12 @@ pub(super) fn spawn_sync_driver(
             // doing internal work (just no useful work).
             {
                 let current_height_for_progress = sync_chain.height();
-                if current_height_for_progress > driver.last_progress_height {
+                // #137: a tip advance OR blocks delivered this tick both reset
+                // the progress clock. Without the delivered check, a large
+                // heavier-fork download (tip frozen > EMERGENCY_T3_NO_PROGRESS_SECS
+                // while the branch assembles) would fire emergency Tier-3 deep
+                // recovery mid-download.
+                if current_height_for_progress > driver.last_progress_height || blocks_flowing {
                     driver.last_progress_time_secs = monotonic_now;
                     driver.emergency_t3_fires = 0;
                     // last_progress_height itself is updated by the
@@ -481,16 +509,25 @@ pub(super) fn spawn_sync_driver(
             } else if !sync_sync.read().await.is_synced() {
                 // Progress detected — reset all stall counters.
                 let current_height = sync_chain.height();
-                if current_height > driver.last_progress_height {
+                // #137: a tip advance OR blocks delivered this tick both count as
+                // progress (blocks_flowing sampled once at the top of the loop).
+                // Without the delivered check, a heavier-fork download (tip
+                // frozen until the branch reorgs) would keep escalating the
+                // Tier-2/Tier-3 counters while blocks stream in, eventually
+                // triggering the Tier-3 backoff mid-download.
+                let tip_advanced = current_height > driver.last_progress_height;
+                if tip_advanced || blocks_flowing {
                     driver.stall_count = 0;
-                    driver.last_progress_height = current_height;
+                    if tip_advanced {
+                        driver.last_progress_height = current_height;
+                        driver.tier2_last_height = current_height;
+                    }
                     // Real progress made — reset Tier-3 counters too,
                     // not just Tier-1's stall_count. Otherwise a node
                     // that recovers naturally would still escalate to
                     // Tier-3 on the next minor hiccup.
                     driver.tier2_fires_since_progress = 0;
                     driver.tier3_fires_since_progress = 0;
-                    driver.tier2_last_height = current_height;
                 }
             }
 
@@ -527,9 +564,20 @@ pub(super) fn spawn_sync_driver(
 
                     recover_block_requests(&sync_sync, now).await;
 
-                    // Track progress for stall detection
+                    // Track progress for stall detection.
+                    // #137: progress is a tip advance OR any block delivered to
+                    // the chain layer this tick (blocks_flowing, sampled once at
+                    // the top of the loop). Downloading a shorter-but-heavier
+                    // fork delivers (and stores side-chain) blocks without moving
+                    // the ACTIVE TIP until the branch completes and the reorg
+                    // fires — a height-only check reads that as a stall and, at
+                    // 60 ticks, bounces to Headers, abandoning the half-
+                    // downloaded fork. A rising delivered count proves the
+                    // pipeline is doing real work regardless of tip movement.
                     if our_h > driver.last_progress_height {
                         driver.last_progress_height = our_h;
+                        driver.no_progress_ticks = 0;
+                    } else if blocks_flowing {
                         driver.no_progress_ticks = 0;
                     } else {
                         driver.no_progress_ticks += 1;
