@@ -94,7 +94,17 @@ impl Blockchain {
     /// `calculate_difficulty` directly and diverged from this regtest branch,
     /// rejecting every peer header so regtest nodes could not sync. Hence `pub`.)
     pub fn expected_next_target(&self, blocks: &[DifficultyBlock], height: u64) -> Hash {
-        if self.network == crate::config::NetworkType::Regtest {
+        // Beta shares regtest's fast-chain retarget: it eases to / pins at its low
+        // genesis difficulty and never climbs toward the 120s block spacing, so
+        // opt-in testers reliably reach the shielded activation height (5) in
+        // seconds. Without this the low *initial* difficulty only buys the first
+        // few blocks before ASERT retargets upward (observed 256 → 907 by height 9
+        // on 2026-10-01) and mining slows to the normal spacing. Beta is a
+        // disposable test network, so the same overshoot-free easing regtest uses
+        // is exactly what it wants.
+        if self.network == crate::config::NetworkType::Regtest
+            || self.network == crate::config::NetworkType::Beta
+        {
             // Ease difficulty DOWN toward the MIN_DIFFICULTY floor at <=3x per
             // block (safely inside the ±4x/step sanity layer), then pin there
             // and never retarget. Applies from the very first block (parent =
