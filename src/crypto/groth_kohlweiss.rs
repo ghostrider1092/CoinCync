@@ -1301,6 +1301,310 @@ pub fn verify_spend_value_hidden(
     Ok(v_point)
 }
 
+// ── V5: the complete end-state spend (HK value-hidden membership ⊕ KI nullifier)
+//
+// Fuses V4's value-hidden HK one-of-many over the shifted set `{C_i − V}` with
+// the Triptych key-image binding over the spend-key ring `{P_i}` — ONE hidden
+// index `l`, ONE Fiat-Shamir challenge, ONE bit-decomposition shared across all
+// three accumulators (value `W_i`, pubkey `P_i`, tag). On success a verifier
+// learns exactly: some hidden coin was spent, `V` commits that coin's value (so
+// the balance proof binds), and `tag = x_l·ki_gen` is the serial-hidden
+// nullifier of the SAME coin's spend key. The shared `prods` forbid the
+// split-output attack (value-index == key-index); the shared `zp`/`σ_k` bind
+// `tag` to the proven key. Supersedes V4 (membership-only). SOUNDNESS: all of
+// `Gv,G,H,K,pk_gen,ki_gen` must be mutually independent NUMS points. Gated
+// `sketch-gk-proof`, UNAUDITED, unwired from consensus.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct SparkSpendProofV5 {
+    /// Per-bit commitments (in the `(G,K)` basis), proving each index bit ∈ {0,1}.
+    pub cl: Vec<[u8; 32]>,
+    pub ca: Vec<[u8; 32]>,
+    pub cb: Vec<[u8; 32]>,
+    /// Value accumulator over `W_i = C_i − V`, blinded `ρ_h·H + ρ_k·K`.
+    pub gk: Vec<[u8; 32]>,
+    /// Public-key accumulator `Σ_i p_{i,k}·P_i + σ_k·pk_gen`.
+    pub gkp: Vec<[u8; 32]>,
+    /// Tag accumulator `σ_k·ki_gen` (SAME `σ_k` as `gkp`).
+    pub gkt: Vec<[u8; 32]>,
+    /// Per-bit response scalars.
+    pub f: Vec<[u8; 32]>,
+    pub za: Vec<[u8; 32]>,
+    pub zb: Vec<[u8; 32]>,
+    /// HK value responses: `z_dh = h_coef·x^m − Σ ρ_h·x^k`, `z_dk` likewise for `k_coef`.
+    pub zdh: [u8; 32],
+    pub zdk: [u8; 32],
+    /// Fused spend-key response `zp = x_l·x^m − Σ σ_k·x^k`.
+    pub zp: [u8; 32],
+    /// Published value commitment `V = v·Gv + b·K`.
+    pub value_commitment: [u8; 32],
+    /// Serial-hidden nullifier `T = x_l·ki_gen`.
+    pub tag: [u8; 32],
+    /// The spend message this proof is bound to.
+    pub message: [u8; 32],
+}
+
+fn spend_context_v5(value_commitment: &[u8; 32], message: &[u8; 32]) -> Vec<u8> {
+    let mut h = Sha3_256::new();
+    h.update(b"COINCYNC_SPARK_SPEND_V5_CTX_v1");
+    h.update(value_commitment);
+    h.update(message);
+    h.finalize().to_vec()
+}
+
+/// Prove the complete spend of coin `l`. The spender knows the full coin opening
+/// `coins[l] = value·Gv + h_coef·H + blinding·K` and the spend key `x_l` opening
+/// `pubkeys[l] = x_l·pk_gen`; it draws a fresh `value_blinding` for the published
+/// `V`. Returns the proof carrying `V` and the nullifier `tag`.
+#[allow(clippy::too_many_arguments)]
+pub fn prove_spend_full<R: CryptoRng + RngCore>(
+    coins: &[RistrettoPoint],
+    pubkeys: &[RistrettoPoint],
+    l: usize,
+    value: u64,
+    h_coef: &Scalar,
+    blinding: &Scalar,
+    value_blinding: &Scalar,
+    x_l: &Scalar,
+    pk_gen: RistrettoPoint,
+    ki_gen: RistrettoPoint,
+    message: &[u8; 32],
+    rng: &mut R,
+) -> Result<SparkSpendProofV5> {
+    let n = coins.len();
+    if n == 0 || !n.is_power_of_two() {
+        return Err(Error::CryptoError("v5 spend: set size must be a power of two >= 1".into()));
+    }
+    if pubkeys.len() != n {
+        return Err(Error::CryptoError("v5 spend: pubkey ring length must equal coin ring length".into()));
+    }
+    let m = n.trailing_zeros() as usize;
+    if m == 0 || m > MAX_GK_ROUNDS {
+        return Err(Error::CryptoError("v5 spend: rounds out of range".into()));
+    }
+    if l >= n {
+        return Err(Error::CryptoError("v5 spend: index out of range".into()));
+    }
+    // Prover guards: the opening must match the coin, and x_l must open pubkeys[l].
+    if coins[l] != gen_gv() * Scalar::from(value) + gen_h() * h_coef + gen_k() * blinding {
+        return Err(Error::CryptoError("v5 spend: opening does not match coins[l]".into()));
+    }
+    if pubkeys[l] != pk_gen * x_l {
+        return Err(Error::CryptoError("v5 spend: x_l does not open pubkeys[l]".into()));
+    }
+
+    let v_point = gen_gv() * Scalar::from(value) + gen_k() * value_blinding;
+    let v_bytes = v_point.compress().to_bytes();
+    // W_i = C_i − V ; at l this is h_coef·H + (blinding − value_blinding)·K ∈ ⟨H,K⟩.
+    let shifted: Vec<RistrettoPoint> = coins.iter().map(|c| c - v_point).collect();
+    let k_coef = blinding - value_blinding;
+    let tag = (ki_gen * x_l).compress().to_bytes();
+    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+
+    // Round 1: per-bit commitments (G,K basis), identical to the base/HK proofs.
+    let (mut lj, mut aj, mut rj, mut sj, mut tj) = (
+        Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m),
+        Vec::with_capacity(m), Vec::with_capacity(m),
+    );
+    let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
+    for j in 0..m {
+        let l_j = Scalar::from(bit(j) as u64);
+        let a_j = Scalar::random(&mut *rng);
+        let r_j = Scalar::random(&mut *rng);
+        let s_j = Scalar::random(&mut *rng);
+        let t_j = Scalar::random(&mut *rng);
+        cl.push(commit(&l_j, &r_j).compress().to_bytes());
+        ca.push(commit(&a_j, &s_j).compress().to_bytes());
+        cb.push(commit(&(l_j * a_j), &t_j).compress().to_bytes());
+        lj.push(l_j);
+        aj.push(a_j);
+        rj.push(r_j);
+        sj.push(s_j);
+        tj.push(t_j);
+    }
+
+    // Accumulate Σ_i p_{i,k}·W_i AND Σ_i p_{i,k}·P_i with the SAME p_{i,k}.
+    let rho_h: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
+    let rho_k: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
+    let sigma: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
+    let mut coeff_w = vec![RistrettoPoint::default(); m];
+    let mut coeff_p = vec![RistrettoPoint::default(); m];
+    for (i, (w_i, p_i)) in shifted.iter().zip(pubkeys.iter()).enumerate() {
+        let mut poly = vec![Scalar::ONE];
+        for j in 0..m {
+            let i_j = (i >> j) & 1;
+            let (c0, c1) = if i_j == 1 { (aj[j], lj[j]) } else { (-aj[j], Scalar::ONE - lj[j]) };
+            poly = poly_mul_linear(&poly, c0, c1);
+        }
+        for k in 0..m {
+            coeff_w[k] += w_i * poly[k];
+            coeff_p[k] += p_i * poly[k];
+        }
+    }
+    let (mut gk, mut gkp, mut gkt) = (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
+    for k in 0..m {
+        gk.push((coeff_w[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k]).compress().to_bytes());
+        gkp.push((coeff_p[k] + pk_gen * sigma[k]).compress().to_bytes());
+        gkt.push((ki_gen * sigma[k]).compress().to_bytes());
+    }
+
+    let ctx = spend_context_v5(&v_bytes, message);
+    let x = challenge_ki(&ctx, &shifted, pubkeys, &ki_gen, &tag, &cl, &ca, &cb, &gk, &gkp, &gkt);
+
+    let (mut f, mut za, mut zb) = (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
+    for j in 0..m {
+        let f_j = lj[j] * x + aj[j];
+        f.push(f_j.to_bytes());
+        za.push((rj[j] * x + sj[j]).to_bytes());
+        zb.push((rj[j] * (x - f_j) + tj[j]).to_bytes());
+    }
+    let (mut x_pow, mut sum_h, mut sum_k, mut sum_s) =
+        (Scalar::ONE, Scalar::ZERO, Scalar::ZERO, Scalar::ZERO);
+    for k in 0..m {
+        sum_h += rho_h[k] * x_pow;
+        sum_k += rho_k[k] * x_pow;
+        sum_s += sigma[k] * x_pow;
+        x_pow *= x;
+    }
+    // x_pow == x^m
+    let zdh = (*h_coef * x_pow - sum_h).to_bytes();
+    let zdk = (k_coef * x_pow - sum_k).to_bytes();
+    let zp = (*x_l * x_pow - sum_s).to_bytes();
+
+    Ok(SparkSpendProofV5 {
+        cl, ca, cb, gk, gkp, gkt, f, za, zb, zdh, zdk, zp,
+        value_commitment: v_bytes,
+        tag,
+        message: *message,
+    })
+}
+
+/// Verify a complete spend. On success returns `(V, tag)` — the value commitment
+/// for the balance proof and the nullifier for the spent-tag-set check. Fail-closed.
+pub fn verify_spend_full(
+    coins: &[RistrettoPoint],
+    pubkeys: &[RistrettoPoint],
+    proof: &SparkSpendProofV5,
+    pk_gen: RistrettoPoint,
+    ki_gen: RistrettoPoint,
+    message: &[u8; 32],
+) -> Result<(RistrettoPoint, [u8; 32])> {
+    if &proof.message != message {
+        return Err(Error::SparkVerifyFailed);
+    }
+    let n = coins.len();
+    if n == 0 || !n.is_power_of_two() || pubkeys.len() != n {
+        return Err(Error::SparkVerifyFailed);
+    }
+    let m = n.trailing_zeros() as usize;
+    if m == 0 || m > MAX_GK_ROUNDS {
+        return Err(Error::SparkVerifyFailed);
+    }
+    for len in [
+        proof.cl.len(), proof.ca.len(), proof.cb.len(), proof.gk.len(), proof.gkp.len(),
+        proof.gkt.len(), proof.f.len(), proof.za.len(), proof.zb.len(),
+    ] {
+        if len != m {
+            return Err(Error::SparkVerifyFailed);
+        }
+    }
+    let points = |v: &[[u8; 32]]| -> Result<Vec<RistrettoPoint>> {
+        v.iter()
+            .copied()
+            .map(PeerPoint::decode_non_identity)
+            .map(|r| r.map(|p| *p.as_point()))
+            .collect::<Result<Vec<_>>>()
+            .map_err(|_| Error::SparkVerifyFailed)
+    };
+    let scalars = |v: &[[u8; 32]]| -> Result<Vec<Scalar>> {
+        v.iter()
+            .copied()
+            .map(PeerScalar::decode)
+            .map(|r| r.map(|s| *s.as_scalar()))
+            .collect::<Result<Vec<_>>>()
+            .map_err(|_| Error::SparkVerifyFailed)
+    };
+    let cl = points(&proof.cl)?;
+    let ca = points(&proof.ca)?;
+    let cb = points(&proof.cb)?;
+    let gk = points(&proof.gk)?;
+    let gkp = points(&proof.gkp)?;
+    let gkt = points(&proof.gkt)?;
+    let f = scalars(&proof.f)?;
+    let za = scalars(&proof.za)?;
+    let zb = scalars(&proof.zb)?;
+    let zdh = *PeerScalar::decode(proof.zdh).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
+    let zdk = *PeerScalar::decode(proof.zdk).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
+    let zp = *PeerScalar::decode(proof.zp).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
+    let v_point = *PeerPoint::decode_non_identity(proof.value_commitment)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_point();
+    let tag_point = *PeerPoint::decode_non_identity(proof.tag)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_point();
+
+    let shifted: Vec<RistrettoPoint> = coins.iter().map(|c| c - v_point).collect();
+    let g = gen_g();
+    let k_gen = gen_k();
+    let ctx = spend_context_v5(&proof.value_commitment, message);
+    let x = challenge_ki(
+        &ctx, &shifted, pubkeys, &ki_gen, &proof.tag,
+        &proof.cl, &proof.ca, &proof.cb, &proof.gk, &proof.gkp, &proof.gkt,
+    );
+
+    // Per-bit bit-ness.
+    for j in 0..m {
+        if x * cl[j] + ca[j] != g * f[j] + k_gen * za[j] {
+            return Err(Error::SparkVerifyFailed);
+        }
+        if (x - f[j]) * cl[j] + cb[j] != k_gen * zb[j] {
+            return Err(Error::SparkVerifyFailed);
+        }
+    }
+
+    // Shared polynomial products P_i(x) — the single bit-decomposition reused by
+    // the value AND pubkey accumulators; this is what forbids value-index != key-index.
+    let mut prods = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut prod = Scalar::ONE;
+        for (j, f_j) in f.iter().enumerate() {
+            let factor = if (i >> j) & 1 == 1 { *f_j } else { x - f_j };
+            prod *= factor;
+        }
+        prods.push(prod);
+    }
+    let (mut lhs_w, mut lhs_p) = (RistrettoPoint::default(), RistrettoPoint::default());
+    for ((w_i, p_i), prod) in shifted.iter().zip(pubkeys.iter()).zip(&prods) {
+        lhs_w += w_i * prod;
+        lhs_p += p_i * prod;
+    }
+    let mut x_pow = Scalar::ONE;
+    for k in 0..m {
+        lhs_w -= gk[k] * x_pow;
+        lhs_p -= gkp[k] * x_pow;
+        x_pow *= x;
+    }
+    // x_pow == x^m
+    // (value, ⟨H,K⟩): Σ_i P_i(x)·W_i − Σ_k x^k·gk_k == z_dh·H + z_dk·K
+    if lhs_w != gen_h() * zdh + k_gen * zdk {
+        return Err(Error::SparkVerifyFailed);
+    }
+    // (public key): Σ_i P_i(x)·P_i − Σ_k x^k·gkp_k == zp·pk_gen
+    if lhs_p != pk_gen * zp {
+        return Err(Error::SparkVerifyFailed);
+    }
+    // (tag): x^m·T − Σ_k x^k·gkt_k == zp·ki_gen
+    let mut lhs_t = tag_point * x_pow;
+    let mut x_pow2 = Scalar::ONE;
+    for gkt_k in gkt.iter() {
+        lhs_t -= gkt_k * x_pow2;
+        x_pow2 *= x;
+    }
+    if lhs_t != ki_gen * zp {
+        return Err(Error::SparkVerifyFailed);
+    }
+    Ok((v_point, proof.tag))
+}
+
 /// Proof that a bound coin `C = v·Gv + s·H + r·K` (appended to the tree) and a
 /// published value commitment `V = v·Gv + b·K` (used by the balance proof) commit
 /// the **same value** `v` — the OUTPUT mint-binding, the mirror of the input
@@ -1915,6 +2219,72 @@ mod tests {
                 .is_err(),
             "embedded base proof must not verify under the base challenge"
         );
+    }
+
+    #[test]
+    fn spend_full_v5_round_trips_and_binds() {
+        // The complete end-state spend: value-hidden HK membership ⊕ KI nullifier.
+        let mut rng = ChaCha20Rng::seed_from_u64(0x5151_5151);
+        let pk_gen = gen_g(); // one-time keys live on G
+        let ki_gen = gen_gv(); // independent NUMS tag generator
+        let (m, l) = (3usize, 4usize);
+        let n = 1usize << m;
+        let value = 1234u64;
+        let h_coef = Scalar::random(&mut rng); // coin serial coefficient on H
+        let blinding = Scalar::random(&mut rng); // coin K-blinding
+        let value_blinding = Scalar::random(&mut rng); // fresh blinding for V
+        let x_l = Scalar::random(&mut rng); // spend key
+
+        // Coin ring: fillers everywhere, a real Spark opening at l.
+        let mut coins: Vec<RistrettoPoint> = (0..n).map(|i| filler(i as u64 + 500)).collect();
+        coins[l] = gen_gv() * Scalar::from(value) + gen_h() * h_coef + gen_k() * blinding;
+        let mut pubkeys: Vec<RistrettoPoint> = (0..n)
+            .map(|i| RISTRETTO_BASEPOINT_POINT * Scalar::from(i as u64 * 31 + 3))
+            .collect();
+        pubkeys[l] = pk_gen * x_l;
+        let msg = [7u8; 32];
+
+        let proof = prove_spend_full(
+            &coins, &pubkeys, l, value, &h_coef, &blinding, &value_blinding, &x_l, pk_gen, ki_gen,
+            &msg, &mut rng,
+        )
+        .expect("honest v5 spend proves");
+        let (v, tag) = verify_spend_full(&coins, &pubkeys, &proof, pk_gen, ki_gen, &msg)
+            .expect("honest v5 spend verifies");
+        assert_eq!(
+            v,
+            gen_gv() * Scalar::from(value) + gen_k() * value_blinding,
+            "returned V = v·Gv + b·K"
+        );
+        assert_eq!(tag, (ki_gen * x_l).compress().to_bytes(), "nullifier tag = x_l·ki_gen");
+
+        // (1) wrong message → reject.
+        assert!(verify_spend_full(&coins, &pubkeys, &proof, pk_gen, ki_gen, &[9u8; 32]).is_err());
+        // (2) tampered nullifier tag → reject.
+        let mut bad = proof.clone();
+        bad.tag = (ki_gen * (x_l + Scalar::ONE)).compress().to_bytes();
+        assert!(verify_spend_full(&coins, &pubkeys, &bad, pk_gen, ki_gen, &msg).is_err());
+        // (3) value-binding: swap V to commit a DIFFERENT value → reject (the
+        //     membership was proven over W_i = C_i − V for the original V; a
+        //     different V breaks the ⟨H,K⟩ membership at l).
+        let mut bad = proof.clone();
+        bad.value_commitment =
+            (gen_gv() * Scalar::from(value + 1) + gen_k() * value_blinding).compress().to_bytes();
+        assert!(verify_spend_full(&coins, &pubkeys, &bad, pk_gen, ki_gen, &msg).is_err());
+        // (4) wrong ki_gen at verify → reject.
+        assert!(verify_spend_full(&coins, &pubkeys, &proof, pk_gen, gen_h(), &msg).is_err());
+        // (5) tampered membership response → reject.
+        let mut bad = proof.clone();
+        let mut f0 = bad.f[0];
+        f0[0] ^= 1;
+        bad.f[0] = f0;
+        assert!(verify_spend_full(&coins, &pubkeys, &bad, pk_gen, ki_gen, &msg).is_err());
+        // (6) prover guard: a value that does not open coins[l] cannot be proven.
+        assert!(prove_spend_full(
+            &coins, &pubkeys, l, value + 1, &h_coef, &blinding, &value_blinding, &x_l, pk_gen,
+            ki_gen, &msg, &mut rng,
+        )
+        .is_err());
     }
 
     #[test]
