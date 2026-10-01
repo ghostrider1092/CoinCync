@@ -85,3 +85,38 @@ the compound proof has a ratified set shape to build against. It is **not wired
 into consensus** — the production `SpendVerifier` is `FailClosedVerifier` and
 shielded stays gated off (`SHIELDED_TX_ACTIVATION_HEIGHT = u64::MAX`). `N` and
 the ratification questions above are still open.
+
+## Parameter ratification — anonymity-set size N (audit-prep, 2026-09-30)
+
+Status: **ANALYSIS for ratification.** N is a consensus privacy/performance
+parameter; this records the tradeoff + a recommendation. The final value is a
+user + audit decision, ideally backed by the benchmark below.
+
+**What N is.** The anonymity set per spend. Native GK path: fixed-position bucket
+`N = 2^GK_ANON_SET_LOG2 = 256`. libspark (production) path: libspark does NOT
+hardcode the set size — Grootle's base `n` and depth `m` are constructor
+parameters (`grootle.h`), and the cover set is a monotonically-growing group the
+CALLER assembles (`spend_transaction.h`). So `N` (≈ `n^m`) and `(n, m)` are
+**CoinCync's to choose** on the libspark path too — not fixed by libspark.
+
+**Tradeoff.**
+- Privacy scales with N: a spend is indistinguishable among its N cover members.
+  `N = 256` gives only a 256-member anonymity set — weak for a privacy coin.
+- Cost: Grootle proof size ≈ O(m·(n−1)) group elements (≈ O(log N) at fixed n);
+  verification ≈ O(N) multiexponentiation per spend (batchable across spends).
+  Larger N ⇒ linearly more per-spend verify work.
+
+**Reference.** Firo Spark mainnet runs a large set (`n = 8, m = 5 ⇒ 32768`). A
+privacy coin generally wants ≥ 2^12 for the set to be meaningful.
+
+**Recommendation.** `256` is too small for the production (libspark) path. Target
+Firo-class — ideally ~2^15 (`n=8, m=5`), or a benchmarked point in 2^12..2^15 that
+keeps worst-case per-block shielded verify within the block budget. **Ratify only
+after the benchmark.**
+
+**Benchmark needed before ratification (the decision data):**
+- libspark `verify_spend` wall-time + proof bytes at `N ∈ {256, 1024, 4096,
+  16384, 32768}`, single and batched, on target hardware; pick the largest N whose
+  worst-case per-block shielded-verify fits the block time budget.
+- Confirm the bucket / cover-set model (above) composes a monotonic group of the
+  chosen N that every node derives identically (determinism contract).
