@@ -30,7 +30,7 @@ use sha3::{Digest, Sha3_256, Sha3_512};
 // crypto/spark_generators.rs), so it proves membership in the exact same basis
 // as the Spark coin commitment `C = v·G + s·H + r·K`. `Com(b; r) = b·G + r·K` is
 // the auxiliary Pedersen commitment used inside the proof.
-use crate::crypto::spark_generators::{gen_g, gen_gv, gen_h, gen_k};
+use crate::crypto::spark_generators::{gen_g, gen_gv, gen_h, gen_k, gen_u};
 
 /// Auxiliary Pedersen commitment `Com(b; r) = b·G + r·K`.
 fn commit(b: &Scalar, r: &Scalar) -> RistrettoPoint {
@@ -1605,6 +1605,296 @@ pub fn verify_spend_full(
     Ok((v_point, proof.tag))
 }
 
+// ── V6: the Spark-NATIVE end-state spend (value-hidden + serial-keyed nullifier)
+//
+// The chosen production shape. V4's value-hidden HK membership over `{C_i − V}`
+// PLUS a serial-keyed algebraic nullifier `T = s·U` bound to the SAME coin — with
+// NO separate spend key, NO pubkey ring, and NO shielded-store change (the ring
+// is the coin set the store already holds). The coin's serial `s` is the
+// H-coefficient the membership already commits (bound by `z_dh`); adding a tag
+// accumulator `gkt_k = ρ_h_k·U` (the SAME `ρ_h` that blinds `gk` on `H`) makes
+// the tag equation `x^m·T − Σ_k x^k·gkt_k == z_dh·U` force `T = s·U` for exactly
+// that `s`. `T` is deterministic in `s` (a second spend of the same coin
+// collides) yet hides `s` (DL on the independent generator `U`). This is the
+// Lelantus-Spark-faithful nullifier. Gated `sketch-gk-proof`, UNAUDITED, unwired
+// from consensus.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct SparkSpendProofV6 {
+    /// Per-bit commitments (in the `(G,K)` basis), proving each index bit ∈ {0,1}.
+    pub cl: Vec<[u8; 32]>,
+    pub ca: Vec<[u8; 32]>,
+    pub cb: Vec<[u8; 32]>,
+    /// Value accumulator over `W_i = C_i − V`, blinded `ρ_h·H + ρ_k·K`.
+    pub gk: Vec<[u8; 32]>,
+    /// Serial-tag accumulator `ρ_h_k·U` — the SAME `ρ_h` as `gk`'s `H`-blinding.
+    pub gkt: Vec<[u8; 32]>,
+    /// Per-bit response scalars.
+    pub f: Vec<[u8; 32]>,
+    pub za: Vec<[u8; 32]>,
+    pub zb: Vec<[u8; 32]>,
+    /// `H` response `z_dh = s·x^m − Σ ρ_h·x^k` (doubles as the tag response).
+    pub zdh: [u8; 32],
+    /// `K` response `z_dk = k_coef·x^m − Σ ρ_k·x^k`.
+    pub zdk: [u8; 32],
+    /// Published value commitment `V = v·Gv + b·K`.
+    pub value_commitment: [u8; 32],
+    /// Serial-keyed nullifier `T = s·U`.
+    pub nullifier: [u8; 32],
+    /// The spend message this proof is bound to.
+    pub message: [u8; 32],
+}
+
+#[allow(clippy::too_many_arguments)]
+fn challenge_spark(
+    context: &[u8],
+    shifted: &[RistrettoPoint],
+    nullifier: &[u8; 32],
+    cl: &[[u8; 32]],
+    ca: &[[u8; 32]],
+    cb: &[[u8; 32]],
+    gk: &[[u8; 32]],
+    gkt: &[[u8; 32]],
+) -> Scalar {
+    let mut h = Sha3_512::new();
+    h.update(b"COINCYNC_SPARK_SPEND_V6_FS_v1");
+    h.update((context.len() as u64).to_le_bytes());
+    h.update(context);
+    for c in shifted {
+        h.update(c.compress().as_bytes());
+    }
+    h.update(nullifier);
+    for v in [cl, ca, cb, gk, gkt] {
+        for p in v {
+            h.update(p);
+        }
+    }
+    let mut wide = [0u8; 64];
+    wide.copy_from_slice(&h.finalize());
+    Scalar::from_bytes_mod_order_wide(&wide)
+}
+
+/// Prove a serial-hiding, value-hiding Spark spend of coin `l`, publishing the
+/// value commitment `V` and the serial-keyed nullifier `T = s·U`. The spender
+/// knows the full opening `coins[l] = value·Gv + serial·H + blinding·K` and draws
+/// a fresh `value_blinding` for `V`.
+#[allow(clippy::too_many_arguments)]
+pub fn prove_spend_spark<R: CryptoRng + RngCore>(
+    coins: &[RistrettoPoint],
+    l: usize,
+    value: u64,
+    serial: &Scalar,
+    blinding: &Scalar,
+    value_blinding: &Scalar,
+    message: &[u8; 32],
+    rng: &mut R,
+) -> Result<SparkSpendProofV6> {
+    let n = coins.len();
+    if n == 0 || !n.is_power_of_two() {
+        return Err(Error::CryptoError("v6 spend: set size must be a power of two >= 1".into()));
+    }
+    let m = n.trailing_zeros() as usize;
+    if m == 0 || m > MAX_GK_ROUNDS {
+        return Err(Error::CryptoError("v6 spend: rounds out of range".into()));
+    }
+    if l >= n {
+        return Err(Error::CryptoError("v6 spend: index out of range".into()));
+    }
+    if coins[l] != gen_gv() * Scalar::from(value) + gen_h() * serial + gen_k() * blinding {
+        return Err(Error::CryptoError("v6 spend: opening does not match coins[l]".into()));
+    }
+
+    let u = gen_u();
+    let v_point = gen_gv() * Scalar::from(value) + gen_k() * value_blinding;
+    let v_bytes = v_point.compress().to_bytes();
+    let shifted: Vec<RistrettoPoint> = coins.iter().map(|c| c - v_point).collect();
+    let k_coef = blinding - value_blinding;
+    let nullifier = (u * serial).compress().to_bytes();
+    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+
+    let (mut lj, mut aj, mut rj, mut sj, mut tj) = (
+        Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m),
+        Vec::with_capacity(m), Vec::with_capacity(m),
+    );
+    let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
+    for j in 0..m {
+        let l_j = Scalar::from(bit(j) as u64);
+        let a_j = Scalar::random(&mut *rng);
+        let r_j = Scalar::random(&mut *rng);
+        let s_j = Scalar::random(&mut *rng);
+        let t_j = Scalar::random(&mut *rng);
+        cl.push(commit(&l_j, &r_j).compress().to_bytes());
+        ca.push(commit(&a_j, &s_j).compress().to_bytes());
+        cb.push(commit(&(l_j * a_j), &t_j).compress().to_bytes());
+        lj.push(l_j);
+        aj.push(a_j);
+        rj.push(r_j);
+        sj.push(s_j);
+        tj.push(t_j);
+    }
+
+    let rho_h: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
+    let rho_k: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
+    let mut coeff_w = vec![RistrettoPoint::default(); m];
+    for (i, w_i) in shifted.iter().enumerate() {
+        let mut poly = vec![Scalar::ONE];
+        for j in 0..m {
+            let i_j = (i >> j) & 1;
+            let (c0, c1) = if i_j == 1 { (aj[j], lj[j]) } else { (-aj[j], Scalar::ONE - lj[j]) };
+            poly = poly_mul_linear(&poly, c0, c1);
+        }
+        for k in 0..m {
+            coeff_w[k] += w_i * poly[k];
+        }
+    }
+    let (mut gk, mut gkt) = (Vec::with_capacity(m), Vec::with_capacity(m));
+    for k in 0..m {
+        gk.push((coeff_w[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k]).compress().to_bytes());
+        gkt.push((u * rho_h[k]).compress().to_bytes()); // SAME ρ_h as gk's H-blinding
+    }
+
+    let ctx = spend_context_v4(&v_bytes, message);
+    let x = challenge_spark(&ctx, &shifted, &nullifier, &cl, &ca, &cb, &gk, &gkt);
+
+    let (mut f, mut za, mut zb) = (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
+    for j in 0..m {
+        let f_j = lj[j] * x + aj[j];
+        f.push(f_j.to_bytes());
+        za.push((rj[j] * x + sj[j]).to_bytes());
+        zb.push((rj[j] * (x - f_j) + tj[j]).to_bytes());
+    }
+    let (mut x_pow, mut sum_h, mut sum_k) = (Scalar::ONE, Scalar::ZERO, Scalar::ZERO);
+    for k in 0..m {
+        sum_h += rho_h[k] * x_pow;
+        sum_k += rho_k[k] * x_pow;
+        x_pow *= x;
+    }
+    // x_pow == x^m
+    let zdh = (*serial * x_pow - sum_h).to_bytes();
+    let zdk = (k_coef * x_pow - sum_k).to_bytes();
+
+    Ok(SparkSpendProofV6 {
+        cl, ca, cb, gk, gkt, f, za, zb, zdh, zdk,
+        value_commitment: v_bytes,
+        nullifier,
+        message: *message,
+    })
+}
+
+/// Verify a Spark-native spend. On success returns `(V, nullifier)` — the value
+/// commitment for the balance proof and the serial-keyed nullifier for the
+/// spent-tag-set (double-spend) check. Fail-closed.
+pub fn verify_spend_spark(
+    coins: &[RistrettoPoint],
+    proof: &SparkSpendProofV6,
+    message: &[u8; 32],
+) -> Result<(RistrettoPoint, [u8; 32])> {
+    if &proof.message != message {
+        return Err(Error::SparkVerifyFailed);
+    }
+    let n = coins.len();
+    if n == 0 || !n.is_power_of_two() {
+        return Err(Error::SparkVerifyFailed);
+    }
+    let m = n.trailing_zeros() as usize;
+    if m == 0 || m > MAX_GK_ROUNDS {
+        return Err(Error::SparkVerifyFailed);
+    }
+    for len in [
+        proof.cl.len(), proof.ca.len(), proof.cb.len(), proof.gk.len(), proof.gkt.len(),
+        proof.f.len(), proof.za.len(), proof.zb.len(),
+    ] {
+        if len != m {
+            return Err(Error::SparkVerifyFailed);
+        }
+    }
+    let points = |v: &[[u8; 32]]| -> Result<Vec<RistrettoPoint>> {
+        v.iter()
+            .copied()
+            .map(PeerPoint::decode_non_identity)
+            .map(|r| r.map(|p| *p.as_point()))
+            .collect::<Result<Vec<_>>>()
+            .map_err(|_| Error::SparkVerifyFailed)
+    };
+    let scalars = |v: &[[u8; 32]]| -> Result<Vec<Scalar>> {
+        v.iter()
+            .copied()
+            .map(PeerScalar::decode)
+            .map(|r| r.map(|s| *s.as_scalar()))
+            .collect::<Result<Vec<_>>>()
+            .map_err(|_| Error::SparkVerifyFailed)
+    };
+    let cl = points(&proof.cl)?;
+    let ca = points(&proof.ca)?;
+    let cb = points(&proof.cb)?;
+    let gk = points(&proof.gk)?;
+    let gkt = points(&proof.gkt)?;
+    let f = scalars(&proof.f)?;
+    let za = scalars(&proof.za)?;
+    let zb = scalars(&proof.zb)?;
+    let zdh = *PeerScalar::decode(proof.zdh).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
+    let zdk = *PeerScalar::decode(proof.zdk).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
+    let v_point = *PeerPoint::decode_non_identity(proof.value_commitment)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_point();
+    let tag_point = *PeerPoint::decode_non_identity(proof.nullifier)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_point();
+
+    let u = gen_u();
+    let g = gen_g();
+    let k_gen = gen_k();
+    let shifted: Vec<RistrettoPoint> = coins.iter().map(|c| c - v_point).collect();
+    let ctx = spend_context_v4(&proof.value_commitment, message);
+    let x = challenge_spark(
+        &ctx, &shifted, &proof.nullifier, &proof.cl, &proof.ca, &proof.cb, &proof.gk, &proof.gkt,
+    );
+
+    // Per-bit bit-ness.
+    for j in 0..m {
+        if x * cl[j] + ca[j] != g * f[j] + k_gen * za[j] {
+            return Err(Error::SparkVerifyFailed);
+        }
+        if (x - f[j]) * cl[j] + cb[j] != k_gen * zb[j] {
+            return Err(Error::SparkVerifyFailed);
+        }
+    }
+
+    let mut prods = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut prod = Scalar::ONE;
+        for (j, f_j) in f.iter().enumerate() {
+            let factor = if (i >> j) & 1 == 1 { *f_j } else { x - f_j };
+            prod *= factor;
+        }
+        prods.push(prod);
+    }
+    let mut lhs_w = RistrettoPoint::default();
+    for (w_i, prod) in shifted.iter().zip(&prods) {
+        lhs_w += w_i * prod;
+    }
+    let mut x_pow = Scalar::ONE;
+    for k in 0..m {
+        lhs_w -= gk[k] * x_pow;
+        x_pow *= x;
+    }
+    // x_pow == x^m
+    // (value, ⟨H,K⟩): Σ_i P_i(x)·W_i − Σ_k x^k·gk_k == z_dh·H + z_dk·K
+    if lhs_w != gen_h() * zdh + k_gen * zdk {
+        return Err(Error::SparkVerifyFailed);
+    }
+    // (serial tag): x^m·T − Σ_k x^k·gkt_k == z_dh·U  (forces T = s·U for the same s)
+    let mut lhs_t = tag_point * x_pow;
+    let mut x_pow2 = Scalar::ONE;
+    for gkt_k in gkt.iter() {
+        lhs_t -= gkt_k * x_pow2;
+        x_pow2 *= x;
+    }
+    if lhs_t != u * zdh {
+        return Err(Error::SparkVerifyFailed);
+    }
+    Ok((v_point, proof.nullifier))
+}
+
 /// Proof that a bound coin `C = v·Gv + s·H + r·K` (appended to the tree) and a
 /// published value commitment `V = v·Gv + b·K` (used by the balance proof) commit
 /// the **same value** `v` — the OUTPUT mint-binding, the mirror of the input
@@ -2285,6 +2575,67 @@ mod tests {
             ki_gen, &msg, &mut rng,
         )
         .is_err());
+    }
+
+    #[test]
+    fn spend_spark_v6_round_trips_and_nullifier_is_serial_keyed() {
+        // The Spark-native end-state: value-hidden membership + serial-keyed
+        // nullifier T = serial·U, no spend key / pubkey ring / store change.
+        let mut rng = ChaCha20Rng::seed_from_u64(0x6060_6060);
+        let (m, l) = (3usize, 2usize);
+        let n = 1usize << m;
+        let value = 9001u64;
+        let serial = Scalar::random(&mut rng);
+        let blinding = Scalar::random(&mut rng);
+        let value_blinding = Scalar::random(&mut rng);
+        let mut coins: Vec<RistrettoPoint> = (0..n).map(|i| filler(i as u64 + 700)).collect();
+        coins[l] = gen_gv() * Scalar::from(value) + gen_h() * serial + gen_k() * blinding;
+        let msg = [3u8; 32];
+
+        let proof = prove_spend_spark(&coins, l, value, &serial, &blinding, &value_blinding, &msg, &mut rng)
+            .expect("honest v6 spend proves");
+        let (v, nf) = verify_spend_spark(&coins, &proof, &msg).expect("honest v6 spend verifies");
+        assert_eq!(v, gen_gv() * Scalar::from(value) + gen_k() * value_blinding, "returned V");
+        assert_eq!(nf, (gen_u() * serial).compress().to_bytes(), "nullifier = serial·U");
+
+        // DOUBLE-SPEND DETECTION: a second spend of the SAME coin — different
+        // message, different value blinding, different anonymity set + position —
+        // yields the SAME nullifier, so the spent-tag set catches it.
+        let vb2 = Scalar::random(&mut rng);
+        let msg2 = [42u8; 32];
+        let (l2, n2) = (5usize, 8usize);
+        let mut coins2: Vec<RistrettoPoint> = (0..n2).map(|i| filler(i as u64 + 1500)).collect();
+        coins2[l2] = gen_gv() * Scalar::from(value) + gen_h() * serial + gen_k() * blinding;
+        let proof2 = prove_spend_spark(&coins2, l2, value, &serial, &blinding, &vb2, &msg2, &mut rng).unwrap();
+        let (_, nf2) = verify_spend_spark(&coins2, &proof2, &msg2).unwrap();
+        assert_eq!(nf, nf2, "same coin serial MUST collide in the nullifier (double-spend)");
+
+        // A DIFFERENT serial → a DIFFERENT nullifier (no cross-coin collision).
+        let serial3 = Scalar::random(&mut rng);
+        let mut coins3 = coins.clone();
+        coins3[l] = gen_gv() * Scalar::from(value) + gen_h() * serial3 + gen_k() * blinding;
+        let proof3 = prove_spend_spark(&coins3, l, value, &serial3, &blinding, &value_blinding, &msg, &mut rng).unwrap();
+        let (_, nf3) = verify_spend_spark(&coins3, &proof3, &msg).unwrap();
+        assert_ne!(nf, nf3, "different serial → different nullifier");
+
+        // Adversarial rejections.
+        assert!(verify_spend_spark(&coins, &proof, &[0u8; 32]).is_err(), "wrong message");
+        let mut bad = proof.clone();
+        bad.nullifier = (gen_u() * (serial + Scalar::ONE)).compress().to_bytes();
+        assert!(verify_spend_spark(&coins, &bad, &msg).is_err(), "tampered nullifier");
+        let mut bad = proof.clone();
+        bad.value_commitment =
+            (gen_gv() * Scalar::from(value + 1) + gen_k() * value_blinding).compress().to_bytes();
+        assert!(verify_spend_spark(&coins, &bad, &msg).is_err(), "value-binding (wrong V value)");
+        let mut bad = proof.clone();
+        let mut f0 = bad.f[0];
+        f0[0] ^= 1;
+        bad.f[0] = f0;
+        assert!(verify_spend_spark(&coins, &bad, &msg).is_err(), "tampered membership");
+        assert!(
+            prove_spend_spark(&coins, l, value + 1, &serial, &blinding, &value_blinding, &msg, &mut rng).is_err(),
+            "prover opening guard"
+        );
     }
 
     #[test]

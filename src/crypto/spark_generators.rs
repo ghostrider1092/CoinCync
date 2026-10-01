@@ -47,15 +47,25 @@ pub fn gen_kv() -> RistrettoPoint {
     nums(b"COINCYNC_SPARK_GEN_KV_v1")
 }
 
+/// Serial-tag (nullifier) generator `U` — NUMS, independent of {G,H,K,Gv,Kv}.
+/// The serial-hidden double-spend nullifier is the algebraic tag `T = s·U`,
+/// deterministic in the coin's serial `s` (so a second spend of the same coin
+/// collides) yet revealing nothing about `s` under the DL assumption. Keeping
+/// `U` independent of the serial generator `H` is what makes `T = s·U` a sound
+/// binding of the SAME `s` the membership proof commits on `H`.
+pub fn gen_u() -> RistrettoPoint {
+    nums(b"COINCYNC_SPARK_GEN_U_v1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn generators_are_deterministic_distinct_and_nonidentity() {
-        let gens = [gen_g(), gen_h(), gen_k(), gen_gv(), gen_kv()];
+        let gens = [gen_g(), gen_h(), gen_k(), gen_gv(), gen_kv(), gen_u()];
         // deterministic
-        assert_eq!(gens, [gen_g(), gen_h(), gen_k(), gen_gv(), gen_kv()]);
+        assert_eq!(gens, [gen_g(), gen_h(), gen_k(), gen_gv(), gen_kv(), gen_u()]);
         // pairwise distinct
         for i in 0..gens.len() {
             for j in (i + 1)..gens.len() {
