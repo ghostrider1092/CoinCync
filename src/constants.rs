@@ -446,6 +446,11 @@ pub const SHIELDED_REGTEST_ACTIVATION_HEIGHT: u64 = 100;
 /// value, so activating unaudited shielded consensus there is contained.
 pub const SHIELDED_BETA_ACTIVATION_HEIGHT: u64 = 5;
 
+/// Beta initial mining difficulty — deliberately LOW so the disposable beta test
+/// network mines near-instantly and opt-in users watch shielded activate (height
+/// 5) within seconds. Beta-only; testnet/mainnet keep their own initial difficulty.
+pub const BETA_INITIAL_DIFFICULTY: u64 = 256;
+
 /// Network-scoped shielded activation height. **Regtest** activates at
 /// [`SHIELDED_REGTEST_ACTIVATION_HEIGHT`]; **testnet and mainnet stay
 /// `u64::MAX`** (permanently disabled) until the shielded path is externally
