@@ -1,7 +1,9 @@
 # Vendored third-party source — attribution
 
-The `src/` tree here is vendored from **Firo** (`github.com/firoorg/firo`,
-`master`), used under the **MIT License**:
+The `src/` tree here is vendored from **Firo** (`github.com/firoorg/firo`) at
+commit `c03cd0a1c68e1af8274349d1234d142ae7d02d1e` (tag **v0.14.18.1**,
+2026-09-25), used under the **MIT License**. See `PROVENANCE.md` for the pinned
+commit and the LF-normalized verbatim-verification recipe.
 
 > Copyright (c) 2016-2026 The Firo Core developers
 > Copyright (c) 2009-2026 The Bitcoin Core developers

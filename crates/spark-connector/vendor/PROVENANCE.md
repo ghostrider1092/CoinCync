@@ -45,20 +45,51 @@ transcript, aead, kdf, …), `src/secp256k1/`, `src/crypto/`, `src/support/`,
 `src/compat/`, and the Bitcoin-core root headers — is byte-identical to upstream
 Firo and contains the Lelantus-Spark crypto that the external audit covers.
 
-**ACTION REQUIRED (audit-prep): pin the upstream commit.** `NOTICE.md` records the
-source as Firo `master` at vendor time, which is not reproducible (master moves).
-Before the audit, pin the exact `firoorg/firo` commit and record it here, then the
-verbatim claim is reproducible with:
+### Pinned upstream commit
+
+**Upstream pin:** `firoorg/firo` commit
+**`c03cd0a1c68e1af8274349d1234d142ae7d02d1e`** — tag **v0.14.18.1**
+("Bump version to v0.14.18.1 (#1968)", 2026-09-25). This replaces the
+non-reproducible "Firo `master` at vendor time" note; `master` has since moved
+(e.g. #1973 "guard Grootle set sizes", 2026-09-28, which this vendoring
+predates — see the Grootle note below).
+
+This pin was established mechanically: every file in `MANIFEST.sha256` except
+the five shims is **byte-identical to `firoorg/firo` at `c03cd0a1`, modulo line
+endings** (see below). The result was derived by LF-normalized SHA-256 compare
+of the whole vendored tree against upstream history; the only files that differ
+from current `master` are `src/libspark/grootle.cpp` and
+`src/libspark/test/grootle_test.cpp` (both changed by #1973 *after* this
+vendoring), and both match `c03cd0a1` exactly. Since `master` equals `c03cd0a1`
+on every other file, the entire crypto surface pins to `c03cd0a1`.
+
+> **Line endings.** The vendored `src/` tree is stored with **CRLF** line
+> endings, while upstream is **LF**. A naive `diff -r` / `sha256sum` against a
+> fresh upstream checkout therefore reports *every line* as changed. Verification
+> MUST normalize line endings first (e.g. `git -c core.autocrlf=false` plus
+> `dos2unix`, or pipe each side through `tr -d '\r'` before hashing). The hashes
+> in `MANIFEST.sha256` above are of the vendored (CRLF) bytes as they sit in this
+> repo; the verbatim-vs-upstream claim is about the **LF-normalized** content.
+
+### Reproducing the verbatim verification
 
 ```bash
-# <PIN> = the firoorg/firo commit libspark was vendored from
+PIN=c03cd0a1c68e1af8274349d1234d142ae7d02d1e   # firoorg/firo v0.14.18.1
 git clone --filter=blob:none --no-checkout https://github.com/firoorg/firo firo-upstream
-cd firo-upstream && git checkout <PIN> -- src/libspark src/secp256k1 src/crypto src/support
-# diff each verbatim tree against this vendor/src/<tree>; expect NO differences
-#   diff -r firo-upstream/src/libspark  <vendor>/src/libspark   # etc.
-# (exclude the five shim files above)
+cd firo-upstream && git checkout "$PIN" -- src/libspark src/secp256k1 src/crypto src/support
+
+# LF-normalized per-file compare (empty output = identical). Example for one tree;
+# repeat for secp256k1 / crypto / support, and exclude the five shim files.
+cd <vendor>
+for f in $(cd firo-upstream && git ls-files src/libspark); do
+  u=$(tr -d '\r' < "firo-upstream/$f" | sha256sum | cut -d' ' -f1)
+  v=$(tr -d '\r' < "$f"               | sha256sum | cut -d' ' -f1)
+  [ "$u" = "$v" ] || echo "DIFF $f"
+done
+# Exclude: src/util.h, src/sync.h (shims); shims/* are not upstream at all.
 ```
 
-An auditor who pins `<PIN>` and runs the diff confirms the entire crypto surface
-is unmodified Firo, reducing the shielded-crypto review to (a) upstream Firo's own
-audited Spark implementation and (b) these five infra shims.
+An auditor who checks out `c03cd0a1` and runs the LF-normalized compare confirms
+the entire crypto surface is unmodified Firo v0.14.18.1, reducing the
+shielded-crypto review to (a) upstream Firo's own audited Spark implementation
+and (b) these five infra shims.

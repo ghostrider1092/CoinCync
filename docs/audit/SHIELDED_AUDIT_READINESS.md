@@ -111,16 +111,46 @@ range proofs, a balance proof, and the Dodis–Yampolskiy VRF nullifier
 
 ## 5. Evidence (to re-run against the audit commit)
 
-- **libspark in-block / verify soak** — a 24h build→verify→tamper→reject soak
-  stressing the FFI boundary has been run on the libspark path; re-run against the
-  exact audit commit and attach the log.
+- **libspark in-block / verify soak** (`chain::tests::soak_shielded_in_block_consensus`,
+  `#[ignore]`, driven by `scripts/soak-24h-shielded.sh`) — mint → transfer → self-spend
+  → double-spend-reject → reorg cycles through the **real block hooks with live
+  libspark proofs**, asserting after every op: `pool_value >= 0`, no consensus
+  halt, double-spend rejected, reorg restores an empty pool, and that a transfer's
+  recipient (and only the recipient) recovers the output coin.
+  - **180s validation on the audit candidate (2026-09-30):** `SHIELDED SOAK OK:
+    462 mint/transfer/spend/reorg cycles, seed=828927513140`, `1 passed; 0 failed`,
+    **0 anomalies**.
+  - **Full 24h soak launched 2026-09-30** (`SHIELDED_SOAK_SECS=86400`, log
+    `soak-shielded-20260930-215419.log`); attach the `SHIELDED SOAK OK: <n> cycles`
+    completion summary against the exact audit commit.
 - **Native-GK crypto soak** (`soak_shielded_verifier`, the differential oracle,
   NOT the audited engine) — most recent run this cycle: 310,034 iterations,
   620,068 adversarial rejections, **0 anomalies** over 24h. Included only as a
   cross-check data point.
-- **Unit coverage** — the `libspark-ffi` shielded test suite (create/build/verify/
-  identify round-trips, proof-tamper rejection, node-verifies-real-bundle). List
-  the exact count at the audit commit.
+- **Unit coverage** (feature set `testnet,sketch-gk-proof,libspark-ffi`) —
+  **2128** total lib tests, **0 failures**. Of these, **121** carry the
+  `spark`/`shielded` names (the full shielded-engine surface: crypto primitives,
+  storage/reorg, pipeline, wallet, consensus wiring). **12** are gated behind the
+  `libspark-ffi` feature and exercise the **real vendored engine** end-to-end — of
+  which 2 are the `#[ignore]` soaks above (`soak_shielded_in_block_consensus`,
+  `shielded_connector::ffi_tests::soak_shielded_verify`) and 10 are standing unit /
+  end-to-end tests:
+  - `shielded_connector::ffi_tests::node_verifies_real_libspark_bundle` — the node
+    verifies a real libspark-produced bundle.
+  - `validation::tests::shielded_tx_with_valid_libspark_bundle_verifies_post_activation`,
+    `validation::tests::regtest_activates_shielded_and_routes_v2_payload_statelessly`
+    — consensus routing accepts a valid real bundle post-activation.
+  - `chain::tests::{spark_v2_chain_hooks_feed_and_verify_a_real_shielded_tx,
+    spark_v2_authenticated_mint_bundle_feeds_pool,
+    spark_v2_rejects_unauthenticated_coin_entry}` — block hooks over real proofs.
+  - `spark_payload::tests::{end_to_end_v2_payload_verify_then_apply,
+    mint_shield_in_binds_value_balance_to_authenticated_mint_total,
+    mint_builder_then_spend_builder_full_loop}`,
+    `storage::spark_pool::tests::end_to_end_store_drives_spend_and_unspent_check`.
+
+  (Count method: `target/release/deps/coincync-<hash>.exe --list` for the total/
+  named tallies; libspark-gated subset by `#[cfg(...feature = "libspark-ffi"...)]`
+  at the audit commit. Re-run both against the audit commit to re-pin.)
 
 ## 6. Known open items (honest)
 
