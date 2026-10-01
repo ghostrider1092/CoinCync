@@ -193,7 +193,7 @@ toolchain (`build-essential cmake` on Debian/Ubuntu; `base-devel cmake` on Arch;
 **Clone and build:**
 
 ```bash
-git clone https://github.com/Coincync-sys/Coincync-Testnet-.git coincync
+git clone https://github.com/ghostrider1092/CoinCync.git coincync
 cd coincync
 cargo build --release --features randomx
 ```
