@@ -944,7 +944,7 @@ pub mod ffi {
         }
 
         #[test]
-        fn partial_cover_set_smaller_than_N_verifies() {
+        fn partial_cover_set_smaller_than_n_verifies() {
             // (c) Grootle accepts any set size in [1, N] and pads internally,
             // so a real (partial) cover set — fewer than N coins — must still
             // build and verify.

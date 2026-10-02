@@ -530,6 +530,15 @@ async fn main() {
             }
         }
         Command::Start => {
+            if matches!(network, Network::Beta) && !coincync::beta::shielded_capable_build() {
+                error!(
+                    "Cannot start a Beta node: this binary was built without the required shielded \
+                     engine support and cannot follow the Beta chain once shielded transactions \
+                     are included. Rebuild with: cargo build --release --features \
+                     \"testnet,sketch-gk-proof,libspark-ffi\". See docs/BETA_TESTING.md."
+                );
+                std::process::exit(1);
+            }
             if let Err(e) = start_node(
                 network,
                 data_dir,

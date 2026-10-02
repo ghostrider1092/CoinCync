@@ -9,6 +9,12 @@
 use crate::consensus::Block;
 use crate::primitives::Hash;
 
+/// True only when this binary can validate shielded transactions on Beta,
+/// i.e. it was built with both `sketch-gk-proof` and `libspark-ffi`.
+pub const fn shielded_capable_build() -> bool {
+    cfg!(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))
+}
+
 /// Beta genesis block: the testnet genesis with the beta magic swapped in.
 pub fn beta_genesis() -> Block {
     let mut g = crate::testnet::testnet_genesis();
@@ -47,6 +53,41 @@ pub fn expected_genesis_hash() -> Hash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn shielded_capable_when_required_features_are_enabled() {
+        use crate::config::NetworkType;
+        use crate::constants::{shielded_activation_height, SHIELDED_BETA_ACTIVATION_HEIGHT};
+
+        assert!(shielded_capable_build());
+        // A build allowed to start on beta must actually activate shielded there.
+        assert_eq!(
+            shielded_activation_height(NetworkType::Beta),
+            SHIELDED_BETA_ACTIVATION_HEIGHT
+        );
+    }
+
+    // Also covers the partial builds (only one of the two features), which must
+    // still be refused by the beta startup guard.
+    #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
+    #[test]
+    fn not_shielded_capable_without_required_features() {
+        assert!(!shielded_capable_build());
+    }
+
+    // Literal u64::MAX rather than SHIELDED_TX_ACTIVATION_HEIGHT: that constant
+    // may become a real height after audit, but a build without the GK proof
+    // must still never activate shielded on beta.
+    #[cfg(not(feature = "sketch-gk-proof"))]
+    #[test]
+    fn beta_shielded_never_activates_without_sketch_gk_proof() {
+        use crate::config::NetworkType;
+        use crate::constants::shielded_activation_height;
+
+        assert_eq!(shielded_activation_height(NetworkType::Beta), u64::MAX);
+        assert!(!shielded_capable_build());
+    }
 
     #[test]
     fn print_beta_genesis_hash() {

@@ -13,8 +13,9 @@ description = "Isolated Spark shielded-engine connector for CoinCync: a clean Ru
 [features]
 default = []
 # Build the vendored Firo `libspark` FFI backend (vendor/). Pulls the C++
-# toolchain + secp256k1 + OpenSSL. Requires the env var SPARK_OPENSSL_DIR to
-# point at an OpenSSL install (dir with include/ and lib/). OFF by default;
+# toolchain + secp256k1 + OpenSSL. OpenSSL is found via SPARK_OPENSSL_DIR (a
+# dir with include/ and lib/; required on Windows/MSVC, an override elsewhere),
+# else pkg-config `libcrypto` (Linux/macOS), else Homebrew openssl@3. OFF by default;
 # unwired from consensus until externally reviewed.
 # See docs/design/cip-shielded-libspark-ffi.md.
 libspark-ffi = []
@@ -24,3 +25,4 @@ libspark-ffi = []
 [build-dependencies]
 # Only used when the `libspark-ffi` feature is on (build.rs early-returns otherwise).
 cc = "1"
+pkg-config = "0.3"

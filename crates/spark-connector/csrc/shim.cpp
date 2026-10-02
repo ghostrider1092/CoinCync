@@ -220,7 +220,7 @@ int spark_ffi_make_verify_bundle(unsigned char* out, int cap) {
         ss << cover_set;
         ss << out_coins;
         ss << (uint64_t)out_coins.size();
-        ss.insert(ss.end(), tx_stream.begin(), tx_stream.end());
+        ss.insert(ss.end(), tx_stream.data(), tx_stream.data() + tx_stream.size());
 
         if ((int)ss.size() > cap) return -1;
         std::copy(ss.begin(), ss.end(), out);
@@ -254,7 +254,7 @@ int spark_ffi_build_spend(uint64_t output_value, unsigned char* out, int cap) {
         ss << cover_set;
         ss << out_coins;
         ss << (uint64_t)out_coins.size();
-        ss.insert(ss.end(), tx_stream.begin(), tx_stream.end());
+        ss.insert(ss.end(), tx_stream.data(), tx_stream.data() + tx_stream.size());
 
         if ((int)ss.size() > cap) return -1;
         std::copy(ss.begin(), ss.end(), out);
@@ -734,7 +734,7 @@ int spark_ffi_build_spend_over_set(const unsigned char* seed, int seed_len,
         ss << cover_set;
         ss << out_coins;
         ss << (uint64_t)out_coins.size();
-        ss.insert(ss.end(), tx_stream.begin(), tx_stream.end());
+        ss.insert(ss.end(), tx_stream.data(), tx_stream.data() + tx_stream.size());
 
         if ((int)ss.size() > cap) return -1;
         std::copy(ss.begin(), ss.end(), out);
