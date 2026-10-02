@@ -236,6 +236,13 @@ pub struct ChainSync {
     /// block an orphan (parent not yet applied), each orphan front-queues its
     /// parent, and the download degenerates into an orphan storm.
     next_request_seq: u64,
+    /// Download-order position of hashes that a re-queue path put back into
+    /// `pending_headers`. `get_blocks_to_request` reuses it instead of a
+    /// fresh `next_request_seq`, so a re-requested span keeps its place
+    /// relative to spans that are still in flight. Without this, two
+    /// staggered timeout rounds leave the earlier span with the higher
+    /// seq, and the next re-queue sorts it behind the later one.
+    requeued_seq: HashMap<Hash, u64>,
     max_concurrent: usize,
     request_timeout: u64,
     last_orphan_cleanup: u64,
@@ -357,6 +364,7 @@ impl ChainSync {
             downloading: HashSet::new(),
             download_timestamps: HashMap::new(),
             next_request_seq: 0,
+            requeued_seq: HashMap::new(),
             max_concurrent: 100,
             request_timeout: 30,
             last_orphan_cleanup: 0,
@@ -989,7 +997,10 @@ impl ChainSync {
                 if !self.downloading.contains(&h) {
                     out.push(h);
                     self.downloading.insert(h);
-                    let seq = self.next_seq();
+                    let seq = match self.requeued_seq.remove(&h) {
+                        Some(seq) => seq,
+                        None => self.next_seq(),
+                    };
                     self.download_timestamps.insert(
                         h,
                         DownloadEntry {
@@ -1263,7 +1274,9 @@ impl ChainSync {
     pub fn mark_block_failed(&mut self, hash: &Hash) {
         self.pending_requests.remove(hash);
         self.downloading.remove(hash);
-        self.download_timestamps.remove(hash);
+        if let Some(entry) = self.download_timestamps.remove(hash) {
+            self.requeued_seq.insert(*hash, entry.seq);
+        }
         self.pending_headers.push_front(*hash);
         tracing::debug!(
             "Block {} failed — re-queued for retry",
@@ -1657,7 +1670,10 @@ impl ChainSync {
     /// (lowest `seq` ends up first), whatever order they were collected in.
     fn push_front_ordered(&mut self, mut items: Vec<(u64, Hash)>) {
         items.sort_by_key(|(seq, _)| *seq);
-        for (_, h) in items.into_iter().rev() {
+        for (seq, h) in items.into_iter().rev() {
+            if seq != u64::MAX {
+                self.requeued_seq.insert(h, seq);
+            }
             self.pending_headers.push_front(h);
         }
     }
@@ -1670,7 +1686,9 @@ impl ChainSync {
             // this hash (e.g. partial-send race), the requeue path must
             // fully reset its in-flight state.
             self.downloading.remove(&h);
-            self.download_timestamps.remove(&h);
+            if let Some(entry) = self.download_timestamps.remove(&h) {
+                self.requeued_seq.insert(h, entry.seq);
+            }
             self.pending_requests.remove(&h);
             self.pending_headers.push_front(h);
         }
@@ -1698,6 +1716,7 @@ impl ChainSync {
         self.orphan_by_parent.clear();
         self.orphans_per_peer.clear();
         self.pending_headers.clear();
+        self.requeued_seq.clear();
         // v1.0.13 #4 — keep peer attribution maps in sync.
         self.pending_header_peer.clear();
         self.headers_per_peer.clear();
@@ -1781,6 +1800,7 @@ impl ChainSync {
                 self.headers_request_time = None;
                 self.blocks_entered_at = None;
                 self.pending_headers.clear();
+                self.requeued_seq.clear();
                 // v1.0.13 #4 — keep peer attribution maps in sync
                 self.pending_header_peer.clear();
                 self.headers_per_peer.clear();
@@ -2073,6 +2093,46 @@ mod tests {
         // Stuck downloads (in `downloading` with no request entry).
         assert_eq!(sync.recover_stuck_downloads(), 50);
         assert_eq!(sync.get_blocks_to_request(50), hashes, "stuck re-queue");
+    }
+
+    #[test]
+    fn staggered_retries_keep_download_order_across_spans() {
+        let mut sync = ChainSync::new(0, Hash::zero());
+        let peer = super::super::peer::generate_peer_id();
+        sync.update_peer_height_for(peer, 200);
+        let hashes: Vec<Hash> = (1..=100u8).map(|i| Hash::from_bytes([i; 32])).collect();
+        sync.queue_headers_from_peer(peer, hashes.clone());
+
+        // Two spans in flight, requested ten seconds apart.
+        let first = sync.get_blocks_to_request(50);
+        for h in &first {
+            sync.record_request(*h, peer, 1_000);
+        }
+        let second = sync.get_blocks_to_request(50);
+        for h in &second {
+            sync.record_request(*h, peer, 1_010);
+        }
+        assert_eq!(first, hashes[..50].to_vec());
+        assert_eq!(second, hashes[50..].to_vec());
+
+        // Only the first span times out. The driver re-queues it and sends
+        // it again right away, while the second span is still in flight.
+        let t = 1_000 + sync.request_timeout() + 1;
+        assert_eq!(sync.get_blocks_to_retry(t).len(), 50);
+        let again = sync.get_blocks_to_request(50);
+        assert_eq!(again, hashes[..50].to_vec(), "timeout re-queue");
+        for h in &again {
+            sync.record_request(*h, peer, t);
+        }
+
+        // The peer goes away with both spans in flight. They must come back
+        // in chain order, not with the re-requested span sorted last.
+        sync.on_peer_disconnected(&peer);
+        assert_eq!(
+            sync.get_blocks_to_request(100),
+            hashes,
+            "disconnect re-queue after a staggered retry"
+        );
     }
 
     #[test]
