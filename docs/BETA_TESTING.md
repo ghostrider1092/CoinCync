@@ -18,8 +18,11 @@ and **not** mainnet:
 ## 1. Run a beta node (no shielded — default build)
 
 A normal build runs a beta node, but the shielded engine is **fail-closed**
-(`StubBackend`): the node follows the beta chain, but any shielded transaction is
-rejected. Fine if you just want to run a node / mine.
+(`StubBackend`): the node follows the beta chain only until the first block that
+carries a shielded transaction (activation is at height 5). From there it rejects
+every such block and stops syncing, so a default build is **not** usable as a
+long-running beta node or seed once shielded is in use. Fine for a quick look at the
+network; build §2 for anything else.
 
 ```bash
 cargo build --release --features testnet       # 'testnet' pulls in RandomX; beta reuses it
@@ -45,8 +48,11 @@ toolchain + OpenSSL**, so this build has extra prerequisites:
 
 - **LLVM/libclang** — set `LIBCLANG_PATH` to your LLVM `bin` (e.g. on Windows
   `C:/Program Files/LLVM/bin`).
-- **A static OpenSSL prefix** — set `SPARK_OPENSSL_DIR` to an OpenSSL install with
+- **OpenSSL** — on Windows set `SPARK_OPENSSL_DIR` to an OpenSSL install with
   `include/` and `lib/` (the project uses a vcpkg `x64-windows-static-md` build).
+  On Linux/macOS the build finds `libcrypto` through `pkg-config` (install
+  `libssl-dev` / `openssl-devel` / `brew install openssl@3`); `SPARK_OPENSSL_DIR`
+  is only an override there.
 - A C++17 compiler (MSVC on Windows; clang/gcc elsewhere).
 
 See `docs/design/cip-shielded-libspark-ffi.md` for the full build/toolchain
@@ -63,39 +69,34 @@ cargo build --release --features "testnet,sketch-gk-proof,libspark-ffi"
 
 ### Linux build (Debian/Ubuntu)
 
-> **⚠️ Shielded on Linux is not buildable yet.** The `libspark-ffi` build
-> (`crates/spark-connector/build.rs`) is currently **Windows/MSVC-only** — it
-> unconditionally sets `WIN32`/`NOMINMAX` and links Windows system libs
-> (`advapi32`, `crypt32`, …) with MSVC OpenSSL naming, so `cargo build
-> --features "...,libspark-ffi"` **fails on Linux** until `build.rs` is ported to
-> be cross-platform (tracked separately). A plain `cargo build --release
-> --features testnet` *does* build on Linux and runs a beta node, but with the
-> fail-closed stub it can't validate shielded txs — so it is **not** a usable beta
-> seed once shielded activates. For now, a shielded-capable node (incl. the seed)
-> must be **built on Windows**. The steps below are the Linux prerequisites for
-> once the port lands.
-
 ```bash
 # 1. Toolchain: Rust, a C++ compiler, clang/libclang (for the FFI bindings),
-#    and OpenSSL development files.
+#    pkg-config and OpenSSL development files.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # if cargo isn't installed
 sudo apt-get update
-sudo apt-get install -y build-essential clang libclang-dev pkg-config libssl-dev
+sudo apt-get install -y build-essential clang libclang-dev pkg-config libssl-dev cmake
 
-# 2. Point the build at libclang and an OpenSSL prefix (include/ + lib/).
-#    libssl-dev installs OpenSSL under /usr, which works as the prefix:
+# 2. Point the RandomX bindings at libclang. OpenSSL needs no variable:
+#    build.rs asks pkg-config for libcrypto.
 export LIBCLANG_PATH="$(llvm-config --libdir 2>/dev/null || echo /usr/lib/llvm-*/lib)"
-export SPARK_OPENSSL_DIR=/usr          # /usr/include/openssl + /usr/lib/.../libcrypto
 
 # 3. Build.
 cargo build --release --features "testnet,sketch-gk-proof,libspark-ffi"
 ```
 
-If the linker can't find `libcrypto` under `/usr` on your distro (some put it in
-`/usr/lib/x86_64-linux-gnu`), install a static OpenSSL into a dedicated prefix and
-point `SPARK_OPENSSL_DIR` there instead — the layout the build expects is
-`<prefix>/include/openssl/*.h` and `<prefix>/lib/libcrypto.*`. On RHEL/Fedora the
-package names are `clang clang-devel openssl-devel`.
+On RHEL/Fedora the package names are `clang clang-devel openssl-devel pkgconf`.
+If pkg-config cannot see your OpenSSL (custom prefix), set `SPARK_OPENSSL_DIR` to
+a prefix laid out as `<prefix>/include/openssl/*.h` + `<prefix>/lib/libcrypto.*`
+(Debian's `lib/<triplet>/` subdirectory is searched as well).
+
+### macOS build
+
+```bash
+brew install cmake openssl@3 pkg-config
+export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig"   # optional: build.rs also knows the Homebrew prefix
+export LIBCLANG_PATH="/Library/Developer/CommandLineTools/usr/lib"
+cargo build --release --features "testnet,sketch-gk-proof,libspark-ffi"
+```
 
 ## 3. Mine the beta so shielded activates
 

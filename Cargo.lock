@@ -5517,6 +5517,7 @@ name = "spark-connector"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "pkg-config",
 ]
 
 [[package]]

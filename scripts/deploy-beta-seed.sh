@@ -10,16 +10,18 @@
 #        bash scripts/deploy-beta-seed.sh
 #
 # Env:
-#   SPARK_OPENSSL_DIR   (required) static OpenSSL prefix for the libspark link.
+#   SPARK_OPENSSL_DIR   (optional) OpenSSL prefix override for the libspark link;
+#                       by default build.rs finds libcrypto via pkg-config.
 #   BETA_PAYOUT         (optional) beta payout address → the seed also mines.
 #   BETA_MINE_THREADS   (optional, default 2) mining threads when BETA_PAYOUT set.
 #   RANDOMX_LIGHT       (optional) set to 1 for low-memory RandomX (~256 MB vs ~2 GB).
 set -euo pipefail
 
-# OpenSSL prefix for the libspark link. libssl-dev installs under /usr, which
-# works as the prefix, so default there; override for a dedicated static build.
-SPARK_OPENSSL_DIR="${SPARK_OPENSSL_DIR:-/usr}"
-export SPARK_OPENSSL_DIR
+# OpenSSL for the libspark link is found via pkg-config (libssl-dev). Only
+# export an override if the caller set one (e.g. a dedicated static build).
+if [ -n "${SPARK_OPENSSL_DIR:-}" ]; then
+  export SPARK_OPENSSL_DIR
+fi
 BETA_PAYOUT="${BETA_PAYOUT:-}"
 BETA_MINE_THREADS="${BETA_MINE_THREADS:-2}"
 RANDOMX_LIGHT="${RANDOMX_LIGHT:-0}"
@@ -30,27 +32,13 @@ cd "$repo_root"
 echo "==> Installing build prerequisites (clang/libclang + OpenSSL dev) …"
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq
-  apt-get install -y build-essential clang libclang-dev pkg-config libssl-dev
+  apt-get install -y build-essential clang libclang-dev pkg-config libssl-dev cmake
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y gcc gcc-c++ clang clang-devel openssl-devel pkgconfig
+  dnf install -y gcc gcc-c++ clang clang-devel openssl-devel pkgconfig cmake
 else
   echo "    (unknown package manager — ensure a C++ toolchain, clang/libclang, and OpenSSL dev headers are present)"
 fi
 export LIBCLANG_PATH="${LIBCLANG_PATH:-$(llvm-config --libdir 2>/dev/null || echo /usr/lib)}"
-
-# NOTE: the libspark-ffi build (crates/spark-connector/build.rs) is currently
-# Windows/MSVC-only (unconditional WIN32 defines + Windows system libs + MSVC
-# OpenSSL naming), so the cargo build below FAILS on Linux until build.rs is
-# ported to be cross-platform. Until then, build a shielded-capable node on
-# Windows and ship the binary to the box instead of building here. This guard
-# stops the script before a long, doomed build unless you override it.
-if [ "$(uname -s)" = "Linux" ] && [ "${ALLOW_LINUX_LIBSPARK_BUILD:-0}" != "1" ]; then
-  echo "ERROR: shielded (libspark-ffi) build is not yet supported on Linux" >&2
-  echo "       (crates/spark-connector/build.rs is Windows-only — port pending)." >&2
-  echo "       Build the binary on Windows and scp it to /usr/local/bin/coincync-node-beta," >&2
-  echo "       or set ALLOW_LINUX_LIBSPARK_BUILD=1 to attempt it anyway." >&2
-  exit 2
-fi
 
 echo "==> Building beta node (features: testnet,sketch-gk-proof,libspark-ffi) …"
 echo "    NOTE: this is a full libspark (C++) build — CPU/memory-heavy. On a box"

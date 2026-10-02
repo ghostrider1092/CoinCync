@@ -174,10 +174,12 @@ impl SparkBackend for StubBackend {
 /// The libspark FFI backend (Firo's audited Spark, via a C shim) — vendored under
 /// `vendor/`, built by `build.rs` behind this feature. See
 /// `docs/design/cip-shielded-libspark-ffi.md`.
+///
+/// Vendored `libspark` + secp256k1 backend, behind a thin C shim. Building this
+/// feature pulls in the C++ toolchain + OpenSSL (found via `SPARK_OPENSSL_DIR`,
+/// pkg-config, or Homebrew — see `build.rs`).
 #[cfg(feature = "libspark-ffi")]
 pub mod ffi {
-    //! Vendored `libspark` + secp256k1 backend, behind a thin C shim. Building
-    //! this feature pulls in the C++ toolchain + OpenSSL (via `SPARK_OPENSSL_DIR`).
     use super::*;
 
     use core::ffi::c_int;
@@ -944,7 +946,7 @@ pub mod ffi {
         }
 
         #[test]
-        fn partial_cover_set_smaller_than_N_verifies() {
+        fn partial_cover_set_smaller_than_n_verifies() {
             // (c) Grootle accepts any set size in [1, N] and pads internally,
             // so a real (partial) cover set — fewer than N coins — must still
             // build and verify.
