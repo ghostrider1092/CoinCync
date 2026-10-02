@@ -283,10 +283,7 @@ async fn main() {
                 Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
-            let expected_genesis = match network {
-                Network::Mainnet => coincync::mainnet::mainnet_genesis().hash(),
-                _ => coincync::testnet::expected_genesis_hash(),
-            };
+            let expected_genesis = expected_genesis_hash(network);
             info!(
                 "Migrating legacy DB at {} (network={}, expected_genesis={})",
                 chaindata_path.display(),
@@ -360,10 +357,7 @@ async fn main() {
                     }
                 }
                 let tip = chain.tip();
-                let genesis = match network {
-                    Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
-                    _ => coincync::testnet::expected_genesis_hash(),
-                };
+                let genesis = expected_genesis_hash(network);
                 (
                     tip.height,
                     hex::encode(tip.hash.as_bytes()),
@@ -454,10 +448,7 @@ async fn main() {
                 Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
-            let genesis = match network {
-                Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
-                _ => coincync::testnet::expected_genesis_hash(),
-            };
+            let genesis = expected_genesis_hash(network);
             let backup_stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -558,12 +549,26 @@ async fn main() {
     }
 }
 
-fn print_genesis_hash(network: Network) {
-    let genesis = match network {
+/// Expected genesis hash for `network`. Exhaustive on purpose: a `_` arm here
+/// once sent beta to the testnet genesis in the snapshot and migrate commands.
+fn expected_genesis_hash(network: Network) -> coincync::primitives::Hash {
+    match network {
+        Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
+        Network::Beta => coincync::beta::expected_genesis_hash(),
+        Network::Testnet | Network::Regtest => coincync::testnet::expected_genesis_hash(),
+    }
+}
+
+fn genesis_block(network: Network) -> coincync::consensus::Block {
+    match network {
         Network::Mainnet => coincync::mainnet::mainnet_genesis(),
-        _ => coincync::testnet::testnet_genesis(),
-    };
-    let hash = genesis.hash();
+        Network::Beta => coincync::beta::beta_genesis(),
+        Network::Testnet | Network::Regtest => coincync::testnet::testnet_genesis(),
+    }
+}
+
+fn print_genesis_hash(network: Network) {
+    let hash = genesis_block(network).hash();
     println!("Genesis hash: {}", hex::encode(hash.as_bytes()));
     println!(
         "Paste this into src/{}.rs as the GENESIS_HASH constant.",
@@ -571,7 +576,7 @@ fn print_genesis_hash(network: Network) {
             Network::Mainnet => "mainnet",
             Network::Testnet => "testnet",
             Network::Regtest => "testnet",
-            Network::Beta => "testnet",
+            Network::Beta => "beta",
         }
     );
 }
@@ -1887,4 +1892,32 @@ async fn start_node(
     // non-zero — operators (and systemd) treat that as a crash and
     // may attempt restart.
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn genesis_helpers_select_each_networks_own_genesis() {
+        for network in [
+            Network::Mainnet,
+            Network::Testnet,
+            Network::Regtest,
+            Network::Beta,
+        ] {
+            assert_eq!(
+                genesis_block(network).hash(),
+                expected_genesis_hash(network)
+            );
+        }
+        assert_eq!(
+            expected_genesis_hash(Network::Beta),
+            coincync::beta::expected_genesis_hash()
+        );
+        assert_ne!(
+            expected_genesis_hash(Network::Beta),
+            coincync::testnet::expected_genesis_hash()
+        );
+    }
 }
