@@ -114,9 +114,24 @@ single-box beta.
 
 ## 4. Try a shielded transaction
 
-With a shielded-enabled build (§2) on a beta node past height 5, the shielded
-wallet subcommands work (`shielded-address`, `shielded-send`, `shielded-balance`;
-see `docs/COMMANDS.md`). Report anything you hit in Discord `#beta`.
+Not possible yet on this tag, see issue #172. With a shielded-enabled build on a
+beta node past height 5, `shielded-address` and `shielded-balance` talk to the
+node, and `shielded-send` builds and verifies a real libspark spend bundle, but
+it then prints
+
+    NOTE: not submitted - live shielded submission awaits activation and a shielded submission RPC.
+
+and nothing reaches the chain. There is also no shield-in (mint) command, so the
+on-chain pool is empty and `shielded-balance` reports no notes. The only complete
+shielded flow today is `--demo`, which runs against an in-process regtest pool and
+needs no node. Please do not report "shielded-send did nothing" as a new bug.
+
+What you can test on beta today: node sync, mining, peer behaviour across the
+shielded activation height (5), and the transparent wallet flow. The wallet does
+not accept `--network beta` yet; use
+`coincync-wallet --network testnet --node http://127.0.0.1:38081 ...` (beta uses
+testnet's address format and the node does not check the wallet's network label).
+Report anything you hit in Discord `#beta`.
 
 ## What to report
 
