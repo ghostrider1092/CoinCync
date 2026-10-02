@@ -57,7 +57,15 @@ mod tests {
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
     #[test]
     fn shielded_capable_when_required_features_are_enabled() {
+        use crate::config::NetworkType;
+        use crate::constants::{shielded_activation_height, SHIELDED_BETA_ACTIVATION_HEIGHT};
+
         assert!(shielded_capable_build());
+        // A build allowed to start on beta must actually activate shielded there.
+        assert_eq!(
+            shielded_activation_height(NetworkType::Beta),
+            SHIELDED_BETA_ACTIVATION_HEIGHT
+        );
     }
 
     // Also covers the partial builds (only one of the two features), which must
@@ -68,25 +76,17 @@ mod tests {
         assert!(!shielded_capable_build());
     }
 
+    // Literal u64::MAX rather than SHIELDED_TX_ACTIVATION_HEIGHT: that constant
+    // may become a real height after audit, but a build without the GK proof
+    // must still never activate shielded on beta.
+    #[cfg(not(feature = "sketch-gk-proof"))]
     #[test]
-    fn shielded_capable_build_agrees_with_beta_activation_height() {
+    fn beta_shielded_never_activates_without_sketch_gk_proof() {
         use crate::config::NetworkType;
-        use crate::constants::{
-            shielded_activation_height, SHIELDED_BETA_ACTIVATION_HEIGHT,
-            SHIELDED_TX_ACTIVATION_HEIGHT,
-        };
+        use crate::constants::shielded_activation_height;
 
-        let height = shielded_activation_height(NetworkType::Beta);
-        // A build allowed to start on beta must actually activate shielded there.
-        if shielded_capable_build() {
-            assert_eq!(height, SHIELDED_BETA_ACTIVATION_HEIGHT);
-        }
-        // Without sketch-gk-proof, shielded never activates on beta and the
-        // build is not shielded-capable.
-        if !cfg!(feature = "sketch-gk-proof") {
-            assert_eq!(height, SHIELDED_TX_ACTIVATION_HEIGHT);
-            assert!(!shielded_capable_build());
-        }
+        assert_eq!(shielded_activation_height(NetworkType::Beta), u64::MAX);
+        assert!(!shielded_capable_build());
     }
 
     #[test]
