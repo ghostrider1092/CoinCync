@@ -1263,7 +1263,7 @@ fn check_header_checkpoint_vote(header: &BlockHeader, result: &mut BlockValidati
 /// nodes on badly-configured hosts still process blocks (validation of
 /// crypto and consensus rules is orthogonal to wall-clock).
 fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidation) {
-    let current_time = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+    let local_time = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs(),
         Err(e) => {
             result.add_error(format!(
@@ -1273,11 +1273,20 @@ fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidat
             return;
         }
     };
-    // Sanity: current time should be reasonably recent (after 2020).
+    // Sanity: the LOCAL clock should be reasonably recent (after 2020).
     const MIN_REASONABLE_TIME: u64 = 1577836800; // 2020-01-01 00:00:00 UTC
-    if current_time < MIN_REASONABLE_TIME {
+    if local_time < MIN_REASONABLE_TIME {
         result.add_warning("System clock appears to be set incorrectly (before 2020)");
     }
+    // Network-adjusted time (audit M-4): shift the future-block boundary by the
+    // median offset of OUTBOUND peers' clocks, so a node whose LOCAL clock is
+    // skewed does not wrongly reject valid blocks. `net_time::offset_secs` is
+    // hardened against remote clock-poisoning — per-netgroup dedup, sampled only
+    // after VERSION validation, out-of-range median → 0 (not clamp-to-max),
+    // outbound peers only (see src/net_time.rs and PR #59's review). It returns 0
+    // until >= MIN_TIME_PEERS distinct netgroups are sampled, so a fresh or
+    // isolated node behaves exactly as it did before (local clock only).
+    let current_time = (local_time as i64 + crate::net_time::offset_secs()).max(0) as u64;
     if header.height > 0 && header.timestamp > current_time + MAX_TIMESTAMP_DRIFT {
         result.add_error("Block timestamp too far in future");
     }
