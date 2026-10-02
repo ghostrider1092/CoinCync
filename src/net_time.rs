@@ -42,9 +42,24 @@ pub const MAX_TIME_OFFSET_SECS: i64 = 70 * 60;
 /// Upper bound on tracked netgroups (bounded memory; first-come once full).
 const MAX_TRACKED: usize = 200;
 
+/// A sample older than this (seconds) is discarded: it reflects a peer we may no
+/// longer be connected to, and a stale offset must not survive a local clock
+/// correction (per the PR #59/#170 review). Samples are also refreshed every
+/// time the netgroup reconnects, so a live peer's offset never ages out.
+const SAMPLE_TTL_SECS: u64 = 3 * 3600;
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 struct State {
-    /// netgroup key → that group's offset sample (one per group).
-    samples: HashMap<u64, i64>,
+    /// netgroup key → (offset sample, unix time it was recorded). One per group;
+    /// a reconnect refreshes the timestamp so live peers don't expire, while a
+    /// peer that goes away ages out after `SAMPLE_TTL_SECS`.
+    samples: HashMap<u64, (i64, u64)>,
 }
 
 fn state() -> &'static Mutex<State> {
@@ -77,12 +92,17 @@ pub fn netgroup_key(addr: &SocketAddr) -> u64 {
 /// netgroup contributes at most one vote regardless of how many messages or
 /// connections it opens.
 pub fn record_offset(addr: &SocketAddr, offset_secs: i64) {
+    record_offset_at(addr, offset_secs, now_unix())
+}
+
+/// As [`record_offset`] but with an explicit record time (seam for tests).
+fn record_offset_at(addr: &SocketAddr, offset_secs: i64, at_unix: u64) {
     let key = netgroup_key(addr);
     let mut st = state().lock().unwrap_or_else(|e| e.into_inner());
     if !st.samples.contains_key(&key) && st.samples.len() >= MAX_TRACKED {
         return; // bounded; ignore new groups once full
     }
-    st.samples.insert(key, offset_secs);
+    st.samples.insert(key, (offset_secs, at_unix));
 }
 
 /// The network-adjusted offset (seconds) to **add** to the local clock for the
@@ -93,11 +113,13 @@ pub fn record_offset(addr: &SocketAddr, offset_secs: i64) {
 ///   clamped to the bound).
 /// - otherwise the median of the per-netgroup samples.
 pub fn offset_secs() -> i64 {
-    let st = state().lock().unwrap_or_else(|e| e.into_inner());
+    let now = now_unix();
+    let mut st = state().lock().unwrap_or_else(|e| e.into_inner());
+    prune_stale(&mut st, now);
     if st.samples.len() < MIN_TIME_PEERS {
         return 0;
     }
-    let mut v: Vec<i64> = st.samples.values().copied().collect();
+    let mut v: Vec<i64> = st.samples.values().map(|(off, _)| *off).collect();
     v.sort_unstable();
     let median = v[v.len() / 2];
     if median < -MAX_TIME_OFFSET_SECS || median > MAX_TIME_OFFSET_SECS {
@@ -107,9 +129,19 @@ pub fn offset_secs() -> i64 {
     }
 }
 
-/// Number of distinct netgroups currently sampled (diagnostics / tests).
+/// Drop samples older than `SAMPLE_TTL_SECS` so the median reflects the current
+/// peer set and a stale offset can't survive a local clock correction.
+fn prune_stale(st: &mut State, now: u64) {
+    st.samples
+        .retain(|_, (_, at)| now.saturating_sub(*at) <= SAMPLE_TTL_SECS);
+}
+
+/// Number of distinct **fresh** netgroups currently sampled (diagnostics/tests).
 pub fn sample_count() -> usize {
-    state().lock().unwrap_or_else(|e| e.into_inner()).samples.len()
+    let now = now_unix();
+    let mut st = state().lock().unwrap_or_else(|e| e.into_inner());
+    prune_stale(&mut st, now);
+    st.samples.len()
 }
 
 /// Test-only: clear all samples so tests don't leak global state into each other.
@@ -122,12 +154,18 @@ pub fn reset_for_test() {
 mod tests {
     use super::*;
 
+    // These tests mutate the process-global sample map, so they must not run
+    // concurrently with each other. Each acquires this guard for its duration
+    // (held via the `_guard` binding) and resets the state under it.
+    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn addr(a: u8, b: u8) -> SocketAddr {
         format!("{a}.{b}.0.1:28080").parse().unwrap()
     }
 
     #[test]
     fn warmup_returns_zero_until_min_distinct_netgroups() {
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         // 4 distinct /16s with a big offset — still below the warmup floor → 0.
         for i in 0..(MIN_TIME_PEERS as u8 - 1) {
@@ -144,6 +182,7 @@ mod tests {
     fn single_netgroup_flood_cannot_satisfy_warmup() {
         // junbyjun1238's attack: one peer (one /16) sends many samples. With
         // per-netgroup dedup this is ONE vote, never enough to warm up alone.
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         for k in 0..50i64 {
             record_offset(&addr(203, 0), -86400 + k); // all 203.0.0.0/16
@@ -156,6 +195,7 @@ mod tests {
     fn out_of_range_median_resets_to_zero_not_clamp() {
         // 5 distinct netgroups all claiming -1 day. Median is out of range →
         // untrusted → 0 (NOT clamped to -MAX_TIME_OFFSET_SECS).
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         for i in 0..MIN_TIME_PEERS as u8 {
             record_offset(&addr(10, i), -86400);
@@ -170,6 +210,7 @@ mod tests {
 
     #[test]
     fn in_range_median_is_applied() {
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         for (i, off) in [100, 200, 300, 400, 500].into_iter().enumerate() {
             record_offset(&addr(10, i as u8), off);
@@ -179,9 +220,25 @@ mod tests {
 
     #[test]
     fn resampling_same_netgroup_replaces_not_appends() {
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         record_offset(&addr(10, 1), 100);
         record_offset(&addr(10, 1), 999); // same /16 updates in place
         assert_eq!(sample_count(), 1);
+    }
+
+    #[test]
+    fn stale_samples_expire_and_do_not_influence_the_cap() {
+        // #170 review (junbyjun1238): a sample must not outlive its peer or
+        // survive a local clock correction. Samples older than the TTL are
+        // pruned, so even a full set of stale offsets yields 0.
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        let old = now_unix().saturating_sub(SAMPLE_TTL_SECS + 60);
+        for i in 0..MIN_TIME_PEERS as u8 {
+            record_offset_at(&addr(10, i), 600, old);
+        }
+        assert_eq!(sample_count(), 0, "stale samples must be pruned");
+        assert_eq!(offset_secs(), 0, "an expired offset must not shift the future-block cap");
     }
 }
