@@ -1030,6 +1030,7 @@ mod tests {
             consecutive_full: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             connection_token: std::sync::Arc::new(()),
             eclipse_slot: None,
+            consensus_fingerprint: None,
         }
     }
 
