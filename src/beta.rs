@@ -54,12 +54,39 @@ pub fn expected_genesis_hash() -> Hash {
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
     #[test]
-    fn shielded_capable_build_matches_features() {
-        assert_eq!(
-            shielded_capable_build(),
-            cfg!(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))
-        );
+    fn shielded_capable_when_required_features_are_enabled() {
+        assert!(shielded_capable_build());
+    }
+
+    // Also covers the partial builds (only one of the two features), which must
+    // still be refused by the beta startup guard.
+    #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
+    #[test]
+    fn not_shielded_capable_without_required_features() {
+        assert!(!shielded_capable_build());
+    }
+
+    #[test]
+    fn shielded_capable_build_agrees_with_beta_activation_height() {
+        use crate::config::NetworkType;
+        use crate::constants::{
+            shielded_activation_height, SHIELDED_BETA_ACTIVATION_HEIGHT,
+            SHIELDED_TX_ACTIVATION_HEIGHT,
+        };
+
+        let height = shielded_activation_height(NetworkType::Beta);
+        // A build allowed to start on beta must actually activate shielded there.
+        if shielded_capable_build() {
+            assert_eq!(height, SHIELDED_BETA_ACTIVATION_HEIGHT);
+        }
+        // Without sketch-gk-proof, shielded never activates on beta and the
+        // build is not shielded-capable.
+        if !cfg!(feature = "sketch-gk-proof") {
+            assert_eq!(height, SHIELDED_TX_ACTIVATION_HEIGHT);
+            assert!(!shielded_capable_build());
+        }
     }
 
     #[test]
