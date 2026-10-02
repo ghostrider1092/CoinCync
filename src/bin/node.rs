@@ -283,10 +283,7 @@ async fn main() {
                 Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
-            let expected_genesis = match network {
-                Network::Mainnet => coincync::mainnet::mainnet_genesis().hash(),
-                _ => coincync::testnet::expected_genesis_hash(),
-            };
+            let expected_genesis = expected_genesis_hash(network);
             info!(
                 "Migrating legacy DB at {} (network={}, expected_genesis={})",
                 chaindata_path.display(),
@@ -360,10 +357,7 @@ async fn main() {
                     }
                 }
                 let tip = chain.tip();
-                let genesis = match network {
-                    Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
-                    _ => coincync::testnet::expected_genesis_hash(),
-                };
+                let genesis = expected_genesis_hash(network);
                 (
                     tip.height,
                     hex::encode(tip.hash.as_bytes()),
@@ -454,10 +448,7 @@ async fn main() {
                 Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
-            let genesis = match network {
-                Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
-                _ => coincync::testnet::expected_genesis_hash(),
-            };
+            let genesis = expected_genesis_hash(network);
             let backup_stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -467,16 +458,7 @@ async fn main() {
             // must match them at every checkpoint height or the import is
             // refused — this defeats a fabricated / wrong-fork snapshot from an
             // untrusted source. Always includes genesis, so it's never empty.
-            let checkpoints: Vec<(u64, coincync::primitives::Hash)> = match network {
-                Network::Mainnet => coincync::mainnet::mainnet_checkpoints()
-                    .into_iter()
-                    .map(|c| (c.height, c.hash))
-                    .collect(),
-                _ => coincync::testnet::testnet_checkpoints()
-                    .into_iter()
-                    .map(|c| (c.height, c.hash))
-                    .collect(),
-            };
+            let checkpoints = snapshot_checkpoints(network);
             // Optional trusted-source gate. If COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS
             // is set (comma-separated hex Ed25519 keys), the snapshot must carry
             // a `manifest.sig` signed by one of them. Unset (the private-fleet
@@ -558,12 +540,35 @@ async fn main() {
     }
 }
 
+/// Expected genesis hash for `network`. Exhaustive on purpose: a `_` arm here
+/// once sent beta to the testnet genesis in the snapshot and migrate commands.
+fn expected_genesis_hash(network: Network) -> coincync::primitives::Hash {
+    match network {
+        Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
+        Network::Beta => coincync::beta::expected_genesis_hash(),
+        Network::Testnet | Network::Regtest => coincync::testnet::expected_genesis_hash(),
+    }
+}
+
+/// Checkpoints `snapshot-import` verifies the snapshot DB against. Beta has no
+/// checkpoint list of its own and must not reuse testnet's: its chain differs
+/// from genesis onward, so only its genesis is pinned.
+fn snapshot_checkpoints(network: Network) -> Vec<(u64, coincync::primitives::Hash)> {
+    match network {
+        Network::Mainnet => coincync::mainnet::mainnet_checkpoints()
+            .into_iter()
+            .map(|c| (c.height, c.hash))
+            .collect(),
+        Network::Beta => vec![(0, coincync::beta::expected_genesis_hash())],
+        Network::Testnet | Network::Regtest => coincync::testnet::testnet_checkpoints()
+            .into_iter()
+            .map(|c| (c.height, c.hash))
+            .collect(),
+    }
+}
+
 fn print_genesis_hash(network: Network) {
-    let genesis = match network {
-        Network::Mainnet => coincync::mainnet::mainnet_genesis(),
-        _ => coincync::testnet::testnet_genesis(),
-    };
-    let hash = genesis.hash();
+    let hash = coincync::chain::create_genesis_block_for(network).hash();
     println!("Genesis hash: {}", hex::encode(hash.as_bytes()));
     println!(
         "Paste this into src/{}.rs as the GENESIS_HASH constant.",
@@ -571,7 +576,7 @@ fn print_genesis_hash(network: Network) {
             Network::Mainnet => "mainnet",
             Network::Testnet => "testnet",
             Network::Regtest => "testnet",
-            Network::Beta => "testnet",
+            Network::Beta => "beta",
         }
     );
 }
@@ -1887,4 +1892,44 @@ async fn start_node(
     // non-zero — operators (and systemd) treat that as a crash and
     // may attempt restart.
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_NETWORKS: [Network; 4] = [
+        Network::Mainnet,
+        Network::Testnet,
+        Network::Regtest,
+        Network::Beta,
+    ];
+
+    #[test]
+    fn genesis_helpers_select_each_networks_own_genesis() {
+        for network in ALL_NETWORKS {
+            assert_eq!(
+                coincync::chain::create_genesis_block_for(network).hash(),
+                expected_genesis_hash(network)
+            );
+        }
+        assert_eq!(
+            expected_genesis_hash(Network::Beta),
+            coincync::beta::expected_genesis_hash()
+        );
+        assert_ne!(
+            expected_genesis_hash(Network::Beta),
+            coincync::testnet::expected_genesis_hash()
+        );
+    }
+
+    #[test]
+    fn snapshot_checkpoints_use_each_networks_genesis() {
+        for network in ALL_NETWORKS {
+            assert_eq!(
+                snapshot_checkpoints(network).first(),
+                Some(&(0, expected_genesis_hash(network)))
+            );
+        }
+    }
 }
