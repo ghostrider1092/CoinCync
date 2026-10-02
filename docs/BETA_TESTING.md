@@ -15,19 +15,16 @@ and **not** mainnet:
 > time, and the shielded crypto is **not yet audited**. Beta coins have **no
 > value**. Do not reuse beta wallets/keys anywhere else.
 
-## 1. Run a beta node (no shielded — default build)
+## 1. Beta nodes require a shielded-capable build
 
-A normal build runs a beta node, but the shielded engine is **fail-closed**
-(`StubBackend`): the node follows the beta chain only until the first block that
-carries a shielded transaction (activation is at height 5). From there it rejects
-every such block and stops syncing, so a default build is **not** usable as a
-long-running beta node or seed once shielded is in use. Fine for a quick look at the
-network; build §2 for anything else.
+A default build (`--features testnet`) refuses to start with `--network beta`
+and exits with code 1. It cannot validate beta's shielded transactions and would
+reject blocks containing them, diverging from shielded-capable nodes.
 
-```bash
-cargo build --release --features testnet       # 'testnet' pulls in RandomX; beta reuses it
-./target/release/coincync-node --network beta
-```
+Both `sketch-gk-proof` and `libspark-ffi` are required; enabling only one is not
+enough. Follow the build instructions in section 2 before starting a beta node.
+The startup guard applies only to node startup; commands such as
+`--network beta print-genesis-hash` and `--network beta status` remain available.
 
 (Use `./coincync-node --network beta --help` for the P2P/RPC ports and flags.
 To reach the beta network, `--addnode <BETA_SEED_HOST:PORT>` — the beta seed

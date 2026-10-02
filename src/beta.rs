@@ -9,6 +9,12 @@
 use crate::consensus::Block;
 use crate::primitives::Hash;
 
+/// True only when this binary can validate shielded transactions on Beta,
+/// i.e. it was built with both `sketch-gk-proof` and `libspark-ffi`.
+pub const fn shielded_capable_build() -> bool {
+    cfg!(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))
+}
+
 /// Beta genesis block: the testnet genesis with the beta magic swapped in.
 pub fn beta_genesis() -> Block {
     let mut g = crate::testnet::testnet_genesis();
@@ -47,6 +53,14 @@ pub fn expected_genesis_hash() -> Hash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shielded_capable_build_matches_features() {
+        assert_eq!(
+            shielded_capable_build(),
+            cfg!(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))
+        );
+    }
 
     #[test]
     fn print_beta_genesis_hash() {
