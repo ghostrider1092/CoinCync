@@ -980,7 +980,7 @@ fn check_block_consensus_checkpoint(
     if let Some(expected_hash) = crate::constants::expected_checkpoint_hash(network, block.height())
     {
         let actual_hash = block.hash();
-        if actual_hash.as_bytes() != expected_hash {
+        if actual_hash.as_bytes() != &expected_hash {
             result.add_error(format!(
                 "consensus checkpoint mismatch at height {}: \
                  expected {} but got {} — refusing to accept reorg \

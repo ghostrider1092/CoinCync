@@ -219,25 +219,12 @@ impl AuditEvent {
 }
 
 fn unix_now() -> u64 {
-    // Monotonic-max fallback: SystemTime::duration_since(UNIX_EPOCH) can
-    // theoretically fail (system clock set before 1970, which doesn't
-    // happen on a running system) or step backwards (NTP correction).
-    // The original `unwrap_or(0)` would mark fresh mempool entries as
-    // 56 years old, triggering immediate eviction by the TTL sweep.
-    // Track the last good value and return max(now, last) so a clock
-    // hiccup never produces an artificially-ancient timestamp. Costs
-    // one relaxed atomic CAS per call — negligible vs the syscall.
-    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let last = LAST.load(std::sync::atomic::Ordering::Relaxed);
-    let out = now.max(last);
-    if out > last {
-        LAST.store(out, std::sync::atomic::Ordering::Relaxed);
-    }
-    out
+    // Single source of truth (E1): monotonic-nondecreasing unix time so an NTP
+    // backwards step never marks a fresh mempool entry as ancient (which would
+    // trigger immediate TTL eviction). The monotonic-max logic now lives in the
+    // canonical clock, which is also override-aware for the simulator. See
+    // src/clock.rs.
+    crate::clock::unix_now_monotonic()
 }
 
 /// A transaction in the mempool with metadata

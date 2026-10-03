@@ -69,6 +69,9 @@ pub fn consensus_fingerprint(network: NetworkType) -> Hash {
         NetworkType::Mainnet => crate::mainnet::expected_genesis_hash(),
         NetworkType::Testnet | NetworkType::Regtest => crate::testnet::expected_genesis_hash(),
     };
+    // Resolved from the single canonical checkpoint source (#173), so the
+    // fingerprint reflects exactly the checkpoints the validator enforces.
+    let checkpoints = network.consensus_checkpoints();
     fingerprint_from_parts(&FingerprintParts {
         magic: network.magic_bytes(),
         genesis,
@@ -76,7 +79,7 @@ pub fn consensus_fingerprint(network: NetworkType) -> Hash {
         min_output_age_hardfork_height: network.min_output_age_hardfork_height(),
         rolling_finality_enable_height: network.rolling_finality_enable_height(),
         rolling_finality_enforce_height: network.rolling_finality_enforce_height(),
-        checkpoints: network.consensus_checkpoints(),
+        checkpoints: &checkpoints,
     })
 }
 
