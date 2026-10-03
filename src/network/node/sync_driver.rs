@@ -116,7 +116,7 @@ struct SyncDriverState {
     stall_count: u32,
     last_progress_height: u64,
     no_progress_ticks: u32,
-    started_at: std::time::Instant,
+    started_at: crate::clock::MonoInstant,
     tier2_fires_since_progress: u32,
     tier3_fires_since_progress: u32,
     tier2_last_height: u64,
@@ -135,7 +135,7 @@ impl SyncDriverState {
             stall_count: 0,
             last_progress_height: height,
             no_progress_ticks: 0,
-            started_at: std::time::Instant::now(),
+            started_at: crate::clock::mono_now(),
             tier2_fires_since_progress: 0,
             tier3_fires_since_progress: 0,
             tier2_last_height: height,
@@ -1009,7 +1009,7 @@ mod tests {
     }
 
     fn mk_connected_peer(id: PeerId, height: u64) -> PeerInfo {
-        let now = std::time::Instant::now();
+        let now = crate::clock::mono_now();
         PeerInfo {
             id,
             addr: "127.0.0.1:28080".parse().unwrap(),
