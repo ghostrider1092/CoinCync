@@ -196,3 +196,31 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     }
     r
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_matches_known_answer_vectors() {
+        // Pin this hand-rolled SHA-256 to the published FIPS-180-4 test vectors
+        // so it can't drift from the algorithm. build.rs ships a byte-identical
+        // copy; a lock this binary produces that build.rs's SHA would reject
+        // fails the build, so build.rs's copy is in turn anchored to this one —
+        // both ends pinned, no silent drift (#173 class).
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // 56-byte message: padding overflows into a second block, exercising the
+        // multi-chunk path.
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+    }
+}
