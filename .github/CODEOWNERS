@@ -55,8 +55,8 @@
 # A bug in tx-admit that lets invalid txs persist will stall block
 # production (the 2026-05-07 "shadow conflict" stalls are the
 # canonical example).
-/src/mempool.rs                     @ghostrider1092
-/src/network/                       @ghostrider1092
+/src/mempool.rs                     @ghostrider1092 @Blackpagan3
+/src/network/                       @ghostrider1092 @Blackpagan3
 
 # ── RPC surface: anything user-facing or attack-surface ─────────────
 # REST proxy, JSON-RPC server, allowlist gating. Mistakes here can
