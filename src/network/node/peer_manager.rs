@@ -325,7 +325,7 @@ pub(super) fn spawn_listener_acceptor(
                         // disconnect), freeing an in-flight slot.
                         let _permit = permit;
                         let result = handle_connection(
-                            stream,
+                            crate::network::transport::NetStream::tcp(stream),
                             peer_id,
                             false,
                             magic,
@@ -829,7 +829,7 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
         Ok(stream) => {
             backoffs.lock().await.remove(&addr);
             let result = handle_connection(
-                stream,
+                crate::network::transport::NetStream::tcp(stream),
                 generate_peer_id(),
                 true,
                 magic,
