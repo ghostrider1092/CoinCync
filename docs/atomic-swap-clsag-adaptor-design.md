@@ -84,7 +84,7 @@ The standard construction (Farcaster's reference, derived from the MRL discussio
 - **Ristretto255 is cleaner than raw Ed25519 for this.** Ristretto is a prime-order group: it eliminates the cofactor-8 subtleties that complicate the Monero-side proof in the original secp256k1↔Ed25519 construction. The bit-decomposition proof still works; the per-bit ring signatures simply target a prime-order group, removing one class of small-subgroup edge cases. Implementers should treat this as a simplification, not a new risk — but it does mean the proof is *not* byte-identical to Farcaster's, so it needs its own test vectors and its own review.
 - **The scalar order mismatch remains.** secp256k1's group order and Ristretto255's group order are both ~2^252–2^256 but unequal. The proof must bound the scalar to the *smaller* of the two orders so it is a valid discrete log in both groups. This is the single most error-prone part of the whole construction and is flagged in §7 as a primary review target.
 
-The CDLP is exchanged and verified during the negotiation phase, **before either party commits an on-chain transaction**. CIP-001 already gates this correctly: `verify_cross_curve_proof` failing is a mandatory abort (`adaptor.rs:65`, `coordinator.rs` `HandshakeAction::VerifyAdaptorMaterial`).
+The CDLP is exchanged and verified during the negotiation phase, **before either party commits an on-chain transaction**. CIP-001 already gates this correctly: `cross_curve_dleq::verify` failing is a mandatory abort (`adaptor.rs:65`, `coordinator.rs` `HandshakeAction::VerifyAdaptorMaterial`).
 
 ### 3.5 The Bitcoin adaptor signature itself
 
@@ -143,7 +143,7 @@ Changes this design implies:
 | File | Change |
 |---|---|
 | `src/crypto/clsag.rs` | **None.** Ordinary `clsag_sign` / `clsag_verify` used unmodified. |
-| `adaptor.rs` | **`CyncAdaptorSig` should be removed.** There is no CYNC-side adaptor signature. Replace with: a `CyncKeyShare` type (`s_a` / `s_b` and the `S_a` / `S_b` points), and a `JointSpendKey` type. `BtcAdaptorSig`, `CrossCurveDlProof`, `AdaptorSecret` stay. `decrypt_btc_adaptor` and `recover_secret_from_btc_sig` stay and become the core operations. |
+| `adaptor.rs` | **`CyncAdaptorSig` should be removed.** There is no CYNC-side adaptor signature. Replace with: a `CyncKeyShare` type (`s_a` / `s_b` and the `S_a` / `S_b` points), and a `JointSpendKey` type. `BtcAdaptorSig`, `AdaptorSecret` stay; the cross-curve proof is `cross_curve_dleq::CrossCurveProof` (v2), and the design below needs TWO of them (claim and refund shares). `decrypt_btc_adaptor` and `recover_secret_from_btc_sig` stay and become the core operations. |
 | `btc.rs` | Implement against a secp256k1 library (add `secp256k1` + `bitcoin` crates — currently absent from `Cargo.toml`, see Explore note 7). Schnorr adaptor primary, ECDSA fallback. |
 | `cync.rs` | Implement `build_lock_tx` as an *ordinary* transfer to the joint stealth address — no special output type. Implement the sweep as an *ordinary* CLSAG spend once `s = s_a + s_b` is known. |
 | New: `cdlp.rs` | Cross-curve discrete-log-equality proof over secp256k1 ↔ Ristretto255. The single most novel and review-critical module. |

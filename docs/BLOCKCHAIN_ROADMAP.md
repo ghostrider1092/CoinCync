@@ -194,8 +194,8 @@ unrelated soak risk.
 15. **CIP-001 atomic swap real crypto** — **substantially complete**.
     What's now shipped: state machine + handshake + persistence;
     Schnorr adaptor sigs (BTC BIP-340 parity-correct + CYNC
-    Ristretto255); dual-response cross-curve DLEQ + strict-binding
-    Noether 2018 variant (gated by Cargo feature `strict-dleq`); BTC
+    Ristretto255); cross-curve DLEQ v2 (joint bit decomposition,
+    replacing the v1 fast and strict proofs on 2026-10-03); BTC
     + CYNC RPC clients with mock impls; BTC lock/claim/refund tx
     construction (BIP-341 script-path); CYNC swap key-derivation +
     `SwapLockRecipient` wallet-bridge helper; coordinator transport
@@ -205,8 +205,8 @@ unrelated soak risk.
     `refund-cync`); operator-driven dual-testnet smoke harness
     ([scripts/cyncswap-dual-testnet-smoke.sh](../scripts/cyncswap-dual-testnet-smoke.sh));
     operator transport-setup guide ([docs/cyncswap-transport-setup.md](cyncswap-transport-setup.md)).
-    **346 tests pass with `--features strict-dleq`; 288 in default
-    builds.** Mutation score 100% on audit-critical files. Audit prep
+    Test counts and mutation score predate the 2026-10-03 DLEQ v2
+    change and need re-measurement. Audit prep
     complete at [docs/cyncswap-audit-prep.md](cyncswap-audit-prep.md).
     What's left: **(a)** wallet Trade tab; **(b)** optional CLSAG
     ring-binding for the CYNC-side adaptor (touches audited consensus,

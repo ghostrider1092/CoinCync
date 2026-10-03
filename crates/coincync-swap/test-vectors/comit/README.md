@@ -11,7 +11,7 @@
 
 - `SCHEMA.md` — JSON schema each vector file conforms to (one vector per file).
 - `btc-adaptor/*.json` — BIP-340 Schnorr adaptor signature vectors (create, verify, decrypt, recover).
-- `dleq-cross-curve/*.json` — Maxwell-Poelstra cross-curve DLEQ vectors (prove, verify).
+- `dleq-cross-curve/*.json` — Maxwell-Poelstra cross-curve DLEQ vectors (prove, verify). **Not replayable as-is:** our v2 proof uses Ristretto points, its own NUMS generators and transcript, so vendor proofs cannot match byte-for-byte; `tests/external_vectors.rs` rejects `dleq-cross-curve` vectors until a dedicated verify-only harness exists.
 - `state-machine/*.json` — Protocol-level vectors for the swap state machine (optional; deferred).
 
 ## Why these vectors
