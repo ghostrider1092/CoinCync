@@ -563,6 +563,17 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
+    #[test]
+    fn namespace_is_the_canonical_literal() {
+        // The signer binary (src/bin/sign_snapshot.rs) deliberately re-declares
+        // this namespace as a standalone literal so it need not link the whole
+        // crate. Both sides anchor to this exact literal (the signer has the
+        // mirror test `namespace_bytes_are_exactly_the_string`), so neither can
+        // drift from the other without one anchor test failing (#173 class).
+        assert_eq!(SIGNATURE_NAMESPACE, b"coincync-peer-snapshot-v1");
+        assert_eq!(SIGNATURE_NAMESPACE.len(), 25);
+    }
+
     /// Deterministic test signing key. NEVER used outside tests.
     fn test_signing_key() -> SigningKey {
         SigningKey::from_bytes(&[42u8; 32])

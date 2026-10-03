@@ -10,10 +10,14 @@ use std::net::SocketAddr;
 
 // ── Network constants ────────────────────────────────────────────────────────
 
-pub const TESTNET_MAGIC: [u8; 4] = [0x74, 0x43, 0x59, 0x4E]; // "tCYN"
-pub const TESTNET_P2P_PORT: u16 = 28080;
-pub const TESTNET_RPC_PORT: u16 = 28081;
-pub const TESTNET_ADDRESS_PREFIX: &str = "tCYNC";
+// Single source of truth: the testnet wire identity lives in `crate::constants`
+// (read by the `ChainParams` table and the address layer). Re-exported here so the
+// historical `testnet::` paths (bootstrap, tests) resolve to the SAME definition
+// and can't drift from `constants::` — previously both modules declared these
+// independently, the #173 bug class.
+pub use crate::constants::{
+    TESTNET_ADDRESS_PREFIX, TESTNET_MAGIC, TESTNET_P2P_PORT, TESTNET_RPC_PORT,
+};
 
 /// Public DNS names that must resolve to hosts listening on `TESTNET_P2P_PORT`.
 /// (The `*.testnet.*` hostnames are not deployed in DNS; clearnet bootstrap uses these.)
@@ -141,13 +145,17 @@ pub fn verify_hardcoded_checkpoint(height: u64, hash: &Hash) -> Option<bool> {
 }
 
 // ── Emission ─────────────────────────────────────────────────────────────────
-
-pub mod emission {
-    pub const INITIAL_REWARD: u64 = 50_000_000_000;
-    pub const TAIL_EMISSION: u64 = 600_000_000;
-    pub const TAIL_EMISSION_HEIGHT: u64 = 2_000_000;
-    pub const ANNUAL_DECAY: u64 = 8500;
-}
+//
+// AUDIT (2026-10-03): removed the `pub mod emission { ... }` block that lived
+// here. It was dead code (zero references repo-wide — grep
+// `testnet::emission::*` yields nothing) and carried a 1000× value drift:
+// `TAIL_EMISSION` declared 600_000_000 while the authoritative
+// `constants::TAIL_EMISSION` is 600_000_000_000 (0.6 CYNC). The live emission
+// curve reads `crate::constants` (see src/emission/curve.rs). This completes the
+// same removal made to `mainnet.rs` on 2026-07-02, deferred here then only
+// because this file is `critical_files.lock`-protected. Per-network emission
+// overrides, if ever needed, belong in `constants.rs` — the single source of
+// truth its per-network parameters already are.
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
