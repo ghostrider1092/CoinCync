@@ -47,6 +47,7 @@ pub mod prelude;
 // ── Primitives + types ──────────────────────────────────────
 pub mod decoy;
 pub mod primitives;
+pub mod rng;
 pub mod transaction;
 
 // ── Consensus + emission ────────────────────────────────────
