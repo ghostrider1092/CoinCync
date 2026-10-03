@@ -16,6 +16,44 @@
 //! Phase 1 (this module + its wiring): **measure only** — the score is
 //! tracked and exposed; it does **not** yet affect eviction. Phase 2 feeds
 //! it into `eviction.rs` as a bounded, eclipse-safe protection axis.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `RelayScoreMap::credit_block`** — INVARIANT: deposits saturate at
+//!   `RELAY_SCORE_MAX` and are only ever reachable from the block-receive
+//!   path (no transaction observation feeds this map).
+//!   THREAT: an un-poisonable score requires the *only* input to be public,
+//!   provably-costly-to-fake data (an actually-relayed valid block).
+//!   TESTS: `credit_accumulates_and_saturates`.
+//! - **§2 `RelayScoreMap::evaporate`** — INVARIANT: each round multiplies by
+//!   `EVAP_NUM/EVAP_DEN` (keep 90%) with no `u32` overflow at the max score,
+//!   and zero-score peers are dropped from the map entirely.
+//!   THREAT: an un-evaporated score would let a peer that relayed once keep
+//!   permanent eviction protection long after it stops being useful.
+//!   TESTS: `evaporate_decays_and_drops_zero`, `evaporate_does_not_overflow_at_max`.
+//! - **§3 `RelayScoreMap::forget`** — INVARIANT: unconditionally removes a
+//!   peer's score (used on disconnect) so stale entries don't linger.
+//!   TESTS: `forget_removes_a_peer`.
+//! - **§4 `RelayScoreMap::score`** — INVARIANT: an unknown peer returns `0`
+//!   rather than panicking, so callers never need a fallible lookup.
+//!   TESTS: (gap — no dedicated unknown-peer test; behavior is exercised
+//!   incidentally via `forget_removes_a_peer`'s post-forget assertion).
+//! - **§5 `RelayScoreMap::top`** — INVARIANT: deterministic ordering —
+//!   descending by score, ties broken ascending by `PeerId` — so eviction's
+//!   protection set is reproducible across runs.
+//!   TESTS: `top_is_score_descending_then_stable_by_id`.
+//! - **§6 Prime invariant (block-only input) as consumed by eviction** —
+//!   INVARIANT: `eviction.rs`'s relay-score protection axis stays bounded
+//!   (`PROTECT_PER_AXIS`) and never overrides netgroup-concentration
+//!   eviction, so a sybil that "earns" relay score by flooding one netgroup
+//!   is still evicted.
+//!   THREAT: turning an anti-poisoning measure into an eclipse assist would
+//!   be worse than not having the axis at all.
+//!   TESTS: `relay_scored_flood_is_still_evicted_eclipse_safe` (in
+//!   `eviction.rs`), `relay_score_protects_a_good_relayer_when_its_group_is_not_flooded`
+//!   (in `eviction.rs`).
 
 use std::collections::BTreeMap;
 

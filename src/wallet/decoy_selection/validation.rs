@@ -1,3 +1,30 @@
+//! Boundary validation that binds a raw node covered response to its request.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `snapshot match`** — INVARIANT: the response's snapshot id must equal
+//!   the request's. THREAT: a response resolved against a different snapshot.
+//!   TESTS: `covered_response_rejects_snapshot_order_and_height_mismatches`.
+//! - **§2 `length match`** — INVARIANT: the response output count equals the
+//!   requested locator count. THREAT: a truncated or padded response.
+//!   TESTS: `covered_response_rejects_snapshot_order_and_height_mismatches`.
+//! - **§3 `locator match`** — INVARIANT: each output's locator equals the
+//!   requested locator in order. THREAT: reordered or substituted outputs.
+//!   TESTS: `covered_response_rejects_snapshot_order_and_height_mismatches`.
+//! - **§4 `height match`** — INVARIANT: each output's redundant height field
+//!   matches its locator height. THREAT: inconsistent output metadata.
+//!   TESTS: `covered_response_rejects_snapshot_order_and_height_mismatches`.
+//! - **§5 `unique index`** — INVARIANT: the locator→index map is built from
+//!   unique locators. THREAT: duplicate locators alias distinct outputs.
+//!   TESTS: `covered_lookup_allocates_transaction_wide_unique_decoys`.
+//! - **§6 `validate_covered_response`** — INVARIANT: a `ValidatedCoveredResponse`
+//!   is returned only when snapshot, cardinality, ordering and heights all pass
+//!   (fail-closed). THREAT: a partially-validated response reaches allocation.
+//!   TESTS: `covered_response_rejects_snapshot_order_and_height_mismatches`,
+//!   `allocation_rejects_real_identity_mismatch`.
+
 use super::error::{DecoySelectionError, DecoySelectionResult};
 use super::types::{CoveredRequest, SnapshotId, ValidatedCoveredResponse};
 use crate::decoy::ResolvedDecoySnapshot;

@@ -1,3 +1,67 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `header_history`** — INVARIANT: walks parent hashes back at most
+//!   `DIFFICULTY_LONG_WINDOW` blocks and errors on a missing ancestor rather
+//!   than silently truncating.
+//!   THREAT: an unbounded or silently-short ancestor walk feeds a wrong
+//!   difficulty window into validation, letting forged targets slip through.
+//!   TESTS: `accepts_connected_header_with_valid_pow`,
+//!   `rejects_header_without_known_parent`.
+//! - **§2 `validate_header_batch` (magic / sequencing / contiguity)** —
+//!   INVARIANT: every header must match the chain's network magic, connect to
+//!   a known parent, increment height by exactly one, and chain
+//!   `prev_hash`-to-hash contiguously within the batch.
+//!   THREAT: cross-network replay or a disjoint/forked batch being accepted
+//!   as a valid extension of the chain.
+//!   TESTS: `rejects_non_contiguous_header_batch`,
+//!   `rejects_header_without_known_parent`.
+//! - **§3 `validate_header_batch` (version / timestamp / MTP)** — INVARIANT:
+//!   header version never regresses below the height-activation floor or the
+//!   parent's version; timestamp strictly advances past the parent and, once
+//!   `MTP_WINDOW` history exists, past the median-time-past.
+//!   THREAT: timestamp manipulation to bias difficulty retargeting or
+//!   replay stale headers.
+//!   TESTS: (gap — no dedicated unit test exercises the version/MTP branches
+//!   directly; only covered incidentally via the accept/reject paths above).
+//! - **§4 `validate_header_batch` (checkpoint + difficulty target)** —
+//!   INVARIANT: a hardcoded checkpoint mismatch rejects the header outright;
+//!   otherwise the header's `target` must equal the chain's own
+//!   `expected_next_target` for that history (single-sourced, not
+//!   recomputed ad hoc).
+//!   THREAT: a peer claiming an easier-than-valid target once difficulty is
+//!   active, or a checkpoint-violating alternate history.
+//!   TESTS: `rejects_self_declared_easy_target_after_difficulty_activates`.
+//! - **§5 `validate_header_batch` (proof-of-work)** — INVARIANT: `verify_pow`
+//!   must succeed against the header's bound anchor/nonce/tx_root/target
+//!   before a header is accepted into `hashes`.
+//!   THREAT: a structurally-valid header with forged or missing PoW being
+//!   queued for sync.
+//!   TESTS: `accepts_connected_header_with_valid_pow`.
+//! - **§6 `handle_get_headers`** — INVARIANT: oversized `GetHeaders` payloads
+//!   are dropped and scored before parsing; the response is bounded to
+//!   `MAX_HEADERS_RESPONSE` headers starting from the first locator match.
+//!   THREAT: a giant or unbounded GetHeaders request driving unbounded disk
+//!   reads or an oversized response.
+//!   TESTS: (gap — no dedicated unit test for `handle_get_headers` in this
+//!   file; only its sibling `handle_headers` inbound path is unit-tested).
+//! - **§7 `handle_headers` (nonce validation)** — INVARIANT: an inbound
+//!   `Headers` response is honored only for the peer it was issued to, and a
+//!   nonce is consumed on first (even empty) use, never on a cross-peer or
+//!   replayed attempt.
+//!   THREAT: eclipse-style cross-peer nonce spoofing or nonce replay
+//!   poisoning `ChainSync` state.
+//!   TESTS: `handle_headers_cross_peer_nonce_is_rejected_without_consuming`,
+//!   `handle_headers_valid_nonce_is_single_use`,
+//!   `handle_headers_unsolicited_nonce_zero_is_ignored`.
+//! - **§8 `handle_headers` (deserialization + batch-reject scoring)** —
+//!   INVARIANT: malformed borsh and rejected header batches both score the
+//!   peer via `record_misbehavior` with the classified offense, and a
+//!   rejected batch never reaches `queue_headers_from_peer`.
+//!   THREAT: unscored garbage or invalid-header spam from a misbehaving peer.
+//!   TESTS: `handle_headers_borsh_garbage_scores_protocol_violation`.
+
 use std::collections::HashMap;
 
 use dashmap::DashMap;
@@ -35,7 +99,7 @@ fn header_history(
 
         history.push(DifficultyBlock {
             height: header.height,
-            timestamp: header.timestamp,
+            timestamp: header.timestamp.as_secs(),
             target: header.target,
         });
 
@@ -166,7 +230,7 @@ fn validate_header_batch(
                 .collect();
             timestamps.sort_unstable();
             let median = timestamps[timestamps.len() / 2];
-            if header.timestamp <= median {
+            if header.timestamp.as_secs() <= median {
                 return Err(reject(
                     "timestamp does not exceed median-time-past".into(),
                     MisbehaviorType::ProtocolViolation,
@@ -196,12 +260,13 @@ fn validate_header_batch(
         verify_pow(
             &header.prev_hash,
             header.height,
-            header.timestamp,
+            header.timestamp.as_secs(),
             header.nonce,
             &header.tx_root,
             &header.target,
             &header.anchor,
             header.algorithm,
+            &header.pow_binding(),
         )
         .map_err(|error| reject(error.to_string(), MisbehaviorType::InvalidBlockPoW))?;
 
@@ -211,6 +276,32 @@ fn validate_header_batch(
     }
 
     Ok(hashes)
+}
+
+/// #158: resolve the GetHeaders response start height from a block locator.
+///
+/// Returns `(deepest common MAIN-CHAIN ancestor in the locator).height + 1`, or
+/// `0` (genesis) if nothing matches. `block_height(hash)` yields the height of
+/// ANY stored block (including side chains); `main_chain_hash_at(h)` yields the
+/// hash of our MAIN-CHAIN block at height `h`. A locator entry only counts when
+/// those agree — i.e. the entry is on our main chain — so the headers we return
+/// descend from it and connect for the requester. Matching a side-chain entry
+/// (as the old code did) made us send main-chain headers whose parent a forked
+/// requester lacked ("does not connect"), wedging it forever. The locator always
+/// ends at genesis, which is on-chain, so a match is guaranteed.
+fn locator_start_height(
+    locator: &[Hash],
+    block_height: impl Fn(&Hash) -> Option<u64>,
+    main_chain_hash_at: impl Fn(u64) -> Option<Hash>,
+) -> u64 {
+    for hash in locator {
+        if let Some(h) = block_height(hash) {
+            if main_chain_hash_at(h) == Some(*hash) {
+                return h + 1;
+            }
+        }
+    }
+    0
 }
 
 pub(super) async fn handle_get_headers(
@@ -246,13 +337,15 @@ pub(super) async fn handle_get_headers(
 
         // Database reads can stall without yielding to other async tasks.
         let headers = tokio::task::block_in_place(|| {
-            let mut start_height = 0u64;
-            for hash in &msg.locator {
-                if let Some(block) = chain.get_block(hash) {
-                    start_height = block.height() + 1;
-                    break;
-                }
-            }
+            // #158: start the response at the deepest COMMON MAIN-CHAIN ancestor
+            // in the locator (see `locator_start_height`). Matching a side-chain
+            // block here would send headers the requester can't connect, wedging
+            // a forked peer in an endless EMERGENCY-TIER-3 loop.
+            let start_height = locator_start_height(
+                &msg.locator,
+                |hash| chain.get_block(hash).map(|b| b.height()),
+                |h| chain.get_block_hash(h),
+            );
             let mut headers = Vec::new();
             for h in start_height..start_height + MAX_HEADERS_RESPONSE as u64 {
                 if let Some(block) = chain.get_block_by_height(h) {
@@ -284,11 +377,69 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn locator_start_height_skips_side_chain_matches_158() {
+        let g = Hash::from_bytes([0u8; 32]);
+        let a1 = Hash::from_bytes([1u8; 32]);
+        let a2 = Hash::from_bytes([2u8; 32]);
+        let s2 = Hash::from_bytes([0x52u8; 32]); // a stored SIDE block, also at h=2
+
+        // Our MAIN chain: g@0, a1@1, a2@2. s2 is a side block at height 2.
+        let block_height = |h: &Hash| -> Option<u64> {
+            if *h == g {
+                Some(0)
+            } else if *h == a1 {
+                Some(1)
+            } else if *h == a2 {
+                Some(2)
+            } else if *h == s2 {
+                Some(2)
+            } else {
+                None
+            }
+        };
+        let main_chain_hash_at = |h: u64| -> Option<Hash> {
+            match h {
+                0 => Some(g),
+                1 => Some(a1),
+                2 => Some(a2),
+                _ => None,
+            }
+        };
+
+        // A forked requester's locator leads with its own fork tip s2 (a side
+        // block for us), then the common main-chain ancestor a1, then genesis.
+        // We MUST skip s2 and start from a1+1 = 2, so the headers we send (from
+        // a2, whose parent is a1) connect for the requester. Pre-fix this matched
+        // s2 and started at 3, sending a3 whose parent (a2) the requester lacked.
+        assert_eq!(
+            locator_start_height(&[s2, a1, g], block_height, main_chain_hash_at),
+            2,
+            "#158: must skip the side-chain locator entry and start from the \
+             common main-chain ancestor + 1"
+        );
+        // A locator whose tip IS on our main chain starts right after it.
+        assert_eq!(
+            locator_start_height(&[a2, a1, g], block_height, main_chain_hash_at),
+            3
+        );
+        // A locator of only unknown hashes falls back to genesis.
+        let unknown = Hash::from_bytes([0xFFu8; 32]);
+        assert_eq!(
+            locator_start_height(&[unknown], block_height, main_chain_hash_at),
+            0
+        );
+    }
+
     fn mine_easy_header(mut header: BlockHeader) -> BlockHeader {
         header.algorithm = PowAlgorithm::RandomX as u8;
-        header.anchor = compute_full_anchor(&header.prev_hash, header.height, header.timestamp)
-            .expect("anchor")
-            .mixed_hash;
+        // audit §1: bind the header fields into the anchor (binding excludes
+        // anchor/nonce, so compute it before setting them).
+        let binding = header.pow_binding();
+        header.anchor =
+            compute_full_anchor(&header.prev_hash, header.height, header.timestamp.as_secs(), &binding)
+                .expect("anchor")
+                .mixed_hash;
 
         for nonce in 0..u64::MAX {
             header.nonce = nonce;
@@ -319,7 +470,7 @@ mod tests {
         header.height = 1;
         header.version = crate::constants::block_version_at_height(1);
         header.prev_hash = genesis.hash();
-        header.timestamp = genesis.header.timestamp + crate::constants::TARGET_BLOCK_TIME;
+        header.timestamp = crate::primitives::Timestamp::from_secs(genesis.header.timestamp.as_secs() + crate::constants::TARGET_BLOCK_TIME);
         header.target = Hash::from_bytes([0xFE; 32]);
         mine_easy_header(header)
     }
@@ -339,12 +490,12 @@ mod tests {
         let history = [
             DifficultyBlock {
                 height: genesis.header.height,
-                timestamp: genesis.header.timestamp,
+                timestamp: genesis.header.timestamp.as_secs(),
                 target: genesis.header.target,
             },
             DifficultyBlock {
                 height: first.height,
-                timestamp: first.timestamp,
+                timestamp: first.timestamp.as_secs(),
                 target: first.target,
             },
         ];
@@ -359,7 +510,7 @@ mod tests {
         second.height = 2;
         second.version = crate::constants::block_version_at_height(2);
         second.prev_hash = first.hash();
-        second.timestamp += crate::constants::TARGET_BLOCK_TIME;
+        second.timestamp = second.timestamp + std::time::Duration::from_secs(crate::constants::TARGET_BLOCK_TIME);
         second.target = claimed;
 
         let error = validate_header_batch(&chain, &[first, second]).expect_err("target mismatch");
@@ -500,4 +651,128 @@ pub(super) async fn handle_headers(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod handle_headers_tests {
+    use super::*;
+    use crate::chain::Blockchain;
+    use crate::network::protocol::HeadersMessage;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    fn genesis_chain() -> SharedBlockchain {
+        let chain: SharedBlockchain = Arc::new(Blockchain::new());
+        chain.init_genesis().expect("genesis");
+        chain
+    }
+
+    fn addr_for(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{port}").parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn handle_headers_cross_peer_nonce_is_rejected_without_consuming() {
+        // Jun #2: a nonce issued to peer A must not be honoured from peer B, and
+        // rejecting B's attempt must NOT consume the nonce (A can still respond).
+        let peer_a = [10u8; 32];
+        let peer_b = [11u8; 32];
+        let peers = DashMap::new();
+        peers.insert(peer_b, PeerInfo::new(peer_b, addr_for(31001), false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let nonce = sync
+            .write()
+            .await
+            .begin_headers_request(peer_a, 123)
+            .expect("nonce issued to A");
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: vec![],
+            nonce,
+        })
+        .unwrap();
+        handle_headers(peer_b, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert!(
+            sync.read().await.headers_request_pending(),
+            "A's nonce not consumed by B's cross-peer response"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_headers_valid_nonce_is_single_use() {
+        let peer = [12u8; 32];
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr_for(31002), false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let nonce = sync.write().await.begin_headers_request(peer, 123).unwrap();
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: vec![],
+            nonce,
+        })
+        .unwrap();
+        // First (empty but valid) response consumes the nonce.
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+        assert!(
+            !sync.read().await.headers_request_pending(),
+            "nonce consumed after first response"
+        );
+
+        // Replay with the same nonce: rejected (already consumed), no re-queue.
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+        assert!(!sync.read().await.headers_request_pending());
+    }
+
+    #[tokio::test]
+    async fn handle_headers_unsolicited_nonce_zero_is_ignored() {
+        // nonce 0 is never allocated → unsolicited Headers rejected (anti-eclipse).
+        let peer = [13u8; 32];
+        let addr = addr_for(31003);
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr, false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: vec![],
+            nonce: 0,
+        })
+        .unwrap();
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert!(scorer.read().await.get(&addr).is_none(), "no scoring");
+        assert!(!sync.read().await.headers_request_pending());
+    }
+
+    #[tokio::test]
+    async fn handle_headers_borsh_garbage_scores_protocol_violation() {
+        let peer = [14u8; 32];
+        let addr = addr_for(31004);
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr, false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = vec![0u8; 2]; // too short to decode a HeadersMessage
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert!(scorer.read().await.get(&addr).unwrap().reputation < 100);
+    }
 }

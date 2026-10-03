@@ -5,6 +5,27 @@
 //! it through the typed coordinator. Internal modules keep construction,
 //! submission and state-carrying types separate so reservation invariants do
 //! not leak into CLI or churn callers.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `begin`** — INVARIANT: every session is bound to exactly one freshly
+//!   validated decoy snapshot, with target height and maturity floor derived
+//!   from that snapshot so later build/submit steps cannot recombine across
+//!   snapshots. THREAT: cross-snapshot decoy mixing or a stale maturity floor
+//!   that deanonymizes the real input. TESTS: `validated_snapshot_rejects_unsupported_policy`,
+//!   `validated_snapshot_rejects_invalid_height_buckets`,
+//!   `regression_finding_01_spend_context_preserves_target_height_min_age`.
+//! - **§2 `new` / `for_node` (construction)** — INVARIANT: a coordinator wraps
+//!   exactly one typed `NodeRpcClient`, so all node I/O flows through the typed
+//!   transport. THREAT: an untyped or duplicate transport path that bypasses
+//!   submission classification. TESTS: (gap — thin constructors, exercised only
+//!   indirectly by the `submit_reserved` tests).
+//! - **§3 `rpc`** — INVARIANT: exposes a shared read-only borrow of the client
+//!   for diagnostics, never a second mutable transport. THREAT: an aliased
+//!   client that could submit outside the reservation path.
+//!   TESTS: (gap — trivial accessor).
 
 mod build;
 mod submission;

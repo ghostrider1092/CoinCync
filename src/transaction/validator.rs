@@ -164,8 +164,13 @@ pub fn validate_transaction(tx: &Transaction, height: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::primitives::{Amount, PublicKey};
-    use crate::transaction::{Transaction, TxOutput, TxType};
+    use crate::constants::{
+        MAX_TX_INPUTS, MAX_TX_OUTPUTS, MAX_TX_SIZE, MIN_FEE_PER_BYTE, MIN_TX_SIZE,
+    };
+    use crate::crypto::{ClsagSignature, KeyImage as CurveKeyImage, PublicPoint};
+    use crate::error::Error;
+    use crate::primitives::{Amount, KeyImage, PublicKey};
+    use crate::transaction::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 
     fn make_coinbase_tx() -> Transaction {
         Transaction {
@@ -205,5 +210,236 @@ mod tests {
         let mut tx = make_coinbase_tx();
         tx.outputs.clear();
         assert!(validate_transaction(&tx, 0).is_err());
+    }
+
+    // ─── shared helpers for input/output-driven cases ───────────────────
+
+    fn make_output() -> TxOutput {
+        TxOutput {
+            stealth_address: PublicKey::from_bytes([1u8; 32]),
+            tx_public_key: PublicKey::from_bytes([2u8; 32]),
+            commitment: [3u8; 32],
+            encrypted_amount: vec![0u8; 8],
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        }
+    }
+
+    /// Build a transfer input with explicit control over the ring length, the
+    /// number of CLSAG responses, and the two key-image byte strings the
+    /// validator cross-checks. `sig_key_image` must be valid ristretto point
+    /// bytes; the all-zero encoding is the identity point.
+    fn make_transfer_input(
+        ring_len: usize,
+        resp_len: usize,
+        input_key_image: [u8; 32],
+        sig_key_image: [u8; 32],
+    ) -> TxInput {
+        let member = RingMemberRef {
+            public_key: PublicKey::from_bytes([9u8; 32]),
+            commitment: [0u8; 32],
+        };
+        TxInput {
+            key_image: KeyImage::from_bytes(input_key_image),
+            ring_members: vec![member; ring_len],
+            signature: ClsagSignature {
+                key_image: CurveKeyImage::from_bytes(sig_key_image)
+                    .expect("identity is a valid ristretto point"),
+                commitment_image: PublicPoint::identity(),
+                c1: [0u8; 32],
+                responses: vec![[0u8; 32]; resp_len],
+            },
+            pseudo_output_commitment: [0u8; 32],
+        }
+    }
+
+    /// A structurally valid single-input transfer whose fee clears the
+    /// per-byte minimum. The signature's key image matches the input's, and
+    /// ring/response counts agree, so it passes every check when the ring
+    /// length is legal for the target height.
+    fn make_valid_transfer(ring_len: usize) -> Transaction {
+        let ki = [0u8; 32]; // identity bytes shared by input + signature
+        let mut tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![make_transfer_input(ring_len, ring_len, ki, ki)],
+            outputs: vec![make_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        // Amount is a fixed 8 bytes regardless of value, so setting the fee
+        // after measuring the size does not change the size.
+        let min_fee = tx.size() as u64 * MIN_FEE_PER_BYTE;
+        tx.fee = Amount::from_atomic(min_fee + 1);
+        tx
+    }
+
+    #[test]
+    fn test_oversized_transaction_rejected() {
+        let mut tx = make_coinbase_tx();
+        tx.range_proof = vec![0u8; MAX_TX_SIZE + 1];
+        assert!(matches!(
+            validate_transaction(&tx, 0),
+            Err(Error::TransactionTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn test_undersized_non_coinbase_rejected() {
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        assert!(tx.size() < MIN_TX_SIZE);
+        assert!(matches!(
+            validate_transaction(&tx, 0),
+            Err(Error::TransactionTooSmall { .. })
+        ));
+    }
+
+    #[test]
+    fn test_too_many_inputs_rejected() {
+        let input = make_transfer_input(2, 2, [0u8; 32], [0u8; 32]);
+        let mut tx = make_coinbase_tx();
+        tx.tx_type = TxType::Transfer;
+        tx.inputs = vec![input; MAX_TX_INPUTS + 1];
+        assert!(matches!(
+            validate_transaction(&tx, 0),
+            Err(Error::InvalidInputCount { .. })
+        ));
+    }
+
+    #[test]
+    fn test_too_many_outputs_rejected() {
+        let mut tx = make_coinbase_tx();
+        tx.outputs = vec![make_output(); MAX_TX_OUTPUTS + 1];
+        assert!(matches!(
+            validate_transaction(&tx, 0),
+            Err(Error::InvalidOutputCount { .. })
+        ));
+    }
+
+    #[test]
+    fn test_lock_height_far_future_rejected() {
+        let mut tx = make_coinbase_tx();
+        // one past the accepted horizon of height + 525_960 at height 0
+        tx.outputs[0].lock_height = Some(525_961);
+        assert!(matches!(
+            validate_transaction(&tx, 0),
+            Err(Error::InvalidTransaction(_))
+        ));
+    }
+
+    #[test]
+    fn test_lock_height_at_boundary_accepted() {
+        let mut tx = make_coinbase_tx();
+        // exactly height + 525_960 is accepted
+        tx.outputs[0].lock_height = Some(525_960);
+        assert!(validate_transaction(&tx, 0).is_ok());
+    }
+
+    #[test]
+    fn test_duplicate_key_image_within_tx_rejected() {
+        let input = make_transfer_input(2, 2, [7u8; 32], [0u8; 32]);
+        let mut tx = make_coinbase_tx();
+        tx.tx_type = TxType::Transfer;
+        tx.inputs = vec![input.clone(), input];
+        assert!(matches!(
+            validate_transaction(&tx, 0),
+            Err(Error::DuplicateKeyImage(_))
+        ));
+    }
+
+    #[test]
+    fn test_young_chain_small_ring_accepted() {
+        // height < 10_000 allows a ring smaller than the target (min 2)
+        let tx = make_valid_transfer(2);
+        assert!(validate_transaction(&tx, 0).is_ok());
+    }
+
+    #[test]
+    fn test_mature_chain_wrong_ring_size_rejected() {
+        // At height >= 10_000 the exact target ring size (16) is required, so a
+        // ring of 2 that is fine on a young chain is now rejected.
+        let tx = make_valid_transfer(2);
+        assert!(matches!(
+            validate_transaction(&tx, 10_000),
+            Err(Error::InvalidRingSize { .. })
+        ));
+    }
+
+    #[test]
+    fn test_young_chain_ring_too_small_rejected() {
+        // a ring of 1 is below the minimum of 2 even on a young chain
+        let tx = make_valid_transfer(1);
+        assert!(matches!(
+            validate_transaction(&tx, 0),
+            Err(Error::InvalidRingSize { .. })
+        ));
+    }
+
+    #[test]
+    fn test_ring_signature_size_mismatch_rejected() {
+        // ring_members has 2 entries but the CLSAG signature carries 3 responses
+        let mut tx = make_valid_transfer(2);
+        tx.inputs = vec![make_transfer_input(2, 3, [0u8; 32], [0u8; 32])];
+        assert!(matches!(
+            validate_transaction(&tx, 0),
+            Err(Error::InvalidSignature(_))
+        ));
+    }
+
+    #[test]
+    fn test_signature_key_image_mismatch_rejected() {
+        // ring/response counts agree, but the signature's key-image bytes differ
+        // from the input's key-image bytes
+        let mut tx = make_valid_transfer(2);
+        tx.inputs = vec![make_transfer_input(2, 2, [1u8; 32], [0u8; 32])];
+        assert!(matches!(
+            validate_transaction(&tx, 0),
+            Err(Error::InvalidSignature(_))
+        ));
+    }
+
+    #[test]
+    fn test_fee_below_minimum_rejected() {
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![make_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        assert!(matches!(
+            validate_transaction(&tx, 0),
+            Err(Error::FeeTooLow { .. })
+        ));
+    }
+
+    #[test]
+    fn test_non_recovery_invalid_extra_rejected() {
+        // A recovery entry pointing at output index 5 in a 1-output tx is
+        // invalid; validate_transaction surfaces it as InvalidTransaction with
+        // the "invalid recovery metadata" prefix.
+        let mut tx = make_coinbase_tx();
+        let mut extra = vec![0xDEu8, 5]; // RECOVERY_TAG, output_index = 5
+        extra.extend_from_slice(&[0xABu8; 32]); // recovery_address
+        extra.extend_from_slice(&262_800u64.to_le_bytes()); // valid timeout
+        tx.extra = extra;
+        match validate_transaction(&tx, 0) {
+            Err(Error::InvalidTransaction(msg)) => {
+                assert!(msg.contains("invalid recovery metadata"), "got: {msg}");
+            }
+            other => panic!("expected InvalidTransaction, got {other:?}"),
+        }
     }
 }

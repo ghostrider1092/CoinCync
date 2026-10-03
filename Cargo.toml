@@ -51,6 +51,12 @@ path = "src/bin/sign_snapshot.rs"
 name = "coincync-tick"
 path = "src/bin/coincync-tick.rs"
 
+[[bin]]
+# Explain CoinCync diagnostic codes (like `rustc --explain`). Read-only; prints
+# from the compile-time diagnostics catalog. See src/bin/diag.rs.
+name = "coincync-diag"
+path = "src/bin/diag.rs"
+
 [features]
 default = ["randomx"]
 testnet = ["randomx"]
@@ -76,6 +82,15 @@ test-utilities  = []
 # feature gate. See feedback_snapshot_procedure.md / H2 in the 2026-06-30
 # audit for rationale.
 insecure-fast-sync = []
+# TEST-ONLY: skip RandomX PoW + ASERT difficulty-target enforcement so the
+# multi-node simkit harness mines instantly. INSECURE — never enable in a real
+# build. Off by default → production is byte-identical after cfg-strip.
+test-fast-pow = []
+# Hardware-wallet (Ledger/Trezor) host-side support. Off by default — gates
+# `src/wallet/hardware.rs` (APDU transport abstraction + device-backed TxSigner).
+# The default build pulls no USB/HID deps; the real transport adapter is added
+# behind this feature in a later slice. See docs/ (hardware-wallet plan).
+hardware = []
 # Sketch features â€” implementations reserved for post-mainnet CIPs.
 # All gated modules are off by default and not part of the production
 # audit perimeter. See docs/cip/.
@@ -163,7 +178,7 @@ rcgen                = "0.13"
 
 # â”€â”€ Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Migrated to RocksDB via the db::shim layer â€” see src/db/shim.rs.
-rocksdb  = { version = "0.22", features = ["multi-threaded-cf", "lz4"] }
+rocksdb  = { version = "0.23", features = ["multi-threaded-cf", "lz4"] }
 bech32   = "0.11"
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 redb     = "2"
@@ -231,7 +246,7 @@ strsim    = "0.11"
 #    Leaving the entries so any future TUI feature can pick
 #    them up without re-resolving versions.) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 ratatui   = "0.30"
-crossterm = "0.27"
+crossterm = "0.29"
 
 # â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 config    = "0.14"

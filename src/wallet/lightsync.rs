@@ -24,11 +24,70 @@
 //!   Audit **Gap 2** (checkpoint *authentication*): a consumer must call
 //!   [`SyncCheckpoint::authenticate`] and only fast-skip on
 //!   [`CheckpointAuth::Authenticated`] — this validates a server-provided
-//!   checkpoint against the binary's hardcoded `CONSENSUS_CHECKPOINTS` set.
+//!   checkpoint against the binary's hardcoded consensus checkpoints.
 //!   Full miner-signed checkpoints remain the v1.0.1 solution; until then an
 //!   unhardcoded height is `Unverifiable` and must fall back to a full scan.
 //!
 //! Bandwidth savings: ~50-100x reduction vs downloading full blocks.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `BlockDigest::from_block`** — INVARIANT: a digest is an output-only
+//!   summary and scanning is local, so a range request leaks only the block
+//!   height RANGE to the server, never the wallet's address set (strictly
+//!   stronger than BIP-157; see `docs/security/LIGHTSYNC_AUDIT.md`).
+//!   THREAT: address-set deanonymization by the serving node.
+//!   TESTS: `test_create_digest_from_block`, `scan_digest_matches_full_scanner_on_same_block`.
+//! - **§2 `scan_digest`** — INVARIANT: only outputs that pass the view-tag
+//!   prefilter AND ECDH-decrypt as ours are returned, each with its amount and
+//!   canonical locator; empty scan keys find nothing without panicking.
+//!   THREAT: false-positive ownership or a panic on an empty key set.
+//!   TESTS: `test_scan_digest_finds_output`, `test_scan_digest_rejects_others`,
+//!   `scan_digest_empty_keys_finds_nothing_no_panic`,
+//!   `scan_output_digest_view_tag_mismatch_short_circuits`.
+//! - **§3 `scan_output_digest` (per-output decrypt)** — INVARIANT: a forged
+//!   encrypted amount is dropped, a subaddress match preserves its index, and a
+//!   coinbase plaintext amount is read correctly. THREAT: crediting a forged
+//!   amount or losing the subaddress attribution. TESTS:
+//!   `scan_output_digest_drops_forged_encrypted_amount`,
+//!   `scan_output_digest_detects_subaddress_and_preserves_index`,
+//!   `scan_digest_detects_coinbase_plaintext_amount`.
+//! - **§4 `scan_digests_parallel` / `validate_digest_sequence` (#87)** —
+//!   INVARIANT: the batch is validated for height contiguity and `prev_hash`
+//!   linkage BEFORE any scan, and an invalid batch returns `Err` leaving
+//!   `last_scanned` untouched. THREAT: advancing past unscanned blocks (missed
+//!   owned outputs) on a gapped/forged batch. TESTS:
+//!   `scan_digests_parallel_rejects_gap_issue_87`,
+//!   `scan_digests_parallel_rejects_broken_link_issue_87`,
+//!   `scan_digests_parallel_rejects_out_of_order_issue_87`,
+//!   `scan_digests_parallel_reorg_batch_preserves_last_scanned`,
+//!   `scan_digests_parallel_advances_last_scanned_to_final_height`.
+//! - **§5 `SyncCheckpoint::authenticate` (audit Gap 2)** — INVARIANT: a
+//!   server checkpoint is trusted for fast-skip only when its hash matches a
+//!   hardcoded consensus-checkpoint entry (`Authenticated`); a mismatch is
+//!   `Forged` and an unknown height is `Unverifiable`, both of which must fall
+//!   back to a full scan. THREAT: a forged checkpoint making the wallet skip
+//!   real blocks and miss owned incoming txs. TESTS:
+//!   `checkpoint_authenticate_accepts_matching_hardcoded`,
+//!   `checkpoint_authenticate_rejects_forged`,
+//!   `checkpoint_authenticate_unverifiable_without_hardcoded`,
+//!   `checkpoint_authenticate_never_false_accepts_against_real_table`.
+//! - **§6 `SyncCheckpoint::verify_hash`** — INVARIANT: computes a
+//!   self-consistency hash only (tamper on any field changes it); it proves
+//!   integrity in transit, NOT authenticity — that is §5's job.
+//!   THREAT: mistaking a self-consistent but forged checkpoint for a trusted
+//!   one. TESTS: `checkpoint_verify_hash_changes_on_field_tamper`,
+//!   `test_checkpoint_creation`.
+//! - **§7 `estimate_bandwidth`** — INVARIANT: byte estimate scales linearly with
+//!   block count and average outputs per block. THREAT: a wildly wrong budget
+//!   that breaks the per-request cap. TESTS: `test_bandwidth_estimate`.
+//! - **§8 `LightSyncStats` accumulation** — INVARIANT: scan stats accumulate
+//!   across digests (including coinbase); a known lock-height correctness hole
+//!   is pinned by a regression test. THREAT: silent miscount of found outputs.
+//!   TESTS: `light_sync_stats_accumulate_across_digests_including_coinbase`,
+//!   `scan_output_digest_loses_lock_height_funds_correctness_hole`.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use rayon::prelude::*;
@@ -151,7 +210,7 @@ impl BlockDigest {
             height: block.height(),
             hash,
             prev_hash: block.header.prev_hash,
-            timestamp: block.header.timestamp,
+            timestamp: block.header.timestamp.as_secs(),
             output_count: outputs.len() as u16,
             outputs,
         }
@@ -217,7 +276,7 @@ impl SyncCheckpoint {
     }
 
     /// Authenticate this (server-provided) checkpoint against the binary's
-    /// hardcoded `CONSENSUS_CHECKPOINTS` set — the interim mitigation for
+    /// hardcoded consensus checkpoints — the interim mitigation for
     /// **audit Gap 2** (checkpoint authentication) until miner-signed
     /// checkpoints are wired (v1.0.1).
     ///
@@ -230,10 +289,9 @@ impl SyncCheckpoint {
     /// and [`Forged`](CheckpointAuth::Forged) must both fall back to a normal
     /// scan (and `Forged` should additionally distrust the peer).
     pub fn authenticate(&self, network: crate::config::NetworkType) -> CheckpointAuth {
-        self.authenticate_against(crate::constants::expected_checkpoint_hash(
-            network,
-            self.height,
-        ))
+        self.authenticate_against(
+            crate::constants::expected_checkpoint_hash(network, self.height).as_ref(),
+        )
     }
 
     /// Core of [`authenticate`](Self::authenticate), split out so the
@@ -649,6 +707,23 @@ fn detect_coinbase_digest(output: &OutputDigest, keys: &ScanKeys) -> Option<Decr
     } else {
         0
     };
+    // SEC (2026-09-07): coinbase commitments are zero-blinding, so the plaintext
+    // amount must reconstruct output.commitment — parity with the non-coinbase
+    // ghost-balance defense above. Rejects a forged/inflated coinbase amount
+    // rather than surfacing it as unspendable ghost balance. Logged at WARN
+    // (security-visible), matching the R-103 elevation in the full scanner.
+    let expected_commitment =
+        crate::crypto::PedersenCommitment::commit(amount, &BlindingFactor::zero()).to_bytes();
+    if expected_commitment != output.commitment {
+        tracing::warn!(
+            "lightsync coinbase: stealth match but commitment recompute mismatch \
+             (tx={}, output_idx={}, claimed amount {}) — skipping.",
+            output.tx_hash.to_hex(),
+            output.output_index,
+            amount,
+        );
+        return None;
+    }
     Some(DecryptedOutput {
         tx_hash: output.tx_hash,
         output_index: output.output_index,
@@ -968,7 +1043,7 @@ mod tests {
             network_magic: test_magic(),
             version: 1,
             height: 1,
-            timestamp: 1000,
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx_hash,
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1013,7 +1088,7 @@ mod tests {
             network_magic: test_magic(),
             version: 1,
             height: 1,
-            timestamp: 1000,
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1065,7 +1140,7 @@ mod tests {
             network_magic: test_magic(),
             version: 1,
             height: 1,
-            timestamp: 1000,
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1119,7 +1194,7 @@ mod tests {
                 network_magic: test_magic(),
                 version: 1,
                 height: h,
-                timestamp: 1000 + h * 30,
+                timestamp: crate::primitives::Timestamp::from_secs(1000 + h * 30),
                 prev_hash,
                 tx_root: tx.hash(),
                 anchor: Hash::from_bytes([0u8; 32]),
@@ -1173,7 +1248,7 @@ mod tests {
             network_magic: test_magic(),
             version: 1,
             height,
-            timestamp: 1000 + height * 30,
+            timestamp: crate::primitives::Timestamp::from_secs(1000 + height * 30),
             prev_hash,
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1362,7 +1437,11 @@ mod tests {
         let output = TxOutput {
             stealth_address: spend_public, // old-format coinbase → direct match
             tx_public_key: spend_public,
-            commitment: [0u8; 32],               // zero-blinding placeholder
+            // audit 2026-09-07: coinbase is zero-blinding, so the commitment MUST
+            // equal commit(amount, 0) — the light scanner now verifies this, so
+            // the test uses the real commitment rather than a placeholder.
+            commitment: crate::crypto::PedersenCommitment::commit(reward, &BlindingFactor::zero())
+                .to_bytes(),
             encrypted_amount: reward.to_le_bytes().to_vec(), // PLAINTEXT LE amount
             view_tag: 0,
             lock_height: None,
@@ -1381,7 +1460,7 @@ mod tests {
             network_magic: test_magic(),
             version: 1,
             height: 1,
-            timestamp: 1000,
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1411,6 +1490,312 @@ mod tests {
         assert_eq!(
             found[0].blinding_factor.to_bytes(),
             BlindingFactor::zero().to_bytes()
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Test-plan gap fills (docs/audit/test-plan/wallet.md § src/wallet/lightsync.rs)
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Build a single-transaction block wrapping `outputs`.
+    fn block_with_outputs(
+        height: u64,
+        prev_hash: Hash,
+        outputs: Vec<TxOutput>,
+        coinbase: bool,
+    ) -> Block {
+        let tx = Transaction {
+            version: 1,
+            tx_type: if coinbase {
+                TxType::Coinbase
+            } else {
+                TxType::Transfer
+            },
+            inputs: vec![],
+            outputs,
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let header = BlockHeader {
+            network_magic: test_magic(),
+            version: 1,
+            height,
+            timestamp: crate::primitives::Timestamp::from_secs(1000 + height),
+            prev_hash,
+            tx_root: tx.hash(),
+            anchor: Hash::from_bytes([0u8; 32]),
+            algorithm: 0,
+            nonce: 0,
+            target: Hash::from_bytes([0xFF; 32]),
+            miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+            supply_commitment: [0u8; 32],
+            checkpoint_vote: None,
+            spark_set_root: [0u8; 32],
+            mw_kernel_root: [0u8; 32],
+        };
+        Block::new(header, vec![tx])
+    }
+
+    /// FUNDS-CORRECTNESS HOLE: `OutputDigest` has no `lock_height` field, so a
+    /// locked/vesting output detected on light sync comes back with
+    /// `lock_height == None` and would be treated as immediately spendable.
+    /// Pin this behavior so a future fix is forced to update the test.
+    #[test]
+    fn scan_output_digest_loses_lock_height_funds_correctness_hole() {
+        let (view_secret, spend_public) = make_test_keys();
+        let amount = 9_000_000u64;
+        let (mut output, _) = create_test_output(&view_secret, &spend_public, amount, 0);
+        // The on-chain output is time-locked (a vesting output).
+        output.lock_height = Some(1_000);
+
+        let block = block_with_outputs(1, Hash::from_bytes([0u8; 32]), vec![output], false);
+        let digest = BlockDigest::from_block(&block);
+
+        let keys = ScanKeys::new(view_secret, spend_public, 0);
+        let mut sync = LightWalletSync::new(vec![keys]);
+        let found = sync.scan_digest(&digest);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].output.lock_height, None,
+            "lightsync loses lock_height — a locked output looks immediately spendable"
+        );
+    }
+
+    /// A reorged/broken-link continuation batch is rejected and `last_scanned`
+    /// is preserved at the previously-scanned height.
+    #[test]
+    fn scan_digests_parallel_reorg_batch_preserves_last_scanned() {
+        let (vs, sp) = make_test_keys();
+        let d1 = mk_digest(1, Hash::from_bytes([0u8; 32]), &vs, &sp);
+        let d2 = mk_digest(2, d1.hash, &vs, &sp);
+        let d2_hash = d2.hash;
+        let mut sync = LightWalletSync::new(vec![ScanKeys::new(vs.clone(), sp, 0)]);
+        sync.scan_digests_parallel(&[d1, d2]).expect("valid batch");
+        assert_eq!(sync.last_scanned(), 2);
+
+        // Continuation whose block 4 forks off a sibling of block 3 (broken link).
+        let d3 = mk_digest(3, d2_hash, &vs, &sp);
+        let d4 = mk_digest(4, Hash::from_bytes([0xAB; 32]), &vs, &sp);
+        let res = sync.scan_digests_parallel(&[d3, d4]);
+        assert!(matches!(res, Err(DigestSequenceError::BrokenLink { height: 4 })));
+        assert_eq!(
+            sync.last_scanned(),
+            2,
+            "position preserved on a reorged/broken batch"
+        );
+    }
+
+    /// Parity: lightsync and the full scanner detect the identical output
+    /// set/amount for the same block.
+    #[test]
+    fn scan_digest_matches_full_scanner_on_same_block() {
+        let (view_secret, spend_public) = make_test_keys();
+        let amount = 3_333_333u64;
+        let (output, _) = create_test_output(&view_secret, &spend_public, amount, 0);
+        let block = block_with_outputs(1, Hash::from_bytes([0u8; 32]), vec![output], false);
+
+        let mut full = crate::wallet::scanner::WalletScanner::new();
+        full.add_keys(view_secret.clone(), spend_public, 0);
+        let full_found = full.scan_block(&block);
+
+        let digest = BlockDigest::from_block(&block);
+        let mut light = LightWalletSync::new(vec![ScanKeys::new(view_secret, spend_public, 0)]);
+        let light_found = light.scan_digest(&digest);
+
+        assert_eq!(full_found.len(), 1);
+        assert_eq!(light_found.len(), full_found.len());
+        assert_eq!(light_found[0].amount, full_found[0].amount);
+        assert_eq!(light_found[0].amount, amount);
+        assert_eq!(light_found[0].tx_hash, full_found[0].tx_hash);
+        assert_eq!(light_found[0].output_index, full_found[0].output_index);
+    }
+
+    /// View-tag mismatch short-circuits before ECDH (non-coinbase).
+    #[test]
+    fn scan_output_digest_view_tag_mismatch_short_circuits() {
+        let (view_secret, spend_public) = make_test_keys();
+        let (mut output, _) = create_test_output(&view_secret, &spend_public, 1_000_000, 0);
+        output.view_tag ^= 0xFF; // corrupt: fast filter must reject before ECDH
+        let block = block_with_outputs(1, Hash::from_bytes([0u8; 32]), vec![output], false);
+        let digest = BlockDigest::from_block(&block);
+
+        let mut sync = LightWalletSync::new(vec![ScanKeys::new(view_secret, spend_public, 0)]);
+        assert!(
+            sync.scan_digest(&digest).is_empty(),
+            "a view-tag mismatch must short-circuit (non-coinbase)"
+        );
+    }
+
+    /// Forged encrypted_amount with a matching stealth is dropped by the
+    /// commitment recompute (parity with the full scanner).
+    #[test]
+    fn scan_output_digest_drops_forged_encrypted_amount() {
+        let (view_secret, spend_public) = make_test_keys();
+        let (mut output, _) = create_test_output(&view_secret, &spend_public, 1_000_000, 0);
+        output.commitment = [0xAB; 32]; // still ours + passes fast filter, forged amount
+        let block = block_with_outputs(1, Hash::from_bytes([0u8; 32]), vec![output], false);
+        let digest = BlockDigest::from_block(&block);
+
+        let mut sync = LightWalletSync::new(vec![ScanKeys::new(view_secret, spend_public, 0)]);
+        assert!(
+            sync.scan_digest(&digest).is_empty(),
+            "forged commitment must be dropped by the recompute check"
+        );
+    }
+
+    /// Subaddress output detected via subaddress_keys, index preserved.
+    #[test]
+    fn scan_output_digest_detects_subaddress_and_preserves_index() {
+        use crate::wallet::subaddress::{SubaddressIndex, SubaddressManager};
+        let (view_secret, spend_public) = make_test_keys();
+        let view_public = {
+            let vs = CurveSecretScalar::from_bytes(*view_secret.as_bytes());
+            PublicKey::from_bytes(vs.to_public().to_bytes())
+        };
+        let mut mgr = SubaddressManager::new(
+            SecretKey::from_bytes(*view_secret.as_bytes()),
+            spend_public,
+            view_public,
+        );
+        let sub_bytes: [u8; 32] = *mgr
+            .generate_at(SubaddressIndex::new(0, 4))
+            .unwrap()
+            .spend_public
+            .as_bytes();
+        let sub_spend = PublicKey::from_bytes(sub_bytes);
+
+        // create_test_output builds P = H(shared)*G + <spend_key>; using the
+        // subaddress spend key makes it detectable by that subaddress key.
+        let (output, _) = create_test_output(&view_secret, &sub_spend, 2_500_000, 0);
+        let block = block_with_outputs(1, Hash::from_bytes([0u8; 32]), vec![output], false);
+        let digest = BlockDigest::from_block(&block);
+
+        let mut keys = ScanKeys::new(view_secret, spend_public, 0);
+        keys.subaddress_keys = vec![(0, 4, sub_spend)];
+        let mut sync = LightWalletSync::new(vec![keys]);
+        let found = sync.scan_digest(&digest);
+        assert_eq!(found.len(), 1, "subaddress output detected via light sync");
+        assert_eq!(found[0].subaddress_index, Some((0, 4)));
+        assert_eq!(found[0].amount, 2_500_000);
+    }
+
+    /// Empty scan_keys finds nothing and does not panic.
+    #[test]
+    fn scan_digest_empty_keys_finds_nothing_no_panic() {
+        let (view_secret, spend_public) = make_test_keys();
+        let (output, _) = create_test_output(&view_secret, &spend_public, 1_000_000, 0);
+        let block = block_with_outputs(1, Hash::from_bytes([0u8; 32]), vec![output], false);
+        let digest = BlockDigest::from_block(&block);
+
+        let mut sync = LightWalletSync::new(vec![]);
+        assert!(
+            sync.scan_digest(&digest).is_empty(),
+            "empty scan_keys finds nothing and does not panic"
+        );
+    }
+
+    /// A valid contiguous multi-block batch advances `last_scanned` to the final
+    /// height, counting each block exactly once.
+    #[test]
+    fn scan_digests_parallel_advances_last_scanned_to_final_height() {
+        let (vs, sp) = make_test_keys();
+        let d10 = mk_digest(10, Hash::from_bytes([0u8; 32]), &vs, &sp);
+        let d11 = mk_digest(11, d10.hash, &vs, &sp);
+        let d12 = mk_digest(12, d11.hash, &vs, &sp);
+        let mut sync = LightWalletSync::new(vec![ScanKeys::new(vs, sp, 0)]);
+        let found = sync
+            .scan_digests_parallel(&[d10, d11, d12])
+            .expect("contiguous batch");
+        assert_eq!(found.len(), 3);
+        assert_eq!(sync.last_scanned(), 12);
+        assert_eq!(sync.stats().digests_scanned, 3, "each block counted once");
+    }
+
+    /// Single-block and empty-batch boundary behavior.
+    #[test]
+    fn scan_digests_parallel_single_and_empty_batch_boundaries() {
+        let (vs, sp) = make_test_keys();
+        let single = mk_digest(77, Hash::from_bytes([0u8; 32]), &vs, &sp);
+        let mut sync = LightWalletSync::new(vec![ScanKeys::new(vs, sp, 0)]);
+
+        sync.scan_digests_parallel(&[single])
+            .expect("single-block batch valid");
+        assert_eq!(sync.last_scanned(), 77);
+
+        let found = sync.scan_digests_parallel(&[]).expect("empty batch valid");
+        assert!(found.is_empty());
+        assert_eq!(
+            sync.last_scanned(),
+            77,
+            "empty batch must not change position"
+        );
+    }
+
+    /// `verify_hash` changes when `total_outputs` or `utxo_hash` is tampered.
+    #[test]
+    fn checkpoint_verify_hash_changes_on_field_tamper() {
+        let base = SyncCheckpoint::new(
+            1000,
+            Hash::from_bytes([7u8; 32]),
+            50_000,
+            Hash::from_bytes([2u8; 32]),
+        );
+        let h = base.verify_hash();
+
+        let mut t1 = base.clone();
+        t1.total_outputs = 50_001;
+        assert_ne!(
+            t1.verify_hash(),
+            h,
+            "tampering total_outputs must change the verify hash"
+        );
+
+        let mut t2 = base.clone();
+        t2.utxo_hash = Hash::from_bytes([3u8; 32]);
+        assert_ne!(
+            t2.verify_hash(),
+            h,
+            "tampering utxo_hash must change the verify hash"
+        );
+    }
+
+    /// `LightSyncStats` accumulate total_amount/outputs_found across digests,
+    /// including a coinbase output.
+    #[test]
+    fn light_sync_stats_accumulate_across_digests_including_coinbase() {
+        let (view_secret, spend_public) = make_test_keys();
+
+        let reg_amount = 4_000_000u64;
+        let (reg_out, _) = create_test_output(&view_secret, &spend_public, reg_amount, 0);
+        let reg_block = block_with_outputs(1, Hash::from_bytes([0u8; 32]), vec![reg_out], false);
+        let reg_digest = BlockDigest::from_block(&reg_block);
+
+        let reward = 50_000_000_000u64;
+        let cb_out = TxOutput {
+            stealth_address: spend_public, // old-format coinbase → direct match
+            tx_public_key: spend_public,
+            commitment: crate::crypto::PedersenCommitment::commit(reward, &BlindingFactor::zero())
+                .to_bytes(),
+            encrypted_amount: reward.to_le_bytes().to_vec(),
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let cb_block = block_with_outputs(2, reg_block.hash(), vec![cb_out], true);
+        let cb_digest = BlockDigest::from_block(&cb_block);
+
+        let keys = ScanKeys::new(view_secret, spend_public, 0);
+        let mut sync = LightWalletSync::new(vec![keys]);
+        sync.scan_digest(&reg_digest);
+        sync.scan_digest(&cb_digest);
+
+        let stats = sync.stats();
+        assert_eq!(stats.outputs_found, 2, "regular + coinbase both counted");
+        assert_eq!(
+            stats.total_amount,
+            reg_amount as u128 + reward as u128,
+            "total_amount accumulates across digests including coinbase"
         );
     }
 }

@@ -225,12 +225,12 @@ pub mod hex_utils {
 pub mod time_utils {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// Get current Unix timestamp in seconds
+    /// Get current Unix timestamp in seconds.
+    ///
+    /// Single source of truth (E1): delegates to the canonical clock, so the
+    /// simulation harness can make it deterministic. See `src/clock.rs`.
     pub fn now_secs() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
+        crate::clock::unix_now()
     }
 
     /// Get current Unix timestamp in milliseconds

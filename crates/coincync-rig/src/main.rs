@@ -305,6 +305,19 @@ fn main() -> Result<()> {
 
 // ─── run-pool ────────────────────────────────────────────────────────
 
+/// #145: the rig hashes through the shared
+/// `coincync::consensus::pow::randomx_cache`, whose mode default became LIGHT
+/// unless `NODE_MINING_ACTIVE` is set (#135). Only `coincync-node` set it (from
+/// `--mine`), so the rig silently ran in light mode — ~7x slower. Every rig
+/// MINING entry point (run-solo, run-pool, run-config → run-solo, bench) calls
+/// this ONCE before the first `Hasher` is constructed, so the shared cache
+/// builds a full-mem dataset. Verify/selftest/info stay light (a one-off check
+/// doesn't need the 2 GB dataset). `COINCYNC_RANDOMX_LIGHT_MODE=1` remains the
+/// explicit low-RAM opt-out.
+fn activate_full_mem_hashing() {
+    coincync::consensus::pow::set_node_mining_active(true);
+}
+
 fn run_pool_cli(
     pool: &str,
     login: &str,
@@ -312,6 +325,7 @@ fn run_pool_cli(
     network: NetworkArg,
     threads: usize,
 ) -> Result<()> {
+    activate_full_mem_hashing(); // #145
     let net = network.into_network_type();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -401,6 +415,7 @@ fn decode_nonce(s: &str) -> Result<u64> {
 // ─── bench ───────────────────────────────────────────────────────────
 
 fn run_bench(threads: usize, duration_secs: u64) -> Result<()> {
+    activate_full_mem_hashing(); // #145 — bench must measure full-mem hashrate
     let n_threads = if threads == 0 {
         match std::thread::available_parallelism() {
             Ok(n) => n.get(),
@@ -528,6 +543,7 @@ fn run_solo_cli(
     signal_v1012: bool,
     tui_log_rx: Option<std::sync::mpsc::Receiver<String>>,
 ) -> Result<()> {
+    activate_full_mem_hashing(); // #145 (also covers run-config, which calls this)
     // Build SignalBits from miner opt-in flags. Today there's only
     // V1_0_12_BUNDLE (CIP-012); future CIPs add their own flag here
     // and OR their bit into `signal_raw`. Passing SignalBits(0)
@@ -722,4 +738,22 @@ fn run_config_cli(config_path: &str) -> Result<()> {
         cfg.mining.signal_v1012,
         None,
     )
+}
+
+#[cfg(test)]
+mod mode_tests {
+    #[test]
+    fn rig_mining_activates_full_mem() {
+        // #145 regression: the rig's mining entry points must declare mining
+        // active so the shared randomx_cache selects full-mem, not the ~7x-slow
+        // light mode it silently fell into after #135. If the call is dropped
+        // from activate_full_mem_hashing (or an entry point stops calling it),
+        // this fails.
+        super::activate_full_mem_hashing();
+        assert!(
+            coincync::consensus::pow::node_mining_active(),
+            "activate_full_mem_hashing must set NODE_MINING_ACTIVE so rig miners \
+             use full-mem RandomX (#145)"
+        );
+    }
 }

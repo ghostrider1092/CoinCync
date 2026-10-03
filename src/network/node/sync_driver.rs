@@ -1,3 +1,91 @@
+//! # Sync Driver
+//!
+//! Drives the `ChainSync` state machine on a tick loop: issues GetHeaders,
+//! requests block spans across live peers during IBD, and escalates through
+//! tiered stall-recovery when the chain stops advancing.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `SyncDriverState::emergency_recovery_due`** — INVARIANT: emergency
+//!   Tier-3 recovery fires only after `EMERGENCY_T3_NO_PROGRESS_SECS` of no
+//!   height advance, and re-fires at most every `EMERGENCY_T3_REPEAT_SECS`
+//!   thereafter — never every tick.
+//!   THREAT: 2026-06-02 orphan-fetch cascade (coincync-lon, 22+h stuck) where
+//!   the sync engine looked internally busy so `is_stalled` never fired;
+//!   without the repeat-throttle, an unthrottled version would log-flood at
+//!   tick rate.
+//!   TESTS: `emergency_recovery_respects_progress_and_thresholds`.
+//! - **§2 `run_headers_tick` pending-request gate** — INVARIANT: the tick
+//!   loop checks `headers_request_pending()` and returns early rather than
+//!   issuing a second concurrent GetHeaders.
+//!   THREAT: Finding #3 headers-request flood — the pre-fix loop sent
+//!   GetHeaders unconditionally every tick (~4 Hz hammer) while stuck on a
+//!   fork, exhausting CPU.
+//!   TESTS: `regression_finding_03_ibd_loop_gates_on_pending`.
+//! - **§3 EMERGENCY-TIER-3 branch (`spawn_sync_driver` main loop)** —
+//!   INVARIANT: when the chain has not advanced for
+//!   `EMERGENCY_T3_NO_PROGRESS_SECS` despite `is_stalled()` reporting false,
+//!   the driver forces a deep reset (clear tried-list, drop expired
+//!   orphans, reset headers timeout, force `SyncState::Headers`) using the
+//!   max of `target_height` and live connected-peer heights as the
+//!   ground-truth "are we behind" signal.
+//!   THREAT: 2026-07-09 idle/limp-while-behind — `peer_heights`-derived
+//!   `is_synced()`/`target_height` empties under connection churn and every
+//!   recovery path stops firing, leaving the node idle indefinitely.
+//!   TESTS: `sync_driver_blocks_tick_requests_queued_hashes_from_eligible_peer`
+//!   drives the real tick loop end-to-end for the Blocks branch (queued hash →
+//!   GetBlocks emitted to an eligible peer); the §3 EMERGENCY-TIER-3 deep-reset
+//!   branch specifically is still exercised only via the pure
+//!   `emergency_recovery_due` predicate (§1).
+//! - **§4 Tier-1/2/3 stall escalation (`stall_count`, `tier2_fires_since_progress`,
+//!   `tier3_fires_since_progress`, `N_T3_BEFORE_BACKOFF` backoff)** —
+//!   INVARIANT: escalation counters reset on real progress and only climb
+//!   on consecutive no-progress firings; Tier-3 backoff pauses 30s after
+//!   `N_T3_BEFORE_BACKOFF` consecutive no-progress escalations to stop
+//!   hammering peers and flooding logs.
+//!   THREAT: 2026-06-01/02 (barns1253, coincync-lon) — Tier-2 alone cycled
+//!   thousands of times without ever clearing a stuck sync.
+//!   TESTS: the tick loop is now exercised end-to-end by
+//!   `sync_driver_blocks_tick_requests_queued_hashes_from_eligible_peer`, though
+//!   the Tier-1/2/3 escalation counters specifically are still not asserted
+//!   directly (they need a multi-tick stall fixture).
+//! - **§5 `send_block_spans` peer eligibility (P-3 + #126)** — INVARIANT:
+//!   block-hash spans are distributed only to peers that are either strictly
+//!   TALLER than local height OR advertise strictly greater cumulative WORK
+//!   than our tip (`ChainSync::work_heavier_peers`); a peer that is neither is
+//!   never sent a span.
+//!   THREAT: (P-3, 2026-08-16) a same-height stuck follower received part of
+//!   the span, answered empty, and IBD wedged permanently with no recovery
+//!   tier able to clear it. (#126, 2026-09-28) a peer on a shorter-but-heavier
+//!   fork holds exactly the fork blocks needed to reorg, but a pure height gate
+//!   filtered it out, so the queued fork hashes were never requested from
+//!   anyone and the node wedged below the heavier tip.
+//!   TESTS: `send_block_spans_admits_work_heavier_shorter_peer_126`,
+//!   `send_block_spans_rejects_equal_height_equal_work_peer`.
+//! - **§6 `live_block_peers` / `remove_dead_senders`** — INVARIANT: only
+//!   peers that are `Connected`, have an open (non-closed) sender channel,
+//!   and are not `GetBlocks`-banned by the scorer are offered as IBD block
+//!   sources; peers with a closed sender are pruned from the map.
+//!   THREAT: sending GetBlocks to a dead or banned peer wastes a download
+//!   slot and delays legitimate catch-up.
+//!   TESTS: (gap — requires a live DashMap/sender/scorer harness not present
+//!   in the test suite).
+//! - **§7 `run_synced_tick` + coarse recovery predicates (work-aware, #126)** —
+//!   INVARIANT: the drained-recovery, `no_progress_ticks ≥ 60` net, and
+//!   `run_synced_tick` all re-trigger discovery via
+//!   `ChainSync::should_retrigger_sync` — when a peer is more than `slack`
+//!   blocks TALLER, OR a vetted peer advertises more cumulative WORK
+//!   (`work_behind_substantiated`) — rather than sitting idle. (Also: local 0
+//!   with peers present still re-triggers.)
+//!   THREAT: a node on a shorter-but-heavier fork settled as "synced on height"
+//!   while a heavier chain went unfetched — the height-only predicates never
+//!   fired for it. The substantiation gate keeps a phantom claim from forcing
+//!   perpetual resync.
+//!   TESTS: `should_retrigger_sync_covers_height_and_work_126` (the predicate;
+//!   the async tick loop itself remains unit-test-gapped).
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +122,11 @@ struct SyncDriverState {
     tier2_last_height: u64,
     last_progress_time_secs: u64,
     emergency_t3_fires: u32,
+    /// #137 — last observed `ChainSync::blocks_delivered()`. Download progress
+    /// (including fork blocks that do not advance the active tip) is a rise in
+    /// this value between ticks; the stall detector treats that as progress so a
+    /// heavier-fork download is not aborted by the 60-tick Headers bounce.
+    last_blocks_delivered: u64,
 }
 
 impl SyncDriverState {
@@ -48,6 +141,7 @@ impl SyncDriverState {
             tier2_last_height: height,
             last_progress_time_secs: 0,
             emergency_t3_fires: 0,
+            last_blocks_delivered: 0,
         }
     }
 
@@ -149,6 +243,23 @@ pub(super) fn spawn_sync_driver(
             let now = chrono::Utc::now().timestamp() as u64;
             let monotonic_now = driver.elapsed_secs();
 
+            // #137 false-stall fix: sample the monotonic count of blocks
+            // DELIVERED to the chain layer once per tick. A rise means the
+            // download pipeline is doing real work — INCLUDING pulling down a
+            // shorter-but-heavier fork, whose requested blocks are delivered
+            // (and stored side-chain) without advancing the ACTIVE TIP until the
+            // branch completes and reorgs. Every height-keyed progress check
+            // below OR-s this in, so a frozen-tip fork download is not misread as
+            // a stall (which would bounce to Headers / fire emergency Tier-3 and
+            // abandon the half-downloaded fork). Sampled ONCE per tick so no site
+            // consumes the increase before another site can see it.
+            let blocks_flowing = {
+                let delivered = sync_sync.read().await.blocks_delivered();
+                let flowing = delivered > driver.last_blocks_delivered;
+                driver.last_blocks_delivered = delivered;
+                flowing
+            };
+
             // Clean up expired sync bans periodically
             sync_sync.write().await.cleanup_sync_bans(now);
 
@@ -170,9 +281,13 @@ pub(super) fn spawn_sync_driver(
                 // TTL runs here for now.
                 let mut s = sync_sync.write().await;
                 s.expire_stale_work_claims(now, super::super::sync::WORK_CLAIM_TTL_SECS);
-                let st = s.stats();
+                // H6: substantiation-gated work-behind veto (see
+                // ChainSync::work_behind_substantiated). Time-box an
+                // unsubstantiated claim so a persistent liar can't wedge the
+                // miner. Computed under the lock with the tick's unix `now`.
+                let work_behind = s.work_behind_substantiated(now);
                 drop(s);
-                sync_chain.set_work_behind(st.best_known_difficulty > st.local_total_difficulty);
+                sync_chain.set_work_behind(work_behind);
             }
 
             // ── PROGRESS-TIME STALL TRACKING (runs every tick) ────
@@ -184,7 +299,12 @@ pub(super) fn spawn_sync_driver(
             // doing internal work (just no useful work).
             {
                 let current_height_for_progress = sync_chain.height();
-                if current_height_for_progress > driver.last_progress_height {
+                // #137: a tip advance OR blocks delivered this tick both reset
+                // the progress clock. Without the delivered check, a large
+                // heavier-fork download (tip frozen > EMERGENCY_T3_NO_PROGRESS_SECS
+                // while the branch assembles) would fire emergency Tier-3 deep
+                // recovery mid-download.
+                if current_height_for_progress > driver.last_progress_height || blocks_flowing {
                     driver.last_progress_time_secs = monotonic_now;
                     driver.emergency_t3_fires = 0;
                     // last_progress_height itself is updated by the
@@ -394,16 +514,25 @@ pub(super) fn spawn_sync_driver(
             } else if !sync_sync.read().await.is_synced() {
                 // Progress detected — reset all stall counters.
                 let current_height = sync_chain.height();
-                if current_height > driver.last_progress_height {
+                // #137: a tip advance OR blocks delivered this tick both count as
+                // progress (blocks_flowing sampled once at the top of the loop).
+                // Without the delivered check, a heavier-fork download (tip
+                // frozen until the branch reorgs) would keep escalating the
+                // Tier-2/Tier-3 counters while blocks stream in, eventually
+                // triggering the Tier-3 backoff mid-download.
+                let tip_advanced = current_height > driver.last_progress_height;
+                if tip_advanced || blocks_flowing {
                     driver.stall_count = 0;
-                    driver.last_progress_height = current_height;
+                    if tip_advanced {
+                        driver.last_progress_height = current_height;
+                        driver.tier2_last_height = current_height;
+                    }
                     // Real progress made — reset Tier-3 counters too,
                     // not just Tier-1's stall_count. Otherwise a node
                     // that recovers naturally would still escalate to
                     // Tier-3 on the next minor hiccup.
                     driver.tier2_fires_since_progress = 0;
                     driver.tier3_fires_since_progress = 0;
-                    driver.tier2_last_height = current_height;
                 }
             }
 
@@ -440,9 +569,20 @@ pub(super) fn spawn_sync_driver(
 
                     recover_block_requests(&sync_sync, now).await;
 
-                    // Track progress for stall detection
+                    // Track progress for stall detection.
+                    // #137: progress is a tip advance OR any block delivered to
+                    // the chain layer this tick (blocks_flowing, sampled once at
+                    // the top of the loop). Downloading a shorter-but-heavier
+                    // fork delivers (and stores side-chain) blocks without moving
+                    // the ACTIVE TIP until the branch completes and the reorg
+                    // fires — a height-only check reads that as a stall and, at
+                    // 60 ticks, bounces to Headers, abandoning the half-
+                    // downloaded fork. A rising delivered count proves the
+                    // pipeline is doing real work regardless of tip movement.
                     if our_h > driver.last_progress_height {
                         driver.last_progress_height = our_h;
+                        driver.no_progress_ticks = 0;
+                    } else if blocks_flowing {
                         driver.no_progress_ticks = 0;
                     } else {
                         driver.no_progress_ticks += 1;
@@ -461,13 +601,18 @@ pub(super) fn spawn_sync_driver(
                         let sg = sync_sync.read().await;
                         let pending = sg.pending_count();
                         let true_best = sg.true_best_height();
+                        // #126: retrigger when behind by HEIGHT or by cumulative
+                        // WORK (a shorter-but-heavier fork). The old height-only
+                        // `our_h < true_best` never fired for the work case, so a
+                        // drained node sitting below a heavier tip stayed wedged.
+                        let retrigger = sg.should_retrigger_sync(our_h, 0);
+                        let work_behind = sg.work_behind_now();
                         drop(sg);
 
-                        if pending == 0 && our_h < true_best {
-                            // Drained with no work but still behind — go back to Headers
+                        if pending == 0 && retrigger {
                             warn!(
-                            "[IBD] Blocks drained at height {} but target is {}. Re-requesting headers.",
-                            our_h, true_best
+                            "[IBD] Blocks drained at height {} (target {}, work_behind={}). Re-requesting headers.",
+                            our_h, true_best, work_behind
                         );
                             let mut sg = sync_sync.write().await;
                             sg.set_state(SyncState::Headers);
@@ -513,11 +658,16 @@ pub(super) fn spawn_sync_driver(
                     // Safety net: if stuck for 60+ ticks (5min) with no progress,
                     // force back to Headers
                     if driver.no_progress_ticks >= 60 {
-                        let true_best = sync_sync.read().await.true_best_height();
-                        if true_best > our_h + 2 {
+                        let sg = sync_sync.read().await;
+                        let true_best = sg.true_best_height();
+                        // #126: force Headers when behind by height OR work.
+                        let retrigger = sg.should_retrigger_sync(our_h, 2);
+                        let work_behind = sg.work_behind_now();
+                        drop(sg);
+                        if retrigger {
                             warn!(
-                            "[IBD] No progress for {} ticks at height {} (target {}). Forcing Headers.",
-                            driver.no_progress_ticks, our_h, true_best
+                            "[IBD] No progress for {} ticks at height {} (target {}, work_behind={}). Forcing Headers.",
+                            driver.no_progress_ticks, our_h, true_best, work_behind
                         );
                             let mut sg = sync_sync.write().await;
                             sg.set_state(SyncState::Headers);
@@ -656,18 +806,30 @@ async fn send_block_spans(
     now: u64,
     local_height: u64,
 ) -> usize {
-    // P-3 fix (2026-08-16): only request blocks from peers strictly AHEAD of
-    // our tip. A peer at or below our height cannot serve the blocks we're
-    // missing; the old code split the request span across ALL live peers by
-    // index and ignored `peer_height`, so in a relay topology a same-height
-    // stuck follower received half the gap (e.g. the one block that would
-    // cascade-connect the orphan stash), answered empty, and IBD wedged
-    // permanently — no recovery tier cleared it. Bitcoin Core likewise only
-    // downloads from peers whose announced chain extends beyond ours.
+    // P-3 fix (2026-08-16): request blocks from peers strictly AHEAD of our
+    // tip. A taller peer's chain extends beyond ours; the old code split the
+    // request span across ALL live peers by index and ignored `peer_height`, so
+    // in a relay topology a same-height stuck follower received half the gap
+    // (e.g. the one block that would cascade-connect the orphan stash), answered
+    // empty, and IBD wedged permanently — no recovery tier cleared it. Bitcoin
+    // Core likewise downloads from peers whose announced chain extends ours.
+    //
+    // #126 fix (2026-09-28): height alone is NOT sufficient. A competing branch
+    // that forks BELOW our tip with higher cumulative WORK but equal/lower
+    // HEIGHT is the better chain, yet a pure height gate filters out its only
+    // source peer — so the fork hashes we already discovered and queued are
+    // never requested from anyone and the node wedges (the below-tip
+    // heavier-fork case; chain-layer reorg is sound, this is the delivery gap).
+    // Also admit peers advertising strictly greater cumulative work than our
+    // tip. `work_heavier_peers` is vetted (bogus-over-claim cap + TTL +
+    // substantiation), and an admitted peer that cannot deliver is re-queued and
+    // de-scored exactly as a taller one is — so this widens eligibility without
+    // weakening the P-3 guarantee (taller peers remain eligible unconditionally).
+    let work_heavier = { sync.read().await.work_heavier_peers() };
     let ahead: Vec<(PeerId, u64)> = peers
         .iter()
         .copied()
-        .filter(|(_, h)| *h > local_height)
+        .filter(|(id, h)| *h > local_height || work_heavier.contains(id))
         .collect();
     if ahead.is_empty() {
         return 0;
@@ -736,12 +898,20 @@ async fn run_synced_tick(
 ) {
     driver.stall_count = 0;
     let local_height = chain.height();
-    let target_height = sync.read().await.true_best_height();
+    let sg = sync.read().await;
+    let target_height = sg.true_best_height();
+    // #126: a Synced node also re-triggers when it is work-behind (a
+    // shorter-but-heavier fork advertised by a peer), not only when a taller
+    // peer exists — otherwise it settles as "synced on height" while a heavier
+    // chain goes unfetched.
+    let retrigger = sg.should_retrigger_sync(local_height, 2);
+    let work_behind = sg.work_behind_now();
+    drop(sg);
     let has_peers = peers.iter().any(|peer| peer.state == PeerState::Connected);
-    if (local_height == 0 && has_peers) || target_height > local_height + 2 {
+    if (local_height == 0 && has_peers) || retrigger {
         debug!(
-            "Safety net: local={} true_best={} has_peers={}, re-triggering sync",
-            local_height, target_height, has_peers
+            "Safety net: local={} true_best={} work_behind={} has_peers={}, re-triggering sync",
+            local_height, target_height, work_behind, has_peers
         );
         sync.write().await.trigger_resync();
     }
@@ -763,5 +933,163 @@ mod tests {
         state.emergency_t3_fires = 1;
         assert!(!state.emergency_recovery_due(419, false));
         assert!(state.emergency_recovery_due(420, false));
+    }
+
+    fn sync_at(height: u64, local_work: u128) -> ChainSync {
+        let mut s = ChainSync::new(height, Hash::zero());
+        s.set_local_total_difficulty(local_work);
+        s
+    }
+
+    // §5 / #126: a peer at the SAME height as us (not taller) but advertising
+    // strictly greater cumulative WORK is a shorter-but-heavier fork source and
+    // MUST be sent a block span. Before the fix the strict height gate dropped
+    // it and `send_block_spans` returned 0 — the below-tip heavier-fork wedge.
+    #[tokio::test]
+    async fn send_block_spans_admits_work_heavier_shorter_peer_126() {
+        let mut cs = sync_at(100, 1_000);
+        let peer: PeerId = [7u8; 32];
+        cs.update_peer_difficulty_for(peer, 2_000); // work 2_000 > local 1_000
+        assert!(
+            cs.work_heavier_peers().contains(&peer),
+            "a peer heavier than local work must be tracked as work-heavier"
+        );
+        let sync = RwLock::new(cs);
+
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer, tx);
+
+        let hashes = vec![
+            Hash::from_bytes([1u8; 32]),
+            Hash::from_bytes([2u8; 32]),
+            Hash::from_bytes([3u8; 32]),
+        ];
+        // peer height (100) == local height (100): NOT taller. Only work admits it.
+        let peers = [(peer, 100u64)];
+
+        let sent =
+            send_block_spans(&hashes, &peers, &senders, &sync, [0xC0, 0x15, 0x11, 0x00], 1_000, 100)
+                .await;
+
+        assert_eq!(
+            sent,
+            hashes.len(),
+            "all queued hashes must be requested from the work-heavier peer"
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "a GetBlocks span must be delivered to the work-heavier peer"
+        );
+    }
+
+    // §5 control (P-3 preserved): a peer that is neither taller NOR work-heavier
+    // is still filtered out — the #126 fix widens eligibility, it does not open
+    // the floodgates to same-height, same-work followers.
+    #[tokio::test]
+    async fn send_block_spans_rejects_equal_height_equal_work_peer() {
+        let cs = sync_at(100, 1_000); // no peer work claim recorded
+        let peer: PeerId = [9u8; 32];
+        assert!(!cs.work_heavier_peers().contains(&peer));
+        let sync = RwLock::new(cs);
+
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer, tx);
+
+        let hashes = vec![Hash::from_bytes([1u8; 32])];
+        let peers = [(peer, 100u64)]; // same height, no work claim
+
+        let sent =
+            send_block_spans(&hashes, &peers, &senders, &sync, [0xC0, 0x15, 0x11, 0x00], 1_000, 100)
+                .await;
+
+        assert_eq!(sent, 0, "an equal-height, equal-work peer must not be sent a span");
+        assert!(rx.try_recv().is_err(), "no GetBlocks should be emitted");
+    }
+
+    fn mk_connected_peer(id: PeerId, height: u64) -> PeerInfo {
+        let now = std::time::Instant::now();
+        PeerInfo {
+            id,
+            addr: "127.0.0.1:28080".parse().unwrap(),
+            state: PeerState::Connected,
+            height,
+            tip_hash: Hash::zero(),
+            version: 1,
+            user_agent: String::new(),
+            last_seen: now,
+            connected_at: now,
+            reputation: 0,
+            outbound: true,
+            bytes_recv: 0,
+            bytes_sent: 0,
+            encrypted: true,
+            remote_static_key: None,
+            capabilities: 0,
+            consecutive_full: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            connection_token: std::sync::Arc::new(()),
+            eclipse_slot: None,
+            consensus_fingerprint: None,
+        }
+    }
+
+    // Orchestration test for the tick loop's Blocks branch (previously a
+    // documented gap — the helpers were unit-tested, the glue was not). Spawns
+    // the real driver with ChainSync in Blocks state holding one queued hash and
+    // a single Connected, taller peer with an open sender, and asserts the tick
+    // wires get_blocks_to_request -> live_block_peers -> send_block_spans and
+    // emits a GetBlocks to that peer's channel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_driver_blocks_tick_requests_queued_hashes_from_eligible_peer() {
+        use std::sync::Arc;
+
+        let chain = crate::chain::Blockchain::new_with_network(crate::config::NetworkType::Testnet);
+        chain.init_genesis().expect("genesis init");
+        let chain: SharedBlockchain = Arc::new(chain);
+        let local_h = chain.height();
+
+        let peer_id: PeerId = [9u8; 32];
+        let mut cs = ChainSync::new(local_h, Hash::zero());
+        cs.queue_headers_from_peer(peer_id, vec![Hash::from_bytes([0xAB; 32])]);
+        cs.set_state(SyncState::Blocks);
+        let sync = Arc::new(RwLock::new(cs));
+
+        let peers: Arc<DashMap<PeerId, PeerInfo>> = Arc::new(DashMap::new());
+        peers.insert(peer_id, mk_connected_peer(peer_id, local_h + 10));
+        let senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>> = Arc::new(DashMap::new());
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(16);
+        senders.insert(peer_id, tx);
+
+        let scorer = Arc::new(RwLock::new(PeerScorer::new()));
+        let addresses = Arc::new(RwLock::new(AddressManager::new(1024)));
+
+        let (sd_tx, sd_rx) = watch::channel(false);
+        let handle = spawn_sync_driver(
+            SyncDriverContext {
+                peers,
+                senders,
+                chain,
+                sync,
+                scorer,
+                addresses,
+                magic: [0xC0, 0x15, 0x11, 0x00],
+            },
+            sd_rx,
+        );
+
+        // The 500ms Blocks tick should emit a GetBlocks to the eligible peer well
+        // within this window (returns as soon as the message arrives).
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await;
+        let _ = sd_tx.send(true);
+        let _ = handle.await;
+
+        let bytes = got
+            .expect("driver emitted no message within 5s")
+            .expect("sender channel closed unexpectedly");
+        assert!(
+            !bytes.is_empty(),
+            "the Blocks tick sent a GetBlocks message to the eligible peer"
+        );
     }
 }

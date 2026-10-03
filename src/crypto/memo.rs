@@ -11,6 +11,47 @@
 //! 5. Wire format: nonce (12 bytes) || ciphertext || tag (16 bytes)
 //!
 //! Recipient decrypts with: shared_point = view_secret * tx_public_key
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `derive_memo_key`** — INVARIANT: the AEAD key is
+//!   `BLAKE3("COINCYNC_MEMO_v1" ‖ shared_point)`, domain-separated from every
+//!   other key derived from the same ECDH secret. THREAT: cross-protocol key
+//!   reuse (the same shared point deriving colliding keys for different uses).
+//!   TESTS: `test_encrypt_decrypt_roundtrip`, `encrypt_decrypt_roundtrip`.
+//! - **§2 `encrypt_memo`** — INVARIANT: a fresh random 12-byte nonce is drawn per
+//!   encryption and written to the wire, and the ECDH `shared_point`, its bytes,
+//!   and the AEAD key are all zeroized before return (R-16 / R-17 / R-80).
+//!   THREAT: ChaCha20-Poly1305 nonce reuse — deriving the nonce from the shared
+//!   point made two calls with the same `(tx_secret, view_pub)` reuse `(key,
+//!   nonce)`, letting an attacker XOR ciphertexts to recover plaintext and forge
+//!   the Poly1305 MAC; plus key/secret heap residue. TESTS:
+//!   `encrypt_uses_fresh_nonce_but_decrypts_correctly`,
+//!   `test_encrypt_decrypt_roundtrip`, `encrypted_output_has_expected_size`.
+//! - **§3 `MAX_MEMO_SIZE` bounds** — INVARIANT: an empty memo returns empty, and
+//!   a memo over `MAX_MEMO_SIZE` (256) bytes is rejected before any crypto runs.
+//!   THREAT: unbounded plaintext / oversized-memo resource abuse. TESTS:
+//!   `test_oversized_memo_rejected`, `oversize_memo_rejected`, `test_empty_memo`,
+//!   `encrypt_empty_returns_empty`.
+//! - **§4 `decrypt_memo`** — INVARIANT: the nonce is read from the wire, the key
+//!   is re-derived from `view_secret·tx_public` ECDH, and the AEAD key is zeroized
+//!   on both success and failure paths (R-16 / R-17 / R-80). THREAT: shared-secret
+//!   / key residue on the stack after decrypt. TESTS:
+//!   `test_encrypt_decrypt_roundtrip`, `encrypt_decrypt_roundtrip`,
+//!   `decrypt_empty_returns_empty`.
+//! - **§5 AEAD authentication** — INVARIANT: decryption of a wrong-key, truncated,
+//!   or bit-flipped memo fails via the Poly1305 tag rather than returning forged
+//!   plaintext. THREAT: ciphertext malleability / integrity bypass. TESTS:
+//!   `test_wrong_key_fails`, `wrong_view_secret_rejected`,
+//!   `truncated_ciphertext_rejected`, `bit_flipped_ciphertext_rejected`,
+//!   `test_truncated_ciphertext_fails`.
+//! - **§6 curve-point validation** — INVARIANT: a non-curve recipient view key
+//!   (encrypt) or tx public key (decrypt) is rejected before the ECDH multiply.
+//!   THREAT: invalid-point / small-subgroup attacks against the ECDH shared
+//!   secret. TESTS: `test_encrypt_invalid_recipient_view_public_rejected`,
+//!   `test_decrypt_noncurve_tx_public_key_rejected`, `wrong_tx_public_rejected`.
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -310,5 +351,36 @@ mod tests {
 
         let result = decrypt_memo(truncated, &view_secret, &tx_public_bytes);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encrypt_invalid_recipient_view_public_rejected() {
+        let (tx_secret, _) = random_keypair();
+        // 0xFF..FF is a non-canonical encoding that does not decompress to a
+        // valid curve point.
+        let bad_view_public = [0xFFu8; 32];
+
+        let result = encrypt_memo(b"hello", &tx_secret, &bad_view_public);
+        assert!(
+            result.is_err(),
+            "invalid recipient view public point must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_decrypt_noncurve_tx_public_key_rejected() {
+        let (tx_secret, _) = random_keypair();
+        let (view_secret, view_public) = random_keypair();
+
+        // A well-formed ciphertext to decrypt.
+        let encrypted = encrypt_memo(b"hello", &tx_secret, &view_public).unwrap();
+
+        // 0xFF..FF does not decompress to a valid curve point.
+        let bad_tx_public = [0xFFu8; 32];
+        let result = decrypt_memo(&encrypted, &view_secret, &bad_tx_public);
+        assert!(
+            result.is_err(),
+            "non-curve tx public key must be rejected"
+        );
     }
 }
