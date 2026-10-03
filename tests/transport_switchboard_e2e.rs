@@ -33,17 +33,19 @@ async fn framed_messages_flow_both_ways_over_the_switchboard() {
     let mut fa = MessageFramer::new(ar, aw, MAGIC);
     let mut fb = MessageFramer::new(br, bw, MAGIC);
 
-    // a -> b
+    // a -> b (Ping = 2; the framer validates the type, so use a real one)
+    const PING: u8 = 2;
+    const PONG: u8 = 3;
     let payload = b"hello-consensus".to_vec();
-    fa.write_message(7, &payload).await.expect("a writes");
+    fa.write_message(PING, &payload).await.expect("a writes");
     let (ty, got) = fb.read_message().await.expect("b reads");
-    assert_eq!(ty, 7);
+    assert_eq!(ty, PING);
     assert_eq!(got, payload);
 
-    // b -> a
-    fb.write_message(9, b"ack").await.expect("b writes");
+    // b -> a (Pong = 3)
+    fb.write_message(PONG, b"ack").await.expect("b writes");
     let (ty2, got2) = fa.read_message().await.expect("a reads");
-    assert_eq!(ty2, 9);
+    assert_eq!(ty2, PONG);
     assert_eq!(got2, b"ack");
 }
 
