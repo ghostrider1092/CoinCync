@@ -17,6 +17,10 @@
 //! discrete halving event, the curve is continuous with a tail floor.
 
 pub mod block;
+// Cross-chain on-ramp peg-in seam — DESIGN SCAFFOLD, fail-closed, off by
+// default. See docs/design/cip-crosschain-onramp.md.
+#[cfg(feature = "crosschain-onramp")]
+pub mod crosschain_onramp;
 pub mod difficulty;
 /// Consensus-rules fingerprint advertised in the handshake (advisory divergence
 /// detection). See docs/design/consensus-fingerprint.md.

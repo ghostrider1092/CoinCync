@@ -451,10 +451,20 @@ async fn run_cleanup_tick(context: CleanupTick<'_>) {
         debug!("Expired {} old mempool transactions", expired);
     }
 
+    // Connected peer addresses — entries the score sweep must retain.
+    let connected: std::collections::HashSet<std::net::SocketAddr> =
+        peers.iter().map(|peer| peer.addr).collect();
+
     let mut scorer = scorer.write().await;
     scorer.decay_all(50);
     scorer.auto_ban_bad_peers();
     scorer.cleanup_bans();
+    // Prune the scores map (previously unbounded — disconnect never removed the
+    // entry, so it grew per unique source address forever + slowed every tick).
+    let pruned = scorer.prune_scores(&connected);
+    if pruned > 0 {
+        debug!("Pruned {} stale peer score entries", pruned);
+    }
 }
 
 async fn run_tip_announce_tick(

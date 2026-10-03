@@ -879,6 +879,11 @@ impl PeerScore {
     }
 }
 
+/// Defense-in-depth hard cap on tracked peer scores (see
+/// [`PeerScorer::prune_scores`]). Bounds memory even under a churn/flood of
+/// distinct source addresses.
+pub const MAX_TRACKED_SCORES: usize = 4096;
+
 /// Peer scoring manager for the entire network
 pub struct PeerScorer {
     /// Scores by peer address
@@ -915,6 +920,46 @@ impl PeerScorer {
     /// Remove a peer's score
     pub fn remove(&mut self, addr: &SocketAddr) {
         self.scores.remove(addr);
+    }
+
+    /// Sweep the `scores` map, dropping entries that are not currently connected
+    /// AND have decayed back to (or above) the neutral default reputation —
+    /// nothing worth remembering, since a reconnecting peer starts at the default
+    /// anyway. Offenders (reputation below default) are kept so their misbehavior
+    /// isn't forgotten before `decay_all` pulls them back to neutral.
+    ///
+    /// As a hard bound against a churn/flood of distinct addresses, if the map is
+    /// still above [`MAX_TRACKED_SCORES`] afterwards, evict the highest-reputation
+    /// disconnected entries (the ones closest to being forgotten) down to the cap.
+    ///
+    /// This closes the one scoring map that had no periodic sweep: `banned` is
+    /// swept by `cleanup_bans` and `RelayScoreMap` self-evaporates, but `scores`
+    /// previously grew unbounded (disconnect never removed the entry). Returns the
+    /// number of entries removed. Call from the maintenance tick with the current
+    /// connected-peer address set.
+    pub fn prune_scores(&mut self, connected: &std::collections::HashSet<SocketAddr>) -> usize {
+        let before = self.scores.len();
+        let default_rep = PeerScore::default().reputation;
+        self.scores
+            .retain(|addr, s| connected.contains(addr) || s.reputation < default_rep);
+
+        if self.scores.len() > MAX_TRACKED_SCORES {
+            // Evict highest-reputation disconnected entries first (least worth
+            // keeping) until back under the cap. Connected peers are bounded by
+            // the connection limit and are never evicted here.
+            let mut evictable: Vec<(SocketAddr, i32)> = self
+                .scores
+                .iter()
+                .filter(|(a, _)| !connected.contains(*a))
+                .map(|(a, s)| (*a, s.reputation))
+                .collect();
+            evictable.sort_by(|a, b| b.1.cmp(&a.1));
+            let overflow = self.scores.len().saturating_sub(MAX_TRACKED_SCORES);
+            for (addr, _) in evictable.into_iter().take(overflow) {
+                self.scores.remove(&addr);
+            }
+        }
+        before - self.scores.len()
     }
 
     /// Check if peer is banned
@@ -2107,5 +2152,47 @@ mod tests {
         assert!(restored.is_banned(&b), "restored ban b is active");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prune_scores_drops_disconnected_neutral_keeps_connected_and_offenders() {
+        use std::collections::HashSet;
+        let mut scorer = PeerScorer::new();
+        let a = test_addr(43001); // connected, neutral
+        let b = test_addr(43002); // disconnected, neutral -> dropped
+        let c = test_addr(43003); // disconnected, offender  -> kept
+        scorer.get_or_create(a); // default reputation
+        scorer.get_or_create(b);
+        scorer.get_or_create(c).reputation = 10; // below default (50) => offender
+
+        let mut connected = HashSet::new();
+        connected.insert(a);
+        let removed = scorer.prune_scores(&connected);
+
+        assert_eq!(removed, 1, "only the disconnected neutral entry is dropped");
+        assert!(scorer.get(&a).is_some(), "connected entry kept");
+        assert!(scorer.get(&b).is_none(), "disconnected neutral entry dropped");
+        assert!(
+            scorer.get(&c).is_some(),
+            "disconnected offender kept until it decays back to neutral"
+        );
+    }
+
+    #[test]
+    fn prune_scores_enforces_hard_cap_under_address_flood() {
+        use std::collections::HashSet;
+        let mut scorer = PeerScorer::new();
+        // Flood with distinct disconnected OFFENDER addresses (all sub-default,
+        // so the neutral-retain keeps them) beyond the cap.
+        for i in 0..(MAX_TRACKED_SCORES + 100) {
+            let addr = test_addr((10_000 + i) as u16);
+            scorer.get_or_create(addr).reputation = 0;
+        }
+        let connected = HashSet::new(); // none connected
+        scorer.prune_scores(&connected);
+        assert!(
+            scorer.scores.len() <= MAX_TRACKED_SCORES,
+            "hard cap must bound the map even under an offender flood"
+        );
     }
 }

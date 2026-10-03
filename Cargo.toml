@@ -63,6 +63,11 @@ testnet = ["randomx"]
 mainnet = ["randomx"]
 randomx = ["randomx-rs"]
 metrics = []
+# CIP-Cross-Chain-Onramp: the peg-in turnstile SEAM (design scaffold only —
+# PegAttestation type + PegAttestor trait + FailClosedAttestor). Off by default,
+# fail-closed, nothing wired. Lets the interfaces be reviewed ahead of the
+# post-audit implementation without touching production builds.
+crosschain-onramp = []
 # Rolling soft-finality (CIP-009.D) consensus-layer adapter. Off by
 # default: compiles in `src/consensus/rolling_finality.rs` and pulls
 # the `coincync-rolling-finality` crate only when explicitly enabled.
