@@ -193,7 +193,9 @@ toolchain (`build-essential cmake` on Debian/Ubuntu; `base-devel cmake` on Arch;
 **Clone and build:**
 
 ```bash
-git clone https://github.com/Coincync-sys/Coincync-Testnet-.git coincync
+# --depth 1 is a shallow clone (latest snapshot only, no history) — much faster
+# to download. Drop it if you need the full git history.
+git clone --depth 1 https://github.com/Coincync-sys/Coincync-Testnet-.git coincync
 cd coincync
 cargo build --release --features randomx
 ```
