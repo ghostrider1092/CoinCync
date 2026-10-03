@@ -300,7 +300,7 @@ fn mine_block(
         network_magic: magic,
         version: block_version_at_height(height),
         height,
-        timestamp,
+        timestamp: timestamp.into(),
         prev_hash,
         tx_root,
         anchor: Hash::from_bytes([0u8; 32]),
@@ -338,7 +338,7 @@ fn mine_block(
 fn diff_block(b: &Block) -> DifficultyBlock {
     DifficultyBlock {
         height: b.header.height,
-        timestamp: b.header.timestamp,
+        timestamp: b.header.timestamp.as_secs(),
         target: b.header.target,
     }
 }
@@ -387,7 +387,7 @@ fn reorg_tip_double_spend_is_rejected() {
     let (_r_spend_sk, r_spend_pk) = generate_keypair();
     let (_r_view_sk, r_view_pk) = generate_keypair();
 
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
     // Space blocks well beyond TARGET_BLOCK_TIME so ASERT eases difficulty
     // toward the MIN_DIFFICULTY floor within a few blocks (cheaper PoW).
     // Genesis is April 2026, so base_ts + 13h is still comfortably in the
@@ -654,7 +654,7 @@ fn natural_fork_sharing_a_tx_can_be_stored_and_reorged() {
     let (_r_spend_sk, r_spend_pk) = generate_keypair();
     let (_r_view_sk, r_view_pk) = generate_keypair();
 
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
     let spacing = 3600u64;
 
     // Main chain B1..B11: K@1, K2@2 (attacker), fillers 3..11. Both mature by 12.
@@ -873,7 +873,7 @@ fn total_difficulty_is_reorg_history_independent() {
     let (_view_sk, view_pk) = generate_keypair();
     let (_miner_sk, miner_pk) = generate_keypair();
 
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
     // Space blocks far beyond TARGET_BLOCK_TIME so ASERT eases difficulty to the
     // MIN_DIFFICULTY floor within a couple of blocks, keeping real PoW cheap.
     let spacing = 3600u64;
@@ -1011,7 +1011,7 @@ fn invalid_block_does_not_mutate_chain_state() {
 
     let (_spend_sk, spend_pub) = generate_keypair();
     let (_view_sk, view_pub) = generate_keypair();
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
     let spacing = 3600u64;
 
     // Build a short valid chain: genesis + B1..B3 (coinbase-only).
@@ -1220,7 +1220,7 @@ fn total_supply_is_conserved_per_block() {
 
     let (_s, spend_pub) = generate_keypair();
     let (_v, view_pub) = generate_keypair();
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
     let spacing = 3600u64;
 
     let mut parent = genesis.clone();
@@ -1287,7 +1287,7 @@ fn replay_of_same_blocks_produces_identical_state() {
         .restore_state(0, genesis.hash(), 1)
         .expect("A seed base");
 
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
     let spacing = 3600u64;
     let mut blocks: Vec<Block> = Vec::new();
     let mut parent = genesis.clone();
@@ -1416,7 +1416,7 @@ fn db_reopen_reconstructs_identical_state() {
         chain
             .restore_state(0, genesis.hash(), 1)
             .expect("seed base");
-        let base_ts = genesis.header.timestamp;
+        let base_ts = genesis.header.timestamp.as_secs();
         let spacing = 3600u64;
         let mut parent = genesis.clone();
         for h in 1..=6u64 {
@@ -1491,7 +1491,7 @@ fn private_fork_reorgs_onto_heavier_branch_forking_below_tip() {
 
     let (_sk, spend_public) = generate_keypair();
     let (_vsk, view_public) = generate_keypair();
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
     let spacing = 3600u64; // ease difficulty to the floor → cheap real PoW
 
     // ── Common chain B1..B10 (coinbase-only fillers), applied ────────────

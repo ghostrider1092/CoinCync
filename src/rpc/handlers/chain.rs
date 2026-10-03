@@ -53,7 +53,7 @@ fn serialize_block(block: &crate::consensus::Block, height: u64) -> Value {
         "hash":           hex::encode(block.hash().as_bytes()),
         "prev_hash":      hex::encode(block.header.prev_hash.as_bytes()),
         "tx_root":        hex::encode(block.header.tx_root.as_bytes()),
-        "timestamp":      block.header.timestamp,
+        "timestamp":      block.header.timestamp.as_secs(),
         "nonce":          block.header.nonce,
         // CoinCync 1.0 is RandomX-only — see `consensus::pow::PowAlgorithm`.
         "algorithm":      block.header.algorithm,

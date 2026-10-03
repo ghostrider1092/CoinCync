@@ -90,7 +90,7 @@ pub fn mainnet_genesis() -> Block {
         network_magic: params.magic,
         version: 1,
         height: 0,
-        timestamp,
+        timestamp: crate::primitives::Timestamp::from_secs(timestamp),
         prev_hash: Hash::zero(),
         tx_root: crate::primitives::merkle_root(&[coinbase_tx.hash()]),
         anchor: Hash::zero(),
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(genesis.header.height, 0);
         assert!(genesis.header.prev_hash.is_zero());
         assert!(!genesis.transactions.is_empty());
-        assert_eq!(genesis.header.timestamp, 1790812800);
+        assert_eq!(genesis.header.timestamp.as_secs(), 1790812800);
     }
 
     #[test]

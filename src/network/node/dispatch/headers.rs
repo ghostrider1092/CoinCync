@@ -99,7 +99,7 @@ fn header_history(
 
         history.push(DifficultyBlock {
             height: header.height,
-            timestamp: header.timestamp,
+            timestamp: header.timestamp.as_secs(),
             target: header.target,
         });
 
@@ -230,7 +230,7 @@ fn validate_header_batch(
                 .collect();
             timestamps.sort_unstable();
             let median = timestamps[timestamps.len() / 2];
-            if header.timestamp <= median {
+            if header.timestamp.as_secs() <= median {
                 return Err(reject(
                     "timestamp does not exceed median-time-past".into(),
                     MisbehaviorType::ProtocolViolation,
@@ -260,7 +260,7 @@ fn validate_header_batch(
         verify_pow(
             &header.prev_hash,
             header.height,
-            header.timestamp,
+            header.timestamp.as_secs(),
             header.nonce,
             &header.tx_root,
             &header.target,
@@ -437,7 +437,7 @@ mod tests {
         // anchor/nonce, so compute it before setting them).
         let binding = header.pow_binding();
         header.anchor =
-            compute_full_anchor(&header.prev_hash, header.height, header.timestamp, &binding)
+            compute_full_anchor(&header.prev_hash, header.height, header.timestamp.as_secs(), &binding)
                 .expect("anchor")
                 .mixed_hash;
 
@@ -470,7 +470,7 @@ mod tests {
         header.height = 1;
         header.version = crate::constants::block_version_at_height(1);
         header.prev_hash = genesis.hash();
-        header.timestamp = genesis.header.timestamp + crate::constants::TARGET_BLOCK_TIME;
+        header.timestamp = crate::primitives::Timestamp::from_secs(genesis.header.timestamp.as_secs() + crate::constants::TARGET_BLOCK_TIME);
         header.target = Hash::from_bytes([0xFE; 32]);
         mine_easy_header(header)
     }
@@ -490,12 +490,12 @@ mod tests {
         let history = [
             DifficultyBlock {
                 height: genesis.header.height,
-                timestamp: genesis.header.timestamp,
+                timestamp: genesis.header.timestamp.as_secs(),
                 target: genesis.header.target,
             },
             DifficultyBlock {
                 height: first.height,
-                timestamp: first.timestamp,
+                timestamp: first.timestamp.as_secs(),
                 target: first.target,
             },
         ];
@@ -510,7 +510,7 @@ mod tests {
         second.height = 2;
         second.version = crate::constants::block_version_at_height(2);
         second.prev_hash = first.hash();
-        second.timestamp += crate::constants::TARGET_BLOCK_TIME;
+        second.timestamp = second.timestamp + std::time::Duration::from_secs(crate::constants::TARGET_BLOCK_TIME);
         second.target = claimed;
 
         let error = validate_header_batch(&chain, &[first, second]).expect_err("target mismatch");

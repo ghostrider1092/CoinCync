@@ -275,7 +275,7 @@ fn mine_block(
         network_magic: magic,
         version: block_version_at_height(height),
         height,
-        timestamp,
+        timestamp: timestamp.into(),
         prev_hash,
         tx_root,
         anchor: Hash::from_bytes([0u8; 32]),
@@ -313,7 +313,7 @@ fn mine_block(
 fn diff_block(b: &Block) -> DifficultyBlock {
     DifficultyBlock {
         height: b.header.height,
-        timestamp: b.header.timestamp,
+        timestamp: b.header.timestamp.as_secs(),
         target: b.header.target,
     }
 }
@@ -492,7 +492,7 @@ fn mine_reorg_tree() -> ReorgTree {
     // A throwaway builder node supplies main-chain ASERT targets (its tip is
     // the main branch). Fork targets are computed from the fork's own lineage.
     let (builder, genesis) = fresh_seeded_node();
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
     let spacing = 3600u64;
 
     // B1 (h1): loose window (< 2 blocks) — start below genesis difficulty so
@@ -734,7 +734,7 @@ fn accepted_reorg_reapplies_real_transfers_correctly() {
     let (_rv, r_view_pk) = generate_keypair();
 
     let (builder, genesis) = fresh_seeded_node();
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
     let spacing = 3600u64;
     let fee = 50_000_000u64;
 
@@ -973,7 +973,7 @@ fn apply_disconnect_symmetry_and_supply_conservation() {
 
     // Mine a canonical coinbase-only chain genesis + B1..B6 once, on a builder.
     let (builder, genesis) = fresh_seeded_node();
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
     let spacing = 3600u64;
     let mut blocks: Vec<Block> = Vec::new();
     let mut parent = genesis.clone();
@@ -1089,7 +1089,7 @@ fn crash_consistency_invariants_hold_on_reopen() {
         chain
             .restore_state(0, genesis.hash(), 1)
             .expect("seed base");
-        let base_ts = genesis.header.timestamp;
+        let base_ts = genesis.header.timestamp.as_secs();
         let spacing = 3600u64;
         let mut parent = genesis.clone();
         let mut blocks = Vec::new();
