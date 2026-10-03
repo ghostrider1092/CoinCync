@@ -32,6 +32,7 @@ compile_error!(
 );
 
 // ── Foundation ──────────────────────────────────────────────
+pub mod clock;
 pub mod constants;
 pub mod diagnostics;
 pub mod error;

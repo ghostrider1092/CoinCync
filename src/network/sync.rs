@@ -1858,10 +1858,8 @@ impl ChainSync {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    // Single source of truth (E1): delegate to the canonical clock. See src/clock.rs.
+    crate::clock::unix_now()
 }
 
 #[derive(Clone, Debug)]
