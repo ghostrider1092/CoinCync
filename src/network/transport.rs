@@ -67,6 +67,16 @@ impl NetStream {
     pub fn is_simulated(&self) -> bool {
         matches!(self, NetStream::Mem(..))
     }
+
+    /// Set `TCP_NODELAY` (disable Nagle) on a real socket. A no-op for an
+    /// in-memory sim pipe, which has no Nagle buffering to disable — so callers
+    /// on the connection path can treat both uniformly.
+    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        match self {
+            NetStream::Tcp(s) => s.set_nodelay(nodelay),
+            NetStream::Mem(..) => Ok(()),
+        }
+    }
 }
 
 impl AsyncRead for NetStream {
