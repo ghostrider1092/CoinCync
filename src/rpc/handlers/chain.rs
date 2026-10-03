@@ -426,10 +426,10 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // SECURITY NOTE: Authentication of these checkpoints is
     // currently a checksum, not a signature (Gap 2 in
     // LIGHTSYNC_AUDIT.md). For v1.0 the wallet MUST cross-check
-    // returned checkpoints against the hardcoded consensus
-    // checkpoint table in `src/constants.rs::CONSENSUS_CHECKPOINTS`
-    // before trusting them. Miner-signed checkpoints arrive in
-    // v1.0.1 (CIP-009.D activation track).
+    // returned checkpoints against the binary's hardcoded consensus
+    // checkpoints (`NetworkType::consensus_checkpoints`, the single
+    // source of truth) before trusting them. Miner-signed checkpoints
+    // arrive in v1.0.1 (CIP-009.D activation track).
     //
     // Params: optional [stride: u64] — emit one checkpoint every
     // `stride` blocks. Default 10000 (~14 days at 120s).
@@ -473,7 +473,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             "chain_height": chain_height,
             "count": checkpoints.len(),
             "checkpoints": checkpoints,
-            "auth_note": "Cross-check against CONSENSUS_CHECKPOINTS in src/constants.rs. Miner-signed authentication queued for v1.0.1 (CIP-009.D).",
+            "auth_note": "Cross-check against the node's hardcoded consensus checkpoints. Miner-signed authentication queued for v1.0.1 (CIP-009.D).",
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
