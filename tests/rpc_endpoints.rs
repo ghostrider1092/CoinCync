@@ -24,6 +24,9 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::sleep;
 
+#[path = "rpc_endpoints/handler_groups.rs"]
+mod handler_groups;
+
 /// Serialise tests that mutate process env vars. Tokio's async Mutex
 /// (not std::sync::Mutex) — holding a std MutexGuard across .await is
 /// unsound because the guard is !Send and the future may be moved

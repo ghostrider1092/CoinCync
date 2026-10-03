@@ -1,6 +1,89 @@
 //! # Wallet Implementation
 //!
 //! Main wallet struct that combines keys, balance, and operations.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `create` / `restore`** — INVARIANT: a wallet built from a seed or
+//!   mnemonic re-derives exactly the same primary keys and address, and a
+//!   restore rescans to rediscover prior funds. THREAT: silent key divergence
+//!   loses access to funds on restore. TESTS: `test_wallet_create`,
+//!   `restore_rederives_same_primary_keys_and_address`,
+//!   `restore_finds_primary_address_funds_by_rescanning`,
+//!   `restore_subaddress_funds_within_lookahead_are_found`.
+//! - **§2 `create_watch_only` / `is_watch_only`** — INVARIANT: a watch-only
+//!   wallet carries only a view secret (no spend secret), so it can detect
+//!   incoming funds but can never sign. THREAT: a view-only export leaking
+//!   spend authority. TESTS: `watch_only_detects_incoming_via_view_key`,
+//!   `watch_only_cannot_mark_own_outputs_spent_no_spend_secret`,
+//!   `tier7_watch_only_cannot_spend`.
+//! - **§3 `unlock` / `lock`** — INVARIANT: unlock reconstructs live secrets from
+//!   the encrypted file and lock zeroizes balance, history and subaddress caches
+//!   back to a safe locked state. THREAT: plaintext secrets or stale balances
+//!   surviving a lock. TESTS: `test_wallet_lock_unlock`,
+//!   `lock_clears_balance_history_and_subaddress_caches`,
+//!   `unlock_resets_scan_state_on_corrupt_utxo_sidecar_issue_90`,
+//!   `open_locked_wallet_returns_locked_state_and_balance_is_safe`.
+//! - **§4 `create_transfer`** — INVARIANT: a transfer is refused unless the
+//!   wallet is unlocked and NOT watch-only, and the assembled tx conserves value
+//!   (inputs == recipients + change + fee) with change returning to the sender.
+//!   THREAT: watch-only spend attempts, or value creation/loss in assembly.
+//!   TESTS: `tier7_watch_only_cannot_spend`,
+//!   `symmetry_main_address_payment_and_change_detected_and_decrypt`.
+//! - **§5 `create_vesting`** — INVARIANT: a vesting output stamps the requested
+//!   unlock height onto the output lock-height and is unspendable until that
+//!   boundary. THREAT: locked funds spendable early, or the lock never applied.
+//!   TESTS: `prepare_vesting_stamps_unlock_height_onto_output_lock_height`,
+//!   `vesting_output_lock_height_gates_spendability_at_unlock_boundary`.
+//! - **§6 `export_view_key` / `export_view_key_confirmed`** — INVARIANT: the
+//!   confirmed export is password-gated and returns the view key for the named
+//!   epoch only. THREAT: unauthenticated disclosure of the view key (history
+//!   linkage). TESTS: `export_view_key_is_password_gated_and_returns_epoch_key`,
+//!   `tier7_view_key_cannot_derive_spend`.
+//! - **§7 `reserve_utxos` / `release_reservations_by_tx` /
+//!   `release_expired_reservations`** — INVARIANT: reserved UTXOs are excluded
+//!   from the available set atomically and reservations expire deterministically.
+//!   THREAT: double-selecting the same UTXO into two concurrent txs. TESTS:
+//!   `test_reserve_excludes_from_available`, `test_reservation_expiry`,
+//!   `test_release_expired_actually_removes`.
+//! - **§8 `mark_spent_by_key_image` / `unmark_spent_by_key_image`** — INVARIANT:
+//!   marking by key image removes an output from spendable balance and unmarking
+//!   restores it (the reorg-unspend path). THREAT: stale spent flags after a
+//!   reorg permanently hiding recovered funds. TESTS:
+//!   `mark_and_unmark_spent_by_key_image_reflect_balance`.
+//! - **§9 `revert_outgoing_above_height`** — INVARIANT: on a rewind only
+//!   outgoing records above the new height are reset; incoming history and
+//!   below-height records are untouched. THREAT: reorg corrupting confirmed
+//!   history. TESTS: `test_revert_outgoing_above_height_resets_orphaned`,
+//!   `test_revert_outgoing_does_not_touch_incoming`,
+//!   `wallet_rewind_resets_only_above_height_outgoing`.
+//! - **§10 `derive_next_epoch` / `keys_for_epoch`** — INVARIANT: rotating to a
+//!   new key epoch advances the current epoch while retaining prior epochs so
+//!   their funds stay detectable and spendable. THREAT: key rotation orphaning
+//!   funds locked to an older epoch. TESTS:
+//!   `derive_next_epoch_advances_and_keeps_old_epoch`,
+//!   `key_epoch_rotation_does_not_orphan_prior_epoch_funds`.
+//! - **§11 `save`** — INVARIANT: save writes encrypted sidecars whose reload
+//!   losslessly reconstructs balance, history and scanned height. THREAT: a save
+//!   that drops or corrupts UTXO/reservation state. TESTS:
+//!   `save_persists_sidecars_and_reload_reconstructs_state`,
+//!   `scanned_height_persisted_across_lock_unlock`.
+//! - **§12 `record_incoming` / `record_outgoing` / `set_tx_memo`** — INVARIANT:
+//!   history records incoming and outgoing transactions and memos independently
+//!   and correctly. THREAT: misattributed or lost transaction records. TESTS:
+//!   `test_history`, `test_set_memo`.
+//! - **§13 `spendable_balance` / `available_utxos`** — INVARIANT: an output is
+//!   spendable only once it clears min-output-age / coinbase maturity at the
+//!   current height, with a saturating boundary that never underflows. THREAT:
+//!   spending immature outputs that a later reorg could orphan. TESTS:
+//!   `test_spendable_balance`, `spendable_min_age_boundary_is_inclusive_at_exact_threshold`,
+//!   `spendable_saturating_age_does_not_underflow_into_spendable_near_u64_max`.
+//! - **§14 `address`** — INVARIANT: address formatting is correct and distinct
+//!   for primary vs subaddress and per network. THREAT: cross-network or
+//!   primary/subaddress address confusion sending funds astray. TESTS:
+//!   `address_primary_vs_subaddress_and_network_formatting`.
 
 use parking_lot::RwLock;
 use std::path::PathBuf;
@@ -1716,5 +1799,549 @@ mod tests {
             wallet.subaddress_data.is_none(),
             "R-112: subaddress_data must be cleared on lock"
         );
+    }
+
+    // =========================================================================
+    // Restore / watch-only / key-epoch gap coverage (test-plan MISSING items)
+    // =========================================================================
+
+    /// Build a Transaction carrying one output detectable by (spend_public,
+    /// view_public), mirroring the sender-side derivation used across the
+    /// scanner's own round-trip tests. For a subaddress, pass D_i as
+    /// `spend_public`, C_i = a*D_i as `view_public`, and `is_subaddress = true`.
+    fn detectable_tx_to(
+        spend_public: &crate::primitives::PublicKey,
+        view_public: &crate::primitives::PublicKey,
+        output_index: u8,
+        amount: u64,
+        is_subaddress: bool,
+    ) -> crate::transaction::Transaction {
+        use crate::crypto::{
+            generate_stealth_address_checked_ext, BlindingFactor, PedersenCommitment, PublicPoint,
+            SecretScalar,
+        };
+        use crate::primitives::{hash_domain, Amount};
+        use crate::transaction::{Transaction, TxOutput, TxType};
+        use crate::wallet::scanner::{encrypt_amount, generate_view_tag};
+        use rand::rngs::OsRng;
+
+        let (stealth, tx_secret) = generate_stealth_address_checked_ext(
+            spend_public,
+            view_public,
+            output_index,
+            is_subaddress,
+            &mut OsRng,
+        )
+        .expect("stealth address generation");
+
+        let tx_scalar = SecretScalar::from_bytes(*tx_secret.as_bytes());
+        let view_point = PublicPoint::from_bytes(*view_public.as_bytes()).unwrap();
+        let shared_point = view_point.mul(&tx_scalar);
+        let shared_hash = hash_domain(
+            b"COINCYNC_SHARED_v2",
+            &[shared_point.to_bytes().as_slice(), &[output_index]].concat(),
+        );
+        let shared: [u8; 32] = *shared_hash.as_bytes();
+
+        let encrypted_amount = encrypt_amount(amount, &shared);
+        let view_tag = generate_view_tag(view_public, &tx_secret, output_index);
+        let blinding_hash = hash_domain(b"COINCYNC_BLINDING", &shared);
+        let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes());
+        let commitment = PedersenCommitment::commit(amount, &blinding).to_bytes();
+
+        Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![TxOutput {
+                stealth_address: stealth.public_key,
+                tx_public_key: stealth.tx_public_key,
+                commitment,
+                encrypted_amount,
+                view_tag,
+                lock_height: None,
+                encrypted_memo: vec![],
+            }],
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: vec![],
+        }
+    }
+
+    /// Construct a SubaddressManager seeded from a wallet key epoch.
+    fn subaddr_mgr_from(keys: &KeyEpoch) -> super::super::subaddress::SubaddressManager {
+        use crate::primitives::{PublicKey, SecretKey};
+        use crate::wallet::subaddress::SubaddressManager;
+        SubaddressManager::new(
+            SecretKey::from_bytes(*keys.view_secret.as_bytes()),
+            PublicKey::from_bytes(*keys.spend_public.as_bytes()),
+            PublicKey::from_bytes(*keys.view_public.as_bytes()),
+        )
+    }
+
+    /// restore-from-seed must rederive the SAME primary keys and address as the
+    /// original wallet — including the spend secret (funds must stay spendable).
+    #[test]
+    fn restore_rederives_same_primary_keys_and_address() {
+        let dir = tempdir().unwrap();
+        let (orig, mnemonic) =
+            Wallet::create(dir.path().join("orig.wallet"), Some("pw"), "testnet").unwrap();
+        let orig_addr = orig.address().unwrap();
+        let ek = orig.current_keys().unwrap();
+        let orig_spend_pub = *ek.spend_public.as_bytes();
+        let orig_view_pub = *ek.view_public.as_bytes();
+        let orig_spend_sec = *ek.spend_secret.as_bytes();
+
+        let restored =
+            Wallet::restore(dir.path().join("restored.wallet"), &mnemonic, Some("pw"), "testnet")
+                .unwrap();
+
+        assert_eq!(restored.address().unwrap(), orig_addr, "restored address must match");
+        let rk = restored.current_keys().unwrap();
+        assert_eq!(*rk.spend_public.as_bytes(), orig_spend_pub);
+        assert_eq!(*rk.view_public.as_bytes(), orig_view_pub);
+        assert_eq!(
+            *rk.spend_secret.as_bytes(),
+            orig_spend_sec,
+            "restored spend secret must match — otherwise funds are unspendable"
+        );
+    }
+
+    /// After restore, rescanning must find primary-address funds: the restored
+    /// keys detect and decrypt an output sent to the primary address.
+    #[test]
+    fn restore_finds_primary_address_funds_by_rescanning() {
+        let dir = tempdir().unwrap();
+        let (_orig, mnemonic) =
+            Wallet::create(dir.path().join("o.wallet"), Some("pw"), "testnet").unwrap();
+        let restored =
+            Wallet::restore(dir.path().join("r.wallet"), &mnemonic, Some("pw"), "testnet").unwrap();
+
+        let ek = restored.current_keys().unwrap();
+        let amount = 7_000_000_000u64;
+        let tx = detectable_tx_to(&ek.spend_public, &ek.view_public, 0, amount, false);
+
+        let mut scanner = crate::wallet::scanner::WalletScanner::new();
+        scanner.add_keys(ek.view_secret.clone(), ek.spend_public, 0);
+        let found = scanner.scan_transaction(&tx);
+        assert_eq!(found.len(), 1, "restored wallet must rescan and find its primary funds");
+        assert_eq!(found[0].amount, amount);
+    }
+
+    /// Subaddress lookahead (within gap): funds sent to a subaddress index
+    /// within the pregenerated gap-limit are found after restore.
+    #[test]
+    fn restore_subaddress_funds_within_lookahead_are_found() {
+        use crate::wallet::subaddress::SubaddressIndex;
+        let dir = tempdir().unwrap();
+        let (_o, mnemonic) =
+            Wallet::create(dir.path().join("o.wallet"), Some("pw"), "testnet").unwrap();
+        let restored =
+            Wallet::restore(dir.path().join("r.wallet"), &mnemonic, Some("pw"), "testnet").unwrap();
+        let ek = restored.current_keys().unwrap();
+
+        let gap = 20u32;
+        let mut mgr = subaddr_mgr_from(ek);
+        mgr.pregenerate_lookahead(0, gap);
+
+        // The index at the gap boundary is pregenerated on a fresh account.
+        let idx = SubaddressIndex::new(0, gap);
+        let sub = mgr.get(idx).expect("within-gap subaddress must be pregenerated");
+        let d_i = sub.spend_public;
+        let c_i = sub.view_public;
+
+        let tx = detectable_tx_to(&d_i, &c_i, 0, 3_000_000_000, true);
+        let mut scanner = crate::wallet::scanner::WalletScanner::new();
+        scanner.add_keys(ek.view_secret.clone(), ek.spend_public, 0);
+        let subkeys: Vec<(u32, u32, crate::primitives::PublicKey)> = mgr
+            .all_spend_public_keys()
+            .into_iter()
+            .map(|(pk, i)| (i.account, i.index, pk))
+            .collect();
+        scanner.add_subaddress_keys(subkeys);
+
+        assert_eq!(
+            scanner.scan_transaction(&tx).len(),
+            1,
+            "funds to a subaddress within the lookahead gap must be found"
+        );
+    }
+
+    /// Subaddress lookahead (beyond gap): funds sent to an index BEYOND the
+    /// pregenerated lookahead are silently missed. Pins the gap-limit boundary.
+    #[test]
+    fn restore_subaddress_funds_beyond_lookahead_are_not_found() {
+        use crate::wallet::subaddress::SubaddressIndex;
+        let dir = tempdir().unwrap();
+        let (_o, mnemonic) =
+            Wallet::create(dir.path().join("o.wallet"), Some("pw"), "testnet").unwrap();
+        let restored =
+            Wallet::restore(dir.path().join("r.wallet"), &mnemonic, Some("pw"), "testnet").unwrap();
+        let ek = restored.current_keys().unwrap();
+
+        let gap = 20u32;
+        let mut mgr = subaddr_mgr_from(ek);
+        mgr.pregenerate_lookahead(0, gap);
+
+        // An index past the gap is NOT part of the wallet's scan set.
+        let idx_beyond = SubaddressIndex::new(0, gap + 5);
+        assert!(
+            mgr.get(idx_beyond).is_none(),
+            "index beyond the gap must not be pregenerated"
+        );
+
+        // The sender still derives that subaddress independently and pays it.
+        let mut sender_mgr = subaddr_mgr_from(ek);
+        let sub = sender_mgr.generate_at(idx_beyond).unwrap();
+        let d_i = sub.spend_public;
+        let c_i = sub.view_public;
+
+        let tx = detectable_tx_to(&d_i, &c_i, 0, 3_000_000_000, true);
+        let mut scanner = crate::wallet::scanner::WalletScanner::new();
+        scanner.add_keys(ek.view_secret.clone(), ek.spend_public, 0);
+        let subkeys: Vec<(u32, u32, crate::primitives::PublicKey)> = mgr
+            .all_spend_public_keys()
+            .into_iter()
+            .map(|(pk, i)| (i.account, i.index, pk))
+            .collect();
+        scanner.add_subaddress_keys(subkeys);
+
+        assert_eq!(
+            scanner.scan_transaction(&tx).len(),
+            0,
+            "funds beyond the lookahead gap are silently missed (gap-limit boundary)"
+        );
+    }
+
+    /// Restoring at a start height persists that height (earlier blocks are
+    /// skipped) while later funds remain detectable by the restored keys.
+    #[test]
+    fn restore_at_start_height_persists_and_later_funds_detectable() {
+        let dir = tempdir().unwrap();
+        let (_o, mnemonic) =
+            Wallet::create(dir.path().join("o.wallet"), Some("pw"), "testnet").unwrap();
+        let path = dir.path().join("r.wallet");
+        let mut restored =
+            Wallet::restore(path.clone(), &mnemonic, Some("pw"), "testnet").unwrap();
+
+        restored.set_scanned_height(1000);
+        restored.save(Some("pw")).unwrap();
+
+        let mut reopened = Wallet::open(path).unwrap();
+        reopened.unlock("pw").unwrap();
+        assert_eq!(
+            reopened.scanned_height(),
+            1000,
+            "restore start height must persist (earlier blocks skipped)"
+        );
+
+        let ek = reopened.current_keys().unwrap();
+        let tx = detectable_tx_to(&ek.spend_public, &ek.view_public, 0, 1_234_000, false);
+        let mut scanner = crate::wallet::scanner::WalletScanner::new();
+        scanner.add_keys(ek.view_secret.clone(), ek.spend_public, 0);
+        assert_eq!(
+            scanner.scan_transaction(&tx).len(),
+            1,
+            "funds in later blocks are still found after a start-height restore"
+        );
+    }
+
+    /// A watch-only wallet detects incoming outputs via its view key.
+    #[test]
+    fn watch_only_detects_incoming_via_view_key() {
+        let dir = tempdir().unwrap();
+        let (src, _m) =
+            Wallet::create(dir.path().join("src.wallet"), Some("pw"), "testnet").unwrap();
+        let ek = src.current_keys().unwrap();
+        let view_hex = hex::encode(ek.view_secret.as_bytes());
+        let spend_hex = hex::encode(ek.spend_public.as_bytes());
+
+        // Output paid to the source primary address.
+        let tx = detectable_tx_to(&ek.spend_public, &ek.view_public, 0, 9_000_000, false);
+
+        let wo = Wallet::create_watch_only(
+            dir.path().join("wo.wallet"),
+            &view_hex,
+            &spend_hex,
+            Some("pw"),
+            "testnet",
+        )
+        .unwrap();
+        assert!(wo.is_watch_only());
+
+        let wk = wo.current_keys().unwrap();
+        let mut scanner = crate::wallet::scanner::WalletScanner::new();
+        scanner.add_keys(wk.view_secret.clone(), wk.spend_public, 0);
+        let found = scanner.scan_transaction(&tx);
+        assert_eq!(found.len(), 1, "watch-only view key must detect the incoming output");
+        assert_eq!(found[0].amount, 9_000_000);
+    }
+
+    /// Watch-only spend-detection limit: with no real spend secret, a watch-only
+    /// wallet cannot compute the true key image, so it cannot mark its own
+    /// output spent — the balance is silently overstated. Pin that behavior.
+    #[test]
+    fn watch_only_cannot_mark_own_outputs_spent_no_spend_secret() {
+        use crate::primitives::{Amount, Hash, KeyImage, PublicKey};
+        let dir = tempdir().unwrap();
+        let (src, _m) =
+            Wallet::create(dir.path().join("src.wallet"), Some("pw"), "testnet").unwrap();
+        let ek = src.current_keys().unwrap();
+        let view_hex = hex::encode(ek.view_secret.as_bytes());
+        let spend_hex = hex::encode(ek.spend_public.as_bytes());
+
+        let mut wo = Wallet::create_watch_only(
+            dir.path().join("wo.wallet"),
+            &view_hex,
+            &spend_hex,
+            Some("pw"),
+            "testnet",
+        )
+        .unwrap();
+
+        // The placeholder spend secret does NOT correspond to spend_public:
+        // there is no way to derive the real key image.
+        let wk = wo.current_keys().unwrap();
+        assert_ne!(
+            wk.spend_secret.public_key().as_bytes(),
+            wk.spend_public.as_bytes(),
+            "watch-only spend secret is a placeholder; real key images are underivable"
+        );
+
+        // Seed a detected UTXO (as the scanner would after view-key detection).
+        let real_ki = KeyImage::from_bytes([0x5au8; 32]);
+        wo.add_utxo(UTXO {
+            tx_hash: Hash::from_bytes([1u8; 32]),
+            output_index: 0,
+            output_locator: None,
+            amount: Amount::from_atomic(5_000_000),
+            height: 10,
+            key_image: real_ki,
+            spent: false,
+            amount_blinding_bytes: [0u8; 32],
+            tx_public_key: PublicKey::from_bytes([2u8; 32]),
+            lock_height: None,
+            subaddress_account: None,
+            subaddress_index: None,
+        });
+        assert_eq!(wo.total_balance().as_atomic(), 5_000_000);
+
+        // The output was spent elsewhere, but a watch-only wallet can only guess
+        // a key image, which won't match the real one — so nothing is marked.
+        let guessed_ki = KeyImage::from_bytes([0xFFu8; 32]);
+        wo.mark_spent_by_key_image(&guessed_ki);
+        assert_eq!(
+            wo.total_balance().as_atomic(),
+            5_000_000,
+            "watch-only cannot mark its output spent — balance is overstated (pinned)"
+        );
+    }
+
+    /// export_view_key is refused (requires the confirmed variant); the
+    /// confirmed variant is password-gated and returns the epoch's view key.
+    #[test]
+    fn export_view_key_is_password_gated_and_returns_epoch_key() {
+        let dir = tempdir().unwrap();
+        let (w, _m) = Wallet::create(dir.path().join("w.wallet"), Some("pw"), "testnet").unwrap();
+
+        assert!(w.export_view_key(None).is_err(), "unconfirmed export must be refused");
+        assert!(
+            w.export_view_key_confirmed("wrong", None).is_err(),
+            "wrong password must be refused"
+        );
+
+        let got = w.export_view_key_confirmed("pw", None).unwrap();
+        let expected = hex::encode(w.current_keys().unwrap().view_secret.as_bytes());
+        assert_eq!(got, expected, "confirmed export returns the current epoch view key");
+    }
+
+    /// derive_next_epoch advances the current epoch while keeping prior-epoch
+    /// keys available and distinct.
+    #[test]
+    fn derive_next_epoch_advances_and_keeps_old_epoch() {
+        let dir = tempdir().unwrap();
+        let (mut w, _m) =
+            Wallet::create(dir.path().join("w.wallet"), Some("pw"), "testnet").unwrap();
+        assert_eq!(w.current_epoch().unwrap(), 0);
+        let e0_spend = *w.keys_for_epoch(0).unwrap().spend_public.as_bytes();
+
+        let next = w.derive_next_epoch().unwrap();
+        assert_eq!(next, 1);
+        assert_eq!(w.current_epoch().unwrap(), 1);
+
+        let e0 = w.keys_for_epoch(0).unwrap();
+        let e1 = w.keys_for_epoch(1).unwrap();
+        assert_eq!(*e0.spend_public.as_bytes(), e0_spend, "old epoch keys must remain");
+        assert_ne!(
+            e0.spend_public.as_bytes(),
+            e1.spend_public.as_bytes(),
+            "new epoch keys must differ"
+        );
+    }
+
+    /// Key-epoch rotation must not orphan prior-epoch funds: an output received
+    /// under epoch 0 is still detected after rotating to epoch 1.
+    #[test]
+    fn key_epoch_rotation_does_not_orphan_prior_epoch_funds() {
+        let dir = tempdir().unwrap();
+        let (mut w, _m) =
+            Wallet::create(dir.path().join("w.wallet"), Some("pw"), "testnet").unwrap();
+
+        // Capture epoch-0 keys before rotation.
+        let (e0_spend_public, e0_view_public, e0_view_secret) = {
+            let e0 = w.keys_for_epoch(0).unwrap();
+            (e0.spend_public, e0.view_public, e0.view_secret.clone())
+        };
+        let tx = detectable_tx_to(&e0_spend_public, &e0_view_public, 0, 8_000_000, false);
+
+        // Rotate to epoch 1.
+        assert_eq!(w.derive_next_epoch().unwrap(), 1);
+        assert!(w.keys_for_epoch(0).is_some(), "prior epoch keys must survive rotation");
+
+        // A rotated wallet scans with both epochs; epoch-0 funds are still found.
+        let mut scanner = crate::wallet::scanner::WalletScanner::new();
+        scanner.add_keys(e0_view_secret, e0_spend_public, 0);
+        let e1 = w.keys_for_epoch(1).unwrap();
+        scanner.add_keys(e1.view_secret.clone(), e1.spend_public, 1);
+
+        let found = scanner.scan_transaction(&tx);
+        assert_eq!(found.len(), 1, "prior-epoch funds must remain detected after rotation");
+        assert_eq!(found[0].amount, 8_000_000);
+    }
+
+    /// Wallet-level mark/unmark-spent-by-key-image wrappers must reflect in the
+    /// balance.
+    #[test]
+    fn mark_and_unmark_spent_by_key_image_reflect_balance() {
+        use crate::primitives::{Amount, Hash, KeyImage, PublicKey};
+        let dir = tempdir().unwrap();
+        let (mut w, _m) =
+            Wallet::create(dir.path().join("w.wallet"), Some("pw"), "testnet").unwrap();
+
+        let ki = KeyImage::from_bytes([9u8; 32]);
+        w.add_utxo(UTXO {
+            tx_hash: Hash::from_bytes([1u8; 32]),
+            output_index: 0,
+            output_locator: None,
+            amount: Amount::from_atomic(6_000_000),
+            height: 5,
+            key_image: ki,
+            spent: false,
+            amount_blinding_bytes: [0u8; 32],
+            tx_public_key: PublicKey::from_bytes([2u8; 32]),
+            lock_height: None,
+            subaddress_account: None,
+            subaddress_index: None,
+        });
+        assert_eq!(w.total_balance().as_atomic(), 6_000_000);
+
+        w.mark_spent_by_key_image(&ki);
+        assert_eq!(w.total_balance().as_atomic(), 0, "marking spent removes it from balance");
+
+        w.unmark_spent_by_key_image(&ki);
+        assert_eq!(w.total_balance().as_atomic(), 6_000_000, "unmark restores the UTXO");
+    }
+
+    /// save persists utxos/history sidecars together; a reopen+unlock
+    /// reconstructs the full state (balance, history, scanned height).
+    #[test]
+    fn save_persists_sidecars_and_reload_reconstructs_state() {
+        use crate::primitives::{Amount, Hash, KeyImage, PublicKey};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("w.wallet");
+        let (mut w, _m) = Wallet::create(path.clone(), Some("pw"), "testnet").unwrap();
+
+        w.add_utxo(UTXO {
+            tx_hash: Hash::from_bytes([3u8; 32]),
+            output_index: 1,
+            output_locator: None,
+            amount: Amount::from_atomic(4_200_000),
+            height: 7,
+            key_image: KeyImage::from_bytes([4u8; 32]),
+            spent: false,
+            amount_blinding_bytes: [0u8; 32],
+            tx_public_key: PublicKey::from_bytes([5u8; 32]),
+            lock_height: None,
+            subaddress_account: None,
+            subaddress_index: None,
+        });
+        w.record_incoming(Hash::from_bytes([3u8; 32]), Amount::from_atomic(4_200_000), 7, 0, 1, None);
+        w.set_scanned_height(77);
+        w.save(Some("pw")).unwrap();
+
+        assert!(path.with_extension("utxos").exists(), "utxos sidecar written");
+        assert!(path.with_extension("history").exists(), "history sidecar written");
+
+        let mut reopened = Wallet::open(path).unwrap();
+        reopened.unlock("pw").unwrap();
+        assert_eq!(
+            reopened.total_balance().as_atomic(),
+            4_200_000,
+            "UTXO sidecar reconstructs balance"
+        );
+        assert_eq!(reopened.scanned_height(), 77);
+        assert_eq!(reopened.history().count(), 1, "history sidecar reconstructs records");
+    }
+
+    /// scanned_height is persisted and restored across a lock/unlock cycle.
+    #[test]
+    fn scanned_height_persisted_across_lock_unlock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("w.wallet");
+        let (mut w, _m) = Wallet::create(path.clone(), Some("pw"), "testnet").unwrap();
+
+        w.set_scanned_height(500);
+        w.save(Some("pw")).unwrap();
+
+        w.lock();
+        assert!(!w.is_unlocked());
+        w.unlock("pw").unwrap();
+        assert_eq!(w.scanned_height(), 500, "scanned height must survive lock/unlock");
+    }
+
+    /// Primary addresses carry the network prefix; a subaddress renders a
+    /// different string and the Subaddress address type.
+    #[test]
+    fn address_primary_vs_subaddress_and_network_formatting() {
+        use crate::primitives::{Network, PublicKey, SecretKey};
+        use crate::wallet::subaddress::{SubaddressIndex, SubaddressManager};
+
+        let dir = tempdir().unwrap();
+        let (wt, _m) = Wallet::create(dir.path().join("t.wallet"), Some("pw"), "testnet").unwrap();
+        let (wm, _m2) = Wallet::create(dir.path().join("m.wallet"), Some("pw"), "mainnet").unwrap();
+
+        let ta = wt.address().unwrap();
+        let ma = wm.address().unwrap();
+        assert!(ta.starts_with("tCYNC"), "testnet primary prefix, got {}", ta);
+        assert!(ma.starts_with("CYNC"), "mainnet primary prefix, got {}", ma);
+        assert_ne!(ta, ma);
+
+        let ek = wt.current_keys().unwrap();
+        let mut mgr = SubaddressManager::new(
+            SecretKey::from_bytes(*ek.view_secret.as_bytes()),
+            PublicKey::from_bytes(*ek.spend_public.as_bytes()),
+            PublicKey::from_bytes(*ek.view_public.as_bytes()),
+        );
+        let sub = mgr.generate_at(SubaddressIndex::new(0, 1)).unwrap();
+        let sub_full = sub.address(Network::Testnet);
+        assert_eq!(sub_full.address_type, crate::primitives::AddressType::Subaddress);
+        assert_ne!(sub_full.to_string(), ta, "subaddress must differ from the primary address");
+    }
+
+    /// Opening a saved wallet yields Locked state; balance queries are safe and
+    /// address() errs (rather than panicking) while locked.
+    #[test]
+    fn open_locked_wallet_returns_locked_state_and_balance_is_safe() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("w.wallet");
+        let (w, _m) = Wallet::create(path.clone(), Some("pw"), "testnet").unwrap();
+        drop(w);
+
+        let opened = Wallet::open(path).unwrap();
+        assert_eq!(opened.state(), WalletState::Locked);
+        assert!(!opened.is_unlocked());
+        assert_eq!(opened.total_balance().as_atomic(), 0, "locked balance query is safe");
+        assert!(opened.address().is_err(), "address on a locked wallet must err, not panic");
+        let _ = opened.spendable_balance(1000); // must not panic
     }
 }

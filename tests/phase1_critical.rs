@@ -637,7 +637,7 @@ mod difficulty_adjustment {
         bytes[1] = 0x01; // realistic target, not saturated
         DifficultyBlock {
             height,
-            timestamp,
+            timestamp: timestamp.into(),
             target: Hash::from_bytes(bytes),
         }
     }

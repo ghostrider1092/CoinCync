@@ -1,3 +1,38 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `TxAbsenceCache` keying by `(PeerId, Hash)`** — INVARIANT: absence
+//!   is scoped per reporting peer, never globally by hash alone.
+//!   THREAT: N-1 — an unauthenticated `NotFound` from one malicious peer
+//!   would otherwise suppress relay of a targeted transaction from ALL
+//!   honest peers for the TTL window (indefinitely refreshable), a targeted
+//!   mempool-censorship primitive.
+//!   TESTS: `absence_is_scoped_per_peer`.
+//! - **§2 `mark_absent`/`is_known_absent`** — INVARIANT: an entry is reported
+//!   absent only while within its TTL from insertion, and only for the exact
+//!   `(peer, hash)` pair recorded.
+//!   THREAT: a stale or cross-hash "absent" result would cause the node to
+//!   either wrongly skip re-requesting an available transaction or spam
+//!   redundant requests.
+//!   TESTS: `marks_and_reports_absent_transactions`.
+//! - **§3 hard-cap eviction in `mark_absent`** — INVARIANT: once `max_size`
+//!   is reached, a prune is attempted first and, if still at capacity, the
+//!   single oldest entry is evicted to admit the new one — the cache never
+//!   grows past `max_size`.
+//!   THREAT: unbounded growth (e.g. an attacker cycling many distinct hashes
+//!   per peer) exhausting memory.
+//!   TESTS: `evicts_oldest_entry_at_the_hard_cap`.
+//! - **§4 `prune`** — INVARIANT: `prune` removes exactly the entries whose
+//!   TTL has elapsed and returns the count removed; live entries are
+//!   untouched.
+//!   THREAT: a prune that removed live entries would defeat §1's per-peer
+//!   scoping (nothing left to consult); a prune that never removes anything
+//!   would defeat §3's memory bound between hard-cap hits.
+//!   TESTS: (gap — no test drives `prune` via elapsed TTL directly; it is
+//!   only exercised indirectly through the hard-cap path in
+//!   `evicts_oldest_entry_at_the_hard_cap`, which does not wait out the TTL).
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 

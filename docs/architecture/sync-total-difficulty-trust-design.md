@@ -40,6 +40,46 @@ without `CAP_CHAINWORK` simply keep height-based sync):
 shorter chain) is fixed by Layers 1–3; Layer 4 additionally makes `synced`
 (and therefore the miner and RPC) honor cumulative work, closing invariant I6.
 
+## Update (2026-09-28): block-download selection made work-aware (#126)
+
+Layer 3 above wired the work signal into *discovery* — a heavier peer flips the
+state machine into `Headers`, and its fork headers are fetched, validated, and
+queued. But the block-**download** step still selected peers by height alone:
+`send_block_spans` (`src/network/node/sync_driver.rs`) requested spans only from
+peers strictly TALLER than local (the 2026-08-16 "P-3" anti-wedge). So a branch
+that forks BELOW our tip with higher work but equal/lower HEIGHT was discovered
+and queued, then never requested from anyone — its only source peer failed the
+height gate — and the queued fork hashes sat undownloaded forever. Fork choice
+(correctly work-based) never received the blocks, so the reorg never happened.
+This is the #126 field symptom; the chain-layer regression test
+`private_fork_reorgs_onto_heavier_branch_forking_below_tip` confirms the reorg is
+sound *once the blocks arrive*, isolating the gap to delivery.
+
+**Fix (this change).** `send_block_spans` now admits a peer that is TALLER *or*
+that advertises strictly greater cumulative work — `ChainSync::work_heavier_peers`,
+the vetted `peer_difficulties` keyset (bogus-over-claim cap on insert, pruned on
+every local tip advance, TTL-aged via `expire_stale_work_claims`). Taller peers
+remain eligible unconditionally, so the P-3 guarantee is preserved. This completes
+§3's request-side change **without** the optional `VersionMessage.total_difficulty`
+handshake field (§1 / §3 bullet 1), which remains future work: today the signal is
+learned from `ChainWork` advertisements and observed blocks, which is sufficient to
+close #126. Covered by `send_block_spans_admits_work_heavier_shorter_peer_126` and
+the control `send_block_spans_rejects_equal_height_equal_work_peer`.
+
+**Follow-up — DONE (2026-09-29).** The coarse height-only recovery predicates
+previously assumed "behind ⇒ taller": the Blocks-drained recovery and the
+`no_progress_ticks ≥ 60` safety net in the sync-driver tick loop, and
+`run_synced_tick`'s `true_best_height` check, all compared *heights*, so they
+never *fired* for a shorter-heavier fork. They were never on the critical path —
+the work-triggered `Headers` flip drives discovery and the per-request
+`recover_block_requests` retry is hash-based, not height-gated — but they are now
+work-aware for belt-and-suspenders coverage: all three route through
+`ChainSync::should_retrigger_sync(local_height, slack)`, which fires when a peer
+is more than `slack` blocks taller OR `work_behind_substantiated` holds (a vetted,
+non-phantom heavier claim). The substantiation gate means a phantom over-claim
+cannot force perpetual resync. Covered by
+`should_retrigger_sync_covers_height_and_work_126`.
+
 ---
 
 **Status:** DESIGN for review. Implements the Phase 2 item already identified in

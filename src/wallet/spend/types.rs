@@ -1,3 +1,42 @@
+//! State-carrying spend types.
+//!
+//! Defines the intent, session, sealed build and submission-outcome types that
+//! carry a spend from user input to a reconciled result. Their constructors and
+//! `#[must_use]` markers keep snapshot binding, input bindings and reservation
+//! state from silently drifting between build and submit.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `SpendIntent`** — INVARIANT: an intent carries only user-level payment
+//!   data with neutral fee/memo/extra defaults, folded into a `SendRequest`
+//!   bound to the session's context. THREAT: fee or metadata drift from the
+//!   caller's expectation. TESTS: `intent_defaults_are_neutral`.
+//! - **§2 `SpendSession`** — INVARIANT: not caller-constructible; obtainable
+//!   only from `SpendCoordinator::begin`, binding snapshot identity, target
+//!   height, ring size and maturity floor together. THREAT: a forged or
+//!   mismatched session that recombines snapshots or uses a stale maturity
+//!   floor. TESTS: `regression_finding_01_spend_context_preserves_target_height_min_age`.
+//! - **§3 `BuiltSpend::try_new`** — INVARIANT: sealing verifies the target
+//!   height equals the snapshot-derived height and seals the canonical tx hash
+//!   and encoded payload exactly once. THREAT: snapshot/height drift or a
+//!   mismatched submission payload. TESTS: `built_spend_tx_hash_is_canonical_and_stable_across_reserialization`.
+//! - **§4 `bind_transaction_inputs`** — INVARIANT: exactly one binding per
+//!   selected output paired to its key image, order preserved, with no
+//!   duplicate output or key image. THREAT: double-reservation, input
+//!   duplication or reordering. TESTS: `input_bindings_preserve_selected_order`,
+//!   `input_bindings_reject_count_mismatch`,
+//!   `input_bindings_reject_duplicate_outputs_and_key_images`.
+//! - **§5 `SpendInputBinding`** — INVARIANT: a binding pins one wallet output to
+//!   the exact key image in the signed transaction, created only while sealing.
+//!   THREAT: rebinding a key image to a different output at submit time.
+//!   TESTS: `key_image_cannot_be_rebound_to_another_output`.
+//! - **§6 `SpendSubmission`** — INVARIANT: a typed outcome enum where
+//!   `MempoolAccepted` and `Unknown` retain reservations and are distinct from
+//!   `Rejected`. THREAT: treating an indeterminate result as a rejection and
+//!   releasing reservations into a double-spend. TESTS: `unknown_submission_is_not_a_rejection`.
+
 use super::super::decoy_selection::{SnapshotId, ValidatedDecoySnapshot};
 use super::super::node_rpc::NodeRpcClient;
 use super::super::send::{Payment, SendRequest, SpendContext};
@@ -330,5 +369,67 @@ mod tests {
                 reservation_release_save_error: None,
             }
         );
+    }
+
+    // The txid sealed into a BuiltSpend must be the canonical transaction hash
+    // and must be stable across a serialize/deserialize round trip — a spend is
+    // reconciled by this hash once it confirms, so any drift would strand the
+    // reservation.
+    #[test]
+    fn built_spend_tx_hash_is_canonical_and_stable_across_reserialization() {
+        use crate::decoy::{
+            DecoyDistributionSnapshot, HeightOutputCount, DECOY_LOCATOR_POLICY_VERSION,
+        };
+        use crate::transaction::{TxInput, TxType};
+        use borsh::BorshDeserialize;
+
+        let signature = crate::crypto::ClsagSignature {
+            key_image: crate::crypto::KeyImage::from_bytes(
+                crate::crypto::PublicPoint::identity().to_bytes(),
+            )
+            .expect("identity is a valid curve point"),
+            commitment_image: crate::crypto::PublicPoint::identity(),
+            c1: [0u8; 32],
+            responses: vec![],
+        };
+        let transaction = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![TxInput {
+                key_image: KeyImage::from_bytes([9u8; 32]),
+                ring_members: vec![],
+                signature,
+                pseudo_output_commitment: [0u8; 32],
+            }],
+            outputs: vec![],
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: vec![],
+        };
+
+        let snapshot = ValidatedDecoySnapshot::try_from(DecoyDistributionSnapshot {
+            snapshot_height: 10,
+            snapshot_hash: Hash::from_bytes([3u8; 32]),
+            policy_version: DECOY_LOCATOR_POLICY_VERSION,
+            heights: vec![HeightOutputCount {
+                height: 0,
+                count: 1,
+            }],
+        })
+        .unwrap();
+
+        let expected_hash = transaction.hash();
+        let selected = vec![(Hash::from_bytes([1u8; 32]), 0u8)];
+        let built =
+            BuiltSpend::try_new(transaction.clone(), snapshot.snapshot_id(), 11, selected).unwrap();
+
+        assert_eq!(built.tx_hash(), expected_hash);
+
+        // Re-hash after a borsh round trip: the canonical txid is identical.
+        let bytes = borsh::to_vec(&transaction).unwrap();
+        let reparsed = Transaction::try_from_slice(&bytes).unwrap();
+        assert_eq!(reparsed.hash(), built.tx_hash());
+        // The sealed RPC payload is exactly the hex of those canonical bytes.
+        assert_eq!(built.serialized_size(), bytes.len());
     }
 }

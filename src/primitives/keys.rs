@@ -405,4 +405,65 @@ mod tests {
         let kp = KeyPair::generate(&mut OsRng);
         assert!(PublicKey::from_bytes_checked(*kp.public.as_bytes()).is_ok());
     }
+
+    #[test]
+    fn validate_rejects_non_curve_and_identity_points() {
+        // Random junk bytes are not a valid Ristretto point.
+        assert!(matches!(
+            PublicKey::from_bytes([0xAB; 32]).validate(),
+            Err(Error::InvalidPublicKey(_))
+        ));
+        // All-zero bytes ARE a valid encoding of the Ristretto identity, which
+        // must still be rejected as a public key.
+        assert!(matches!(
+            PublicKey::from_bytes([0u8; 32]).validate(),
+            Err(Error::InvalidPublicKey(_))
+        ));
+        // A genuine derived public key validates.
+        let kp = KeyPair::generate(&mut OsRng);
+        assert!(kp.public.validate().is_ok());
+    }
+
+    #[test]
+    fn public_key_from_slice_rejects_wrong_length() {
+        assert!(matches!(
+            PublicKey::from_slice(&[0u8; 31]),
+            Err(Error::InvalidPublicKey(_))
+        ));
+        assert!(matches!(
+            PublicKey::from_slice(&[0u8; 33]),
+            Err(Error::InvalidPublicKey(_))
+        ));
+        // Exactly 32 bytes is accepted (from_slice does not validate the curve).
+        assert!(PublicKey::from_slice(&[1u8; 32]).is_ok());
+    }
+
+    #[test]
+    fn secret_key_from_slice_rejects_wrong_length() {
+        assert!(matches!(
+            SecretKey::from_slice(&[0u8; 31]),
+            Err(Error::InvalidSecretKey(_))
+        ));
+        assert!(matches!(
+            SecretKey::from_slice(&[7u8; 33]),
+            Err(Error::InvalidSecretKey(_))
+        ));
+        let sk = SecretKey::from_slice(&[3u8; 32]).unwrap();
+        assert_eq!(sk.as_bytes(), &[3u8; 32]);
+    }
+
+    #[test]
+    fn signature_serde_json_hex_roundtrip() {
+        // The human-readable serde branch encodes the signature as a hex string
+        // and decodes via from_hex. (The non-human-readable visit_bytes /
+        // visit_seq branches require a binary serde format, which is not
+        // available in this crate's deps — see the deferred list in the report.)
+        let sig = Signature::from_bytes([9u8; 64]);
+        let json = serde_json::to_string(&sig).unwrap();
+        assert_eq!(json, format!("\"{}\"", sig.to_hex()));
+        let back: Signature = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, sig);
+        // Malformed hex is rejected.
+        assert!(serde_json::from_str::<Signature>("\"zz\"").is_err());
+    }
 }

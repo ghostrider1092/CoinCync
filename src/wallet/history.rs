@@ -1,6 +1,46 @@
 //! # Transaction History
 //!
 //! Stores and manages wallet transaction history with full metadata.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `TxStatus::from_confirmations` / `confirmations` / `update_status` / `is_spendable`** —
+//!   INVARIANT: status derives from confirmation count against `unlock_height`,
+//!   and a record is spendable only once confirmed AND unlocked.
+//!   THREAT: showing locked/unconfirmed funds as available.
+//!   TESTS: `test_confirmations`, `test_incoming_record`.
+//! - **§2 `incoming` / `outgoing` constructors** — INVARIANT: each record
+//!   captures its direction, amount, and fee at construction so aggregates stay
+//!   correct. THREAT: a mislabeled record skewing totals.
+//!   TESTS: `test_incoming_record`, `test_outgoing_record`.
+//! - **§3 `add` / `get` / query helpers (`recent`, `pending`, `by_direction`, `in_block_range`)** —
+//!   INVARIANT: the store is consistent and `recent` honors its limit/ordering
+//!   for pagination. THREAT: dropped or mis-ordered history entries.
+//!   TESTS: `test_history`, `test_pagination`.
+//! - **§4 `remove_incoming_outputs` (reorg rewind)** — INVARIANT: incoming
+//!   records whose `tx_hash` appears in the orphaned-output list are removed,
+//!   deduped by `tx_hash`, and the pass is idempotent. THREAT: stale incoming
+//!   history surviving a reorg. TESTS: `test_remove_incoming_outputs_drops_matched_incoming`,
+//!   `test_remove_incoming_outputs_dedupes_by_tx_hash`, `test_remove_incoming_outputs_idempotent`.
+//! - **§5 `revert_outgoing_above_height` (reorg rewind)** — INVARIANT: outgoing
+//!   records confirmed above `new_height` reset to pending (`block_height = 0`)
+//!   while incoming records are left untouched, so a re-scan can re-confirm
+//!   them. THREAT: an orphaned confirmation shown as final.
+//!   TESTS: `test_revert_outgoing_above_height_resets_orphaned`,
+//!   `test_revert_outgoing_does_not_touch_incoming`.
+//! - **§6 `mark_spent_by_key_image` / `unmark_spent_by_key_image`** — INVARIANT:
+//!   the spent flag is set/cleared by key image, and unmark restores records
+//!   whose spend came from a now-orphaned block. THREAT: history showing a
+//!   spend that the canonical chain no longer contains. TESTS: (gap — no
+//!   isolated unit test; exercised via the wallet reorg-recovery integration).
+//! - **§7 `total_received` / `total_sent` / `total_fees` / `set_memo` / `has_address`** —
+//!   INVARIANT: totals sum only matching-direction records, and `has_address`
+//!   is a bookkeeping helper over explicitly-tagged `recipient_address` fields,
+//!   NOT a privacy gate (R-91). THREAT: relying on `has_address` for address-
+//!   reuse protection and missing an untagged incoming address.
+//!   TESTS: `test_set_memo`.
 
 use crate::primitives::{Amount, Hash};
 use crate::wallet::SubaddressIndex;

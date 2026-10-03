@@ -1,3 +1,37 @@
+//! # Vesting (time-locked) transaction preparation and assembly
+//!
+//! Prepares and builds transactions whose recipient output carries a
+//! `lock_height`, so the funds are unspendable until the unlock boundary.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `prepare_vesting_transaction`** — INVARIANT: the positional-arg shim builds an
+//!   equivalent `VestingRequest` and delegates to `prepare_vesting` unchanged.
+//!   THREAT: shim drift silently changes vesting semantics for legacy callers.
+//!   TESTS: (gap — tests call `prepare_vesting` directly; the shim is untested).
+//! - **§2 `prepare_vesting` (balance)** — INVARIANT: on success
+//!   `sum(inputs) == amount + estimated_fee + change_amount` exactly.
+//!   THREAT: value created or destroyed before signing → fund loss / inflation.
+//!   TESTS: `prepare_vesting_stamps_unlock_height_onto_output_lock_height`.
+//! - **§3 `prepare_vesting` (fee-growth loop)** — INVARIANT: re-selects and grows `required`
+//!   until inputs cover `amount + fee`, since each added input raises the fee.
+//!   THREAT: settling under-funded → a rejected tx.
+//!   TESTS: `prepare_vesting_fee_growth_loop_reselects_until_inputs_cover_fee`.
+//! - **§4 `build_prepared_vesting_transaction` (lock stamping)** — INVARIANT: exactly one
+//!   output carries `lock_height == unlock_height`.
+//!   THREAT: a missing/wrong lock lets vested funds be spent early.
+//!   TESTS: `prepare_vesting_stamps_unlock_height_onto_output_lock_height`.
+//! - **§5 `build_prepared_vesting_transaction` (change/dummies)** — INVARIANT: change ≥ MIN is a
+//!   real output (fee unchanged); below MIN it folds into the fee, plus 0..=2 dummy outputs.
+//!   THREAT: dust change output, or value silently lost.
+//!   TESTS: `prepare_vesting_stamps_unlock_height_onto_output_lock_height`.
+//! - **§6 lock-height spendability** — INVARIANT: the balance layer treats a vesting output as
+//!   unspendable before `unlock_height` and spendable at/after it.
+//!   THREAT: early spend of still-locked funds.
+//!   TESTS: `vesting_output_lock_height_gates_spendability_at_unlock_boundary`.
+
 use super::super::decoy_selection::AllocatedRings;
 use super::super::{Balance, KeyEpoch, UTXO};
 use super::fee::estimate_tx_size;

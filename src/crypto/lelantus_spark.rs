@@ -62,6 +62,56 @@
 //! audited in this codebase (the CLSAG infrastructure in
 //! `crate::crypto::clsag`). The novel part is the composition, which
 //! follows the Spark paper's security definitions.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Feature-gated behind
+//! `sketch-lelantus-spark`, OFF by default — outside the v1.0 audit perimeter.)
+//!
+//! - **§1 `spark_commit`** — INVARIANT: `C = v*G + s*H + r*K` is deterministic
+//!   in `(v, s, r)` over three independent nothing-up-my-sleeve generators, so
+//!   the commitment is binding. THREAT: a non-deterministic or non-binding
+//!   commitment lets a coin open to two different `(v, s, r)` (inflation).
+//!   TESTS: `commit_is_reproducible`.
+//! - **§2 `spark_pubkey`** — INVARIANT: `P = C - v*G - r*K` equals `s*H`, the
+//!   residue on the serial generator, so the prover's Schnorr key is exactly the
+//!   discrete log of the real opening. THREAT: a mis-derived residue lets a
+//!   prover ring-sign against a key it does not own.
+//!   TESTS: `completeness_n2_real_at_every_position`,
+//!   `completeness_n3_real_at_every_position`.
+//! - **§3 `spark_serial_tag`** — INVARIANT: `T = s*G` is deterministic and
+//!   globally unique per coin, so double-spends collide on `T` without revealing
+//!   `s`. THREAT: a forgeable or non-unique tag defeats double-spend detection or
+//!   deanonymizes the serial.
+//!   TESTS: `serial_tag_is_deterministic`, `soundness_rejects_tampered_serial_tag`.
+//! - **§4 `prove_spark_spend`** — INVARIANT: an honest prover holding the real
+//!   opening at any ring position `l` (n = 1, 2, 3, 5) produces an AOS
+//!   ring-signature proof the verifier accepts (completeness). THREAT: a
+//!   position-dependent gap would break honest spends or leak `l`.
+//!   TESTS: `completeness_n1_real_at_0`, `completeness_n2_real_at_every_position`,
+//!   `completeness_n3_real_at_every_position`, `completeness_n5_real_at_every_position`.
+//! - **§5 `verify_spark_spend`** — INVARIANT: the ring/serial-tag equations must
+//!   close and every peer scalar decodes canonically through `PeerScalar`
+//!   (rejecting non-canonical `from_bytes_mod_order` malleability, Monero
+//!   non-canonical-scalar class); the n=1 degenerate ring is checked as a plain
+//!   Schnorr proof. THREAT: any tampered field, wrong message, or wrong pubkey
+//!   vector must be rejected — else forged spends / inflation.
+//!   TESTS: `soundness_rejects_tampered_challenge`, `soundness_rejects_tampered_response`,
+//!   `soundness_rejects_wrong_message`, `soundness_rejects_wrong_pubkeys`,
+//!   `completeness_n1_real_at_0`.
+//! - **§6 `batch_verify_sparks`** — INVARIANT: the batch agrees exactly with the
+//!   per-proof `verify_spark_spend` — an all-valid batch (and the empty batch)
+//!   passes, and one tampered proof rejects the whole batch. THREAT: crypto M1 —
+//!   a batch verifier that accepts a proof the single verifier rejects is an
+//!   inflation surface. TESTS: `batch_verify_sparks_agrees_with_single_and_rejects_one_tampered`.
+//! - **§7 `build_anon_set`** — INVARIANT: returns a set that always contains the
+//!   real index, is clamped to `[SPARK_ANON_SET_MIN, SPARK_ANON_SET_MAX]`, and
+//!   errors (never panics or silently shrinks) when the pool is below
+//!   `SPARK_ANON_SET_MIN`; decoys drawn from `OsRng` (AUDIT 2026-07-02). THREAT:
+//!   a smaller-than-minimum set silently weakens anonymity; correlated decoy
+//!   draws deanonymize the spender.
+//!   TESTS: `build_anon_set_refuses_small_pool_instead_of_panicking`,
+//!   `build_anon_set_contains_real_idx_when_pool_sufficient`.
 
 use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT as G,
@@ -149,7 +199,14 @@ pub fn spark_serial_tag(serial: &Scalar) -> RistrettoPoint {
 /// A minted Spark coin. Held in the wallet; only the owner knows
 /// the serial. Once the serial is revealed (via a spend's serial
 /// tag) the coin is burned.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// SECURITY (audit 2026-09-07): `serial` and `randomness` are SECRET (revealing
+/// `serial` burns the coin and links it). `Debug` is redacted (manual impl
+/// below) and the secrets are zeroized on drop. NOTE for when
+/// `sketch-lelantus-spark` is enabled: `serial_scalar`/`randomness_scalar` still
+/// use `Scalar::from_bytes_mod_order` (non-canonical acceptance) — migrate them
+/// to `from_canonical_bytes` (a Result/Option return) before activation.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SparkNote {
     /// Pedersen commitment `C = v*G + s*H + r*K`, compressed.
     pub commitment: [u8; 32],
@@ -165,6 +222,29 @@ pub struct SparkNote {
     pub height: u64,
     /// Unique index into the global accumulator.
     pub coin_id: u64,
+}
+
+impl std::fmt::Debug for SparkNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // SECURITY: never print the secret serial/randomness.
+        f.debug_struct("SparkNote")
+            .field("commitment", &self.commitment)
+            .field("value", &self.value)
+            .field("serial", &"<redacted>")
+            .field("randomness", &"<redacted>")
+            .field("diversifier", &self.diversifier)
+            .field("height", &self.height)
+            .field("coin_id", &self.coin_id)
+            .finish()
+    }
+}
+
+impl Drop for SparkNote {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.serial.zeroize();
+        self.randomness.zeroize();
+    }
 }
 
 impl SparkNote {
@@ -849,6 +929,51 @@ mod tests {
             verify_spark_spend(&proof, &pubkeys)
                 .unwrap_or_else(|e| panic!("verify n=5 real={}: {:?}", real_idx, e));
         }
+    }
+
+    /// AUDIT (crypto M1): `batch_verify_sparks` had no dedicated test, yet it is
+    /// a spend-proof verifier (an inflation surface when `sketch-lelantus-spark`
+    /// is enabled). The property that matters: the batch must AGREE with the
+    /// per-proof `verify_spark_spend` — an all-valid batch passes, and a batch
+    /// containing even one tampered proof is rejected (never accept a proof the
+    /// single verifier rejects).
+    #[test]
+    fn batch_verify_sparks_agrees_with_single_and_rejects_one_tampered() {
+        let mut rng = OsRng;
+        let mut build = |value: u64, n: usize, real: usize| {
+            let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, value, n, real);
+            let indices: Vec<u64> = (0..n as u64).collect();
+            let proof =
+                prove_spark_spend(&note, &anon_set, &indices, real, &[21u8; 32], &mut rng).unwrap();
+            (proof, pubkeys)
+        };
+        let (p0, k0) = build(500, 2, 0);
+        let (p1, k1) = build(1000, 3, 1);
+        let (p2, k2) = build(750, 2, 1);
+
+        // Each verifies singly, and the all-valid batch passes.
+        verify_spark_spend(&p0, &k0).expect("single p0");
+        verify_spark_spend(&p1, &k1).expect("single p1");
+        verify_spark_spend(&p2, &k2).expect("single p2");
+        batch_verify_sparks(&[(&p0, k0.as_slice()), (&p1, k1.as_slice()), (&p2, k2.as_slice())])
+            .expect("all-valid batch must pass");
+
+        // Empty batch is vacuously valid.
+        batch_verify_sparks(&[]).expect("empty batch must be Ok");
+
+        // Tamper the MIDDLE proof: the single verifier rejects it, so the batch
+        // must reject too.
+        let mut bad = p1.clone();
+        bad.challenges[0][0] ^= 0x01;
+        assert!(
+            verify_spark_spend(&bad, &k1).is_err(),
+            "tampered proof must fail the single verifier"
+        );
+        assert!(
+            batch_verify_sparks(&[(&p0, k0.as_slice()), (&bad, k1.as_slice()), (&p2, k2.as_slice())])
+                .is_err(),
+            "a batch containing one invalid proof must be rejected"
+        );
     }
 
     // ─── Soundness: proof field tampering ──────────────────────────

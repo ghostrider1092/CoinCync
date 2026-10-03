@@ -1,6 +1,45 @@
 //! Batch signature verification for improved throughput
 //!
 //! Verifies multiple ring signatures in parallel using rayon.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `BatchVerifier::add`** — INVARIANT: `add`/`add_all` only enqueue signatures and
+//!   `pending_count` reflects the queue; no verification runs until `verify_all`.
+//!   THREAT: a signature silently dropped from the batch and never verified.
+//!   TESTS: `test_concurrent_batch`.
+//! - **§2 `BatchVerifier::verify_all`** — INVARIANT: the batch result equals per-signature
+//!   verification — `total == valid + invalid`, an empty batch is `all_valid`, and the parallel
+//!   and single-threaded paths agree. THREAT: the batch path masking one invalid signature
+//!   (fail-one must fail-all — that index must appear in `invalid_indices`).
+//!   TESTS: `test_batch_verify_empty`, `test_concurrent_batch`,
+//!   `cache_does_not_reuse_result_for_different_pseudo_output`.
+//! - **§3 `BatchVerifier::verify_single`** — INVARIANT: a signature verifies here iff CLSAG
+//!   verify accepts it, and an identity `pseudo_output` is rejected defensively (R-29 fix).
+//!   THREAT: R-29 — an identity `pseudo_output` collapses the `mu_c · (C_i − C')` balance term and
+//!   enables inflation. TESTS: `batch_verify_single_rejects_identity_pseudo_output`.
+//! - **§4 `SignatureData::cache_key`** — INVARIANT: `cache_key` binds message, signature,
+//!   ring_data, and pseudo_output together so a cached result cannot be reused across statements.
+//!   THREAT: cache poisoning — reusing a valid result for a different ring or pseudo-output.
+//!   TESTS: `cache_does_not_reuse_result_for_different_pseudo_output`.
+//! - **§5 `BatchVerifyResult`** — INVARIANT: `all_valid()` is true iff `invalid == 0`, and
+//!   `success_rate() == valid / total` (1.0 on an empty batch). THREAT: mis-reporting a batch that
+//!   contains an invalid signature as all-valid. TESTS: `test_batch_result`, `test_batch_verify_empty`.
+//! - **§6 `ParallelTxValidator::validate_transactions`** — INVARIANT: `validate_transactions`
+//!   returns exactly the indices failing the predicate; empty input short-circuits without touching
+//!   rayon. THREAT: a parallel-order race dropping or misindexing an invalid transaction.
+//!   TESTS: `test_parallel_validator`,
+//!   `parallel_validator_returns_correct_invalid_indices_and_subset`.
+//! - **§7 `ParallelTxValidator::filter_valid`** — INVARIANT: `filter_valid` keeps exactly the
+//!   subset of transactions passing the predicate, in order; empty input short-circuits.
+//!   THREAT: a parallel filter admitting an invalid transaction or dropping a valid one.
+//!   TESTS: `parallel_validator_returns_correct_invalid_indices_and_subset`.
+//! - **§8 `VerificationStats::record`** — INVARIANT: `record` atomically increments
+//!   total/hits/misses/valid/invalid, and `snapshot`/`hit_rate` read a consistent tally under
+//!   concurrent updates. THREAT: lost or torn counter updates corrupting reported verification stats.
+//!   TESTS: (gap — no dedicated test exercises `VerificationStats`).
 
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -526,5 +565,55 @@ mod tests {
         assert_eq!(second_result.valid, 1);
         assert_eq!(second_result.invalid, 1);
         assert_eq!(second_result.invalid_indices, vec![1]);
+    }
+
+    // ─── Missing-behavior coverage (appended) ───────────────────────────
+
+    #[test]
+    fn batch_verify_single_rejects_identity_pseudo_output() {
+        use crate::crypto::curve::Commitment;
+
+        // Sanity: a well-formed signature verifies through verify_single.
+        let good = valid_signature_data();
+        assert!(BatchVerifier::verify_single(&good));
+
+        // The identity point (all-zero compressed Ristretto) decodes to a
+        // valid Commitment, so the rejection below is the explicit R-29 check,
+        // not a decode failure.
+        assert!(Commitment::from_bytes([0u8; 32]).is_some());
+
+        // R-29 (consensus-critical): an identity pseudo_output must be rejected.
+        let mut identity_pseudo = valid_signature_data();
+        identity_pseudo.pseudo_output = [0u8; 32];
+        assert!(!BatchVerifier::verify_single(&identity_pseudo));
+    }
+
+    #[test]
+    fn parallel_validator_returns_correct_invalid_indices_and_subset() {
+        use crate::primitives::Amount;
+        use crate::transaction::{Transaction, TxType};
+
+        fn tx(version: u8) -> Transaction {
+            Transaction {
+                version,
+                tx_type: TxType::Transfer,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                fee: Amount::from_atomic(0),
+                range_proof: Vec::new(),
+                extra: Vec::new(),
+            }
+        }
+
+        // Predicate: "valid" == version 1. Mix valid (0, 2) and invalid (1, 3).
+        let validator = ParallelTxValidator::new();
+        let txs = vec![tx(1), tx(2), tx(1), tx(2)];
+
+        let invalid = validator.validate_transactions(&txs, |t| t.version == 1);
+        assert_eq!(invalid, vec![1, 3]);
+
+        let kept = validator.filter_valid(txs, |t| t.version == 1);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|t| t.version == 1));
     }
 }

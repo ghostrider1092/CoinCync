@@ -18,10 +18,17 @@
 
 pub mod block;
 pub mod difficulty;
+/// Consensus-rules fingerprint advertised in the handshake (advisory divergence
+/// detection). See docs/design/consensus-fingerprint.md.
+pub mod fingerprint;
+/// Non-consensus difficulty / block-interval telemetry (kept out of the
+/// hash-locked difficulty.rs). See docs/design/difficulty-health-telemetry.md.
+pub mod telemetry;
 pub mod fee_market;
 pub mod finality;
 pub mod fork_signal;
 pub mod header;
+pub mod invariants;
 pub mod pow;
 pub mod pow_cache;
 pub mod privacy_policy;
@@ -56,7 +63,7 @@ pub use pow::{
 pub use pow::{compute_pow_hash_batch, prewarm_next_epoch_if_near, randomx_seed_for_height};
 // M-1: finality module is dead code; re-exports removed.
 pub use validation::{
-    v1_0_12_rules_active, validate_block, validate_block_with_checkpoint,
+    v1_0_12_rules_active, validate_block, validate_block_ctx, validate_block_with_checkpoint,
     validate_block_with_checkpoint_for_network, validate_transaction, validate_transaction_basic,
     validate_transaction_for_network, BlockValidation,
 };
