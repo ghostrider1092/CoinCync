@@ -151,7 +151,7 @@ impl Sim {
             chain
                 .restore_state(0, genesis.hash(), 1)
                 .expect("seed base");
-            base_ts = genesis.header.timestamp;
+            base_ts = genesis.header.timestamp.as_secs();
             let (_ss, spend_pub) = deterministic_keypair(cfg.seed, id as u8 + 1);
             let (_vs, view_pub) = deterministic_keypair(cfg.seed, id as u8 + 128);
             let peers = (0..cfg.n_nodes).filter(|&p| p != id).collect();
