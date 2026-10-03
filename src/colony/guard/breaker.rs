@@ -48,6 +48,23 @@ impl CircuitBreaker {
         }
     }
 
+    /// A breaker pre-loaded with `failures` consecutive failures (opening it if
+    /// that already meets a non-zero `threshold`) — for restoring a known state
+    /// or constructing a near-threshold breaker in a test.
+    pub fn preloaded(
+        name: &'static str,
+        code: &'static str,
+        threshold: u64,
+        failures: u64,
+    ) -> Self {
+        let b = Self::new(name, code, threshold);
+        b.failures.store(failures, Ordering::Relaxed);
+        if threshold != 0 && failures >= threshold {
+            b.open.store(true, Ordering::Relaxed);
+        }
+        b
+    }
+
     /// Record one failure. Opens the breaker when the consecutive-failure count
     /// reaches a non-zero `threshold`. Returns whether the breaker is now open.
     pub fn record_failure(&self) -> bool {
