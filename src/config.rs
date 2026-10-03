@@ -258,8 +258,8 @@ impl NetworkType {
     /// Mirrors the shielded-activation "finite under clearance, else u64::MAX"
     /// pattern. Do NOT set a finite height without audit-gate clearance —
     /// activating a new consensus rule on testnet is a coordinated hard fork.
-    /// (post-soak: add the `constants::SUPPLY_COMMITMENT_ENFORCE_HEIGHT` mirror
-    /// + drift-guard, matching the other activation heights.)
+    /// Mirrored by `constants::SUPPLY_COMMITMENT_ENFORCE_HEIGHT` with a
+    /// compile-time drift-guard, matching the other activation heights.
     pub const fn supply_commitment_enforce_height(&self) -> u64 {
         match self {
             NetworkType::Mainnet => u64::MAX,
