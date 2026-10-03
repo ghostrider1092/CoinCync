@@ -683,6 +683,13 @@ pub const FEE_DISTRIBUTION_HEIGHT: u64 = 0;
 // compile-time consts remain only as the compiled-network convenience; the
 // asserts below pin each to the runtime resolver's value for the compiled
 // network, so the two definitions can never drift out of sync.
+/// Height at which `supply_commitment` production/enforcement activates.
+/// Mirror of `NetworkType::supply_commitment_enforce_height()` — the drift-guards
+/// below pin them equal, matching the other activation heights. GATED OFF
+/// (`u64::MAX`) on every network until audit-gate clearance (a finite value here
+/// is a coordinated hard fork).
+pub const SUPPLY_COMMITMENT_ENFORCE_HEIGHT: u64 = u64::MAX;
+
 #[cfg(feature = "testnet")]
 const _: () = {
     use crate::config::NetworkType::Testnet as N;
@@ -690,6 +697,7 @@ const _: () = {
     assert!(MIN_OUTPUT_AGE_HARDFORK_HEIGHT == N.min_output_age_hardfork_height());
     assert!(ROLLING_FINALITY_ENABLE_HEIGHT == N.rolling_finality_enable_height());
     assert!(ROLLING_FINALITY_ENFORCE_HEIGHT == N.rolling_finality_enforce_height());
+    assert!(SUPPLY_COMMITMENT_ENFORCE_HEIGHT == N.supply_commitment_enforce_height());
 };
 #[cfg(not(feature = "testnet"))]
 const _: () = {
@@ -698,6 +706,7 @@ const _: () = {
     assert!(MIN_OUTPUT_AGE_HARDFORK_HEIGHT == N.min_output_age_hardfork_height());
     assert!(ROLLING_FINALITY_ENABLE_HEIGHT == N.rolling_finality_enable_height());
     assert!(ROLLING_FINALITY_ENFORCE_HEIGHT == N.rolling_finality_enforce_height());
+    assert!(SUPPLY_COMMITMENT_ENFORCE_HEIGHT == N.supply_commitment_enforce_height());
 };
 
 // =============================================================================
