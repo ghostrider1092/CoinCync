@@ -517,10 +517,9 @@ enum Command {
     /// confirm the build is functional + the host's CPU works for
     /// the primitives.
     ///
-    /// Default run: ~50 ms total (DLEQ, BTC adaptor round-trip,
-    /// CYNC adaptor round-trip, CYNC key-derivation round-trip).
-    /// With `--features strict-dleq`: adds a ~500 ms strict-DLEQ
-    /// prove + verify cycle.
+    /// Covers the v2 cross-curve DLEQ prove + verify cycle (the
+    /// slowest check, 252 joint bit proofs), BTC adaptor round-trip,
+    /// CYNC adaptor round-trip, CYNC key-derivation round-trip.
     ///
     /// Does NOT exercise the transport layer (which needs sockets);
     /// for that, run the dual-testnet smoke harness or one of the
@@ -784,22 +783,16 @@ enum Command {
     /// counterparty who runs `verify-dleq` before committing
     /// any funds.
     ///
-    /// Output is single-line JSON with the four proof fields:
-    /// `{"a_btc": "<hex>", "a_cync": "<hex>", "s_btc": "<hex>", "s_cync": "<hex>"}`
-    /// — feed each field into `verify-dleq`'s flags.
-    ///
-    /// **Soundness caveat reminder** (also in CIP-001 §4.x): the
-    /// shipped construction is dual-response Schoenmakers — it
-    /// proves knowledge of discrete logs on both curves with a
-    /// shared nonce commitment, but does NOT directly prove
-    /// the two discrete logs are the *same number*. The
-    /// operational binding (Alice's BTC claim reveals `t`; Bob's
-    /// CYNC spend secret = `bob + t` either opens the lock or
-    /// fails) closes that gap in the swap protocol.
+    /// Output is single-line JSON:
+    /// `{"version":2,"proof":"<hex>"}` — save it as UTF-8 JSON for
+    /// `verify-dleq --proof-file`. The proof is a fixed 56,608 bytes
+    /// (v2 joint bit-decomposition proof, see
+    /// `coincync_swap::cross_curve_dleq`). It proves the two points
+    /// share ONE integer `t < 2^252`; randomness comes from the OS
+    /// CSPRNG, never from the command line.
     ProveDleq {
         /// Adaptor secret `t`, 32-byte hex in Ristretto canonical
-        /// (little-endian) form. Must satisfy `t < ℓ` (the
-        /// stricter Ristretto field order — checked at parse).
+        /// (little-endian) form. Must satisfy `0 < t < 2^252`.
         #[arg(long)]
         adaptor_secret: String,
         /// `T_btc = t·G_btc`, 33-byte compressed secp256k1 hex.
@@ -808,10 +801,11 @@ enum Command {
         /// `T_cync = t·G_cync`, 32-byte compressed Ristretto255 hex.
         #[arg(long)]
         cync_pub: String,
-        /// 32-byte fresh nonce in Ristretto canonical form.
-        /// MUST be fresh per proof; reuse breaks soundness.
+        /// Session context bound into the proof, e.g. the network
+        /// and swap id both parties agreed on. The verifier must pass
+        /// the identical string; a proof for another context fails.
         #[arg(long)]
-        nonce: String,
+        context: String,
     },
 
     /// Verify a cross-curve DL
@@ -821,8 +815,9 @@ enum Command {
     /// counterparty during negotiation. Silent exit-0 on success;
     /// exit-non-zero with a clear error on failure.
     ///
-    /// All four proof fields come from `prove-dleq`'s JSON output;
-    /// pubkeys come from the negotiation handshake.
+    /// The proof comes from `prove-dleq`; the public keys and the
+    /// context come from YOUR side of the negotiation, never from
+    /// the message that carried the proof.
     VerifyDleq {
         /// `T_btc`, 33-byte compressed secp256k1 hex.
         #[arg(long)]
@@ -830,34 +825,27 @@ enum Command {
         /// `T_cync`, 32-byte compressed Ristretto255 hex.
         #[arg(long)]
         cync_pub: String,
-        /// **Recommended.** Single-argument JSON form — pass the
-        /// raw output of `prove-dleq` (which is a single-line JSON
-        /// object with `a_btc`/`a_cync`/`s_btc`/`s_cync` fields).
-        /// Mutually exclusive with the four `--proof-*` flags.
-        ///
-        /// Use this for shell-piping:
+        /// Session context; must equal the prover's `--context`.
+        #[arg(long)]
+        context: String,
+        /// **Recommended.** UTF-8 JSON file containing the output of
+        /// `prove-dleq`. Avoids command-line length limits on Windows.
         ///
         /// ```text
-        /// PROOF=$(cyncswap prove-dleq ...)
-        /// cyncswap verify-dleq --proof-json "$PROOF" --btc-pub ... --cync-pub ...
+        /// cyncswap verify-dleq --proof-file proof.json --btc-pub ... --cync-pub ... --context ...
         /// ```
-        #[arg(long, conflicts_with_all = ["proof_a_btc", "proof_a_cync", "proof_s_btc", "proof_s_cync"])]
+        #[arg(long)]
+        proof_file: Option<PathBuf>,
+        /// The raw JSON output of `prove-dleq` as a command-line argument.
+        #[arg(
+            long,
+            conflicts_with_all = ["proof_hex", "proof_file"],
+            required_unless_present_any = ["proof_hex", "proof_file"]
+        )]
         proof_json: Option<String>,
-        /// Proof field `a_btc`, 33-byte compressed secp256k1 hex.
-        /// Use with the other three `--proof-*` flags as an
-        /// alternative to `--proof-json` (e.g., when fields come
-        /// from different sources).
-        #[arg(long, required_unless_present = "proof_json")]
-        proof_a_btc: Option<String>,
-        /// Proof field `a_cync`, 32-byte compressed Ristretto255 hex.
-        #[arg(long, required_unless_present = "proof_json")]
-        proof_a_cync: Option<String>,
-        /// Proof field `s_btc`, 32-byte big-endian secp256k1 hex.
-        #[arg(long, required_unless_present = "proof_json")]
-        proof_s_btc: Option<String>,
-        /// Proof field `s_cync`, 32-byte Ristretto canonical hex.
-        #[arg(long, required_unless_present = "proof_json")]
-        proof_s_cync: Option<String>,
+        /// The proof as bare hex (the `proof` field of the JSON).
+        #[arg(long, conflicts_with = "proof_file")]
+        proof_hex: Option<String>,
     },
 
     /// Flip the byte order of an
@@ -1612,7 +1600,7 @@ fn run(cli: Cli) -> Result<(), String> {
             println!("  - state persistence:            shipped");
             println!("  - adaptor signatures (BTC):     shipped (BIP-340 parity-correct)");
             println!("  - adaptor signatures (CYNC):    shipped (Ristretto255)");
-            println!("  - cross-curve DLEQ:             shipped (dual-response Schoenmakers)");
+            println!("  - cross-curve DLEQ:             v2 joint bit-decomposition (replaces v1)");
             println!(
                 "  - BTC tx construction:          shipped (lock + claim + refund w/ script tree)"
             );
@@ -1689,34 +1677,33 @@ fn run(cli: Cli) -> Result<(), String> {
             adaptor_secret,
             btc_pub,
             cync_pub,
-            nonce,
-        } => prove_dleq_cmd(adaptor_secret, btc_pub, cync_pub, nonce),
+            context,
+        } => prove_dleq_cmd(adaptor_secret, btc_pub, cync_pub, context),
         Command::VerifyDleq {
             btc_pub,
             cync_pub,
+            context,
+            proof_file,
             proof_json,
-            proof_a_btc,
-            proof_a_cync,
-            proof_s_btc,
-            proof_s_cync,
+            proof_hex,
         } => {
-            // Resolve the 4 proof fields: either from a single JSON
-            // blob (the recommended pipe-friendly path) or from
-            // four individual flags (the explicit path). Clap's
-            // `required_unless_present` ensures one of the two
-            // paths is populated; we still pattern-match here so
-            // unreachable cases panic loudly rather than silently
-            // proceed with empty strings.
-            let (a_btc, a_cync, s_btc, s_cync) = match proof_json {
-                Some(json) => parse_dleq_proof_json(&json)?,
-                None => (
-                    proof_a_btc.expect("clap required_unless_present"),
-                    proof_a_cync.expect("clap required_unless_present"),
-                    proof_s_btc.expect("clap required_unless_present"),
-                    proof_s_cync.expect("clap required_unless_present"),
-                ),
+            // Clap guarantees exactly one of the three proof inputs.
+            let proof_hex = match (proof_file, proof_json, proof_hex) {
+                (Some(path), None, None) => {
+                    let json = std::fs::read_to_string(&path)
+                        .map_err(|e| format!("--proof-file {}: {e}", path.display()))?;
+                    // Windows UTF-8 writers may prepend a byte-order mark.
+                    parse_dleq_proof_json(json.trim_start_matches('\u{feff}'))?
+                }
+                (None, Some(json), None) => parse_dleq_proof_json(&json)?,
+                (None, None, Some(hex)) => hex,
+                _ => {
+                    return Err(
+                        "pass exactly one of --proof-file / --proof-json / --proof-hex".into(),
+                    )
+                }
             };
-            verify_dleq_cmd(btc_pub, cync_pub, a_btc, a_cync, s_btc, s_cync)
+            verify_dleq_cmd(btc_pub, cync_pub, context, proof_hex)
         }
         Command::AdaptorSecretFlipEndian {
             secret_hex,
@@ -2671,86 +2658,73 @@ fn prove_dleq_cmd(
     adaptor_secret_hex: String,
     btc_pub_hex: String,
     cync_pub_hex: String,
-    nonce_hex: String,
+    context: String,
 ) -> Result<(), String> {
-    use coincync_swap::adaptor::{prove_cross_curve, AdaptorSecret};
+    use coincync_swap::adaptor::AdaptorSecret;
+    use coincync_swap::cross_curve_dleq::{prove, CrossCurveStatement, PROOF_VERSION};
 
     let secret_bytes = parse_hex_32("adaptor-secret", &adaptor_secret_hex)?;
     let btc_pub = parse_hex_33("btc-pub", &btc_pub_hex)?;
     let cync_pub = parse_hex_32("cync-pub", &cync_pub_hex)?;
-    let nonce = parse_hex_32("nonce", &nonce_hex)?;
 
-    // prove_cross_curve reads via `ristretto_bytes()`, so the
-    // AdaptorSecret must be tagged RistrettoLittleEndian. Use
-    // from_ristretto_bytes which also enforces canonical-as-
-    // Ristretto-scalar (< ℓ) — the stricter check the DLEQ math
-    // requires.
+    // The prover additionally enforces 0 < t < 2^252 on the integer
+    // value, before any scalar parsing.
     let secret = AdaptorSecret::from_ristretto_bytes(secret_bytes)
         .map_err(|e| format!("adaptor-secret: {e}"))?;
+    let statement = CrossCurveStatement::new(&btc_pub, &cync_pub, context.as_bytes())
+        .map_err(|e| format!("statement: {e}"))?;
+    let proof = prove(&secret, &statement, &mut rand::rngs::OsRng)
+        .map_err(|e| format!("cross_curve_dleq::prove: {e}"))?;
 
-    let proof = prove_cross_curve(&secret, &btc_pub, &cync_pub, &nonce)
-        .map_err(|e| format!("prove_cross_curve: {e}"))?;
-
-    // Single-line JSON with all four proof components. Caller
-    // pipes each field into `verify-dleq`'s matching flag via
-    // `jq -r .a_btc` / `.a_cync` / `.s_btc` / `.s_cync`.
     println!(
-        r#"{{"a_btc":"{}","a_cync":"{}","s_btc":"{}","s_cync":"{}"}}"#,
-        hex::encode(proof.a_btc),
-        hex::encode(proof.a_cync),
-        hex::encode(proof.s_btc),
-        hex::encode(proof.s_cync),
+        r#"{{"version":{},"proof":"{}"}}"#,
+        PROOF_VERSION,
+        hex::encode(proof.to_bytes()),
     );
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Parse the JSON output of `prove-dleq` into the 4 proof fields.
-/// Accepts the exact byte-for-byte single-line shape `prove-dleq`
-/// emits — `{"a_btc":"<hex>","a_cync":"<hex>","s_btc":"<hex>","s_cync":"<hex>"}`.
-/// Tolerates whitespace + key ordering since `serde_json` is
-/// permissive. Returns the 4 hex strings in `(a_btc, a_cync,
-/// s_btc, s_cync)` order matching `verify_dleq_cmd`'s parameter
-/// list.
-fn parse_dleq_proof_json(json: &str) -> Result<(String, String, String, String), String> {
+/// Extract the proof hex from `prove-dleq`'s JSON output,
+/// `{"version":2,"proof":"<hex>"}`. Rejects any other version so a
+/// v1 four-field proof cannot be fed in by mistake.
+fn parse_dleq_proof_json(json: &str) -> Result<String, String> {
+    use coincync_swap::cross_curve_dleq::PROOF_VERSION;
+
     let parsed: serde_json::Value =
-        serde_json::from_str(json).map_err(|e| format!("--proof-json: invalid JSON: {e}"))?;
-    let extract = |k: &str| -> Result<String, String> {
-        parsed
-            .get(k)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| format!("--proof-json: missing or non-string field `{k}`"))
-            .map(|s| s.to_string())
-    };
-    Ok((
-        extract("a_btc")?,
-        extract("a_cync")?,
-        extract("s_btc")?,
-        extract("s_cync")?,
-    ))
+        serde_json::from_str(json).map_err(|e| format!("proof JSON: invalid JSON: {e}"))?;
+    let version = parsed
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("proof JSON: missing numeric field `version`")?;
+    if version != u64::from(PROOF_VERSION) {
+        return Err(format!(
+            "proof JSON: unsupported proof version {version} (expected {PROOF_VERSION})"
+        ));
+    }
+    parsed
+        .get("proof")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "proof JSON: missing or non-string field `proof`".to_string())
 }
 
 fn verify_dleq_cmd(
     btc_pub_hex: String,
     cync_pub_hex: String,
-    proof_a_btc_hex: String,
-    proof_a_cync_hex: String,
-    proof_s_btc_hex: String,
-    proof_s_cync_hex: String,
+    context: String,
+    proof_hex: String,
 ) -> Result<(), String> {
-    use coincync_swap::adaptor::{verify_cross_curve_proof, CrossCurveDlProof};
+    use coincync_swap::cross_curve_dleq::{verify, CrossCurveProof, CrossCurveStatement};
 
     let btc_pub = parse_hex_33("btc-pub", &btc_pub_hex)?;
     let cync_pub = parse_hex_32("cync-pub", &cync_pub_hex)?;
-    let proof = CrossCurveDlProof {
-        a_btc: parse_hex_33("proof-a-btc", &proof_a_btc_hex)?,
-        a_cync: parse_hex_32("proof-a-cync", &proof_a_cync_hex)?,
-        s_btc: parse_hex_32("proof-s-btc", &proof_s_btc_hex)?,
-        s_cync: parse_hex_32("proof-s-cync", &proof_s_cync_hex)?,
-    };
+    let proof_bytes =
+        hex::decode(proof_hex.trim()).map_err(|e| format!("proof: invalid hex: {e}"))?;
+    let proof = CrossCurveProof::from_bytes(&proof_bytes).map_err(|e| format!("proof: {e}"))?;
+    let statement = CrossCurveStatement::new(&btc_pub, &cync_pub, context.as_bytes())
+        .map_err(|e| format!("statement: {e}"))?;
 
-    verify_cross_curve_proof(&proof, &btc_pub, &cync_pub)
-        .map_err(|e| format!("verify_cross_curve_proof: {e}"))?;
+    verify(&proof, &statement).map_err(|e| format!("cross_curve_dleq::verify: {e}"))?;
     // Silent success — scripts chain on `&&` without parsing.
     Ok(())
 }
@@ -3040,29 +3014,30 @@ fn selftest_cmd() -> Result<(), String> {
         }};
     }
 
-    // ── 1. Fast cross-curve DLEQ round-trip ──
-    check!("fast cross-curve DLEQ (dual-response Schoenmakers)", {
-        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
-        use coincync_swap::adaptor::{
-            cync_adaptor_point, prove_cross_curve, verify_cross_curve_proof, AdaptorSecret,
+    // ── 1. Cross-curve DLEQ (v2) round-trip ──
+    check!("cross-curve DLEQ v2 (252 joint bit proofs + link)", {
+        use coincync_swap::adaptor::{cync_adaptor_point, AdaptorSecret};
+        use coincync_swap::cross_curve_dleq::{
+            prove, verify, CrossCurveProof, CrossCurveStatement,
         };
         let mut secret_le = [0u8; 32];
         secret_le[0] = 0x42;
         let secret = AdaptorSecret::from_ristretto_bytes(secret_le)
             .map_err(|e| format!("AdaptorSecret: {e:?}"))?;
-        let secp = Secp256k1::new();
-        let t_btc = PublicKey::from_secret_key(
-            &secp,
-            &SecretKey::from_slice(&secret.secp256k1_bytes())
-                .map_err(|e| format!("SecretKey: {e}"))?,
-        )
-        .serialize();
+        let t_btc = secret.public_point().serialize();
         let t_cync = cync_adaptor_point(&secret).map_err(|e| format!("t_cync: {e:?}"))?;
-        let mut nonce = [0u8; 32];
-        nonce[0] = 0x11;
-        let proof = prove_cross_curve(&secret, &t_btc, &t_cync, &nonce)
+        let statement = CrossCurveStatement::new(&t_btc, &t_cync, b"cyncswap-selftest")
+            .map_err(|e| format!("statement: {e:?}"))?;
+        let proof = prove(&secret, &statement, &mut rand::rngs::OsRng)
             .map_err(|e| format!("prove: {e:?}"))?;
-        verify_cross_curve_proof(&proof, &t_btc, &t_cync).map_err(|e| format!("verify: {e:?}"))?;
+        let decoded = CrossCurveProof::from_bytes(&proof.to_bytes())
+            .map_err(|e| format!("decode: {e:?}"))?;
+        verify(&decoded, &statement).map_err(|e| format!("verify: {e:?}"))?;
+        let other = CrossCurveStatement::new(&t_btc, &t_cync, b"other-session")
+            .map_err(|e| format!("statement: {e:?}"))?;
+        if verify(&decoded, &other).is_ok() {
+            return Err("proof verified under a different context".into());
+        }
         Ok(())
     });
 
@@ -3185,32 +3160,6 @@ fn selftest_cmd() -> Result<(), String> {
         if pub1 == [0u8; 32] {
             return Err("derivation produced identity point (likely bug)".into());
         }
-        Ok(())
-    });
-
-    // ── 6. Strict-DLEQ round-trip (feature-gated) ──
-    #[cfg(feature = "strict-dleq")]
-    check!("strict cross-curve DLEQ (Noether 2018, ~81 KB proof)", {
-        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
-        use coincync_swap::adaptor::{cync_adaptor_point, AdaptorSecret};
-        use coincync_swap::strict_dleq::{prove_cross_curve_strict, verify_cross_curve_strict};
-        let mut secret_le = [0u8; 32];
-        secret_le[0] = 0x42;
-        let secret = AdaptorSecret::from_ristretto_bytes(secret_le)
-            .map_err(|e| format!("AdaptorSecret: {e:?}"))?;
-        let secp = Secp256k1::new();
-        let t_btc = PublicKey::from_secret_key(
-            &secp,
-            &SecretKey::from_slice(&secret.secp256k1_bytes())
-                .map_err(|e| format!("SecretKey: {e}"))?,
-        )
-        .serialize();
-        let t_cync = cync_adaptor_point(&secret).map_err(|e| format!("t_cync: {e:?}"))?;
-        let seed = [0x77u8; 32];
-        let proof = prove_cross_curve_strict(&secret, &t_btc, &t_cync, &seed)
-            .map_err(|e| format!("prove_strict: {e:?}"))?;
-        verify_cross_curve_strict(&proof, &t_btc, &t_cync)
-            .map_err(|e| format!("verify_strict: {e:?}"))?;
         Ok(())
     });
 
