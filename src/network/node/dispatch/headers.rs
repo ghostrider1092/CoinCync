@@ -61,6 +61,16 @@
 //!   rejected batch never reaches `queue_headers_from_peer`.
 //!   THREAT: unscored garbage or invalid-header spam from a misbehaving peer.
 //!   TESTS: `handle_headers_borsh_garbage_scores_protocol_violation`.
+//! - **§9 `handle_headers` (off-lock batch verification)** — INVARIANT: the
+//!   `ChainSync` write lock is released while `validate_header_batch` runs;
+//!   `begin_headers_validation` / `end_headers_validation` bracket the call so
+//!   `headers_request_pending()` stays true and no second GetHeaders goes out.
+//!   THREAT: holding the lock across ~2000 RandomX header checks froze the
+//!   sync driver for the whole batch; the ticks it missed then fired as a
+//!   burst and tripped the 60-tick no-progress watchdog, forcing a Headers
+//!   re-fetch (and a full re-verification) after every ~100 blocks.
+//!   TESTS: `handle_headers_rejected_batch_clears_validation_flag`,
+//!   `handle_headers_valid_batch_queues_and_clears_validation_flag`.
 
 use std::collections::HashMap;
 
@@ -465,7 +475,7 @@ mod tests {
         (chain, genesis)
     }
 
-    fn first_header(genesis: &crate::consensus::Block) -> BlockHeader {
+    pub(super) fn first_header(genesis: &crate::consensus::Block) -> BlockHeader {
         let mut header = genesis.header.clone();
         header.height = 1;
         header.version = crate::constants::block_version_at_height(1);
@@ -599,7 +609,20 @@ pub(super) async fn handle_headers(
                 return Ok(());
             }
 
-            let hashes = match validate_header_batch(chain, &headers_msg.headers) {
+            // A full batch is 2000 headers = 2000 RandomX hashes, tens of
+            // seconds in light mode. Verify it with the lock RELEASED: the
+            // sync driver takes this lock every tick, and holding it here
+            // stalled the driver for the whole verification (audit map, 9). The
+            // validating flag keeps `headers_request_pending()` true so the
+            // driver does not issue a second GetHeaders meanwhile.
+            sync_guard.begin_headers_validation();
+            drop(sync_guard);
+
+            let validated = validate_header_batch(chain, &headers_msg.headers);
+
+            let mut sync_guard = sync.write().await;
+            sync_guard.end_headers_validation();
+            let hashes = match validated {
                 Ok(hashes) => hashes,
                 Err(error) => {
                     warn!(
@@ -756,6 +779,71 @@ mod handle_headers_tests {
 
         assert!(scorer.read().await.get(&addr).is_none(), "no scoring");
         assert!(!sync.read().await.headers_request_pending());
+    }
+
+    #[tokio::test]
+    async fn handle_headers_rejected_batch_clears_validation_flag() {
+        // The batch is verified with the ChainSync lock released, bracketed by
+        // the validating flag. The flag must be cleared on the reject path too,
+        // or no GetHeaders could ever be issued again.
+        let peer = [15u8; 32];
+        let addr = addr_for(31005);
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr, false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let nonce = sync.write().await.begin_headers_request(peer, 123).unwrap();
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let genesis = chain.get_block_by_height(0).expect("genesis block");
+        let mut header = genesis.header.clone();
+        header.height = 1;
+        header.prev_hash = Hash::from_bytes([0xA5; 32]); // unknown parent
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: vec![header],
+            nonce,
+        })
+        .unwrap();
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert!(scorer.read().await.get(&addr).is_some(), "reject is scored");
+        assert!(
+            !sync.read().await.headers_request_pending(),
+            "validating flag cleared after a rejected batch"
+        );
+        let reissued = sync.write().await.begin_headers_request(peer, 124);
+        assert!(reissued.is_some(), "a new GetHeaders can be issued");
+    }
+
+    #[tokio::test]
+    async fn handle_headers_valid_batch_queues_and_clears_validation_flag() {
+        use crate::network::sync::SyncState;
+
+        let peer = [16u8; 32];
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr_for(31006), false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let nonce = sync.write().await.begin_headers_request(peer, 123).unwrap();
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let genesis = chain.get_block_by_height(0).expect("genesis block");
+        let header = super::tests::first_header(&genesis);
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: vec![header],
+            nonce,
+        })
+        .unwrap();
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        let sg = sync.read().await;
+        assert!(!sg.headers_request_pending(), "flag cleared after accept");
+        assert_eq!(sg.pending_count(), 1, "verified header hash queued");
+        assert_eq!(sg.state(), SyncState::Blocks);
     }
 
     #[tokio::test]

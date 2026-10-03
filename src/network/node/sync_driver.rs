@@ -92,7 +92,7 @@ use std::time::Duration;
 use dashmap::DashMap;
 use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::interval;
+use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use crate::chain::SharedBlockchain;
@@ -116,6 +116,12 @@ struct SyncDriverState {
     stall_count: u32,
     last_progress_height: u64,
     no_progress_ticks: u32,
+    /// Tip height the Blocks-tick watchdog last counted as progress. Kept
+    /// apart from `last_progress_height`: the Tier-1 branch above the state
+    /// match bumps that one on the same tick, so comparing against it made
+    /// every tick of a steadily advancing download read as "no progress" and
+    /// fired the 60-tick Headers bounce every 30 s in the middle of a batch.
+    watchdog_height: u64,
     started_at: std::time::Instant,
     tier2_fires_since_progress: u32,
     tier3_fires_since_progress: u32,
@@ -135,6 +141,7 @@ impl SyncDriverState {
             stall_count: 0,
             last_progress_height: height,
             no_progress_ticks: 0,
+            watchdog_height: height,
             started_at: std::time::Instant::now(),
             tier2_fires_since_progress: 0,
             tier3_fires_since_progress: 0,
@@ -161,6 +168,22 @@ impl SyncDriverState {
             return true;
         }
         since_progress.saturating_sub(EMERGENCY_T3_NO_PROGRESS_SECS) >= EMERGENCY_T3_REPEAT_SECS
+    }
+
+    /// Blocks-tick stall accounting: a tip advance (or blocks delivered this
+    /// tick) resets the no-progress counter, anything else counts the tick.
+    fn note_blocks_tick(&mut self, our_h: u64, blocks_flowing: bool) {
+        if our_h > self.watchdog_height {
+            self.watchdog_height = our_h;
+            if our_h > self.last_progress_height {
+                self.last_progress_height = our_h;
+            }
+            self.no_progress_ticks = 0;
+        } else if blocks_flowing {
+            self.no_progress_ticks = 0;
+        } else {
+            self.no_progress_ticks += 1;
+        }
     }
 }
 
@@ -192,6 +215,12 @@ pub(super) fn spawn_sync_driver(
         // 500ms tick during IBD — aggressive sync for fast convergence.
         // Each tick requests up to 500 blocks distributed across all peers.
         let mut tick = interval(Duration::from_millis(500));
+        // The default (Burst) replays every tick missed while the loop body
+        // was blocked, back-to-back. `no_progress_ticks` counts ticks as
+        // time (60 ticks = 30s at 500ms), so one long stall on the sync lock
+        // could burn the whole budget in a second and force Headers for
+        // nothing. Delay keeps consecutive ticks 500ms apart.
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let _stall_timeout: u64 = 30; // seconds before considering sync stalled
         let mut driver = SyncDriverState::new(sync_chain.height());
 
@@ -579,14 +608,7 @@ pub(super) fn spawn_sync_driver(
                     // 60 ticks, bounces to Headers, abandoning the half-
                     // downloaded fork. A rising delivered count proves the
                     // pipeline is doing real work regardless of tip movement.
-                    if our_h > driver.last_progress_height {
-                        driver.last_progress_height = our_h;
-                        driver.no_progress_ticks = 0;
-                    } else if blocks_flowing {
-                        driver.no_progress_ticks = 0;
-                    } else {
-                        driver.no_progress_ticks += 1;
-                    }
+                    driver.note_blocks_tick(our_h, blocks_flowing);
 
                     // Step 2: Get block hashes to download from sync engine.
                     // (Prior comment cited "Monero uses spans of 20-100";
@@ -655,7 +677,7 @@ pub(super) fn spawn_sync_driver(
                         }
                     }
 
-                    // Safety net: if stuck for 60+ ticks (5min) with no progress,
+                    // Safety net: if stuck for 60+ ticks (30s at 500ms) with no progress,
                     // force back to Headers
                     if driver.no_progress_ticks >= 60 {
                         let sg = sync_sync.read().await;
@@ -1091,5 +1113,24 @@ mod tests {
             !bytes.is_empty(),
             "the Blocks tick sent a GetBlocks message to the eligible peer"
         );
+    }
+
+    #[test]
+    fn blocks_tick_watchdog_counts_progress_even_after_tier1_bumped_the_marker() {
+        // The Tier-1 branch above the state match records the tip advance on
+        // the same tick, before the Blocks arm runs. The watchdog must still
+        // see that advance as progress, or it fires every 30 s mid-download.
+        let mut d = SyncDriverState::new(100);
+        d.last_progress_height = 101;
+        d.note_blocks_tick(101, false);
+        assert_eq!(d.no_progress_ticks, 0, "advancing tip is progress");
+        d.note_blocks_tick(101, false);
+        assert_eq!(d.no_progress_ticks, 1, "same height, nothing delivered");
+        d.note_blocks_tick(101, true);
+        assert_eq!(d.no_progress_ticks, 0, "delivered blocks are progress");
+        d.last_progress_height = 105;
+        d.note_blocks_tick(105, false);
+        assert_eq!(d.no_progress_ticks, 0);
+        assert_eq!(d.last_progress_height, 105);
     }
 }

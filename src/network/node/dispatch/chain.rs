@@ -23,6 +23,10 @@
 //!   `is_synced()` false and requiring an emergency
 //!   `COINCYNC_RIG_SKIP_SYNC_CHECK=1` bypass.
 //!   TESTS: `handle_inv_block_post_ibd_does_not_speculatively_bump_peer_height`.
+//!   Deep-IBD side: an InvBlock refreshes the tip via GetHeaders only when the
+//!   download queue is drained, so a tip announcement cannot force a full
+//!   re-verification of the batch already being downloaded.
+//!   TESTS: `handle_inv_block_during_ibd_skips_headers_refresh_while_queue_busy`.
 //! - **§4 `handle_blocks`** — INVARIANT: each relayed block is rejected on wrong
 //!   network magic and on RandomX PoW failure BEFORE reputation credit or
 //!   `BlockReceived` emission; bad PoW triggers an instant ban and never
@@ -215,8 +219,18 @@ pub(super) async fn handle_inv_block(
                     chain.peer_advertised_height().saturating_sub(our_height),
                     NEAR_TIP_INV_WINDOW,
                 );
+                // Every accepted Headers response is a full batch verification
+                // (up to 2000 RandomX hashes, tens of seconds in light mode), and
+                // a refresh sent while the download queue is still full comes
+                // back with the very range we are already pulling. Deep in IBD
+                // the peer announces every block it mines, so this path kept
+                // re-verifying the same headers and stalled block processing for
+                // the whole batch each time. Refresh only once the queue has
+                // drained; the driver's drained-queue path and the peer's
+                // ChainWork announcements keep the sync target current meanwhile.
+                let queue_busy = sync.read().await.pending_count() > 0;
                 let locator = build_locator(our_height, |h| chain.get_block_hash(h));
-                if !locator.is_empty() {
+                if !locator.is_empty() && !queue_busy {
                     let now = chrono::Utc::now().timestamp() as u64;
                     if let Some(nonce) = sync.write().await.begin_headers_request(peer_id, now) {
                         let sent = match Message::get_headers_with_nonce(
@@ -1021,5 +1035,79 @@ mod tests {
 
         assert_eq!(sync.read().await.true_best_height(), 0, "no speculative bump");
         assert!(srx.try_recv().is_ok(), "direct GetBlocks issued for unknown hash");
+    }
+
+    #[tokio::test]
+    async fn handle_inv_block_during_ibd_skips_headers_refresh_while_queue_busy() {
+        // Deep IBD with hashes still queued: an InvBlock must NOT send a
+        // GetHeaders (each accepted response is a full re-verification of the
+        // range already being downloaded). Once the queue is drained it may.
+        let peer_id = [27; 32];
+        let addr: SocketAddr = "127.0.0.1:28097".parse().unwrap();
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let chain: SharedBlockchain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        chain.init_genesis().unwrap();
+        let scorer = RwLock::new(PeerScorer::new());
+        let inv = InvMessage {
+            inventory: vec![crate::network::protocol::InvVector {
+                inv_type: 0,
+                hash: Hash::from_bytes([6; 32]),
+            }],
+        };
+        let payload = borsh::to_vec(&inv).unwrap();
+
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        {
+            let mut sg = sync.write().await;
+            sg.update_peer_height_for(peer_id, 5_000);
+            sg.queue_headers_from_peer(peer_id, vec![Hash::from_bytes([7; 32])]);
+            assert!(!sg.is_synced(), "precondition: deep IBD");
+            assert_eq!(sg.pending_count(), 1, "precondition: queue busy");
+        }
+        handle_inv_block(
+            peer_id,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &senders,
+            &sync,
+            &chain,
+            &scorer,
+        )
+        .await
+        .unwrap();
+        assert!(
+            srx.try_recv().is_err(),
+            "no GetHeaders while the queue is busy"
+        );
+        assert!(!sync.read().await.headers_request_pending());
+
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        sync.write().await.update_peer_height_for(peer_id, 5_000);
+        assert_eq!(
+            sync.read().await.pending_count(),
+            0,
+            "precondition: drained"
+        );
+        handle_inv_block(
+            peer_id,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &senders,
+            &sync,
+            &chain,
+            &scorer,
+        )
+        .await
+        .unwrap();
+        assert!(
+            srx.try_recv().is_ok(),
+            "GetHeaders refresh once the queue is drained"
+        );
     }
 }
