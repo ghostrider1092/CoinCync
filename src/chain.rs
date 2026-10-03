@@ -3256,10 +3256,7 @@ impl Blockchain {
     /// Called from `add_block` whenever a peer-sourced block is accepted so
     /// phantom-stall detection can measure the gap since the last real arrival.
     pub fn record_block_received(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = crate::clock::unix_now(); // E1: single-source clock
         self.last_block_received_at
             .store(now, std::sync::atomic::Ordering::Relaxed);
     }

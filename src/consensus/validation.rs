@@ -1263,16 +1263,21 @@ fn check_header_checkpoint_vote(header: &BlockHeader, result: &mut BlockValidati
 /// nodes on badly-configured hosts still process blocks (validation of
 /// crypto and consensus rules is orthogonal to wall-clock).
 fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidation) {
-    let current_time = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_secs(),
-        Err(e) => {
-            result.add_error(format!(
-                "System clock error: {}. Cannot validate block timestamps.",
-                e
-            ));
-            return;
-        }
-    };
+    // Single source of truth (E1): the future-block cap reads wall time through
+    // the canonical clock, so the deterministic-simulation harness can drive it
+    // (clock-poisoning scenarios). With no override installed this is the real
+    // system clock — production behaviour is unchanged. A broken real clock
+    // (before the Unix epoch) still yields 0 here; preserve the explicit
+    // "cannot validate timestamps" error for that host-misconfiguration case,
+    // but never when a virtual clock is installed (0 can be a valid sim time).
+    let current_time = crate::clock::unix_now();
+    if current_time == 0 && !crate::clock::is_overridden() {
+        result.add_error(
+            "System clock error: time is before the Unix epoch. Cannot validate block timestamps."
+                .to_string(),
+        );
+        return;
+    }
     // Sanity: current time should be reasonably recent (after 2020).
     const MIN_REASONABLE_TIME: u64 = 1577836800; // 2020-01-01 00:00:00 UTC
     if current_time < MIN_REASONABLE_TIME {
