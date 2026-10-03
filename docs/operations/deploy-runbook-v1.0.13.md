@@ -15,8 +15,8 @@ testnet fleet **one host at a time**, leaving chain state intact.
 
 ```bash
 # Fresh clone of the authoritative repo (NOT OneDrive, NOT Windows).
-git clone https://github.com/ghostrider1092/Coincync-Testnet-.git
-cd Coincync-Testnet-
+git clone https://github.com/ghostrider1092/CoinCync.git
+cd CoinCync
 git checkout main
 git pull
 

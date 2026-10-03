@@ -30,6 +30,35 @@
 //! [`PeerScorer::record_misbehavior`](crate::network::scoring::PeerScorer);
 //! a peer that crosses the ban threshold is disconnected and added to the
 //! local banlist.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `EclipseDetector::record_connect` / `record_disconnect`** —
+//!   INVARIANT: connect/disconnect counters only ever increment within the
+//!   current 5-minute window; `maybe_reset` clears them once the window has
+//!   elapsed, so churn from a stale window never leaks into the current
+//!   one. THREAT: undercounting real churn (window drift) or overcounting
+//!   stale churn, either of which defeats the eclipse-attack signal.
+//!   TESTS: `eclipse_detector_normal`, `eclipse_detector_suspicious_churn`.
+//! - **§2 `EclipseDetector::is_suspicious_churn`** — INVARIANT: the
+//!   suspicious-churn signal fires only when BOTH recent connects and
+//!   recent disconnects exceed 20 in the current window — a one-sided
+//!   spike (e.g. many disconnects from a network blip) does not alone
+//!   trigger it. THREAT: an eclipse attacker cycling connections to fill
+//!   all peer slots with attacker-controlled peers; also guards against
+//!   false positives from ordinary network instability. TESTS:
+//!   `eclipse_detector_suspicious_churn`, `eclipse_detector_normal`.
+//! - **§3 `maybe_reset` window boundary** — INVARIANT: the reset check uses
+//!   a fixed 300-second threshold (`last_reset.elapsed().as_secs() > 300`)
+//!   applied identically on every `record_connect`/`record_disconnect` call,
+//!   so the window length is deterministic and cannot be extended by
+//!   caller timing. THREAT: an attacker pacing connection churn just under
+//!   the reset boundary to stay under threshold indefinitely while still
+//!   cycling peers. TESTS: (gap — no test advances/mocks `Instant` to
+//!   assert the reset actually fires at the 300s boundary; the two tests
+//!   above only cover within-window accumulation).
 
 use std::time::Instant;
 

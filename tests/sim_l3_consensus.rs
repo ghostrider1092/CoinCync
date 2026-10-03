@@ -134,7 +134,7 @@ impl Sim {
             chain
                 .restore_state(0, genesis.hash(), 1)
                 .expect("seed base");
-            base_ts = genesis.header.timestamp;
+            base_ts = genesis.header.timestamp.as_secs();
             let (_ss, spend_pub) = deterministic_keypair(cfg.seed, id as u8 + 1);
             let (_vs, view_pub) = deterministic_keypair(cfg.seed, id as u8 + 128);
             let peers = (0..cfg.n_nodes).filter(|&p| p != id).collect();
@@ -182,11 +182,11 @@ impl Sim {
             .chain
             .get_block_by_height(cur)
             .expect("parent block");
-        let target = if h == 1 {
-            Hash::from_difficulty(500)
-        } else {
-            self.nodes[miner].chain.next_target()
-        };
+        // Always mine at the chain's own next target. At h==1 this maintains the
+        // genesis difficulty (cheap); hard-coding `from_difficulty(500)` here is a
+        // ~128x jump off genesis (≈4) and trips the per-block sanity-ratio clamp,
+        // so the block is rejected before it can propagate.
+        let target = self.nodes[miner].chain.next_target();
         let base = self.base_ts + h * self.cfg.block_spacing_secs;
         let miner_pk = self.nodes[miner].spend_pub;
         let (cb, _) = build_coinbase(h, &self.nodes[miner].spend_pub, &self.nodes[miner].view_pub, 0);

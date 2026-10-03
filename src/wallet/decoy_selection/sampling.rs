@@ -1,3 +1,40 @@
+//! Decoy candidate sampling and covered-request construction.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `sample_candidate_locators`** — INVARIANT: decoy ages are drawn from
+//!   the Gamma(19.28, 1/1.61) log-seconds age distribution (converted to blocks),
+//!   so the real spend's age is statistically indistinguishable from its decoys.
+//!   THREAT: biased age sampling makes the real input identifiable by age;
+//!   ring-selection determinism regressions (incident 1d27d3c8).
+//!   TESTS: `gamma_sampling_is_conditioned_and_unique`,
+//!   `decoy_age_distribution_matches_independent_gamma_reference_wallet_c1`.
+//! - **§2 `min_age eligibility`** — INVARIANT: only outputs at least `min_age`
+//!   blocks old, measured at the next spend height, are eligible as decoys.
+//!   THREAT: too-young decoys shrink the anonymity set and leak spend timing.
+//!   TESTS: `minimum_age_is_measured_at_the_next_spend_height`.
+//! - **§3 `build_covered_request`** — INVARIANT: real locators are padded with
+//!   unique decoys up to `COVERED_LOOKUP_SIZE`, shuffled, and bound to the
+//!   snapshot id and ring policy. THREAT: unbound or duplicated locators reveal
+//!   which ring member is real. TESTS: `covered_request_binds_snapshot_and_policy`,
+//!   `covered_lookup_allocates_transaction_wide_unique_decoys`.
+//! - **§4 `request bounds`** — INVARIANT: real locators must exist in the
+//!   snapshot and required slots must not exceed `COVERED_LOOKUP_SIZE`.
+//!   THREAT: out-of-snapshot or overflowing requests yield malformed rings.
+//!   TESTS: `covered_request_rejects_a_real_locator_outside_the_snapshot`,
+//!   `covered_request_rejects_capacity_overflow`.
+//! - **§5 `pick_nearest_locator`** — INVARIANT: a sampled target age maps to the
+//!   nearest eligible height, breaking ties uniformly at random.
+//!   THREAT: deterministic tie-breaking biases decoy positions.
+//!   TESTS: `gamma_sampling_is_conditioned_and_unique`.
+//! - **§6 `pick_ordinal`** — INVARIANT: every chosen decoy is unique — never a
+//!   real, excluded, or already-selected output. THREAT: duplicate/real reuse
+//!   links the transaction's inputs. TESTS:
+//!   `covered_lookup_allocates_transaction_wide_unique_decoys`,
+//!   `gamma_sampling_is_conditioned_and_unique`.
+
 use super::error::{DecoySelectionError, DecoySelectionResult};
 use super::types::{CoveredRequest, RingPolicy, ValidatedDecoySnapshot};
 use super::{
@@ -5,6 +42,7 @@ use super::{
     DECOY_GAMMA_SHAPE,
 };
 use crate::decoy::{HeightOutputCount, OutputLocator};
+use rand::distributions::WeightedIndex;
 use rand::seq::SliceRandom;
 use rand::{CryptoRng, Rng, RngCore};
 use rand_distr::{Distribution, Gamma};
@@ -85,6 +123,98 @@ pub fn sample_candidate_locators<R: Rng + ?Sized>(
         };
         selected.insert(locator);
         result.push(locator);
+    }
+
+    Ok(result)
+}
+
+/// Empirical, histogram-tracking decoy sampler — an audit-gated ALTERNATIVE to
+/// the fixed-Gamma [`sample_candidate_locators`]. Instead of drawing an age from
+/// a fixed `Gamma(19.28, 1/1.61)` prior and snapping to the nearest eligible
+/// height (which over-selects isolated outputs in sparse age regions), it draws
+/// each decoy's height in proportion to the ACTUAL on-chain output count at that
+/// height — i.e. it tracks the network's real output-age histogram, which the
+/// fixed Gamma drifts away from over a chain's life. Eligibility, uniqueness,
+/// and the exact-fit / insufficient-pool behavior are identical to the Gamma
+/// sampler; only the age law differs.
+///
+/// NOT the default selection policy. The shipped wallet path still uses the
+/// fixed-Gamma law. Flipping the default is a privacy change requiring review
+/// (the empirical law tracks output *creation* density, which is related to but
+/// not identical to the spend-age model the Gamma encodes), so this is provided
+/// built + tested + off by default, consistent with the testnet-only /
+/// audit-pending posture. See docs/design/empirical-decoy-selection.md.
+pub fn sample_candidate_locators_empirical<R: Rng + ?Sized>(
+    snapshot: &ValidatedDecoySnapshot,
+    min_age: u64,
+    count: usize,
+    excluded: &HashSet<OutputLocator>,
+    rng: &mut R,
+) -> DecoySelectionResult<Vec<OutputLocator>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let eligible = snapshot.eligible_heights(min_age);
+    let available = snapshot.eligible_output_count(min_age).saturating_sub(
+        excluded
+            .iter()
+            .filter(|locator| locator_is_in(locator, eligible))
+            .count(),
+    );
+    if available < count {
+        return Err(DecoySelectionError::InsufficientDecoys {
+            available,
+            needed: count,
+        });
+    }
+
+    if available == count {
+        return Ok(eligible
+            .iter()
+            .flat_map(|height| {
+                (0..height.count).map(move |ordinal| OutputLocator {
+                    height: height.height,
+                    ordinal,
+                })
+            })
+            .filter(|locator| !excluded.contains(locator))
+            .collect());
+    }
+
+    // Weight each eligible height by its on-chain output count — the empirical
+    // output-age histogram. Heights holding more outputs contribute
+    // proportionally more decoys, so the realized decoy age distribution
+    // matches where outputs actually exist on chain.
+    let weights = WeightedIndex::new(eligible.iter().map(|height| height.count)).map_err(|_| {
+        DecoySelectionError::InsufficientDecoys {
+            available,
+            needed: count,
+        }
+    })?;
+
+    let mut selected = HashSet::with_capacity(count);
+    let mut result = Vec::with_capacity(count);
+    // Bound total attempts so an adversarial/degenerate snapshot cannot loop
+    // forever; mirrors the resample bound the Gamma path relies on.
+    let max_attempts = count
+        .saturating_mul(DECOY_GAMMA_MAX_RESAMPLES)
+        .saturating_add(DECOY_GAMMA_MAX_RESAMPLES);
+    let mut attempts = 0usize;
+
+    while result.len() < count {
+        attempts += 1;
+        if attempts > max_attempts {
+            return Err(DecoySelectionError::InsufficientDecoys {
+                available: result.len(),
+                needed: count,
+            });
+        }
+        let height = &eligible[weights.sample(rng)];
+        if let Some(locator) = pick_ordinal(height, excluded, &selected, rng) {
+            selected.insert(locator);
+            result.push(locator);
+        }
     }
 
     Ok(result)

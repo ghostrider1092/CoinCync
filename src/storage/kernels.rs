@@ -9,6 +9,54 @@
 //! kernel is written through to the `mw_kernels` column family, keyed
 //! on a monotonic index. On startup the in-memory vector and root are
 //! rebuilt by replaying the stored kernels in key order.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `compute_root` (canonical root)** — INVARIANT: one root definition
+//!   shared by `new` / `open_with_db` / `append` / `rewind`, so an identical
+//!   kernel set yields an identical root regardless of construction path.
+//!   THREAT: a fresh vs replayed empty store diverging (the latent bug this
+//!   fixes — `new` once hard-coded `[0;32]`). TESTS:
+//!   `empty_store_root_is_consistent_across_constructors`,
+//!   `re_applying_after_rewind_reaches_the_same_root`.
+//! - **§2 `append` + R-61 persistence-failure halt** — INVARIANT: a kernel is
+//!   appended at its dense vector index and mirrored to `mw_kernels`; a
+//!   borsh-serialize or RocksDB write failure PANICS (with structured context)
+//!   rather than continuing in-memory-only. THREAT: **R-61** — a silent
+//!   persistence gap diverges the replayed kernel set from the committed
+//!   `mw_kernel_root` after restart. TESTS: `checkpoint_then_rewind_restores_len_and_root`
+//!   (append happy path); panic path (gap — needs a fault-injecting `shim::Tree`).
+//! - **§3 `checkpoint_at_height` / `checkpoint_count` (bounded stack)** —
+//!   INVARIANT: a checkpoint records the pre-block `kernels_len`; the stack
+//!   caps at `MAX_REORG_CHECKPOINTS` (1000); `checkpoint_count` feeds the
+//!   chain's cross-store invariant (shielded/spark/kernel stacks must agree in
+//!   length). THREAT: uneven cross-store unwind leaving the three Phase-2
+//!   stores at different effective heights. TESTS:
+//!   `checkpoint_stack_cap_holds_and_rewind_works_past_it`,
+//!   `stress_high_volume_checkpoint_append_rewind`.
+//! - **§4 `rewind` (truncate + root + persistence, R-62/R-63)** — INVARIANT:
+//!   pops the guarding checkpoint, truncates kernels to `kernels_len` BEFORE
+//!   recomputing the root (in-memory ordering is crash-safe), then removes the
+//!   dropped keys `split_at..old_len` from `mw_kernels`; empty stack ⇒ `false`;
+//!   per-item remove failures are surfaced loudly (not silently discarded).
+//!   THREAT: **R-62** — a crash mid-rewind leaving in-memory root and on-disk
+//!   kernels inconsistent (documented atomicity gap, batch-delete deferred);
+//!   **R-63** — orphan kernels replayed on next open corrupt the committed
+//!   root. TESTS: `rewind_on_empty_stack_returns_false`,
+//!   `multiple_rewinds_disconnect_multiple_blocks`, `rewind_handles_block_with_no_kernels`.
+//! - **§5 persistence replay / reorg round-trips (`open_with_db`)** —
+//!   INVARIANT: a reopened store replays `mw_kernels` in key order into the
+//!   rewound (not pre-rewind) state; the in-memory-only checkpoint stack starts
+//!   empty (no rewind past a restart); repeated per-session reorgs leave no
+//!   cruft. THREAT: reorg cruft over-counting kernels after restart. TESTS:
+//!   `persistence_rewind_survives_reopen`, `persistence_survives_repeated_reorg_reopen_cycles`,
+//!   `aggressive_random_op_sequences_stay_consistent`.
+//! - **§6 concurrency / lock-graph** — INVARIANT: `kernels` → `root` and
+//!   `checkpoints` → `kernels` → `root` are a strict acquisition order with no
+//!   cycle; concurrent readers + writer(s) never deadlock or panic. THREAT: a
+//!   lock-order cycle hanging block processing. TESTS: `stress_concurrent_read_write_load`.
 
 use parking_lot::RwLock;
 

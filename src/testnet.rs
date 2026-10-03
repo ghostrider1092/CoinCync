@@ -61,7 +61,10 @@ pub const TESTNET_SEED_NODES: &[&str] = &[
     // `testnet_fallback_matches_seed_nodes` test enforces this). The home node
     // is residential and stays DNS-only (privacy); append VPS boxes here as the
     // testnet fleet is re-provisioned.
-    "2.28.1.75:28080", // Hetzner (EU) — stable public seed
+    // 2026-09-07: migrated 2.28.1.75 (CPX22, 4 GB) -> 2.29.34.197 (CPX32, 8 GB).
+    // The CPX22 OOM-killed the node (RandomX full-dataset + UTXO exceeded 4 GB);
+    // the CPX32 runs it comfortably. Old box decommissioned.
+    "2.29.34.197:28080", // Hetzner (EU, Falkenstein) — stable public seed
 ];
 
 pub const TESTNET_MIN_RING_SIZE: usize = 11;
@@ -97,21 +100,20 @@ pub const TESTNET_GENESIS_HASH: [u8; 32] = [
 /// an alternative chain from genesis. Any chain that disagrees with a checkpoint
 /// at or below the checkpoint height is rejected immediately.
 pub const TESTNET_CHECKPOINT_LIST: &[(u64, &str)] = &[
-    // ── 2026-06-04 POST-WIPE: list intentionally empty ──
-    // The previous 280 entries (h=50 → h=14000) anchored block
-    // hashes from the pre-2026-06-04 chain. After the testnet
-    // was wiped to genesis on 2026-06-04 (see
-    // docs/operations/stress-tests/2026-06-04-testnet-cascade-recovery.md)
-    // those hashes no longer correspond to any block — they
-    // were causing every fresh-chain block at h=50 to be
-    // rejected with `Hardcoded checkpoint mismatch at height 50`.
+    // ── 2026-06-04 POST-WIPE: the previous 280 entries (h=50 → h=14000)
+    // anchored the pre-wipe chain and were cleared after the 2026-06-04 wipe to
+    // genesis (see docs/operations/stress-tests/2026-06-04-testnet-cascade-recovery.md);
+    // leaving them caused `Hardcoded checkpoint mismatch at height 50` on the
+    // fresh chain. The list was then empty, which meant a syncing node had to
+    // RandomX-verify EVERY block from genesis — a slow IBD ("takes a long time
+    // to clone the blockchain", reported 2026-10-02).
     //
-    // Re-populate once the new chain has soaked stably above
-    // h=20k for >72h on the current binary. Until then, the
-    // chain runs without hardcoded-checkpoint anchoring
-    // (acceptable on testnet pre-mainnet — long-range-attack
-    // protection is via cumulative work + MESS, not yet via
-    // hardcoded anchors).
+    // 2026-10-02: re-seeded with a single recent anchor so a fresh node
+    // assume-valids below it and only verifies the last few hundred blocks.
+    // Height 10000 was 600+ blocks deep on the stable post-wipe chain (tip
+    // ~10686); the hash was read from the live seed and cross-checked against
+    // block 10001's prev_hash. Append further anchors as the chain advances.
+    (10000, "ac4e49146c2c6a4607cf61d67c361c7b746d27b608d7afedd94f87c716c6d882"),
 ];
 
 pub fn highest_checkpoint_height() -> u64 {
@@ -213,7 +215,7 @@ pub fn testnet_genesis() -> Block {
         network_magic: params.magic,
         version: 1,
         height: 0,
-        timestamp,
+        timestamp: crate::primitives::Timestamp::from_secs(timestamp),
         prev_hash: Hash::zero(),
         tx_root: crate::primitives::merkle_root(&[coinbase_tx.hash()]),
         anchor: Hash::zero(),
@@ -343,14 +345,14 @@ mod tests {
         // The previous 280 entries (h=50 → h=14000) anchored block hashes
         // from the pre-wipe chain and no longer correspond to any block.
         //
-        // The assertion accepts either: (a) the current intentionally-empty
-        // state (highest == 0), or (b) a re-populated list at >= 14000,
-        // which is what the bar was set to during the 2026-06-03 refresh.
-        // When the chain soaks above h=20k for >72h and we re-populate,
-        // drop the `h == 0` branch and tighten back to `>= 14000` (or higher).
+        // 2026-10-02: the list was re-seeded with a recent anchor (h=10000) to
+        // speed IBD — a fresh node assume-valids below it instead of
+        // RandomX-verifying every block from genesis. The chain tip (~10686) is
+        // below the old 14000 bar, so the floor is 10000 for now; raise it as
+        // deeper anchors are added. The list must never regress to empty.
         let h = highest_checkpoint_height();
-        assert!(h == 0 || h >= 14000,
-            "checkpoint list regressed: highest is {} (expected 0 for intentionally-empty post-wipe, or >= 14000 once re-populated)", h);
+        assert!(h >= 10000,
+            "checkpoint list regressed: highest is {} (expected >= 10000 since the 2026-10-02 re-seed)", h);
         // List must be strictly monotonic in height — accidental duplicates
         // or out-of-order entries break the long-range-attack defence.
         let heights: Vec<u64> = TESTNET_CHECKPOINT_LIST.iter().map(|(h, _)| *h).collect();

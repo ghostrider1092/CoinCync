@@ -23,6 +23,55 @@
 //! - Multi-tree transactions commit with `WriteOptions::set_sync(true)`.
 //!   The batch is atomic across column families and its WAL record is durable
 //!   before return, which is required by chain-state and schema migrations.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `Db::open_path` / `flush` / `generate_id` / `cas_lock_for_cf` /
+//!   `open_tree` / `tree_names`** — INVARIANT: the monotonic counter is restored
+//!   only from a canonical 8-byte value (any other length refuses to open, never
+//!   silently truncates — R-49); each CF lazily gets its own CAS mutex (R-53);
+//!   generate_id is strictly increasing. THREAT: R-49 — a truncated counter emits
+//!   a non-monotonic id that collides a previously-issued one.
+//!   TESTS: `db_metadata_generate_id_tree_names_and_recovery_flag`,
+//!   `config_open_temporary_and_flush_every_ms`.
+//! - **§2 `Tree::insert` / `get` / `remove` / `contains_key`** — INVARIANT: sled
+//!   `insert`/`remove` return the prior value; single-key writes are atomic at the
+//!   CF level. THREAT: the get-then-put window is NOT a transaction — a concurrent
+//!   writer makes the returned "old value" stale; current callers either ignore it
+//!   or hold an external write lock. TESTS: (gap — no shim-level unit test; covered
+//!   transitively by every higher DB layer).
+//! - **§3 `Tree::compare_and_swap` / `fetch_and_update`** — INVARIANT: CAS is a
+//!   mutex-serialized read-then-conditional-write — expected-matches sets the new
+//!   value, mismatch returns the current value untouched; this is the key-image
+//!   double-spend guard (create-if-absent). THREAT: TOCTOU double-spend — without
+//!   the per-CF lock two threads both see "unspent" and both mark spent; exactly
+//!   one CAS must win. TESTS: `compare_and_swap_matches_and_mismatches`,
+//!   `fetch_and_update_read_modify_write`.
+//! - **§4 `Tree::iter` / `iter_rev` / `scan_prefix` / `range` / `last`,
+//!   `upper_bound`** — INVARIANT: forward/reverse/`last` ordering is correct;
+//!   `scan_prefix` excludes the next sibling via the computed exclusive
+//!   `upper_bound`; range honors inclusive/exclusive bounds. THREAT: R-54 — a
+//!   full-tree `.iter()` eagerly materializes every entry (OOM at mainnet UTXO
+//!   scale); callers must bound with range/scan_prefix. TESTS:
+//!   `scan_prefix_range_iter_ordering_and_boundaries`,
+//!   `upper_bound_increments_last_non_ff_byte_and_falls_back_on_all_ff`.
+//! - **§5 multi-tree `transaction` (`Transactional` / `TxTree`)** — INVARIANT: all
+//!   trees commit or none (single RocksDB `WriteBatch`); the WAL is fsync'd before
+//!   return (`set_sync(true)`, R-56); a closure `Err` aborts with zero mutation;
+//!   TxTree reads see committed state, NOT staged writes. THREAT: R-56 — a
+//!   non-synced consensus batch could disappear on power loss between commit and
+//!   the next WAL sync; H4 — the prior `*mut RocksBatch` aliased mutably (UB).
+//!   TESTS: `multi_tree_transaction_commits_all_or_none`.
+//! - **§6 `Tree::len` / `is_empty` / `clear`** — INVARIANT: len/is_empty track the
+//!   CF contents; clear empties it. THREAT: R-51 — `len()` is O(N) (a multi-second
+//!   scan on the UTXO tree); R-52 — `clear()` is NOT atomic vs a concurrent writer.
+//!   TESTS: `clear_len_and_is_empty`.
+//! - **§7 `IVec` conversions (`From`, `as_ref`, `Deref`, `Borrow`, `to_vec`,
+//!   `len`, `is_empty`)** — INVARIANT: wraps `Box<[u8]>` so `as_ref()` resolves to
+//!   a single `&[u8]` impl (sled parity); all conversions round-trip.
+//!   TESTS: `ivec_conversions`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -148,7 +197,7 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Db> {
     Db::open_path(path.as_ref())
 }
 
-// ── Db ────────────────────────────────────────────────────────────────
+// ── §1 Db ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct Db {
@@ -342,7 +391,7 @@ impl Db {
     }
 }
 
-// ── Tree ──────────────────────────────────────────────────────────────
+// ── §2-§3, §6 Tree ────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct Tree {
@@ -582,7 +631,7 @@ pub struct CasFailure {
     pub current: Option<Vec<u8>>,
 }
 
-// ── Iterator ──────────────────────────────────────────────────────────
+// ── §4 Iterator ───────────────────────────────────────────────────────
 
 /// Sled-parity key/value wrapper that coerces unambiguously to `&[u8]`.
 /// We wrap `Box<[u8]>` so `as_ref()` resolves to a single impl (unlike
@@ -765,7 +814,7 @@ fn upper_bound(prefix: &[u8]) -> Vec<u8> {
     prefix.to_vec()
 }
 
-// ── Transactional (multi-tree write batch) ────────────────────────────
+// ── §5 Transactional (multi-tree write batch) ─────────────────────────
 
 pub mod transaction {
     use super::*;
@@ -925,4 +974,261 @@ pub mod transaction {
 #[allow(dead_code)]
 pub(crate) fn _hashset_marker<T: std::hash::Hash + Eq>() -> HashSet<T> {
     HashSet::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Real backing store on a temp dir; TempDir is returned so it outlives
+    /// the DB handle (dropping it would delete the RocksDB directory).
+    fn temp_db() -> (tempfile::TempDir, Db) {
+        let dir = tempdir().unwrap();
+        let db = open(dir.path()).unwrap();
+        (dir, db)
+    }
+
+    /// compare_and_swap: create-if-absent (key-image CAS), double-mark
+    /// rejection, matching swap, and mismatch returning the current value.
+    #[test]
+    fn compare_and_swap_matches_and_mismatches() {
+        let (_d, db) = temp_db();
+        let t = db.open_tree("cas").unwrap();
+
+        // Key-image style: expected None -> set the "spent" marker.
+        assert!(t
+            .compare_and_swap(b"ki", None::<&[u8]>, Some(b"spent"))
+            .unwrap()
+            .is_ok());
+
+        // Second attempt with expected None now fails (already present):
+        // this is the double-spend guard.
+        let fail = t
+            .compare_and_swap(b"ki", None::<&[u8]>, Some(b"again"))
+            .unwrap();
+        let cf = fail.expect_err("expected CAS mismatch when key already present");
+        assert_eq!(cf.current.as_deref(), Some(&b"spent"[..]));
+
+        // Matching expected -> swap succeeds.
+        assert!(t
+            .compare_and_swap(b"ki", Some(b"spent"), Some(b"v2"))
+            .unwrap()
+            .is_ok());
+        assert_eq!(t.get(b"ki").unwrap().unwrap().as_ref(), b"v2");
+
+        // Wrong expected -> mismatch returns current, value unchanged.
+        let m = t
+            .compare_and_swap(b"ki", Some(b"WRONG"), Some(b"v3"))
+            .unwrap();
+        assert_eq!(m.unwrap_err().current.as_deref(), Some(&b"v2"[..]));
+        assert_eq!(t.get(b"ki").unwrap().unwrap().as_ref(), b"v2");
+    }
+
+    /// fetch_and_update performs an atomic read-modify-write and returns the
+    /// PRIOR value; returning None from the closure deletes the key.
+    #[test]
+    fn fetch_and_update_read_modify_write() {
+        let (_d, db) = temp_db();
+        let t = db.open_tree("fau").unwrap();
+        t.insert(b"n", 1u64.to_le_bytes()).unwrap();
+
+        let prev = t
+            .fetch_and_update(b"n", |cur| {
+                let v = cur
+                    .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+                    .unwrap_or(0);
+                Some((v + 41).to_le_bytes().to_vec())
+            })
+            .unwrap();
+        assert_eq!(prev.unwrap().as_ref(), &1u64.to_le_bytes());
+        assert_eq!(t.get(b"n").unwrap().unwrap().as_ref(), &42u64.to_le_bytes());
+
+        // Returning None deletes.
+        let _ = t.fetch_and_update(b"n", |_| None).unwrap();
+        assert!(t.get(b"n").unwrap().is_none());
+    }
+
+    /// iter / iter_rev / last ordering, scan_prefix upper_bound boundary, and
+    /// range inclusive/exclusive bounds.
+    #[test]
+    fn scan_prefix_range_iter_ordering_and_boundaries() {
+        let (_d, db) = temp_db();
+        let t = db.open_tree("ord").unwrap();
+        // Under prefix [0x10], plus a sibling [0x11,..] that must NOT be
+        // swept in by scan_prefix([0x10]).
+        let keys: &[&[u8]] = &[&[0x10, 0x01], &[0x10, 0x02], &[0x10, 0xFF], &[0x11, 0x00]];
+        for (i, k) in keys.iter().enumerate() {
+            t.insert(*k, [i as u8]).unwrap();
+        }
+
+        let fwd: Vec<Vec<u8>> = t.iter().map(|r| r.unwrap().0.to_vec()).collect();
+        assert_eq!(
+            fwd,
+            vec![
+                vec![0x10, 0x01],
+                vec![0x10, 0x02],
+                vec![0x10, 0xFF],
+                vec![0x11, 0x00]
+            ]
+        );
+
+        let rev: Vec<Vec<u8>> = t.iter_rev().map(|r| r.unwrap().0.to_vec()).collect();
+        assert_eq!(
+            rev,
+            vec![
+                vec![0x11, 0x00],
+                vec![0x10, 0xFF],
+                vec![0x10, 0x02],
+                vec![0x10, 0x01]
+            ]
+        );
+
+        assert_eq!(t.last().unwrap().unwrap().0.as_ref(), &[0x11, 0x00]);
+
+        // scan_prefix([0x10]): exactly the three 0x10.. keys; the 0x11 sibling
+        // is excluded by the computed upper_bound.
+        let pref: Vec<Vec<u8>> = t.scan_prefix([0x10u8]).map(|r| r.unwrap().0.to_vec()).collect();
+        assert_eq!(pref, vec![vec![0x10, 0x01], vec![0x10, 0x02], vec![0x10, 0xFF]]);
+
+        // Inclusive range keeps the upper endpoint.
+        let rng: Vec<Vec<u8>> = t
+            .range((&[0x10u8, 0x02][..])..=(&[0x10u8, 0xFF][..]))
+            .map(|r| r.unwrap().0.to_vec())
+            .collect();
+        assert_eq!(rng, vec![vec![0x10, 0x02], vec![0x10, 0xFF]]);
+
+        // Exclusive end drops the upper endpoint.
+        let rng_ex: Vec<Vec<u8>> = t
+            .range((&[0x10u8, 0x01][..])..(&[0x10u8, 0xFF][..]))
+            .map(|r| r.unwrap().0.to_vec())
+            .collect();
+        assert_eq!(rng_ex, vec![vec![0x10, 0x01], vec![0x10, 0x02]]);
+    }
+
+    /// upper_bound: increments the last non-0xFF byte (truncating the tail),
+    /// and falls back to the prefix itself when it is all 0xFF.
+    #[test]
+    fn upper_bound_increments_last_non_ff_byte_and_falls_back_on_all_ff() {
+        assert_eq!(upper_bound(&[0x10]), vec![0x11]);
+        assert_eq!(upper_bound(&[0x10, 0x01]), vec![0x10, 0x02]);
+        assert_eq!(upper_bound(&[0x10, 0xFF]), vec![0x11]);
+        assert_eq!(upper_bound(&[0xFF, 0xFF]), vec![0xFF, 0xFF]);
+    }
+
+    /// Multi-tree transaction commits all trees on Ok and none on closure Err.
+    #[test]
+    fn multi_tree_transaction_commits_all_or_none() {
+        use super::transaction::{Transactional, TransactionError};
+        let (_d, db) = temp_db();
+        let a = db.open_tree("ta").unwrap();
+        let b = db.open_tree("tb").unwrap();
+        let trees: &[&Tree] = &[&a, &b];
+
+        // Commit-all.
+        trees
+            .transaction(|tx| {
+                tx[0].insert(b"k", b"va")?;
+                tx[1].insert(b"k", b"vb")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(a.get(b"k").unwrap().unwrap().as_ref(), b"va");
+        assert_eq!(b.get(b"k").unwrap().unwrap().as_ref(), b"vb");
+
+        // Closure Err aborts -> neither tree mutated.
+        let res: std::result::Result<(), TransactionError> = trees.transaction(|tx| {
+            tx[0].insert(b"k2", b"xa")?;
+            tx[1].insert(b"k2", b"xb")?;
+            Err(TransactionError::Abort("boom".into()))
+        });
+        assert!(res.is_err());
+        assert!(a.get(b"k2").unwrap().is_none());
+        assert!(b.get(b"k2").unwrap().is_none());
+    }
+
+    /// clear empties the tree; len / is_empty track its contents.
+    #[test]
+    fn clear_len_and_is_empty() {
+        let (_d, db) = temp_db();
+        let t = db.open_tree("cl").unwrap();
+        assert!(t.is_empty());
+        assert_eq!(t.len(), 0);
+        for i in 0u8..3 {
+            t.insert([i], [i]).unwrap();
+        }
+        assert_eq!(t.len(), 3);
+        assert!(!t.is_empty());
+        t.clear().unwrap();
+        assert_eq!(t.len(), 0);
+        assert!(t.is_empty());
+    }
+
+    /// Db-level: generate_id is monotonic, tree_names lists opened CFs,
+    /// was_recovered is false on a fresh open, and size_on_disk walks
+    /// without panicking.
+    #[test]
+    fn db_metadata_generate_id_tree_names_and_recovery_flag() {
+        let (_d, db) = temp_db();
+        let _t = db.open_tree("named_cf").unwrap();
+        db.flush().unwrap();
+
+        let a = db.generate_id().unwrap();
+        let b = db.generate_id().unwrap();
+        let c = db.generate_id().unwrap();
+        assert!(a < b && b < c, "generate_id must be monotonically increasing");
+
+        let names: Vec<String> = db
+            .tree_names()
+            .iter()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "named_cf"),
+            "tree_names should list opened CFs: {:?}",
+            names
+        );
+
+        assert!(!db.was_recovered());
+        let _ = db.size_on_disk();
+    }
+
+    /// IVec conversions and accessors: From<Vec>, From<Box<[u8]>>, as_ref,
+    /// Deref, Borrow, to_vec, len, is_empty.
+    #[test]
+    fn ivec_conversions() {
+        use std::borrow::Borrow;
+        let v = vec![1u8, 2, 3];
+        let iv = IVec::from(v.clone());
+        assert_eq!(iv.as_ref(), &[1, 2, 3]);
+        assert_eq!(&*iv, &[1, 2, 3][..]); // Deref
+        let b: &[u8] = iv.borrow(); // Borrow
+        assert_eq!(b, &[1, 2, 3]);
+        assert_eq!(iv.to_vec(), v);
+        assert_eq!(iv.len(), 3);
+        assert!(!iv.is_empty());
+
+        let boxed: Box<[u8]> = vec![9u8].into_boxed_slice();
+        let iv2 = IVec::from(boxed);
+        assert_eq!(iv2.as_ref(), &[9]);
+        assert!(IVec::from(Vec::<u8>::new()).is_empty());
+    }
+
+    /// Config: temporary + flush_every_ms opens a working store; a Config
+    /// with neither path nor temporary is an error.
+    #[test]
+    fn config_open_temporary_and_flush_every_ms() {
+        let db = Config::new()
+            .temporary(true)
+            .flush_every_ms(Some(100))
+            .open()
+            .unwrap();
+        let t = db.open_tree("tmp").unwrap();
+        t.insert(b"k", b"v").unwrap();
+        assert_eq!(t.get(b"k").unwrap().unwrap().as_ref(), b"v");
+        db.flush().unwrap();
+
+        // No path + not temporary => error.
+        assert!(Config::new().open().is_err());
+    }
 }

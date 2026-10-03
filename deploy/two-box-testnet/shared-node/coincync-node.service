@@ -1,0 +1,43 @@
+[Unit]
+Description=CoinCync testnet node (validate / relay / RPC)
+Documentation=https://github.com/coincync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=coincync
+Group=coincync
+# RPC Bearer key. The node REFUSES a non-loopback --rpc-bind without this, so
+# auth can never be silently skipped. Same value goes in /etc/coincync/rpc.key
+# for the tick, and on the rig box.
+EnvironmentFile=/etc/coincync/node.env
+
+# RPC binds to all interfaces but is Bearer-gated AND firewalled to the rig IP
+# (see firewall.sh). P2P is public (joins the mesh). REST/explorer disabled — a
+# validator doesn't need the public HTTP surface.
+ExecStart=/usr/local/bin/coincync-node \
+  --network testnet \
+  --data-dir /var/lib/coincync \
+  --p2p-bind 0.0.0.0:28080 \
+  --rpc-bind 0.0.0.0:28081 \
+  --addnode 2.29.34.197:28080 \
+  --external-ip <SHARED_IP> \
+  --rest-disable
+
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/coincync
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

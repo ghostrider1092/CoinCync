@@ -3,6 +3,106 @@
 //! Provides detailed behavioral tracking for peer selection and prioritization.
 //! Peers are scored based on multiple factors including latency, reliability,
 //! and protocol compliance.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `MisbehaviorType::penalty`** — INVARIANT: penalties are calibrated
+//!   tiers toward the -50 ban threshold; `OrphanFlood`/`MissingParent` stay at
+//!   zero and can never accumulate to a ban.
+//!   THREAT: misclassifying legitimate reorg/mining behavior as an attack
+//!   caused two testnet chain-partition stalls (2026-06-22, 2026-07-04).
+//!   TESTS: `orphan_flood_penalty_is_zero`, `orphan_flood_thousand_strikes_cannot_ban`,
+//!   `missing_parent_penalty_cannot_ban_even_if_accumulated`,
+//!   `orphan_flood_variant_penalty_calibration_matrix`.
+//! - **§2 `classify_invalid_block_reason`** — INVARIANT: reason-string
+//!   classification routes genuine protocol/PoW/proof violations to
+//!   instant-ban categories while routing non-fault causes (missing-parent
+//!   reorg race, our own system-clock error) away from instant-ban.
+//!   THREAT: F32 (SEV-B) — an overly broad `"timestamp"` substring match
+//!   instant-banned every peer when OUR clock failed; the 2026-07-04
+//!   misclassification of `MissingParent` as `InvalidBlockProofs` banned our
+//!   own miner during a legitimate reorg.
+//!   TESTS: `classify_difficulty_target_mismatch_is_instant_ban`,
+//!   `classify_checkpoint_mismatch_is_instant_ban`,
+//!   `classify_pow_and_timestamp_violations_are_instant_ban`,
+//!   `classify_anchor_violation_is_anchor_stamp`,
+//!   `classify_height_violation_is_protocol`,
+//!   `classify_unknown_reason_defaults_to_block_proofs`,
+//!   `classify_missing_parent_is_not_misbehavior`, `classify_is_case_insensitive`,
+//!   `other_reasons_still_ban_after_fix`,
+//!   `f32_system_clock_error_does_not_instant_ban_peers`,
+//!   `f32_legitimate_timestamp_violations_still_instant_ban`.
+//! - **§3 `classify_invalid_tx_reason`** — INVARIANT: oversized-payload
+//!   rejections map to `ProtocolViolation`, fee-floor rejections map to the
+//!   low-weight `LowFeeFlood` bucket (dynamic fee floor can legitimately
+//!   exceed a relaying peer's estimate), everything else maps to
+//!   `InvalidTransaction`.
+//!   THREAT: HIGH #13 — sybil spam below the dynamic fee floor must
+//!   accumulate to a ban without punishing honest fee-estimator drift.
+//!   TESTS: `classify_tx_oversized_is_protocol_violation`,
+//!   `classify_tx_default_is_invalid_transaction`.
+//! - **§4 `PeerScore` composite scoring / decay / ban check** — INVARIANT:
+//!   `composite_score` is a bounded `[0,1]` weighted blend; `decay` converges
+//!   monotonically to neutral; `should_ban` fires exactly at reputation
+//!   `<= -50`.
+//!   TESTS: `test_composite_score`, `test_decay_convergence`,
+//!   `invalid_tx_misbehavior_bans_after_four_offenses`,
+//!   `invalid_block_pow_is_single_strike_ban_from_default_reputation`.
+//! - **§5 `record_empty_blocks_response` / `is_get_blocks_banned`** —
+//!   INVARIANT: empty `Blocks` replies below `EMPTY_BLOCKS_BAN_THRESHOLD`
+//!   never erode reputation; at/after the threshold the peer is temporarily
+//!   banned from `GetBlocks` selection and reputation charges begin; the ban
+//!   auto-expires and resets the counter.
+//!   THREAT: eclipse via speculative/fabricated IBD hashes driving an honest
+//!   bystander to the disconnect floor; the "stall pathology" wedge observed
+//!   2026-05-04/05 where an unhelpful peer never got demoted.
+//!   TESTS: `empty_blocks_ban_triggers_at_threshold`,
+//!   `empty_blocks_ban_resets_on_real_block_delivery`,
+//!   `empty_blocks_ban_auto_expires`,
+//!   `sub_threshold_empty_blocks_do_not_erode_reputation`,
+//!   `persistent_empty_only_peer_still_disconnects`,
+//!   `empty_blocks_reputation_charged_only_from_threshold_onward`,
+//!   `record_block_success_clears_empties_and_marks_validated`.
+//! - **§6 `record_misbehavior` as sole reputation-write path**  — INVARIANT:
+//!   all misbehavior scoring flows through `record_misbehavior`, which both
+//!   deducts reputation and emits a debug trace; the earlier bypassing
+//!   `record_protocol_violation` method was removed so no code path silently
+//!   changes reputation without observability.
+//!   THREAT: F2 — divergent call sites causing a silent observability gap on
+//!   9 of 24 protocol-violation call sites.
+//!   TESTS: `test_misbehavior_wrong_network_is_immediate_ban_threshold`,
+//!   `classified_instant_ban_actually_bans_on_first_offense`.
+//! - **§7 `PeerMessageRateTracker` / `MSG_RATE_LIMITS`** — INVARIANT: every
+//!   table entry corresponds to a real `MessageType` discriminant, and every
+//!   attacker-amplification message type is present in the table.
+//!   THREAT: F21 (SEV-A) — a stale hex-literal table let GetBlocks/GetData
+//!   floods bypass `MessageFlood` detection entirely (unbounded CPU-burn
+//!   attack surface).
+//!   TESTS: `test_message_rate_tracker_flags_flood`,
+//!   `msg_rate_limits_use_real_msg_type_discriminants`,
+//!   `msg_rate_limits_cover_the_attacker_amplification_types`.
+//! - **§8 `OrphanFloodTracker`** — INVARIANT: per-peer isolated sliding
+//!   window; flags at most once per window when the threshold is crossed.
+//!   THREAT: orphan-flood CPU-recheck DoS, while not penalizing peers that
+//!   legitimately fan out orphans during a deep reorg.
+//!   TESTS: `orphan_flood_below_threshold_does_not_trigger`,
+//!   `orphan_flood_crossing_threshold_triggers_once`,
+//!   `orphan_flood_per_peer_isolated`, `orphan_flood_forget_clears_state`,
+//!   `orphan_flood_tracker_still_returns_true_at_threshold`.
+//! - **§9 `PeerScorer` ban/unban/cleanup/persistence`** — INVARIANT: `ban`
+//!   opportunistically prunes expired entries and removes the peer's score;
+//!   the on-disk ban list round-trips exactly through save/load.
+//!   TESTS: `test_ban_system`, `ban_opportunistically_prunes_expired_entries`,
+//!   `test_auto_ban_bad_peers_after_severe_offense`,
+//!   `save_and_load_bans_round_trip`.
+//! - **§10 `top_peers_for_download` / `peers_by_latency` validated gating**
+//!   — INVARIANT: both selectors return only `validated` peers, regardless
+//!   of composite score or latency.
+//!   TESTS: `top_peers_for_download_filters_unvalidated_and_low_score`,
+//!   `peers_by_latency_filters_unvalidated_and_orders_ascending`,
+//!   `test_peer_scorer`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -1849,5 +1949,163 @@ mod tests {
              re-opens the F11 CPU-burn vector.",
             score.reputation,
         );
+    }
+
+    #[test]
+    fn empty_blocks_reputation_charged_only_from_threshold_onward() {
+        // ECLIPSE defense (pre-mainnet review #4): pins the EXACT charge point.
+        // Sub-threshold empty `Blocks` replies must not touch reputation (an
+        // honest bystander fed speculative/fabricated IBD hashes cannot be
+        // driven to the -50 disconnect floor by empties). Only the
+        // threshold-crossing empty (and every empty after it) charges -15, so a
+        // genuinely-unhelpful pure-empty peer is still eventually disconnected.
+        let mut score = PeerScore::default();
+        let start = score.reputation;
+        for _ in 0..(EMPTY_BLOCKS_BAN_THRESHOLD - 1) {
+            score.record_empty_blocks_response();
+        }
+        assert_eq!(
+            score.reputation, start,
+            "sub-threshold empties must not erode reputation"
+        );
+        // The threshold-crossing empty charges reputation for the first time.
+        score.record_empty_blocks_response();
+        assert_eq!(score.consecutive_empty_blocks, EMPTY_BLOCKS_BAN_THRESHOLD);
+        assert_eq!(
+            score.reputation,
+            start - 15,
+            "the threshold empty charges exactly -15 (first reputation hit)"
+        );
+        // Each further empty keeps charging so a pure-empty peer still degrades.
+        score.record_empty_blocks_response();
+        assert_eq!(
+            score.reputation,
+            start - 30,
+            "post-threshold empties keep charging -15 each"
+        );
+    }
+
+    #[test]
+    fn record_block_success_clears_empties_and_marks_validated() {
+        // A real delivery must (a) clear the consecutive-empty wedge counter and
+        // (b) mark the peer validated (H-15: delivering a valid block proves the
+        // peer more conclusively than a bare handshake).
+        let mut score = PeerScore::default();
+        assert!(!score.validated, "fresh peer is not validated");
+        for _ in 0..(EMPTY_BLOCKS_BAN_THRESHOLD - 1) {
+            score.record_empty_blocks_response();
+        }
+        assert_eq!(score.consecutive_empty_blocks, EMPTY_BLOCKS_BAN_THRESHOLD - 1);
+
+        score.record_block_success(Duration::from_millis(20));
+        assert_eq!(
+            score.consecutive_empty_blocks, 0,
+            "a real delivery clears the empty-blocks wedge counter"
+        );
+        assert!(
+            score.validated,
+            "delivering a valid block marks the peer validated (H-15 fix)"
+        );
+        assert_eq!(score.blocks_delivered, 1);
+    }
+
+    #[test]
+    fn top_peers_for_download_filters_unvalidated_and_low_score() {
+        // top_peers_for_download must return only peers that are BOTH validated
+        // AND above min_download_score. A default validated peer clears the
+        // 0.3 score floor; an unvalidated peer (even with a good score) and a
+        // sub-floor peer are both excluded.
+        let mut scorer = PeerScorer::new();
+        let good = test_addr(31001);
+        let unvalidated = test_addr(31002);
+        let low = test_addr(31003);
+        {
+            let s = scorer.get_or_create(good);
+            s.validated = true; // default composite (~0.70) clears the floor
+        }
+        {
+            let s = scorer.get_or_create(unvalidated);
+            s.validated = false; // good score but not validated → excluded
+        }
+        {
+            let s = scorer.get_or_create(low);
+            s.validated = true;
+            s.reputation = -100;
+            s.latency_ms = 5000;
+            s.validity_rate = 0.0;
+            s.block_speed = 0.0; // composite == 0 → below min_download_score
+        }
+
+        let top = scorer.top_peers_for_download(10);
+        assert!(top.contains(&good), "validated, above-floor peer is included");
+        assert!(
+            !top.contains(&unvalidated),
+            "unvalidated peer must be filtered even with a good score"
+        );
+        assert!(
+            !top.contains(&low),
+            "peer below min_download_score must be filtered"
+        );
+    }
+
+    #[test]
+    fn peers_by_latency_filters_unvalidated_and_orders_ascending() {
+        // peers_by_latency returns only validated peers, sorted lowest-latency
+        // first. An unvalidated peer is excluded regardless of its latency.
+        let mut scorer = PeerScorer::new();
+        let fast = test_addr(32001);
+        let slow = test_addr(32002);
+        let unval = test_addr(32003);
+        {
+            let s = scorer.get_or_create(fast);
+            s.validated = true;
+            s.latency_ms = 50;
+        }
+        {
+            let s = scorer.get_or_create(slow);
+            s.validated = true;
+            s.latency_ms = 5000;
+        }
+        {
+            let s = scorer.get_or_create(unval);
+            s.validated = false;
+            s.latency_ms = 10; // lowest latency but not validated → excluded
+        }
+
+        let ordered = scorer.peers_by_latency();
+        assert_eq!(ordered.len(), 2, "only validated peers are returned");
+        assert_eq!(ordered[0], fast, "lowest-latency validated peer first");
+        assert_eq!(ordered[1], slow);
+        assert!(
+            !ordered.contains(&unval),
+            "unvalidated peer must be excluded from the latency list"
+        );
+    }
+
+    #[test]
+    fn save_and_load_bans_round_trip() {
+        // Ban list persists across restarts: active bans survive a
+        // save_bans_to_file → load_bans_from_file round-trip.
+        let mut scorer = PeerScorer::new();
+        let a = test_addr(41001);
+        let b = test_addr(41002);
+        scorer.ban(a);
+        scorer.ban(b);
+
+        let path = std::env::temp_dir().join(format!(
+            "coincync_bans_roundtrip_{}.json",
+            std::process::id()
+        ));
+        scorer.save_bans_to_file(&path).expect("save bans to disk");
+
+        let mut restored = PeerScorer::new();
+        let loaded = restored
+            .load_bans_from_file(&path)
+            .expect("load bans from disk");
+        assert_eq!(loaded, 2, "both active bans must be loaded");
+        assert!(restored.is_banned(&a), "restored ban a is active");
+        assert!(restored.is_banned(&b), "restored ban b is active");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

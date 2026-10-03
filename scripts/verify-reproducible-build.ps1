@@ -38,7 +38,7 @@
 
 .PARAMETER GitHubRepo
   owner/repo for the -CompareToRelease asset fetch. Default
-  "ghostrider1092/Coincync-Testnet-". Override for fork verification.
+  "ghostrider1092/CoinCync". Override for fork verification.
 
 .EXAMPLE
   .\verify-reproducible-build.ps1
@@ -64,7 +64,7 @@ param(
   [string]$GitBashPath = "C:\Program Files\Git\bin\bash.exe",
   [switch]$SkipSecondRun,
   [string]$CompareToRelease = $null,
-  [string]$GitHubRepo = "ghostrider1092/Coincync-Testnet-"
+  [string]$GitHubRepo = "ghostrider1092/CoinCync"
 )
 
 $ErrorActionPreference = 'Stop'

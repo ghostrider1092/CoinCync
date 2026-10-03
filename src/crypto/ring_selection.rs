@@ -26,6 +26,58 @@
 //! residual — a genuinely old real output remains an age outlier — is closed
 //! only by the long-term large-ring / zero-knowledge upgrade, not by decoy
 //! tuning.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `RingSelectionPool`** — INVARIANT: the pool deduplicates candidates by
+//!   full public key, so no output can appear twice in one anonymity set.
+//!   THREAT: repeated pool entries give one output multiple inclusion chances,
+//!   shrinking the effective anonymity set and biasing the ring.
+//!   TESTS: `duplicate_public_keys_pool_rejected_structurally`,
+//!   `full_public_key_distinguishes_shared_u64_prefixes`.
+//! - **§2 `RingSelectionConfig`** — INVARIANT: decoy eligibility is bounded by a
+//!   configured `[min_decoy_age, max_decoy_age]` window with a default ring size
+//!   of 11. THREAT: an unbounded/ancient decoy window or a tiny ring weakens the
+//!   privacy set an observer must defeat.
+//!   TESTS: `is_eligible_decoy_enforces_min_and_max_age_bounds`.
+//! - **§3 `select_decoys`** — INVARIANT: `ring_size >= 2` is enforced before
+//!   `decoy_count = ring_size - 1`, and decoys are sampled uniformly from the
+//!   already policy-shaped pool without re-imposing an age bias.
+//!   THREAT: T3F1 — `ring_size = 0` underflows `ring_size - 1` to `usize::MAX` in
+//!   release wrapping arithmetic; a second age bias here would re-expose the real
+//!   spend the upstream gamma policy hid.
+//!   TESTS: `test_ring_selection`, `test_ring_assembly_is_uniform_over_supplied_pool`,
+//!   `select_decoys_rejects_ring_size_below_two`,
+//!   `select_decoys_errs_when_eligible_below_decoy_count_after_age_filter`.
+//! - **§4 `is_eligible_decoy`** — INVARIANT: BUG-5 — a real output younger than
+//!   `min_decoy_age` relaxes `effective_min_age` so it is not the sole young ring
+//!   member; the real output is never eligible as its own decoy; ages stay within
+//!   the configured window. THREAT: BUG-5 — a lone young real member is trivially
+//!   deanonymized by age analysis (R-22 emits the loud advisory for this).
+//!   TESTS: `select_decoys_young_real_output_relaxes_effective_min_age`,
+//!   `is_eligible_decoy_enforces_min_and_max_age_bounds`.
+//! - **§5 `verify_ring_quality`** — INVARIANT: per-ring structural audit flags a
+//!   real output that is a statistical age outlier and any duplicate commitment;
+//!   distribution conformance is deliberately not judged from one ring.
+//!   THREAT: an age-outlier real member or a duplicated commitment identifies the
+//!   real spend to a chain analyst.
+//!   TESTS: `verify_ring_quality_flags_real_age_outlier`,
+//!   `verify_ring_quality_flags_duplicate_commitment`, `test_ring_quality_check`.
+//! - **§6 `RingSelectionStats`** — INVARIANT: A4-CR-04 — the age-bucket histogram
+//!   handles `age == 0` explicitly (no `log2(0) = -inf`) and clamps the bucket to
+//!   9, so no out-of-bounds index or UB on cast to `usize`.
+//!   THREAT: A4-CR-04 — an `age == 0` decoy casting `-inf` to `usize` corrupts the
+//!   stats array / triggers undefined behavior.
+//!   TESTS: `test_ring_selection`.
+//! - **§7 `with_ring_size`** — INVARIANT: the `RingSelector` constructors bind a
+//!   ring-size policy to `RingSelectionConfig` defaults, so a caller-chosen ring
+//!   size still inherits the audited age bounds; an invalid size is caught only at
+//!   `select_decoys` (§3), never silently accepted here.
+//!   THREAT: a constructor that dropped the default age bounds would let an
+//!   under-constrained selector assemble low-anonymity rings.
+//!   TESTS: `test_ring_selection`, `select_decoys_rejects_ring_size_below_two`.
 
 use crate::error::{Error, Result};
 use crate::primitives::PublicKey;
@@ -604,5 +656,227 @@ mod tests {
             .unwrap();
 
         assert_eq!(decoys.len(), 10);
+    }
+
+    #[test]
+    fn select_decoys_rejects_ring_size_below_two() {
+        let current_height = 100_000;
+        let pool_storage: Vec<OwnedOutput> = (0u64..20)
+            .map(|i| make_output(current_height - 1_000, i))
+            .collect();
+        let pool = output_pool(&pool_storage);
+        let real_output = make_output(current_height - 50, 9999);
+        let mut rng = StdRng::seed_from_u64(10);
+
+        // ring_size = 0 must not underflow `ring_size - 1`; it is rejected with
+        // the sentinel expected=2 before decoy_count is ever computed.
+        let zero = RingSelector::with_ring_size(0);
+        let r0 = zero.select_decoys(
+            &real_output.public_key,
+            real_output.height,
+            &pool,
+            current_height,
+            &mut rng,
+        );
+        assert!(matches!(
+            r0,
+            Err(Error::InvalidRingSize {
+                expected: 2,
+                got: 0
+            })
+        ));
+
+        // ring_size = 1 provides no anonymity set and is likewise rejected.
+        let one = RingSelector::with_ring_size(1);
+        let r1 = one.select_decoys(
+            &real_output.public_key,
+            real_output.height,
+            &pool,
+            current_height,
+            &mut rng,
+        );
+        assert!(matches!(
+            r1,
+            Err(Error::InvalidRingSize {
+                expected: 2,
+                got: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn select_decoys_errs_when_eligible_below_decoy_count_after_age_filter() {
+        let selector = RingSelector::with_ring_size(11);
+        let current_height = 100_000;
+        // Pool is large enough to pass the raw pool-size check (>= 10) but every
+        // member is younger than min_decoy_age (age 0 < 10), so the age filter
+        // removes them all. The real output is old, so effective_min_age stays
+        // at the configured min (10) and no BUG-5 relaxation applies.
+        let pool_storage: Vec<OwnedOutput> =
+            (0u64..15).map(|i| make_output(current_height, i)).collect();
+        let pool = output_pool(&pool_storage);
+        let real_output = make_output(current_height - 1_000, 9999);
+        let mut rng = StdRng::seed_from_u64(11);
+
+        let result = selector.select_decoys(
+            &real_output.public_key,
+            real_output.height,
+            &pool,
+            current_height,
+            &mut rng,
+        );
+        assert!(matches!(
+            result,
+            Err(Error::InvalidRingSize {
+                expected: 10,
+                got: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn select_decoys_young_real_output_relaxes_effective_min_age() {
+        // BUG-5: a real output younger than min_decoy_age relaxes the effective
+        // minimum decoy age so the ring is not trivially deanonymized by having
+        // the real output be the only young member.
+        let selector = RingSelector::with_ring_size(11);
+        let current_height = 100_000;
+        // Pool members are age 5: older than the young real output, but younger
+        // than the configured min_decoy_age (10).
+        let pool_storage: Vec<OwnedOutput> = (0u64..15)
+            .map(|i| make_output(current_height - 5, i))
+            .collect();
+        let pool = output_pool(&pool_storage);
+
+        // Young real output (age 2 < min_decoy_age): effective_min_age relaxes
+        // to 2, so the age-5 members become eligible and selection succeeds.
+        let young_real = make_output(current_height - 2, 9999);
+        let mut rng = StdRng::seed_from_u64(12);
+        let (decoys, real_position, stats) = selector
+            .select_decoys(
+                &young_real.public_key,
+                young_real.height,
+                &pool,
+                current_height,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(decoys.len(), 10);
+        assert!(real_position < 11);
+        assert_eq!(stats.decoys_selected, 10);
+
+        // Contrast: an OLD real output leaves effective_min_age at the
+        // configured 10, which filters the same age-5 pool down to nothing.
+        let old_real = make_output(current_height - 10_000, 8888);
+        let mut rng2 = StdRng::seed_from_u64(12);
+        let contrast = selector.select_decoys(
+            &old_real.public_key,
+            old_real.height,
+            &pool,
+            current_height,
+            &mut rng2,
+        );
+        assert!(matches!(
+            contrast,
+            Err(Error::InvalidRingSize {
+                expected: 10,
+                got: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn is_eligible_decoy_enforces_min_and_max_age_bounds() {
+        let config = RingSelectionConfig {
+            target_ring_size: 11,
+            min_decoy_age: 10,
+            max_decoy_age: 100,
+        };
+        let selector = RingSelector::new(config);
+        let current_height = 1_000;
+        let real = make_output(current_height - 50, 9999);
+        let effective_min_age = 10; // configured min, no relaxation
+
+        // Boundary at min: age == 10 eligible, age == 9 rejected.
+        let at_min = make_output(current_height - 10, 1);
+        let below_min = make_output(current_height - 9, 2);
+        assert!(selector.is_eligible_decoy(
+            &at_min.as_ref(),
+            &real.public_key,
+            current_height,
+            effective_min_age
+        ));
+        assert!(!selector.is_eligible_decoy(
+            &below_min.as_ref(),
+            &real.public_key,
+            current_height,
+            effective_min_age
+        ));
+
+        // Boundary at max: age == 100 eligible, age == 101 rejected.
+        let at_max = make_output(current_height - 100, 3);
+        let above_max = make_output(current_height - 101, 4);
+        assert!(selector.is_eligible_decoy(
+            &at_max.as_ref(),
+            &real.public_key,
+            current_height,
+            effective_min_age
+        ));
+        assert!(!selector.is_eligible_decoy(
+            &above_max.as_ref(),
+            &real.public_key,
+            current_height,
+            effective_min_age
+        ));
+
+        // The real output itself is never eligible as its own decoy.
+        let real_as_decoy = make_output(current_height - 50, 9999);
+        assert!(!selector.is_eligible_decoy(
+            &real_as_decoy.as_ref(),
+            &real.public_key,
+            current_height,
+            effective_min_age
+        ));
+    }
+
+    #[test]
+    fn verify_ring_quality_flags_real_age_outlier() {
+        let selector = RingSelector::with_ring_size(11);
+        let current_height = 1_000_000;
+        // Ten tightly clustered decoys (age ~1000) plus one wildly older real
+        // output (age 900_000), placed at real_index.
+        let mut ring_storage: Vec<OwnedOutput> = (0u64..10)
+            .map(|i| make_output(current_height - (1_000 + i), i))
+            .collect();
+        ring_storage.push(make_output(current_height - 900_000, 100));
+        let ring = output_pool(&ring_storage);
+        let real_index = ring.outputs.len() - 1;
+
+        let report = selector.verify_ring_quality(&ring.outputs, real_index, current_height);
+        assert!(!report.is_valid);
+        assert!(report.issues.iter().any(|issue| issue.contains("outlier")));
+    }
+
+    #[test]
+    fn verify_ring_quality_flags_duplicate_commitment() {
+        let selector = RingSelector::with_ring_size(11);
+        let current_height = 100_000;
+        // Clustered ages so the real output is NOT an age outlier; the only
+        // issue should be the duplicate commitment.
+        let mut ring_storage: Vec<OwnedOutput> = (0u64..11)
+            .map(|i| make_output(current_height - (1_000 + i * 10), i))
+            .collect();
+        // Force two members to share a commitment while keeping distinct public
+        // keys (so the pool's key-dedup retains both entries).
+        let shared = ring_storage[0].commitment;
+        ring_storage[1].commitment = shared;
+        let ring = output_pool(&ring_storage);
+
+        let report = selector.verify_ring_quality(&ring.outputs, 0, current_height);
+        assert!(!report.is_valid);
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.contains("Duplicate commitment")));
     }
 }

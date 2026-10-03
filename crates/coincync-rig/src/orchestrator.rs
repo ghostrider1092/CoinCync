@@ -443,6 +443,9 @@ pub async fn run_solo(
                                 .map(|d| d.as_secs())
                                 .unwrap_or(0);
                             m.record_block_find(now);
+                            // Authoritative "your blocks" ledger for the
+                            // dashboard: this height, accepted now.
+                            m.record_accepted_block(height, now);
                         }
                         info!(blocks_found, "orchestrator: block accepted");
                     }
@@ -971,6 +974,31 @@ mod tests {
         // Being behind the network is handled by is_synced, not this gate.
         assert!(!fork_diverged(10_000, 10_042, FORK_DIVERGENCE_MARGIN));
         assert!(!fork_diverged(10_042, 10_042, FORK_DIVERGENCE_MARGIN));
+    }
+
+    #[test]
+    fn rig_reads_peer_target_height_key_from_get_info() {
+        // Guards the node<->rig field-name contract that broke in #131: the
+        // gate extracts "peer_target_height" from the daemon's get_info, but the
+        // node never emitted that key, so `peer_target` was always 0 and
+        // fork_diverged() always returned false (gate silently disabled). The
+        // node now emits it (src/rpc/handlers/node.rs, get_info). If either side
+        // renames the key, this test and that handler must both change.
+        let info: serde_json::Value = serde_json::json!({
+            "height": 10_544u64,
+            "peer_target_height": 10_042u64,
+        });
+        // The exact extraction the orchestrator uses (orchestrator.rs:259-266).
+        let local = info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+        let peer_target = info
+            .get("peer_target_height")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(peer_target, 10_042, "rig must read peer_target_height from get_info");
+        assert!(
+            fork_diverged(local, peer_target, FORK_DIVERGENCE_MARGIN),
+            "with the field present, a runaway private fork trips the gate that #131 left disabled"
+        );
     }
 
     // Build a minimal non-coinbase tx carrying only a fee — enough for the

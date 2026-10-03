@@ -1,3 +1,42 @@
+//! Transaction-wide ring allocation from a validated covered response.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `real-set match`** — INVARIANT: the supplied real outputs must equal
+//!   the request's real locators as an ordered set. THREAT: substituting or
+//!   reordering the real member being spent.
+//!   TESTS: `allocation_rejects_real_output_order_mismatch`,
+//!   `allocation_reports_missing_real_output_when_response_index_omits_it`.
+//! - **§2 `real identity binding`** — INVARIANT: each real output's resolved
+//!   public key and commitment must equal the wallet-supplied identity, and no
+//!   two reals may share a public key. THREAT: a forged or mismatched real
+//!   member slips into the ring. TESTS: `allocation_rejects_real_identity_mismatch`,
+//!   `allocation_rejects_duplicate_real_public_key`.
+//! - **§3 `candidate filtering`** — INVARIANT: decoys above `max_decoy_height`
+//!   (min-age) or locked at the spend height are excluded. THREAT: immature or
+//!   locked decoys produce invalid rings or leak spend timing.
+//!   TESTS: `allocation_filters_decoys_above_the_max_decoy_height`,
+//!   `allocation_filters_a_locked_decoy_but_still_allocates`,
+//!   `lock_height_is_checked_at_the_next_spend_height`.
+//! - **§4 `identity-point exclusion`** — INVARIANT: an all-zero (identity-point)
+//!   public key or commitment is never placed in a ring, mirroring the CLSAG
+//!   verifier. THREAT: the genesis placeholder in a ring fails the whole input's
+//!   signature. TESTS: `allocation_excludes_identity_point_decoys`.
+//! - **§5 `decoy uniqueness / sufficiency`** — INVARIANT: each decoy public key
+//!   is used at most once across the transaction; too few candidates or a size
+//!   overflow are rejected, never panicked. THREAT: cross-ring decoy reuse links
+//!   inputs. TESTS: `allocation_uses_no_repeated_decoy_public_key_across_rings`,
+//!   `allocation_reports_insufficient_decoys_when_candidate_pool_too_small`,
+//!   `allocation_reports_ring_allocation_size_overflow`.
+//! - **§6 `real member placement`** — INVARIANT: every ring has the same ring
+//!   size and the real member sits at a uniformly random secret index within
+//!   bounds. THREAT: a predictable real position defeats ring privacy; ring-size
+//!   divergence (incident 1d27d3c8).
+//!   TESTS: `allocation_places_real_member_at_the_secret_index_in_every_ring`,
+//!   `allocation_places_the_real_index_within_ring_bounds`.
+
 use super::error::{DecoySelectionError, DecoySelectionResult};
 use super::types::{
     AllocatedRing, AllocatedRings, RealOutputIdentity, ValidatedCoveredResponse,

@@ -1,5 +1,5 @@
 [Unit]
-Description=CoinCync 1.0 Full Node
+Description=CoinCync Full Node (testnet)
 After=network-online.target
 Wants=network-online.target
 

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# push-both.sh — push ONE branch to the project's public home(s).
+# push-both.sh — push ONE branch to the project's GitHub home(s).
 #
-#   • GitHub    (ghostrider1092/CoinCync)  remote: mirror  (HTTPS/gh)
+#   • origin  (ghostrider1092/CoinCync)     — the PRIMARY personal repo
+#   • mirror  (Coincync/Coincync-Testnet-)  — the org mirror (optional)
 #
 # Codeberg was REMOVED 2026-08-20: Codeberg's usage policy prohibits
-# cryptocurrency/blockchain projects, so it was never a valid home (the old
-# "crypto-tolerant" label here was wrong) and pushing there risked a ToS
-# takedown. NLnet/NGI0 does not require Codeberg — it is host-agnostic. If you
-# want a non-GitHub fallback that ACTUALLY tolerates the project, use one that
-# permits it (GitLab.com, sourcehut, a self-hosted Forgejo/Gitea, or Radicle) —
-# NOT Codeberg — and wire it into the optional block below.
+# cryptocurrency/blockchain projects, so it was never a valid home and pushing
+# there risked a ToS takedown. NLnet/NGI0 is host-agnostic and does not require
+# it. If you want a non-GitHub fallback that ACTUALLY tolerates the project, use
+# one that permits it (GitLab.com, sourcehut, self-hosted Forgejo/Gitea, or
+# Radicle) — NOT Codeberg — and add it to the mirror list below.
 #
 # Usage:  scripts/push-both.sh <branch>
 #
@@ -21,16 +21,24 @@ set -euo pipefail
 
 branch="${1:?usage: scripts/push-both.sh <branch>}"
 
-echo "→ GitHub mirror (ghostrider1092/CoinCync) …"
-git push mirror "$branch:refs/heads/$branch"
+# The PRIMARY: the personal repo. `origin` always exists in a clone/worktree, so
+# a failure here is a real error and must stop the script (set -e).
+echo "→ GitHub origin (ghostrider1092/CoinCync) — PRIMARY …"
+git push origin "$branch:refs/heads/$branch"
 
-# ── Optional second home (a REAL crypto-tolerant forge — NOT Codeberg) ────────
-# Add the remote once, e.g.:
-#   git remote add fallback git@gitlab.com:<you>/coincync.git
-# then uncomment (keep the explicit single-branch refspec — never --all):
-#
-# echo "→ fallback forge …"
-# git push fallback "$branch:refs/heads/$branch"
-# ─────────────────────────────────────────────────────────────────────────────
+# Additional mirrors: push each configured remote, but do NOT fail the whole run
+# if a mirror is missing or transiently rejects — the primary already has the
+# branch. (Previously this script pushed ONLY `mirror` and skipped origin, so a
+# branch reached the org but not the personal primary — the bug this fixes.)
+for m in mirror; do
+    if git remote get-url "$m" >/dev/null 2>&1; then
+        echo "→ GitHub mirror ($m) …"
+        if ! git push "$m" "$branch:refs/heads/$branch"; then
+            echo "  ! mirror '$m' push failed (primary already has '$branch'); continuing." >&2
+        fi
+    else
+        echo "  (mirror '$m' not configured — skipping)"
+    fi
+done
 
-echo "✓ '$branch' pushed to the GitHub mirror."
+echo "✓ '$branch' pushed to origin (primary)$(git remote get-url mirror >/dev/null 2>&1 && echo ' + org mirror')."

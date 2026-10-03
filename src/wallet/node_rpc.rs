@@ -4,6 +4,45 @@
 //! clients with different timeouts and authentication behaviour. This module
 //! keeps transport policy in one place and exposes only the methods required
 //! to build and submit a wallet-owned-decoy transaction.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `new` / `with_timeout`** — INVARIANT: an empty/whitespace endpoint is
+//!   rejected, and any `COINCYNC_RPC_API_KEY` is attached as a sensitive
+//!   `Authorization: Bearer` header that never prints in logs.
+//!   THREAT: unauthenticated or misconfigured client silently talking to the
+//!   wrong node. TESTS: `empty_endpoint_is_rejected`.
+//! - **§2 `submit_transaction` / `classify_submission_result`** — INVARIANT:
+//!   a node result is mapped to exactly one of `Accepted`, definitive
+//!   `Rejected`, or retryable `Unknown`; a remote JSON-RPC error is a
+//!   definitive rejection while transport/protocol failures stay `Unknown`.
+//!   THREAT: a rejected tx treated as accepted (funds/inputs mis-tracked), or a
+//!   maybe-delivered tx treated as failed (double submission).
+//!   TESTS: `remote_submission_error_is_a_definitive_rejection`,
+//!   `transport_and_protocol_failures_keep_submission_unknown`.
+//! - **§3 `submission_was_accepted`** — INVARIANT: acceptance is recognized from
+//!   either a bare `true` or `{"accepted": true}`; anything else is not
+//!   accepted. THREAT: ambiguous node reply read as success.
+//!   TESTS: `submission_acceptance_supports_boolean_and_object_results`.
+//! - **§4 `submission_rejection_reason` / `remote_error_reason`** — INVARIANT:
+//!   the human-readable reason is preferred (`reason`/`message`/`error`), so
+//!   operators see why a tx was rejected. THREAT: opaque rejections that hide a
+//!   fee/validity problem. TESTS: `rejection_reason_prefers_human_readable_fields`,
+//!   `remote_error_reason_prefers_the_json_rpc_message`.
+//! - **§5 `encode_transaction`** — INVARIANT: a local borsh/hex encoding failure
+//!   is definitive (no request reached the node) so callers must not open an
+//!   in-flight reservation for it. THREAT: phantom reservation on a tx that was
+//!   never sent. TESTS: (gap — no isolated encode test; covered via
+//!   `submit_transaction`).
+//! - **§6 `decoy_distribution` / `resolve_outputs`** — INVARIANT: locators are
+//!   resolved against the exact snapshot `(height, hash, policy_version)` they
+//!   were built from, so metadata cannot be mispaired. THREAT: decoy set built
+//!   against a stale/foreign snapshot. TESTS: (gap — requires a live node;
+//!   exercised only in end-to-end spend flows).
+//! - **§7 `endpoint`** — INVARIANT: returns the configured endpoint verbatim.
+//!   THREAT: n/a (read-only accessor). TESTS: (gap — trivial getter).
 
 use super::decoy_selection::CoveredRequest;
 use crate::decoy::{DecoyDistributionSnapshot, ResolvedDecoySnapshot};
@@ -13,7 +52,6 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::fmt;
-use std::str::FromStr;
 use std::time::Duration;
 
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -169,20 +207,28 @@ impl NodeRpcClient {
             .await
             .map_err(|error| RpcCallError::Protocol(format!("invalid JSON response: {error}")))?;
 
-        if let Some(error) = payload.get("error").filter(|error| !error.is_null()) {
-            return Err(RpcCallError::Remote(remote_error_reason(error)));
-        }
-        if !status.is_success() {
-            return Err(RpcCallError::Protocol(format!(
-                "HTTP {status} without a JSON-RPC error"
-            )));
-        }
-
-        payload
-            .get("result")
-            .cloned()
-            .ok_or_else(|| RpcCallError::Protocol("response missing result".into()))
+        parse_rpc_response(status, payload)
     }
+}
+
+fn parse_rpc_response(
+    status: reqwest::StatusCode,
+    mut payload: Value,
+) -> std::result::Result<Value, RpcCallError> {
+    // Preserve node errors even on non-success HTTP responses.
+    if let Some(error) = payload.get("error").filter(|error| !error.is_null()) {
+        return Err(RpcCallError::Remote(remote_error_reason(error)));
+    }
+    if !status.is_success() {
+        return Err(RpcCallError::Protocol(format!(
+            "HTTP {status} without a JSON-RPC error"
+        )));
+    }
+
+    payload
+        .as_object_mut()
+        .and_then(|object| object.remove("result"))
+        .ok_or_else(|| RpcCallError::Protocol("response missing result".into()))
 }
 
 fn classify_submission_result(
@@ -243,6 +289,35 @@ impl fmt::Display for RpcCallError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_response_preserves_result_values() {
+        for result in [json!(true), json!({"outputs": [1, 2]}), Value::Null] {
+            let payload = json!({"result": result, "error": null});
+            assert_eq!(
+                parse_rpc_response(reqwest::StatusCode::OK, payload).unwrap(),
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn rpc_response_preserves_error_precedence() {
+        use reqwest::StatusCode;
+        for status in [StatusCode::OK, StatusCode::BAD_REQUEST] {
+            let payload = json!({"result": true, "error": {"message": "rejected"}});
+            assert!(matches!(parse_rpc_response(status, payload),
+                Err(RpcCallError::Remote(reason)) if reason == "rejected"));
+        }
+        assert!(matches!(
+            parse_rpc_response(StatusCode::BAD_REQUEST, json!({"result": true})),
+            Err(RpcCallError::Protocol(reason)) if reason.starts_with("HTTP 400")
+        ));
+        for payload in [json!({}), json!({"error": null}), Value::Null, json!([])] {
+            assert!(matches!(parse_rpc_response(StatusCode::OK, payload),
+                Err(RpcCallError::Protocol(reason)) if reason == "response missing result"));
+        }
+    }
 
     #[test]
     fn empty_endpoint_is_rejected() {
