@@ -25,6 +25,7 @@ pub mod peer;
 pub mod proxy;
 pub mod relay_score;
 pub mod scoring;
+pub mod switchboard;
 pub mod sync;
 pub mod transport;
 
