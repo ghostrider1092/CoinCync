@@ -60,7 +60,8 @@
 //!   THREAT: Bug 3 (NYC stuck at height 12) — a download that lost its
 //!   request-tracking entry would otherwise never be retried.
 //!   TESTS: `test_mark_block_failed_requeues`, `test_stuck_download_detection`,
-//!   `test_stall_detection`.
+//!   `test_stall_detection`. Re-queue paths restore chain order:
+//!   `requeued_requests_keep_download_order`.
 //! - **§7 `queue_headers_inner` per-peer cap (`MAX_HEADERS_PER_PEER`)** —
 //!   INVARIANT: one peer's queued headers are capped so it cannot fill the
 //!   50K-slot pending-header pool and starve other peers' headers.
@@ -78,7 +79,8 @@
 //!   `header_nonce_rejects_cross_peer_without_consuming`,
 //!   `header_nonce_rejected_after_generation_reset`,
 //!   `header_nonce_cancelled_send_allows_immediate_retry`,
-//!   `header_nonce_unsolicited_rejected`.
+//!   `header_nonce_unsolicited_rejected`,
+//!   `headers_validation_keeps_request_pending`.
 
 use crate::consensus::Block;
 use crate::error::Result;
@@ -102,6 +104,8 @@ struct BlockRequest {
     hash: Hash,
     requested_from: PeerId,
     requested_at: u64,
+    /// Position in the download order, see `ChainSync::next_request_seq`.
+    seq: u64,
 }
 
 const MAX_ORPHAN_BLOCKS: usize = 1000;
@@ -191,6 +195,8 @@ struct OrphanBlock {
 
 struct DownloadEntry {
     entered_at: u64,
+    /// Position in the download order, see `ChainSync::next_request_seq`.
+    seq: u64,
 }
 
 pub struct ChainSync {
@@ -223,6 +229,21 @@ pub struct ChainSync {
     headers_per_peer: HashMap<PeerId, usize>,
     downloading: HashSet<Hash>,
     download_timestamps: HashMap<Hash, DownloadEntry>,
+    /// Monotonic counter stamped on every hash as it leaves `pending_headers`.
+    /// The re-queue paths (timeout, stuck download, peer disconnect) collect
+    /// hashes out of `HashMap`/`HashSet`s, whose iteration order is random;
+    /// sorting by this before `push_front` keeps the queue in chain order.
+    /// Re-requesting a span in random order makes almost every delivered
+    /// block an orphan (parent not yet applied), each orphan front-queues its
+    /// parent, and the download degenerates into an orphan storm.
+    next_request_seq: u64,
+    /// Download-order position of hashes that a re-queue path put back into
+    /// `pending_headers`. `get_blocks_to_request` reuses it instead of a
+    /// fresh `next_request_seq`, so a re-requested span keeps its place
+    /// relative to spans that are still in flight. Without this, two
+    /// staggered timeout rounds leave the earlier span with the higher
+    /// seq, and the next re-queue sorts it behind the later one.
+    requeued_seq: HashMap<Hash, u64>,
     max_concurrent: usize,
     request_timeout: u64,
     last_orphan_cleanup: u64,
@@ -231,6 +252,13 @@ pub struct ChainSync {
     last_sync_peer: Option<PeerId>,
     headers_request_time: Option<u64>,
     headers_received_this_cycle: bool,
+    /// True while `handle_headers` is verifying a Headers batch whose nonce
+    /// it has already consumed. The batch is verified with the `ChainSync`
+    /// lock released (2000 RandomX header checks take tens of seconds in
+    /// light mode), so this is what keeps `headers_request_pending()` true
+    /// for that window; without it the sync driver would see no request in
+    /// flight and issue a second GetHeaders for the same range.
+    validating_headers: bool,
     peer_heights: HashMap<PeerId, u64>,
     /// Outstanding GetHeaders nonces, bound to the peer the request was sent to
     /// and the sync generation it was issued in. A Headers response is only
@@ -343,6 +371,8 @@ impl ChainSync {
             headers_per_peer: HashMap::new(),
             downloading: HashSet::new(),
             download_timestamps: HashMap::new(),
+            next_request_seq: 0,
+            requeued_seq: HashMap::new(),
             max_concurrent: 100,
             request_timeout: 30,
             last_orphan_cleanup: 0,
@@ -351,6 +381,7 @@ impl ChainSync {
             last_sync_peer: None,
             headers_request_time: None,
             headers_received_this_cycle: false,
+            validating_headers: false,
             peer_heights: HashMap::new(),
             peer_difficulties: HashMap::new(),
             best_known_difficulty: 0,
@@ -901,6 +932,12 @@ impl ChainSync {
                 if self.true_best_height() > self.local_height + 2 {
                     self.state = SyncState::Headers;
                     self.headers_request_time = None; // Reset timeout to allow re-request
+                } else if self.state == SyncState::Headers && self.local_height > 0 {
+                    // Nobody claims more than we have and the peer we asked had
+                    // nothing past our tip: one confirming round, then Synced,
+                    // as after a block commit. Staying in Headers meant a new
+                    // GetHeaders every tick, each answered empty again.
+                    self.state = SyncState::ConfirmingSynced;
                 }
             }
             return;
@@ -962,6 +999,13 @@ impl ChainSync {
         }
     }
 
+    /// Hashes currently queued for download. Each came through
+    /// `handle_headers` validation, so a Headers response that repeats them
+    /// (reconnect, tip refresh, watchdog) can skip their PoW check.
+    pub fn queued_header_hashes(&self) -> HashSet<Hash> {
+        self.pending_header_peer.keys().copied().collect()
+    }
+
     pub fn get_blocks_to_request(&mut self, max: usize) -> Vec<Hash> {
         let mut out = Vec::new();
         let slots = self.max_concurrent.saturating_sub(self.downloading.len());
@@ -975,8 +1019,17 @@ impl ChainSync {
                 if !self.downloading.contains(&h) {
                     out.push(h);
                     self.downloading.insert(h);
-                    self.download_timestamps
-                        .insert(h, DownloadEntry { entered_at: now });
+                    let seq = match self.requeued_seq.remove(&h) {
+                        Some(seq) => seq,
+                        None => self.next_seq(),
+                    };
+                    self.download_timestamps.insert(
+                        h,
+                        DownloadEntry {
+                            entered_at: now,
+                            seq,
+                        },
+                    );
                 }
             } else {
                 break;
@@ -1019,15 +1072,27 @@ impl ChainSync {
         }
         // I8 enforcement: ensure all three collections contain `hash`.
         self.downloading.insert(hash);
-        self.download_timestamps
-            .entry(hash)
-            .or_insert(DownloadEntry { entered_at: ts });
+        let seq = match self.download_timestamps.get(&hash) {
+            Some(entry) => entry.seq,
+            None => {
+                let seq = self.next_seq();
+                self.download_timestamps.insert(
+                    hash,
+                    DownloadEntry {
+                        entered_at: ts,
+                        seq,
+                    },
+                );
+                seq
+            }
+        };
         self.pending_requests.insert(
             hash,
             BlockRequest {
                 hash,
                 requested_from: peer,
                 requested_at: ts,
+                seq,
             },
         );
         // Intentional carve-out from I10's strict reading:
@@ -1147,25 +1212,8 @@ impl ChainSync {
             return Ok(out);
         }
 
-        while self.orphan_blocks.len() >= MAX_ORPHAN_BLOCKS {
-            if let Some(k) = self
-                .orphan_blocks
-                .iter()
-                .min_by_key(|(_, e)| e.received_at)
-                .map(|(k, _)| *k)
-            {
-                if let Some(o) = self.orphan_blocks.remove(&k) {
-                    let p = o.block.header.prev_hash;
-                    if let Some(c) = self.orphan_by_parent.get_mut(&p) {
-                        c.retain(|h| h != &k);
-                        if c.is_empty() {
-                            self.orphan_by_parent.remove(&p);
-                        }
-                    }
-                }
-            } else {
-                break;
-            }
+        if !self.make_room_for_orphan(height) {
+            return Ok(vec![]);
         }
         if let Some(pid) = from {
             let c = self.orphans_per_peer.entry(pid).or_insert(0);
@@ -1202,6 +1250,38 @@ impl ChainSync {
     /// child for re-download. Per-child bookkeeping mirrors the drain loop in
     /// `on_block_received_from` (remove from both maps; decrement the origin
     /// peer's `orphans_per_peer` on resolution).
+    /// Make room in the orphan pool for a block at `height`. Returns false when
+    /// the newcomer should not be admitted: the pool is full and nothing in it
+    /// is farther from the tip than the newcomer. The pool exists to hold the
+    /// blocks right behind a gap until the gap closes, so when it overflows the
+    /// block we need last is the one to drop, never the oldest arrival (which is
+    /// the one nearest the tip, and dropping it re-opens the gap).
+    fn make_room_for_orphan(&mut self, height: u64) -> bool {
+        while self.orphan_blocks.len() >= MAX_ORPHAN_BLOCKS {
+            let farthest = self
+                .orphan_blocks
+                .iter()
+                .max_by_key(|(_, e)| e.block.header.height)
+                .map(|(k, e)| (*k, e.block.header.height));
+            match farthest {
+                Some((_, h)) if height >= h => return false,
+                Some((k, _)) => {
+                    if let Some(o) = self.orphan_blocks.remove(&k) {
+                        let p = o.block.header.prev_hash;
+                        if let Some(c) = self.orphan_by_parent.get_mut(&p) {
+                            c.retain(|h| h != &k);
+                            if c.is_empty() {
+                                self.orphan_by_parent.remove(&p);
+                            }
+                        }
+                    }
+                }
+                None => break,
+            }
+        }
+        true
+    }
+
     pub fn take_orphans_of(&mut self, parent_hash: Hash) -> Vec<(Block, Option<PeerId>)> {
         let mut drained = Vec::new();
         if let Some(children) = self.orphan_by_parent.remove(&parent_hash) {
@@ -1231,10 +1311,12 @@ impl ChainSync {
     pub fn mark_block_failed(&mut self, hash: &Hash) {
         self.pending_requests.remove(hash);
         self.downloading.remove(hash);
-        self.download_timestamps.remove(hash);
+        if let Some(entry) = self.download_timestamps.remove(hash) {
+            self.requeued_seq.insert(*hash, entry.seq);
+        }
         self.pending_headers.push_front(*hash);
         tracing::debug!(
-            "Block {} failed — re-queued for retry",
+            "Block {} failed - re-queued for retry",
             &hash.to_hex()[..16]
         );
     }
@@ -1290,29 +1372,11 @@ impl ChainSync {
         // received_at, per-peer cap, parent index).
         let now = unix_now();
         if !self.orphan_blocks.contains_key(&orphan_hash) {
-            // Evict oldest if pool is full.
-            while self.orphan_blocks.len() >= MAX_ORPHAN_BLOCKS {
-                if let Some(k) = self
-                    .orphan_blocks
-                    .iter()
-                    .min_by_key(|(_, e)| e.received_at)
-                    .map(|(k, _)| *k)
-                {
-                    if let Some(o) = self.orphan_blocks.remove(&k) {
-                        let p = o.block.header.prev_hash;
-                        if let Some(c) = self.orphan_by_parent.get_mut(&p) {
-                            c.retain(|h| h != &k);
-                            if c.is_empty() {
-                                self.orphan_by_parent.remove(&p);
-                            }
-                        }
-                    }
-                } else {
-                    break;
-                }
-            }
+            let room = self.make_room_for_orphan(block.header.height);
             // Per-peer cap to bound flood damage.
-            let admit = if let Some(pid) = from {
+            let admit = if !room {
+                false
+            } else if let Some(pid) = from {
                 let c = self.orphans_per_peer.entry(pid).or_insert(0);
                 if *c >= MAX_ORPHANS_PER_PEER {
                     false
@@ -1350,6 +1414,15 @@ impl ChainSync {
         if self.pending_headers.contains(parent_hash) {
             return;
         }
+        // The parent is itself an orphan we already hold: its own parent is
+        // what the chain is missing, and that request is already queued (or
+        // about to be, by its own orphan notification). Re-requesting a pooled
+        // block only produces another orphan report for it. On a single-peer
+        // IBD this turned every 100-block response into 100 re-requests and the
+        // tip advanced by one block per round trip.
+        if self.orphan_blocks.contains_key(parent_hash) {
+            return;
+        }
 
         // Front-queue with high priority — the orphan is gated on this parent.
         const MAX_PH: usize = 50_000;
@@ -1363,7 +1436,7 @@ impl ChainSync {
             }
         }
         tracing::debug!(
-            "Orphan {} → fetching parent {} (pool: {} blocks)",
+            "Orphan {} -> fetching parent {} (pool: {} blocks)",
             &orphan_hash.to_hex()[..16],
             &parent_hash.to_hex()[..16],
             self.orphan_blocks.len(),
@@ -1472,7 +1545,7 @@ impl ChainSync {
     /// peer already owns the in-flight cycle, so callers must not send a second
     /// request that could later invalidate the first response.
     pub fn begin_headers_request(&mut self, peer: PeerId, now: u64) -> Option<u64> {
-        if self.headers_request_time.is_some() {
+        if self.headers_request_pending() {
             return None;
         }
         let n = self.next_header_nonce;
@@ -1545,8 +1618,23 @@ impl ChainSync {
     /// not whether a request was *currently pending*, so it sent a fresh
     /// one every tick regardless of in-flight state. See
     /// `docs/crucible/cycle-01/finding-03-headers-request-flood.md`.
+    ///
+    /// Also true while a received batch is being verified off-lock
+    /// (`validating_headers`): the nonce is consumed before verification
+    /// starts, so the request clock alone would read as "nothing pending".
     pub fn headers_request_pending(&self) -> bool {
-        self.headers_request_time.is_some()
+        self.headers_request_time.is_some() || self.validating_headers
+    }
+
+    /// Bracket an off-lock `validate_header_batch` call. See
+    /// `validating_headers`. The caller must call `end_headers_validation`
+    /// on every exit path once it re-takes the lock.
+    pub fn begin_headers_validation(&mut self) {
+        self.validating_headers = true;
+    }
+
+    pub fn end_headers_validation(&mut self) {
+        self.validating_headers = false;
     }
 
     pub fn reset_headers_timeout(&mut self) {
@@ -1597,6 +1685,24 @@ impl ChainSync {
         }
     }
 
+    fn next_seq(&mut self) -> u64 {
+        let seq = self.next_request_seq;
+        self.next_request_seq += 1;
+        seq
+    }
+
+    /// Put hashes back at the front of `pending_headers` in download order
+    /// (lowest `seq` ends up first), whatever order they were collected in.
+    fn push_front_ordered(&mut self, mut items: Vec<(u64, Hash)>) {
+        items.sort_by_key(|(seq, _)| *seq);
+        for (seq, h) in items.into_iter().rev() {
+            if seq != u64::MAX {
+                self.requeued_seq.insert(h, seq);
+            }
+            self.pending_headers.push_front(h);
+        }
+    }
+
     pub fn requeue_failed(&mut self, hashes: Vec<Hash>) {
         let any = !hashes.is_empty();
         for h in hashes.into_iter().rev() {
@@ -1605,7 +1711,9 @@ impl ChainSync {
             // this hash (e.g. partial-send race), the requeue path must
             // fully reset its in-flight state.
             self.downloading.remove(&h);
-            self.download_timestamps.remove(&h);
+            if let Some(entry) = self.download_timestamps.remove(&h) {
+                self.requeued_seq.insert(h, entry.seq);
+            }
             self.pending_requests.remove(&h);
             self.pending_headers.push_front(h);
         }
@@ -1633,6 +1741,7 @@ impl ChainSync {
         self.orphan_by_parent.clear();
         self.orphans_per_peer.clear();
         self.pending_headers.clear();
+        self.requeued_seq.clear();
         // v1.0.13 #4 — keep peer attribution maps in sync.
         self.pending_header_peer.clear();
         self.headers_per_peer.clear();
@@ -1668,34 +1777,36 @@ impl ChainSync {
 
     /// Get blocks to retry. Also recovers stuck downloads (Bug 3 fix).
     pub fn get_blocks_to_retry(&mut self, now: u64) -> Vec<Hash> {
-        let to: Vec<Hash> = self
+        let timed_out: Vec<(u64, Hash)> = self
             .pending_requests
             .iter()
             .filter(|(_, r)| now > r.requested_at + self.request_timeout)
-            .map(|(h, _)| *h)
+            .map(|(h, r)| (r.seq, *h))
             .collect();
+        let to: Vec<Hash> = timed_out.iter().map(|(_, h)| *h).collect();
         for h in &to {
             self.pending_requests.remove(h);
             self.downloading.remove(h);
             self.download_timestamps.remove(h);
-            self.pending_headers.push_front(*h);
         }
+        self.push_front_ordered(timed_out);
 
-        let stuck: Vec<Hash> = self
+        let stuck_entries: Vec<(u64, Hash)> = self
             .download_timestamps
             .iter()
             .filter(|(h, e)| {
                 !self.pending_requests.contains_key(*h)
                     && now > e.entered_at + STUCK_DOWNLOAD_TIMEOUT_SECS
             })
-            .map(|(h, _)| *h)
+            .map(|(h, e)| (e.seq, *h))
             .collect();
+        let stuck: Vec<Hash> = stuck_entries.iter().map(|(_, h)| *h).collect();
         let sc = stuck.len();
         for h in &stuck {
             self.downloading.remove(h);
             self.download_timestamps.remove(h);
-            self.pending_headers.push_front(*h);
         }
+        self.push_front_ordered(stuck_entries);
         // I10 enforcement: pending_headers got new entries from either
         // timeout or stuck branch — if state was Synced (e.g. an InvBlock
         // catch-up request that timed out), drop to Blocks so the IBD
@@ -1714,6 +1825,7 @@ impl ChainSync {
                 self.headers_request_time = None;
                 self.blocks_entered_at = None;
                 self.pending_headers.clear();
+                self.requeued_seq.clear();
                 // v1.0.13 #4 — keep peer attribution maps in sync
                 self.pending_header_peer.clear();
                 self.headers_per_peer.clear();
@@ -1737,18 +1849,25 @@ impl ChainSync {
     }
 
     pub fn recover_stuck_downloads(&mut self) -> usize {
-        let s: Vec<Hash> = self
+        let s: Vec<(u64, Hash)> = self
             .downloading
             .iter()
             .filter(|h| !self.pending_requests.contains_key(h))
-            .copied()
+            .map(|h| {
+                let seq = self
+                    .download_timestamps
+                    .get(h)
+                    .map(|e| e.seq)
+                    .unwrap_or(u64::MAX);
+                (seq, *h)
+            })
             .collect();
         let c = s.len();
-        for h in s {
-            self.downloading.remove(&h);
-            self.download_timestamps.remove(&h);
-            self.pending_headers.push_front(h);
+        for (_, h) in &s {
+            self.downloading.remove(h);
+            self.download_timestamps.remove(h);
         }
+        self.push_front_ordered(s);
         // I10 enforcement: pending_headers grew; if Synced, drop to Blocks.
         if c > 0 && self.state == SyncState::Synced {
             self.state = SyncState::Blocks;
@@ -1773,30 +1892,31 @@ impl ChainSync {
         // claim and best_known would otherwise be pinned above local).
         self.refresh_best_known();
         self.recompute_best_difficulty();
-        let rq: Vec<Hash> = self
+        let rq: Vec<(u64, Hash)> = self
             .pending_requests
             .iter()
             .filter(|(_, r)| &r.requested_from == peer)
-            .map(|(h, _)| *h)
+            .map(|(h, r)| (r.seq, *h))
             .collect();
-        for h in &rq {
+        let requeued = rq.len();
+        for (_, h) in &rq {
             self.pending_requests.remove(h);
             self.downloading.remove(h);
             self.download_timestamps.remove(h);
-            self.pending_headers.push_front(*h);
         }
+        self.push_front_ordered(rq);
         // I10 enforcement: pending_headers grew; if Synced, drop to Blocks.
-        if !rq.is_empty() && self.state == SyncState::Synced {
+        if requeued > 0 && self.state == SyncState::Synced {
             self.state = SyncState::Blocks;
             if self.blocks_entered_at.is_none() {
                 self.blocks_entered_at = Some(unix_now());
             }
         }
-        if !rq.is_empty() {
+        if requeued > 0 {
             tracing::info!(
                 "Peer {:?} disconnected, re-queued {} requests",
                 peer,
-                rq.len()
+                requeued
             );
         }
     }
@@ -1930,6 +2050,29 @@ mod tests {
     }
 
     #[test]
+    fn empty_headers_reply_leaves_headers_state_when_nobody_is_ahead() {
+        let peer: PeerId = [7u8; 32];
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_state(SyncState::Headers);
+        sync.queue_headers_from_peer(peer, vec![]);
+        assert_eq!(
+            sync.state(),
+            SyncState::ConfirmingSynced,
+            "an empty reply with nobody ahead starts the confirming round"
+        );
+        sync.queue_headers_from_peer(peer, vec![]);
+        assert_eq!(sync.state(), SyncState::Synced);
+
+        // A peer that still claims more keeps us asking.
+        let other: PeerId = [8u8; 32];
+        sync.update_peer_height_for(other, 110);
+        assert_eq!(sync.state(), SyncState::Headers);
+        sync.queue_headers_from_peer(peer, vec![]);
+        assert_eq!(sync.state(), SyncState::Headers);
+        assert!(!sync.headers_request_pending());
+    }
+
+    #[test]
     fn test_build_locator() {
         let hashes: Vec<Hash> = (0..100).map(|i| Hash::from_bytes([i as u8; 32])).collect();
         let loc = build_locator(99, |h| hashes.get(h as usize).copied());
@@ -1955,10 +2098,91 @@ mod tests {
         sync.update_peer_height_for(peer, 100);
         let hash = Hash::from_bytes([5u8; 32]);
         sync.downloading.insert(hash);
-        sync.download_timestamps
-            .insert(hash, DownloadEntry { entered_at: 1000 });
+        sync.download_timestamps.insert(
+            hash,
+            DownloadEntry {
+                entered_at: 1000,
+                seq: 0,
+            },
+        );
         assert!(!sync.is_stalled(1005, 60));
         assert!(sync.is_stalled(1000 + STUCK_DOWNLOAD_TIMEOUT_SECS + 1, 60));
+    }
+
+    /// Timed-out, stuck and disconnected-peer requests are collected out of
+    /// hash maps/sets, so without ordering they would come back shuffled and
+    /// the re-requested span would arrive as a run of orphans.
+    #[test]
+    fn requeued_requests_keep_download_order() {
+        let mut sync = ChainSync::new(0, Hash::zero());
+        let peer = super::super::peer::generate_peer_id();
+        sync.update_peer_height_for(peer, 100);
+        let hashes: Vec<Hash> = (1..=50u8).map(|i| Hash::from_bytes([i; 32])).collect();
+        sync.queue_headers_from_peer(peer, hashes.clone());
+        assert_eq!(sync.get_blocks_to_request(50), hashes);
+
+        // Request timeout.
+        for h in &hashes {
+            sync.record_request(*h, peer, 1_000);
+        }
+        let retried = sync.get_blocks_to_retry(1_000 + sync.request_timeout() + 1);
+        assert_eq!(retried.len(), 50);
+        assert_eq!(sync.get_blocks_to_request(50), hashes, "timeout re-queue");
+
+        // Peer disconnect.
+        for h in &hashes {
+            sync.record_request(*h, peer, 2_000);
+        }
+        sync.on_peer_disconnected(&peer);
+        assert_eq!(
+            sync.get_blocks_to_request(50),
+            hashes,
+            "disconnect re-queue"
+        );
+
+        // Stuck downloads (in `downloading` with no request entry).
+        assert_eq!(sync.recover_stuck_downloads(), 50);
+        assert_eq!(sync.get_blocks_to_request(50), hashes, "stuck re-queue");
+    }
+
+    #[test]
+    fn staggered_retries_keep_download_order_across_spans() {
+        let mut sync = ChainSync::new(0, Hash::zero());
+        let peer = super::super::peer::generate_peer_id();
+        sync.update_peer_height_for(peer, 200);
+        let hashes: Vec<Hash> = (1..=100u8).map(|i| Hash::from_bytes([i; 32])).collect();
+        sync.queue_headers_from_peer(peer, hashes.clone());
+
+        // Two spans in flight, requested ten seconds apart.
+        let first = sync.get_blocks_to_request(50);
+        for h in &first {
+            sync.record_request(*h, peer, 1_000);
+        }
+        let second = sync.get_blocks_to_request(50);
+        for h in &second {
+            sync.record_request(*h, peer, 1_010);
+        }
+        assert_eq!(first, hashes[..50].to_vec());
+        assert_eq!(second, hashes[50..].to_vec());
+
+        // Only the first span times out. The driver re-queues it and sends
+        // it again right away, while the second span is still in flight.
+        let t = 1_000 + sync.request_timeout() + 1;
+        assert_eq!(sync.get_blocks_to_retry(t).len(), 50);
+        let again = sync.get_blocks_to_request(50);
+        assert_eq!(again, hashes[..50].to_vec(), "timeout re-queue");
+        for h in &again {
+            sync.record_request(*h, peer, t);
+        }
+
+        // The peer goes away with both spans in flight. They must come back
+        // in chain order, not with the re-requested span sorted last.
+        sync.on_peer_disconnected(&peer);
+        assert_eq!(
+            sync.get_blocks_to_request(100),
+            hashes,
+            "disconnect re-queue after a staggered retry"
+        );
     }
 
     #[test]
@@ -3662,7 +3886,7 @@ mod tests {
     /// pool never exceeds `MAX_ORPHAN_BLOCKS`, regardless of how many a peer
     /// pushes. (mark_block_orphan does not PoW-gate, so no mining is needed.)
     #[test]
-    fn mark_block_orphan_lru_evicts_at_max_orphan_blocks() {
+    fn mark_block_orphan_evicts_farthest_at_max_orphan_blocks() {
         use crate::consensus::BlockHeader;
         use crate::primitives::PublicKey;
 
@@ -3707,16 +3931,93 @@ mod tests {
             "pool fills exactly to the cap"
         );
 
-        // Pushing more must evict oldest, keeping the pool bounded.
+        // Blocks farther out than everything pooled are refused; the pool
+        // keeps the blocks nearest the tip, which are the ones a closing gap
+        // needs first.
         for i in 0..50u64 {
             sync.mark_block_orphan(make(1_000_000 + i, 1_000_000 + i), None, &local_tip);
         }
         assert_eq!(
             sync.orphan_blocks.len(),
             MAX_ORPHAN_BLOCKS,
-            "orphan pool stays bounded at MAX_ORPHAN_BLOCKS via LRU eviction \
-             no matter how many orphans arrive"
+            "orphan pool stays bounded at MAX_ORPHAN_BLOCKS no matter how many \
+             orphans arrive"
         );
+        assert!(
+            sync.orphan_blocks.contains_key(&make(1, 0).hash()),
+            "the block nearest the tip survives"
+        );
+        assert!(
+            !sync
+                .orphan_blocks
+                .contains_key(&make(1_000_000, 1_000_000).hash()),
+            "a block farther than everything pooled is not admitted"
+        );
+
+        // A nearer block evicts the farthest pooled one instead.
+        let nearer = make(0, 7);
+        sync.mark_block_orphan(nearer.clone(), None, &local_tip);
+        assert!(sync.orphan_blocks.contains_key(&nearer.hash()));
+        assert!(
+            !sync
+                .orphan_blocks
+                .contains_key(&make(MAX_ORPHAN_BLOCKS as u64, MAX_ORPHAN_BLOCKS as u64 - 1).hash()),
+            "the farthest pooled block made room"
+        );
+        assert_eq!(sync.orphan_blocks.len(), MAX_ORPHAN_BLOCKS);
+    }
+
+    #[test]
+    fn orphan_parent_already_pooled_is_not_requeued() {
+        use crate::consensus::BlockHeader;
+        use crate::primitives::PublicKey;
+
+        let make = |height: u64, prev_hash: Hash| -> Block {
+            Block {
+                header: BlockHeader {
+                    network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
+                    version: 1,
+                    height,
+                    timestamp: 1_000 + height,
+                    prev_hash,
+                    tx_root: Hash::zero(),
+                    anchor: Hash::zero(),
+                    algorithm: 0,
+                    nonce: height,
+                    target: Hash::from_bytes([0xFF; 32]),
+                    miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+                    supply_commitment: [0u8; 32],
+                    checkpoint_vote: None,
+                    spark_set_root: [0u8; 32],
+                    mw_kernel_root: [0u8; 32],
+                },
+                transactions: vec![],
+            }
+        };
+
+        let mut sync = ChainSync::new(0, Hash::zero());
+        let missing = Hash::from_bytes([0xAB; 32]);
+        let a = make(5, missing);
+        let b = make(6, a.hash());
+        let c = make(7, b.hash());
+
+        sync.mark_block_orphan(a.clone(), None, &missing);
+        assert_eq!(
+            sync.pending_headers.front(),
+            Some(&missing),
+            "the first orphan front-queues the block the chain is missing"
+        );
+
+        sync.mark_block_orphan(b.clone(), None, &a.hash());
+        sync.mark_block_orphan(c, None, &b.hash());
+        assert_eq!(sync.orphan_blocks.len(), 3);
+        assert_eq!(
+            sync.pending_headers.len(),
+            1,
+            "parents that are pooled orphans themselves are not requested again"
+        );
+        assert!(!sync.pending_headers.contains(&a.hash()));
+        assert!(!sync.pending_headers.contains(&b.hash()));
     }
 
     /// `trigger_resync` fires ONLY from `Synced`/`Idle` (moving to `Headers`);
@@ -3840,5 +4141,37 @@ mod tests {
             sync.begin_headers_request(peers[0], 1_061).is_none(),
             "headers_request_pending must gate a re-issue"
         );
+    }
+
+    /// A received batch is verified outside the `ChainSync` lock, after its
+    /// nonce has been consumed. For that window `headers_request_pending`
+    /// must stay true (no second GetHeaders), and the 60s request timeout
+    /// must not apply - verification can legitimately take longer than that
+    /// on a slow CPU.
+    #[test]
+    fn headers_validation_keeps_request_pending() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        let n = sync.begin_headers_request(peers[0], 1_000).unwrap();
+        assert!(sync.validate_header_nonce(n, &peers[0]));
+        assert!(!sync.headers_request_pending(), "nonce consumed");
+
+        sync.begin_headers_validation();
+        assert!(
+            sync.headers_request_pending(),
+            "validating keeps the cycle pending"
+        );
+        assert!(
+            sync.begin_headers_request(peers[1], 1_001).is_none(),
+            "no competing GetHeaders while a batch is being verified"
+        );
+        assert!(
+            !sync.headers_timed_out(1_000 + 600),
+            "verification is not bounded by the 60s request timeout"
+        );
+
+        sync.end_headers_validation();
+        assert!(!sync.headers_request_pending());
+        assert!(sync.begin_headers_request(peers[1], 1_002).is_some());
     }
 }

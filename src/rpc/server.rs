@@ -496,7 +496,7 @@ pub async fn start_rpc_server(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         if let Some(prev) = previous {
-            info!("RPC accepting CURRENT and PREVIOUS api_key (rotation window active — drop COINCYNC_RPC_API_KEY_PREVIOUS to close)");
+            info!("RPC accepting CURRENT and PREVIOUS api_key (rotation window active - drop COINCYNC_RPC_API_KEY_PREVIOUS to close)");
             RpcBearerValidator::from_plaintexts(&[plaintext.as_ref(), prev.as_str()])
         } else {
             RpcBearerValidator::from_plaintext(plaintext.as_ref())

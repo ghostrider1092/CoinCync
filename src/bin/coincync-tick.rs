@@ -186,7 +186,7 @@ fn load_maintainer_token_hash(token_file: Option<&str>) -> Option<[u8; 32]> {
     };
     let token = raw.trim();
     if token.is_empty() {
-        info!("maintainer: no token configured — /colony endpoint disabled (fails closed)");
+        info!("maintainer: no token configured - /colony endpoint disabled (fails closed)");
         return None;
     }
     let hash = sha2::Sha256::digest(token.as_bytes());
@@ -207,7 +207,7 @@ fn read_bearer(path: &Path) -> Option<String> {
             let t = s.trim().to_string();
             if t.is_empty() {
                 warn!(
-                    "RPC token file {} is empty — running without auth",
+                    "RPC token file {} is empty - running without auth",
                     path.display()
                 );
                 None
@@ -217,7 +217,7 @@ fn read_bearer(path: &Path) -> Option<String> {
         }
         Err(e) => {
             warn!(
-                "RPC token file {} unreadable ({}) — running without auth",
+                "RPC token file {} unreadable ({}) - running without auth",
                 path.display(),
                 e
             );
@@ -868,7 +868,7 @@ fn castes_observe_report(
             );
         }
     } else {
-        info!("caste/spider (observe): personal mode / no fleet aggregate — standing by");
+        info!("caste/spider (observe): personal mode / no fleet aggregate - standing by");
     }
 
     // locust — density-adaptive relay mode (real host load + attack flag).
@@ -1061,7 +1061,7 @@ fn colony_act_report(
     info!(
         allowed = report.allowed.len(),
         denied = report.denied.len(),
-        "colony/act: round complete (dry-run — nothing sent)"
+        "colony/act: round complete (dry-run - nothing sent)"
     );
     for action in &report.allowed {
         info!(action = %action, "colony/act: WOULD (authorized; LoggingActuator only)");
@@ -1230,12 +1230,12 @@ fn main() -> anyhow::Result<()> {
         if colony_act_armed() {
             guards.arm();
             info!(
-                "colony/act: ENABLED — kill switch ARMED (dry-run: LoggingActuator logs \
+                "colony/act: ENABLED - kill switch ARMED (dry-run: LoggingActuator logs \
                  authorized actions; NOTHING sent to node or network)"
             );
         } else {
             info!(
-                "colony/act: ENABLED — kill switch DISARMED (every action gated; set \
+                "colony/act: ENABLED - kill switch DISARMED (every action gated; set \
                  COINCYNC_COLONY_ACT_ENABLED=1 to arm the dry-run)"
             );
         }

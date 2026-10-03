@@ -353,7 +353,7 @@ fn run_watchdog_loop(heartbeat: WatchdogHeartbeat, data_dir: PathBuf) {
                 target: "runtime_watchdog",
                 "CONFIRMED DEADLOCK: {} of {} threads on futex_wait_queue for {}s + \
                  heartbeat frozen for {}s. Writing diagnostic to {} then calling \
-                 abort() — systemd will restart the process. If this recurs, \
+                 abort() - systemd will restart the process. If this recurs, \
                  attach gdb / rebuild with tokio-console for Rust-level stacks.",
                 futex_status.futex_count, futex_status.total_threads,
                 first.elapsed().as_secs(), stall_secs, path.display(),

@@ -1748,7 +1748,7 @@ pub async fn run_rest_api(
     info!("  Endpoints: /api/v1/{{status,blocks/recent,search,stats,network,ws,...}}");
     info!("  RPC proxy: POST /rpc (read-only methods only)");
     if serve_explorer {
-        info!("  Embedded explorer mounted at GET /  (LOCAL DEV ONLY — see deploy/explorer/ for production)");
+        info!("  Embedded explorer mounted at GET /  (LOCAL DEV ONLY - see deploy/explorer/ for production)");
 
         // SECURITY: warn loudly if the explorer mount is reachable
         // from non-localhost. The local-dev mount is meant for

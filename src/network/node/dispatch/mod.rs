@@ -120,7 +120,7 @@ pub(super) async fn process_message(
     ) && payload.len() > MAX_LIGHT_QUERY_PAYLOAD
     {
         tracing::warn!(
-            "Oversized {:?} payload ({} bytes) from peer {:?} — dropping",
+            "Oversized {:?} payload ({} bytes) from peer {:?} - dropping",
             msg_type,
             payload.len(),
             &peer_id[..4]
@@ -247,7 +247,7 @@ pub(super) async fn process_message(
         }
 
         MessageType::Blocks => {
-            chain::handle_blocks(peer_id, payload, magic, peers, event_tx, scorer).await?;
+            chain::handle_blocks(peer_id, payload, magic, peers, chain, event_tx, scorer).await?;
         }
 
         MessageType::Headers => {

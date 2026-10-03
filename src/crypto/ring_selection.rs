@@ -263,7 +263,7 @@ impl RingSelector {
                 age_similar_count = age_similar_count,
                 advisory_threshold = age_similar_advisory,
                 decoy_count = decoy_count,
-                "R-22: real output has {} age-similar peers in pool (advisory ≥{}). \
+                "R-22: real output has {} age-similar peers in pool (advisory >={}). \
                  Ring signature will still be constructed, but a chain \
                  analyst can identify the youngest ring member as the \
                  real spend. Defer this tx until more outputs at similar \

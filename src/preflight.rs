@@ -41,7 +41,7 @@ pub const fn compiled_network_is_testnet() -> bool {
 pub fn check_compiled_network(runtime: NetworkType) -> Result<()> {
     if std::env::var(SKIP_ENV).as_deref() == Ok("1") {
         tracing::warn!(
-            "{}=1 set — skipping the compiled-network preflight guard. \
+            "{}=1 set - skipping the compiled-network preflight guard. \
              You are responsible for ensuring this binary matches --network {}.",
             SKIP_ENV,
             runtime.name(),

@@ -382,7 +382,7 @@ fn diversify_hash(d: &[u8; 11]) -> Option<RistrettoPoint> {
     // operator looking at logs can correlate the gap.
     if pt == RistrettoPoint::default() {
         tracing::warn!(
-            "wallet/keys::diversify_hash: derived identity point — \
+            "wallet/keys::diversify_hash: derived identity point - \
              extremely rare ECDH edge case; caller should advance diversifier index"
         );
         None

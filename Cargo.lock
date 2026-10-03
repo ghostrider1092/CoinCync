@@ -993,6 +993,7 @@ dependencies = [
  "jsonrpsee",
  "merlin",
  "mockall",
+ "nu-ansi-term",
  "num_cpus",
  "once_cell",
  "ordered-float 5.3.0",

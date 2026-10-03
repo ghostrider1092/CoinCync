@@ -207,7 +207,7 @@ impl DandelionRouter {
     pub fn set_outbound_peers(&mut self, peers: Vec<PeerId>) {
         if peers.len() < MIN_PEERS_FOR_PRIVACY && !peers.is_empty() {
             tracing::warn!(
-                "Dandelion++ has only {} outbound peer(s) — privacy degraded. \
+                "Dandelion++ has only {} outbound peer(s) - privacy degraded. \
                  Need {} for adequate anonymity.",
                 peers.len(),
                 MIN_PEERS_FOR_PRIVACY
@@ -370,7 +370,7 @@ impl DandelionRouter {
         // Already in stempool → stem loop detected → fluff immediately
         if self.stempool.contains_key(&hash) {
             tracing::info!(
-                "FLUFF: Stem loop detected for tx {} — fluffing immediately",
+                "FLUFF: Stem loop detected for tx {} - fluffing immediately",
                 &hash.to_hex()[..16]
             );
             // Remove from stempool, mark as fluffed
@@ -389,7 +389,7 @@ impl DandelionRouter {
         if self.epoch.is_fluff_epoch {
             // We're a fluff node this epoch → broadcast immediately
             tracing::debug!(
-                "FLUFF: Tx {} received in fluff epoch — broadcasting",
+                "FLUFF: Tx {} received in fluff epoch - broadcasting",
                 &hash.to_hex()[..16]
             );
             self.fluffed.insert(hash, now);
@@ -445,7 +445,7 @@ impl DandelionRouter {
                 // Check embargo timeout
                 if now >= embargo_deadline {
                     tracing::info!(
-                        "FLUFF: Tx {} embargo expired — fail-safe broadcast",
+                        "FLUFF: Tx {} embargo expired - fail-safe broadcast",
                         &hash.to_hex()[..16]
                     );
                     if let Some(entry) = self.stempool.remove(&hash) {
@@ -491,7 +491,7 @@ impl DandelionRouter {
                 None => {
                     // No relay peer available → fluff as fail-safe
                     tracing::info!(
-                        "FLUFF: No relay peer for tx {} — fail-safe broadcast",
+                        "FLUFF: No relay peer for tx {} - fail-safe broadcast",
                         &hash.to_hex()[..16]
                     );
                     if let Some(entry) = self.stempool.remove(&hash) {

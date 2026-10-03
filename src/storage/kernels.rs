@@ -212,7 +212,7 @@ impl KernelStore {
                     error = %e,
                     kernel_idx = idx,
                     "R-61: mw_kernels write failed at idx {}. Consensus \
-                     storage is unavailable — likely disk full, WAL \
+                     storage is unavailable - likely disk full, WAL \
                      corruption, or RocksDB open state issue. Halting to \
                      preserve on-disk state; SIGTERM handler will flush \
                      cleanly. Investigate disk + RocksDB state before restart.",
@@ -340,7 +340,7 @@ impl KernelStore {
                         target: "storage::kernels",
                         idx = idx,
                         error = %e,
-                        "R-63: rewind failed to remove on-disk kernel {} — \
+                        "R-63: rewind failed to remove on-disk kernel {} - \
                          disk may replay orphan kernel on next open, \
                          corrupting committed root. Reindex required.",
                         idx

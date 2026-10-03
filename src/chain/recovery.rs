@@ -242,7 +242,7 @@ impl Blockchain {
                         if inner.stats.total_difficulty != recomputed {
                             tracing::warn!(
                                 "total_difficulty self-heal on load: stored={} recomputed={} delta={} \
-                                 — converging to the deterministic 1 + Σ dft(1..=height)",
+                                 - converging to the deterministic 1 + sum dft(1..=height)",
                                 inner.stats.total_difficulty,
                                 recomputed,
                                 (recomputed as i128) - (inner.stats.total_difficulty as i128),

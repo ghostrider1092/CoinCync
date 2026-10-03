@@ -140,7 +140,7 @@ fn harden_secret_file_permissions(path: &Path) {
         if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
             tracing::warn!(
                 path = %path.display(), error = %e,
-                "harden_secret_file_permissions: failed to chmod 600 — secret file may be world-readable",
+                "harden_secret_file_permissions: failed to chmod 600 - secret file may be world-readable",
             );
         }
     }
@@ -181,7 +181,7 @@ fn harden_secret_file_permissions(path: &Path) {
         } else {
             tracing::warn!(
                 path = ?path,
-                "harden_secret_file_permissions: path is not valid UTF-8 — cannot pass to icacls",
+                "harden_secret_file_permissions: path is not valid UTF-8 - cannot pass to icacls",
             );
         }
     }
@@ -271,7 +271,7 @@ impl NodeIdentity {
 
         // If DB exists but node_key doesn't, the key was lost — regenerate
         if db_path.exists() && !key_path.exists() {
-            tracing::warn!("node_key missing but database exists — regenerating identity");
+            tracing::warn!("node_key missing but database exists - regenerating identity");
         }
 
         // If node_key is older than DB, it may be stale
@@ -281,7 +281,7 @@ impl NodeIdentity {
             if let (Some(km), Some(dm)) = (key_meta, db_meta) {
                 if let (Ok(kt), Ok(dt)) = (km.modified(), dm.modified()) {
                     if kt < dt {
-                        tracing::info!("node_key older than database — keeping existing key");
+                        tracing::info!("node_key older than database - keeping existing key");
                     }
                 }
             }
@@ -300,7 +300,7 @@ impl NodeIdentity {
         if signing_key_path.exists() {
             let _ = std::fs::remove_file(&signing_key_path);
         }
-        tracing::info!("Node identity cleared — will regenerate on next start");
+        tracing::info!("Node identity cleared - will regenerate on next start");
     }
 
     /// Save to disk.

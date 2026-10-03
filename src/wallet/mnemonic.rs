@@ -229,7 +229,7 @@ impl WalletSeed {
             tracing::error!(
                 target: "wallet::mnemonic::R78",
                 input_len = bytes.len(),
-                "R-78: WalletSeed::from_bytes given {} bytes, expected 64 — \
+                "R-78: WalletSeed::from_bytes given {} bytes, expected 64 - \
                  silent truncation/padding is a corruption path, but \
                  continuing to avoid panic on the release fallback",
                 bytes.len()

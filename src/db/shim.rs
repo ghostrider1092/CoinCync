@@ -246,7 +246,7 @@ impl Db {
         // Enumerate existing column families so we can re-open them.
         let list_cf_start = std::time::Instant::now();
         let existing = Inner::list_cf(&opts, path).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "RocksDB list_cf failed — assuming fresh DB");
+            tracing::warn!(error = %e, "RocksDB list_cf failed - assuming fresh DB");
             vec!["default".to_string()]
         });
         tracing::info!(
@@ -294,7 +294,7 @@ impl Db {
                 tracing::error!(
                     target: "db::shim",
                     counter_key_len = b.len(),
-                    "R-49: monotonic counter key has {} bytes, expected 8 — \
+                    "R-49: monotonic counter key has {} bytes, expected 8 - \
                      refusing to open DB rather than silently truncate. \
                      This indicates on-disk corruption; restore from backup \
                      or reindex.",

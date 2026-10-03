@@ -303,7 +303,7 @@ pub(super) fn spawn_maintenance(
                 tracing::error!(
                     target: "node::supervisor",
                     "CRITICAL: maintenance task exited cleanly (no panic). \
-                     This should never happen — the loop is unbounded. \
+                     This should never happen - the loop is unbounded. \
                      Node is now running WITHOUT ping/dandelion/peer-scoring/ban-flush. \
                      Restart the service immediately."
                 );
@@ -524,7 +524,7 @@ fn update_mesh_floor(
         {
             warn!(
                 target: "node::heartbeat",
-                "mesh-floor: connected peers={} below floor={} for {} ticks — entering mesh_degraded",
+                "mesh-floor: connected peers={} below floor={} for {} ticks - entering mesh_degraded",
                 connected, MESH_FLOOR_PEERS, below_streak,
             );
         }
@@ -533,7 +533,7 @@ fn update_mesh_floor(
         if mesh_degraded.swap(false, Ordering::Relaxed) {
             info!(
                 target: "node::heartbeat",
-                "mesh-floor: connected peers={} at/above floor={} — clearing mesh_degraded",
+                "mesh-floor: connected peers={} at/above floor={} - clearing mesh_degraded",
                 connected, MESH_FLOOR_PEERS,
             );
         }

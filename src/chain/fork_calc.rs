@@ -174,7 +174,7 @@ impl Blockchain {
             if steps > max_steps {
                 tracing::error!(
                     "calculate_fork_cumulative_work walked {} steps from block height {} \
-                     without reaching genesis — possible prev_hash cycle in DB. Returning \
+                     without reaching genesis - possible prev_hash cycle in DB. Returning \
                      partial work; caller's IronConsensus classifier will reject the fork.",
                     steps,
                     block.header.height

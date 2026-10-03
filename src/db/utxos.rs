@@ -178,7 +178,7 @@ impl UtxoDb {
             tracing::error!(
                 target: "db::utxos",
                 "R-43: post-commit height_count bump failed at height {} \
-                 (tx {} idx {}) — stat drift, does NOT affect UTXO validity. \
+                 (tx {} idx {}) - stat drift, does NOT affect UTXO validity. \
                  Reindex height_counts to correct: {}",
                 height, hex::encode(tx_hash.as_bytes()), index, e
             );
@@ -441,7 +441,7 @@ impl UtxoDb {
                 }
                 Some(b) => {
                     tracing::error!(
-                        "DB CORRUPTION: height_counts[height={}] has {} bytes, expected 8 — treating as 0",
+                        "DB CORRUPTION: height_counts[height={}] has {} bytes, expected 8 - treating as 0",
                         height, b.len()
                     );
                     0

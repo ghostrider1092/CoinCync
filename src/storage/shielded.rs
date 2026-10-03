@@ -419,7 +419,7 @@ impl ShieldedStore {
         if !tree_checkpointed {
             tracing::warn!(
                 "ShieldedStore: BridgeTree declined checkpoint at height {} \
-                 (non-monotonic id?) — side-table checkpoint skipped to keep \
+                 (non-monotonic id?) - side-table checkpoint skipped to keep \
                  the two checkpoint stacks in sync",
                 height
             );
@@ -438,7 +438,7 @@ impl ShieldedStore {
         if cps.len() > MAX_CHECKPOINTS {
             let dropped = cps.remove(0);
             tracing::debug!(
-                "ShieldedStore: evicted oldest checkpoint (height {}) — cap {} reached; \
+                "ShieldedStore: evicted oldest checkpoint (height {}) - cap {} reached; \
                  deepest available rollback is now height {}",
                 dropped.height,
                 MAX_CHECKPOINTS,
@@ -497,7 +497,7 @@ impl ShieldedStore {
         if !tree_rewound {
             tracing::warn!(
                 "ShieldedStore: BridgeTree rewind failed while a side-table \
-                 checkpoint existed — tree/side-table state desynced"
+                 checkpoint existed - tree/side-table state desynced"
             );
         }
 

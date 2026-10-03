@@ -315,7 +315,7 @@ fn get_available_memory_mb() -> usize {
             target: "db_config",
             "get_available_memory_mb: Win32 GlobalMemoryStatusEx returned \
              failure or an implausible value; falling back to 4096 MB \
-             default. DB cache may be undersized on high-RAM hosts — set \
+             default. DB cache may be undersized on high-RAM hosts - set \
              cache_size_mb explicitly via DbConfig if this matters."
         );
     }

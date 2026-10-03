@@ -277,7 +277,7 @@ impl WalletKeys {
         if self.watch_only {
             tracing::warn!(
                 target: "wallet::keys::R75",
-                "master_seed_for_backup called on watch-only wallet — \
+                "master_seed_for_backup called on watch-only wallet - \
                  returning None to prevent backup of the [0xFF; 32] sentinel"
             );
             return None;

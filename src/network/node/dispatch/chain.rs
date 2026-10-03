@@ -23,6 +23,10 @@
 //!   `is_synced()` false and requiring an emergency
 //!   `COINCYNC_RIG_SKIP_SYNC_CHECK=1` bypass.
 //!   TESTS: `handle_inv_block_post_ibd_does_not_speculatively_bump_peer_height`.
+//!   Deep-IBD side: an InvBlock refreshes the tip via GetHeaders only when the
+//!   download queue is drained, so a tip announcement cannot force a full
+//!   re-verification of the batch already being downloaded.
+//!   TESTS: `handle_inv_block_during_ibd_skips_headers_refresh_while_queue_busy`.
 //! - **§4 `handle_blocks`** — INVARIANT: each relayed block is rejected on wrong
 //!   network magic and on RandomX PoW failure BEFORE reputation credit or
 //!   `BlockReceived` emission; bad PoW triggers an instant ban and never
@@ -215,8 +219,18 @@ pub(super) async fn handle_inv_block(
                     chain.peer_advertised_height().saturating_sub(our_height),
                     NEAR_TIP_INV_WINDOW,
                 );
+                // Every accepted Headers response is a full batch verification
+                // (up to 2000 RandomX hashes, tens of seconds in light mode), and
+                // a refresh sent while the download queue is still full comes
+                // back with the very range we are already pulling. Deep in IBD
+                // the peer announces every block it mines, so this path kept
+                // re-verifying the same headers and stalled block processing for
+                // the whole batch each time. Refresh only once the queue has
+                // drained; the driver's drained-queue path and the peer's
+                // ChainWork announcements keep the sync target current meanwhile.
+                let queue_busy = sync.read().await.pending_count() > 0;
                 let locator = build_locator(our_height, |h| chain.get_block_hash(h));
-                if !locator.is_empty() {
+                if !locator.is_empty() && !queue_busy {
                     let now = chrono::Utc::now().timestamp() as u64;
                     if let Some(nonce) = sync.write().await.begin_headers_request(peer_id, now) {
                         let sent = match Message::get_headers_with_nonce(
@@ -355,11 +369,23 @@ pub(super) async fn handle_inv_block(
     Ok(())
 }
 
+/// True when both heights hash with the same RandomX key.
+#[cfg(feature = "randomx")]
+pub(super) fn same_pow_epoch(a: u64, b: u64) -> bool {
+    crate::consensus::randomx_seed_for_height(a) == crate::consensus::randomx_seed_for_height(b)
+}
+
+#[cfg(not(feature = "randomx"))]
+pub(super) fn same_pow_epoch(_a: u64, _b: u64) -> bool {
+    true
+}
+
 pub(super) async fn handle_blocks(
     peer_id: PeerId,
     payload: &[u8],
     magic: [u8; 4],
     peers: &DashMap<PeerId, PeerInfo>,
+    chain: &SharedBlockchain,
     event_tx: &broadcast::Sender<NodeEvent>,
     scorer: &RwLock<PeerScorer>,
 ) -> Result<()> {
@@ -410,7 +436,7 @@ pub(super) async fn handle_blocks(
             // incompatible and continue with other peers.
             if blocks_msg.blocks.is_empty() {
                 debug!(
-                    "[IBD] Got 0 blocks from peer {:?} — empty Blocks reply, demoting",
+                    "[IBD] Got 0 blocks from peer {:?} - empty Blocks reply, demoting",
                     &peer_id[..4]
                 );
                 // Record an empty-Blocks response so the scorer can ban
@@ -426,6 +452,14 @@ pub(super) async fn handle_blocks(
                 }
                 return Ok(());
             }
+
+            // Pre-hashing a block from the next RandomX epoch while the chain
+            // task is still applying the current one evicts its key from the
+            // single cache slot, and both sides then rebuild on every hash
+            // until the tip crosses the boundary (issue, cause 7). Blocks past
+            // the tip's epoch skip the pre-hash here; the chain task verifies
+            // their PoW anyway when it applies them.
+            let tip_height = chain.height();
 
             for (bi, block) in blocks_msg.blocks.into_iter().enumerate() {
                 debug!(
@@ -496,6 +530,10 @@ pub(super) async fn handle_blocks(
                 // one solution (e.g. target mutated to spray "new" blocks) share
                 // one RandomX run. Also binds the claimed anchor (recomputed
                 // inside) — the relay previously trusted block.header.anchor.
+                if !same_pow_epoch(block.header.height, tip_height) {
+                    let _ = event_tx.send(NodeEvent::BlockReceived(block, peer_id));
+                    continue;
+                }
                 let pow_hash = match crate::consensus::pow_cache::pow_hash_cached(
                     &block.header.prev_hash,
                     block.header.height,
@@ -524,7 +562,7 @@ pub(super) async fn handle_blocks(
                 };
                 if !pow_hash.meets_difficulty(&block.header.target) {
                     warn!(
-                        "Instant-banning peer {} — provably-invalid PoW: \
+                        "Instant-banning peer {} - provably-invalid PoW: \
                        block hash {:?} does not meet claimed target {:?}",
                         hex::encode(&peer_id[..8]),
                         pow_hash,
@@ -706,7 +744,7 @@ pub(super) async fn handle_block_data(
         };
         if !pow_hash.meets_difficulty(&block.header.target) {
             warn!(
-                "Instant-banning peer {:?} — BlockData block with provably-invalid PoW",
+                "Instant-banning peer {:?} - BlockData block with provably-invalid PoW",
                 &peer_id[..4]
             );
             if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
@@ -757,6 +795,87 @@ mod tests {
     use crate::primitives::PublicKey;
     use std::net::SocketAddr;
 
+    fn empty_chain() -> SharedBlockchain {
+        std::sync::Arc::new(crate::chain::Blockchain::new())
+    }
+
+    fn garbage_pow_block(height: u64) -> Block {
+        Block::new(
+            BlockHeader {
+                network_magic: [1, 2, 3, 4],
+                version: 1,
+                height,
+                timestamp: 1,
+                prev_hash: Hash::zero(),
+                tx_root: Hash::zero(),
+                anchor: Hash::zero(),
+                algorithm: 0,
+                nonce: 0,
+                // Nothing meets an all-zero target.
+                target: Hash::zero(),
+                miner_pubkey: PublicKey::from_bytes([0; 32]),
+                supply_commitment: [0; 32],
+                checkpoint_vote: None,
+                spark_set_root: [0; 32],
+                mw_kernel_root: [0; 32],
+            },
+            Vec::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn blocks_past_the_tip_epoch_skip_the_prehash() {
+        let peer_id = [9; 32];
+        let addr: SocketAddr = "127.0.0.1:28082".parse().unwrap();
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+        let scorer = RwLock::new(PeerScorer::new());
+        let chain = empty_chain();
+
+        // Same epoch as the tip (height 0): the pre-hash runs and rejects it.
+        let payload = borsh::to_vec(&BlocksMessage {
+            blocks: vec![garbage_pow_block(1)],
+        })
+        .unwrap();
+        handle_blocks(
+            peer_id,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &chain,
+            &event_tx,
+            &scorer,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        // Two epochs ahead of the tip: handed to the chain task unhashed.
+        let payload = borsh::to_vec(&BlocksMessage {
+            blocks: vec![garbage_pow_block(5000)],
+        })
+        .unwrap();
+        handle_blocks(
+            peer_id,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &chain,
+            &event_tx,
+            &scorer,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(NodeEvent::BlockReceived(block, _)) if block.header.height == 5000
+        ));
+    }
+
     #[test]
     fn cip019_invblock_near_tip_regime() {
         let window = NEAR_TIP_INV_WINDOW;
@@ -801,9 +920,17 @@ mod tests {
         })
         .unwrap();
 
-        handle_blocks(peer_id, &payload, [1, 2, 3, 4], &peers, &event_tx, &scorer)
-            .await
-            .unwrap();
+        handle_blocks(
+            peer_id,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &empty_chain(),
+            &event_tx,
+            &scorer,
+        )
+        .await
+        .unwrap();
 
         let guard = scorer.read().await;
         let score = guard.get(&addr).unwrap();
@@ -861,9 +988,17 @@ mod tests {
         })
         .unwrap();
 
-        handle_blocks(peer_id, &payload, magic, &peers, &event_tx, &scorer)
-            .await
-            .unwrap();
+        handle_blocks(
+            peer_id,
+            &payload,
+            magic,
+            &peers,
+            &empty_chain(),
+            &event_tx,
+            &scorer,
+        )
+        .await
+        .unwrap();
 
         let guard = scorer.read().await;
         let score = guard.get(&addr).unwrap();
@@ -891,9 +1026,17 @@ mod tests {
         })
         .unwrap();
 
-        handle_blocks(peer_id, &payload, [1, 2, 3, 4], &peers, &event_tx, &scorer)
-            .await
-            .unwrap();
+        handle_blocks(
+            peer_id,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &empty_chain(),
+            &event_tx,
+            &scorer,
+        )
+        .await
+        .unwrap();
 
         let guard = scorer.read().await;
         let score = guard.get(&addr).unwrap();
@@ -919,9 +1062,17 @@ mod tests {
         let scorer = RwLock::new(PeerScorer::new());
 
         let payload = borsh::to_vec(&BlocksMessage { blocks: vec![] }).unwrap();
-        handle_blocks(peer_id, &payload, [1, 2, 3, 4], &peers, &event_tx, &scorer)
-            .await
-            .unwrap();
+        handle_blocks(
+            peer_id,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &empty_chain(),
+            &event_tx,
+            &scorer,
+        )
+        .await
+        .unwrap();
 
         let guard = scorer.read().await;
         let score = guard.get(&addr).expect("score entry created");
@@ -1021,5 +1172,79 @@ mod tests {
 
         assert_eq!(sync.read().await.true_best_height(), 0, "no speculative bump");
         assert!(srx.try_recv().is_ok(), "direct GetBlocks issued for unknown hash");
+    }
+
+    #[tokio::test]
+    async fn handle_inv_block_during_ibd_skips_headers_refresh_while_queue_busy() {
+        // Deep IBD with hashes still queued: an InvBlock must NOT send a
+        // GetHeaders (each accepted response is a full re-verification of the
+        // range already being downloaded). Once the queue is drained it may.
+        let peer_id = [27; 32];
+        let addr: SocketAddr = "127.0.0.1:28097".parse().unwrap();
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let chain: SharedBlockchain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        chain.init_genesis().unwrap();
+        let scorer = RwLock::new(PeerScorer::new());
+        let inv = InvMessage {
+            inventory: vec![crate::network::protocol::InvVector {
+                inv_type: 0,
+                hash: Hash::from_bytes([6; 32]),
+            }],
+        };
+        let payload = borsh::to_vec(&inv).unwrap();
+
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        {
+            let mut sg = sync.write().await;
+            sg.update_peer_height_for(peer_id, 5_000);
+            sg.queue_headers_from_peer(peer_id, vec![Hash::from_bytes([7; 32])]);
+            assert!(!sg.is_synced(), "precondition: deep IBD");
+            assert_eq!(sg.pending_count(), 1, "precondition: queue busy");
+        }
+        handle_inv_block(
+            peer_id,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &senders,
+            &sync,
+            &chain,
+            &scorer,
+        )
+        .await
+        .unwrap();
+        assert!(
+            srx.try_recv().is_err(),
+            "no GetHeaders while the queue is busy"
+        );
+        assert!(!sync.read().await.headers_request_pending());
+
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        sync.write().await.update_peer_height_for(peer_id, 5_000);
+        assert_eq!(
+            sync.read().await.pending_count(),
+            0,
+            "precondition: drained"
+        );
+        handle_inv_block(
+            peer_id,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &senders,
+            &sync,
+            &chain,
+            &scorer,
+        )
+        .await
+        .unwrap();
+        assert!(
+            srx.try_recv().is_ok(),
+            "GetHeaders refresh once the queue is drained"
+        );
     }
 }

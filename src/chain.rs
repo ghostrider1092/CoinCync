@@ -2512,7 +2512,7 @@ impl Blockchain {
                     // main-chain blocks disconnected but fork blocks not applied.
                     if reorg_error.is_some() {
                         tracing::error!(
-                            "Reorg failed — rolling back to pre-reorg state (tip={}, height={})",
+                            "Reorg failed - rolling back to pre-reorg state (tip={}, height={})",
                             pre_reorg_tip.hash.to_hex()[..16].to_string(),
                             pre_reorg_tip.height,
                         );
@@ -2735,7 +2735,7 @@ impl Blockchain {
                     // B exactly when path A did not.
                     if reorg_error.is_some() && !rolled_back {
                         tracing::error!(
-                            "Reorg tip validation failed — rolling back to pre-reorg state (tip={}, height={})",
+                            "Reorg tip validation failed - rolling back to pre-reorg state (tip={}, height={})",
                             pre_reorg_tip.hash.to_hex()[..16].to_string(),
                             pre_reorg_tip.height,
                         );
@@ -3275,7 +3275,7 @@ impl Blockchain {
         let h = self.height();
         self.peer_target_height.store(h, Relaxed);
         self.synced.store(true, Relaxed);
-        tracing::info!("Phantom target cleared — synced=true h={}", h);
+        tracing::info!("Phantom target cleared - synced=true h={}", h);
     }
 
     // export_checkpoints moved to chain::queries (issue #108).

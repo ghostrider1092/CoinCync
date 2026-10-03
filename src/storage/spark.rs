@@ -323,7 +323,7 @@ impl SparkStore {
                     prev_height = prev.height,
                     new_height = height,
                     "R-67: SparkStore checkpoint height regression: \
-                     prev={} new={} — this SHOULD never happen in \
+                     prev={} new={} - this SHOULD never happen in \
                      production (single-writer under chain RwLock). \
                      If seen, the chain orchestrator is calling out \
                      of order or a reorg path is pushing instead of \

@@ -915,7 +915,7 @@ async fn submit_and_broadcast(
             let block_for_broadcast = p2p.map(|_| block.clone());
             match block_builder::submit_mined_block(chain, mempool, block) {
                 Ok(status) => {
-                    info!("stratum: block from worker {} submitted — {:?}", worker_id, status);
+                    info!("stratum: block from worker {} submitted - {:?}", worker_id, status);
                     let accepted = matches!(
                         status,
                         crate::chain::BlockStatus::Accepted

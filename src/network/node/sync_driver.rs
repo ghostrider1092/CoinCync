@@ -16,7 +16,8 @@
 //!   the sync engine looked internally busy so `is_stalled` never fired;
 //!   without the repeat-throttle, an unthrottled version would log-flood at
 //!   tick rate.
-//!   TESTS: `emergency_recovery_respects_progress_and_thresholds`.
+//!   TESTS: `emergency_recovery_respects_progress_and_thresholds`,
+//!   `emergency_recovery_counts_from_falling_behind`.
 //! - **§2 `run_headers_tick` pending-request gate** — INVARIANT: the tick
 //!   loop checks `headers_request_pending()` and returns early rather than
 //!   issuing a second concurrent GetHeaders.
@@ -55,7 +56,8 @@
 //!   block-hash spans are distributed only to peers that are either strictly
 //!   TALLER than local height OR advertise strictly greater cumulative WORK
 //!   than our tip (`ChainSync::work_heavier_peers`); a peer that is neither is
-//!   never sent a span.
+//!   never sent a span while such a peer exists. With no eligible peer at all
+//!   the span goes to the live peers instead of to nobody.
 //!   THREAT: (P-3, 2026-08-16) a same-height stuck follower received part of
 //!   the span, answered empty, and IBD wedged permanently with no recovery
 //!   tier able to clear it. (#126, 2026-09-28) a peer on a shorter-but-heavier
@@ -63,7 +65,8 @@
 //!   filtered it out, so the queued fork hashes were never requested from
 //!   anyone and the node wedged below the heavier tip.
 //!   TESTS: `send_block_spans_admits_work_heavier_shorter_peer_126`,
-//!   `send_block_spans_rejects_equal_height_equal_work_peer`.
+//!   `send_block_spans_rejects_equal_height_equal_work_peer`,
+//!   `send_block_spans_falls_back_to_the_only_peer`.
 //! - **§6 `live_block_peers` / `remove_dead_senders`** — INVARIANT: only
 //!   peers that are `Connected`, have an open (non-closed) sender channel,
 //!   and are not `GetBlocks`-banned by the scorer are offered as IBD block
@@ -92,7 +95,7 @@ use std::time::Duration;
 use dashmap::DashMap;
 use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::interval;
+use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use crate::chain::SharedBlockchain;
@@ -116,6 +119,12 @@ struct SyncDriverState {
     stall_count: u32,
     last_progress_height: u64,
     no_progress_ticks: u32,
+    /// Tip height the Blocks-tick watchdog last counted as progress. Kept
+    /// apart from `last_progress_height`: the Tier-1 branch above the state
+    /// match bumps that one on the same tick, so comparing against it made
+    /// every tick of a steadily advancing download read as "no progress" and
+    /// fired the 60-tick Headers bounce every 30 s in the middle of a batch.
+    watchdog_height: u64,
     started_at: std::time::Instant,
     tier2_fires_since_progress: u32,
     tier3_fires_since_progress: u32,
@@ -135,6 +144,7 @@ impl SyncDriverState {
             stall_count: 0,
             last_progress_height: height,
             no_progress_ticks: 0,
+            watchdog_height: height,
             started_at: std::time::Instant::now(),
             tier2_fires_since_progress: 0,
             tier3_fires_since_progress: 0,
@@ -149,8 +159,15 @@ impl SyncDriverState {
         self.started_at.elapsed().as_secs()
     }
 
-    fn emergency_recovery_due(&self, monotonic_now: u64, is_synced: bool) -> bool {
-        if is_synced || monotonic_now < EMERGENCY_T3_NO_PROGRESS_SECS {
+    fn emergency_recovery_due(&mut self, monotonic_now: u64, is_synced: bool) -> bool {
+        if is_synced {
+            // Synced: nothing to catch up with, so keep the clock current or
+            // the first tick behind a new taller peer fires straight away.
+            self.last_progress_time_secs = monotonic_now;
+            self.emergency_t3_fires = 0;
+            return false;
+        }
+        if monotonic_now < EMERGENCY_T3_NO_PROGRESS_SECS {
             return false;
         }
         let since_progress = monotonic_now.saturating_sub(self.last_progress_time_secs);
@@ -161,6 +178,22 @@ impl SyncDriverState {
             return true;
         }
         since_progress.saturating_sub(EMERGENCY_T3_NO_PROGRESS_SECS) >= EMERGENCY_T3_REPEAT_SECS
+    }
+
+    /// Blocks-tick stall accounting: a tip advance (or blocks delivered this
+    /// tick) resets the no-progress counter, anything else counts the tick.
+    fn note_blocks_tick(&mut self, our_h: u64, blocks_flowing: bool) {
+        if our_h > self.watchdog_height {
+            self.watchdog_height = our_h;
+            if our_h > self.last_progress_height {
+                self.last_progress_height = our_h;
+            }
+            self.no_progress_ticks = 0;
+        } else if blocks_flowing {
+            self.no_progress_ticks = 0;
+        } else {
+            self.no_progress_ticks += 1;
+        }
     }
 }
 
@@ -192,6 +225,12 @@ pub(super) fn spawn_sync_driver(
         // 500ms tick during IBD — aggressive sync for fast convergence.
         // Each tick requests up to 500 blocks distributed across all peers.
         let mut tick = interval(Duration::from_millis(500));
+        // The default (Burst) replays every tick missed while the loop body
+        // was blocked, back-to-back. `no_progress_ticks` counts ticks as
+        // time (60 ticks = 30s at 500ms), so one long stall on the sync lock
+        // could burn the whole budget in a second and force Headers for
+        // nothing. Delay keeps consecutive ticks 500ms apart.
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let _stall_timeout: u64 = 30; // seconds before considering sync stalled
         let mut driver = SyncDriverState::new(sync_chain.height());
 
@@ -421,7 +460,7 @@ pub(super) fn spawn_sync_driver(
                     if advanced_since_last_tier2 {
                         // We DID advance between Tier-2 firings — recovery
                         // is working, even if slowly. Reset Tier-3 counter.
-                        warn!("Sync stalled, rotating peers (made progress since last rotation: {} → {})",
+                        warn!("Sync stalled, rotating peers (made progress since last rotation: {} -> {})",
                           driver.tier2_last_height, current_height);
                         driver.tier2_fires_since_progress = 0;
                         driver.tier3_fires_since_progress = 0;
@@ -463,7 +502,7 @@ pub(super) fn spawn_sync_driver(
                          height stuck at {} (peers={}). Performing aggressive recovery: clearing the \
                          address book tried-list, dropping ALL orphans (not just expired), resetting \
                          headers-request timeout. If this fires repeatedly without recovery, the node \
-                         may be on a fork the peers don't share — operator may need to wipe + reimport snapshot.",
+                         may be on a fork the peers don't share - operator may need to wipe + reimport snapshot.",
                         driver.tier3_fires_since_progress,
                         driver.tier2_fires_since_progress,
                         current_height,
@@ -579,14 +618,7 @@ pub(super) fn spawn_sync_driver(
                     // 60 ticks, bounces to Headers, abandoning the half-
                     // downloaded fork. A rising delivered count proves the
                     // pipeline is doing real work regardless of tip movement.
-                    if our_h > driver.last_progress_height {
-                        driver.last_progress_height = our_h;
-                        driver.no_progress_ticks = 0;
-                    } else if blocks_flowing {
-                        driver.no_progress_ticks = 0;
-                    } else {
-                        driver.no_progress_ticks += 1;
-                    }
+                    driver.note_blocks_tick(our_h, blocks_flowing);
 
                     // Step 2: Get block hashes to download from sync engine.
                     // (Prior comment cited "Monero uses spans of 20-100";
@@ -617,6 +649,10 @@ pub(super) fn spawn_sync_driver(
                             let mut sg = sync_sync.write().await;
                             sg.set_state(SyncState::Headers);
                             sg.reset_headers_timeout();
+                        } else if pending == 0 {
+                            // Idle at the tip: not a stall, so these ticks must
+                            // not feed the 60-tick net below.
+                            driver.no_progress_ticks = 0;
                         }
                     } else {
                         // Step 3: MULTI-PEER SPAN DOWNLOAD
@@ -655,7 +691,7 @@ pub(super) fn spawn_sync_driver(
                         }
                     }
 
-                    // Safety net: if stuck for 60+ ticks (5min) with no progress,
+                    // Safety net: if stuck for 60+ ticks (30s at 500ms) with no progress,
                     // force back to Headers
                     if driver.no_progress_ticks >= 60 {
                         let sg = sync_sync.read().await;
@@ -707,7 +743,15 @@ async fn run_headers_tick(
     if locator.is_empty() {
         return;
     }
-    let Some(peer_id) = pick_scored_peer(peers, scorer) else {
+    // Ask a peer that is not behind us. One that is answers the locator from
+    // the first entry it knows and sends back headers we already have, so the
+    // round is wasted. Any peer will do when nobody is ahead: a node at the
+    // tip still needs its empty reply to settle into Synced.
+    let work_heavier = sync.read().await.work_heavier_peers();
+    let not_behind = |peer: &PeerInfo| peer.height >= height || work_heavier.contains(&peer.id);
+    let Some(peer_id) = pick_scored_peer(peers, scorer, &not_behind)
+        .or_else(|| pick_scored_peer(peers, scorer, &|_: &PeerInfo| true))
+    else {
         return;
     };
     if sync.read().await.is_sync_banned(&peer_id, now) {
@@ -831,10 +875,19 @@ async fn send_block_spans(
         .copied()
         .filter(|(id, h)| *h > local_height || work_heavier.contains(id))
         .collect();
-    if ahead.is_empty() {
+    //
+    // When nobody qualifies, ask the peers we have anyway. The hashes were
+    // queued for a reason (a Headers reply, an orphan's missing parent), and
+    // P-3 was about splitting a span between a taller peer and a same-height
+    // one, not about a lone same-height peer that holds the block: a miner at
+    // the tip gets its only peer's fork announced, the parent goes into the
+    // queue, and with nobody "ahead" nothing ever requested it, so the driver
+    // re-queued it every tick ("Recovered 1 stuck downloads"). A peer that
+    // cannot deliver still times out and is de-scored exactly as before.
+    let peers = if ahead.is_empty() { peers } else { &ahead[..] };
+    if peers.is_empty() {
         return 0;
     }
-    let peers = &ahead[..];
 
     let span_size = hashes.len().div_ceil(peers.len());
     let mut total_sent = 0usize;
@@ -928,11 +981,26 @@ mod tests {
 
         assert!(!state.emergency_recovery_due(299, false));
         assert!(state.emergency_recovery_due(300, false));
-        assert!(!state.emergency_recovery_due(300, true));
 
         state.emergency_t3_fires = 1;
         assert!(!state.emergency_recovery_due(419, false));
         assert!(state.emergency_recovery_due(420, false));
+
+        assert!(!state.emergency_recovery_due(420, true));
+    }
+
+    // The count starts when the node falls behind, not at its last block.
+    #[test]
+    fn emergency_recovery_counts_from_falling_behind() {
+        let mut state = SyncDriverState::new(10);
+        state.last_progress_time_secs = 0;
+        state.emergency_t3_fires = 1;
+
+        assert!(!state.emergency_recovery_due(1000, true));
+        assert_eq!(state.emergency_t3_fires, 0);
+        assert!(!state.emergency_recovery_due(1001, false));
+        assert!(!state.emergency_recovery_due(1299, false));
+        assert!(state.emergency_recovery_due(1300, false));
     }
 
     fn sync_at(height: u64, local_work: u128) -> ChainSync {
@@ -984,28 +1052,66 @@ mod tests {
     }
 
     // §5 control (P-3 preserved): a peer that is neither taller NOR work-heavier
-    // is still filtered out — the #126 fix widens eligibility, it does not open
-    // the floodgates to same-height, same-work followers.
+    // is still filtered out while a taller peer is there — the #126 fix widens
+    // eligibility, it does not open the floodgates to same-height, same-work
+    // followers.
     #[tokio::test]
     async fn send_block_spans_rejects_equal_height_equal_work_peer() {
         let cs = sync_at(100, 1_000); // no peer work claim recorded
         let peer: PeerId = [9u8; 32];
+        let taller: PeerId = [10u8; 32];
         assert!(!cs.work_heavier_peers().contains(&peer));
         let sync = RwLock::new(cs);
 
         let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(4);
         senders.insert(peer, tx);
+        let (taller_tx, mut taller_rx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(taller, taller_tx);
 
-        let hashes = vec![Hash::from_bytes([1u8; 32])];
-        let peers = [(peer, 100u64)]; // same height, no work claim
+        let hashes = vec![Hash::from_bytes([1u8; 32]), Hash::from_bytes([2u8; 32])];
+        let peers = [(taller, 110u64), (peer, 100u64)]; // second: same height, no work claim
 
         let sent =
             send_block_spans(&hashes, &peers, &senders, &sync, [0xC0, 0x15, 0x11, 0x00], 1_000, 100)
                 .await;
 
-        assert_eq!(sent, 0, "an equal-height, equal-work peer must not be sent a span");
-        assert!(rx.try_recv().is_err(), "no GetBlocks should be emitted");
+        assert_eq!(sent, 2, "the whole span goes to the taller peer");
+        assert!(taller_rx.try_recv().is_ok(), "the taller peer got the GetBlocks");
+        assert!(rx.try_recv().is_err(), "the equal-height peer must not be sent a span");
+    }
+
+    // With no taller or heavier peer at all, the span still has to go out:
+    // a miner at the tip whose only peer announced a fork block queues the
+    // parent, and nobody "ahead" meant it was re-queued every tick forever.
+    #[tokio::test]
+    async fn send_block_spans_falls_back_to_the_only_peer() {
+        let sync = RwLock::new(sync_at(100, 1_000));
+        let peer: PeerId = [9u8; 32];
+
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer, tx);
+
+        let hashes = vec![Hash::from_bytes([1u8; 32])];
+        let peers = [(peer, 100u64)];
+
+        let sent = send_block_spans(
+            &hashes,
+            &peers,
+            &senders,
+            &sync,
+            [0xC0, 0x15, 0x11, 0x00],
+            1_000,
+            100,
+        )
+        .await;
+
+        assert_eq!(
+            sent, 1,
+            "the only peer is asked even though it is not ahead"
+        );
+        assert!(rx.try_recv().is_ok(), "a GetBlocks went to that peer");
     }
 
     fn mk_connected_peer(id: PeerId, height: u64) -> PeerInfo {
@@ -1091,5 +1197,24 @@ mod tests {
             !bytes.is_empty(),
             "the Blocks tick sent a GetBlocks message to the eligible peer"
         );
+    }
+
+    #[test]
+    fn blocks_tick_watchdog_counts_progress_even_after_tier1_bumped_the_marker() {
+        // The Tier-1 branch above the state match records the tip advance on
+        // the same tick, before the Blocks arm runs. The watchdog must still
+        // see that advance as progress, or it fires every 30 s mid-download.
+        let mut d = SyncDriverState::new(100);
+        d.last_progress_height = 101;
+        d.note_blocks_tick(101, false);
+        assert_eq!(d.no_progress_ticks, 0, "advancing tip is progress");
+        d.note_blocks_tick(101, false);
+        assert_eq!(d.no_progress_ticks, 1, "same height, nothing delivered");
+        d.note_blocks_tick(101, true);
+        assert_eq!(d.no_progress_ticks, 0, "delivered blocks are progress");
+        d.last_progress_height = 105;
+        d.note_blocks_tick(105, false);
+        assert_eq!(d.no_progress_ticks, 0);
+        assert_eq!(d.last_progress_height, 105);
     }
 }

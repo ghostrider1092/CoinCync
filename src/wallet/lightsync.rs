@@ -490,7 +490,7 @@ impl LightWalletSync {
                     tracing::debug!(
                         "lightsync: stealth match but commitment recompute mismatch \
                          (tx={}, output_idx={}, claimed amount {}). \
-                         Likely malicious sender or corrupted digest — skipping.",
+                         Likely malicious sender or corrupted digest - skipping.",
                         output.tx_hash.to_hex(),
                         output.output_index,
                         amount,
@@ -718,7 +718,7 @@ fn detect_coinbase_digest(output: &OutputDigest, keys: &ScanKeys) -> Option<Decr
     if expected_commitment != output.commitment {
         tracing::warn!(
             "lightsync coinbase: stealth match but commitment recompute mismatch \
-             (tx={}, output_idx={}, claimed amount {}) — skipping.",
+             (tx={}, output_idx={}, claimed amount {}) - skipping.",
             output.tx_hash.to_hex(),
             output.output_index,
             amount,

@@ -182,7 +182,7 @@ pub fn build_template_json(
             }
             Some(floor) => {
                 tracing::debug!(
-                    "Template: skipping tx {} — fee {} < congestion floor {} at {}% full",
+                    "Template: skipping tx {} - fee {} < congestion floor {} at {}% full",
                     tx.hash(),
                     tx.fee.as_atomic(),
                     floor,
@@ -196,7 +196,7 @@ pub fn build_template_json(
             }
             None => {
                 // Same overflow the validator treats as oversized-tx: exclude.
-                tracing::debug!("Template: skipping tx {} — fee calc overflow", tx.hash());
+                tracing::debug!("Template: skipping tx {} - fee calc overflow", tx.hash());
                 continue;
             }
         }

@@ -35,10 +35,12 @@
 //!   TESTS: `rejects_self_declared_easy_target_after_difficulty_activates`.
 //! - **§5 `validate_header_batch` (proof-of-work)** — INVARIANT: `verify_pow`
 //!   must succeed against the header's bound anchor/nonce/tx_root/target
-//!   before a header is accepted into `hashes`.
+//!   before a header is accepted into `hashes`. Headers the chain already
+//!   holds skip the check and are left out of the result.
 //!   THREAT: a structurally-valid header with forged or missing PoW being
 //!   queued for sync.
-//!   TESTS: `accepts_connected_header_with_valid_pow`.
+//!   TESTS: `accepts_connected_header_with_valid_pow`,
+//!   `headers_already_in_the_chain_are_not_returned`.
 //! - **§6 `handle_get_headers`** — INVARIANT: oversized `GetHeaders` payloads
 //!   are dropped and scored before parsing; the response is bounded to
 //!   `MAX_HEADERS_RESPONSE` headers starting from the first locator match.
@@ -61,10 +63,21 @@
 //!   rejected batch never reaches `queue_headers_from_peer`.
 //!   THREAT: unscored garbage or invalid-header spam from a misbehaving peer.
 //!   TESTS: `handle_headers_borsh_garbage_scores_protocol_violation`.
+//! - **§9 `handle_headers` (off-lock batch verification)** — INVARIANT: the
+//!   `ChainSync` write lock is released while `validate_header_batch` runs;
+//!   `begin_headers_validation` / `end_headers_validation` bracket the call so
+//!   `headers_request_pending()` stays true and no second GetHeaders goes out.
+//!   THREAT: holding the lock across ~2000 RandomX header checks froze the
+//!   sync driver for the whole batch; the ticks it missed then fired as a
+//!   burst and tripped the 60-tick no-progress watchdog, forcing a Headers
+//!   re-fetch (and a full re-verification) after every ~100 blocks.
+//!   TESTS: `handle_headers_rejected_batch_clears_validation_flag`,
+//!   `handle_headers_valid_batch_queues_and_clears_validation_flag`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dashmap::DashMap;
+use rayon::prelude::*;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, warn};
 
@@ -78,6 +91,7 @@ use crate::network::sync::ChainSync;
 use crate::primitives::Hash;
 
 use super::super::broadcast::send_to_peer;
+use super::chain::same_pow_epoch;
 
 fn header_history(
     chain: &SharedBlockchain,
@@ -122,11 +136,14 @@ struct HeaderBatchError {
 
 fn validate_header_batch(
     chain: &SharedBlockchain,
+    known: &HashSet<Hash>,
     headers: &[BlockHeader],
 ) -> std::result::Result<Vec<Hash>, HeaderBatchError> {
     let expected_magic = chain.network().magic_bytes();
     let mut accepted = HashMap::with_capacity(headers.len());
     let mut hashes = Vec::with_capacity(headers.len());
+    let mut unverified = Vec::with_capacity(headers.len());
+    let mut held = Vec::with_capacity(headers.len());
 
     for (index, header) in headers.iter().enumerate() {
         let reject = |reason: String, offense| HeaderBatchError {
@@ -257,25 +274,81 @@ fn validate_header_batch(
             }
         }
 
-        verify_pow(
-            &header.prev_hash,
-            header.height,
-            header.timestamp,
-            header.nonce,
-            &header.tx_root,
-            &header.target,
-            &header.anchor,
-            header.algorithm,
-            &header.pow_binding(),
-        )
-        .map_err(|error| reject(error.to_string(), MisbehaviorType::InvalidBlockPoW))?;
-
         let hash = header.hash();
+        // A hash that is already queued for download came through this same
+        // validation, and a hash the chain holds was verified when the block
+        // was applied. Neither needs its RandomX hash again. Every reconnect,
+        // tip refresh and watchdog round re-sends the range we are already
+        // downloading, and hashing 2000 headers costs 25-45 s of one core.
+        let in_chain = chain.get_block_hash(header.height) == Some(hash);
+        if !known.contains(&hash) && !in_chain {
+            unverified.push(index);
+        }
+        held.push(in_chain);
         accepted.insert(hash, header.clone());
         hashes.push(hash);
     }
 
-    Ok(hashes)
+    // RandomX is the expensive part, 10-25 ms per header in light mode. The
+    // headers are independent once the batch is linked, so hash them on all
+    // cores and report the lowest failing index, as the loop above would.
+    // One epoch at a time, though: the dataset cache holds a single key and
+    // rebuilds on a mismatch (0.3 s in light mode, 23 s with the full
+    // dataset), so a batch that straddles a 2048-block boundary with both
+    // keys live on different threads rebuilt it on nearly every hash.
+    for group in epoch_groups(headers, &unverified) {
+        let failure = group
+            .par_iter()
+            .filter_map(|&index| {
+                let header = &headers[index];
+                verify_pow(
+                    &header.prev_hash,
+                    header.height,
+                    header.timestamp,
+                    header.nonce,
+                    &header.tx_root,
+                    &header.target,
+                    &header.anchor,
+                    header.algorithm,
+                    &header.pow_binding(),
+                )
+                .err()
+                .map(|error| (index, error.to_string()))
+            })
+            .min_by_key(|(index, _)| *index);
+        if let Some((index, reason)) = failure {
+            return Err(HeaderBatchError {
+                index,
+                reason,
+                offense: MisbehaviorType::InvalidBlockPoW,
+            });
+        }
+    }
+
+    // Headers for blocks we already have are not handed back. A peer that is
+    // behind us answers our locator from the first entry it knows, genesis
+    // when it is far behind, and returns its whole chain; queueing those
+    // downloads up to 2000 blocks we hold and processes them as duplicates,
+    // on every GetHeaders that happens to land on such a peer.
+    Ok(hashes
+        .into_iter()
+        .zip(held)
+        .filter_map(|(hash, in_chain)| (!in_chain).then_some(hash))
+        .collect())
+}
+
+/// Splits `indices` (ascending positions in `headers`) into runs whose
+/// headers hash with the same RandomX key, in order.
+fn epoch_groups(headers: &[BlockHeader], indices: &[usize]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for &index in indices {
+        let height = headers[index].height;
+        match groups.last_mut() {
+            Some(group) if same_pow_epoch(headers[group[0]].height, height) => group.push(index),
+            _ => groups.push(vec![index]),
+        }
+    }
+    groups
 }
 
 /// #158: resolve the GetHeaders response start height from a block locator.
@@ -465,7 +538,7 @@ mod tests {
         (chain, genesis)
     }
 
-    fn first_header(genesis: &crate::consensus::Block) -> BlockHeader {
+    pub(super) fn first_header(genesis: &crate::consensus::Block) -> BlockHeader {
         let mut header = genesis.header.clone();
         header.height = 1;
         header.version = crate::constants::block_version_at_height(1);
@@ -479,7 +552,8 @@ mod tests {
     fn accepts_connected_header_with_valid_pow() {
         let (chain, genesis) = setup();
         let header = first_header(&genesis);
-        let hashes = validate_header_batch(&chain, &[header]).expect("valid header");
+        let hashes =
+            validate_header_batch(&chain, &HashSet::new(), &[header]).expect("valid header");
         assert_eq!(hashes.len(), 1);
     }
 
@@ -513,7 +587,8 @@ mod tests {
         second.timestamp += crate::constants::TARGET_BLOCK_TIME;
         second.target = claimed;
 
-        let error = validate_header_batch(&chain, &[first, second]).expect_err("target mismatch");
+        let error = validate_header_batch(&chain, &HashSet::new(), &[first, second])
+            .expect_err("target mismatch");
         assert_eq!(error.index, 1);
         assert!(
             error.reason.contains("difficulty target mismatch"),
@@ -531,8 +606,8 @@ mod tests {
         second.height = 2;
         second.prev_hash = genesis.hash();
 
-        let error =
-            validate_header_batch(&chain, &[first, second]).expect_err("disconnected batch");
+        let error = validate_header_batch(&chain, &HashSet::new(), &[first, second])
+            .expect_err("disconnected batch");
         assert_eq!(error.index, 1);
         assert!(error.reason.contains("not contiguous"), "{}", error.reason);
         assert_eq!(error.offense, MisbehaviorType::ProtocolViolation);
@@ -544,10 +619,73 @@ mod tests {
         let mut header = first_header(&genesis);
         header.prev_hash = Hash::from_bytes([0xA5; 32]);
 
-        let error = validate_header_batch(&chain, &[header]).expect_err("unknown parent");
+        let error =
+            validate_header_batch(&chain, &HashSet::new(), &[header]).expect_err("unknown parent");
         assert_eq!(error.index, 0);
         assert!(error.reason.contains("known block"), "{}", error.reason);
         assert_eq!(error.offense, MisbehaviorType::ProtocolViolation);
+    }
+
+    #[test]
+    fn queued_header_skips_the_pow_check() {
+        let (chain, genesis) = setup();
+        let mut header = first_header(&genesis);
+        // Nothing meets an all-zero target, so the PoW check must fail...
+        header.target = Hash::zero();
+        let error = validate_header_batch(&chain, &HashSet::new(), std::slice::from_ref(&header))
+            .expect_err("unknown header is hashed");
+        assert_eq!(error.offense, MisbehaviorType::InvalidBlockPoW);
+
+        // ...unless the hash is one we already validated and queued.
+        let known: HashSet<Hash> = [header.hash()].into_iter().collect();
+        let hashes = validate_header_batch(&chain, &known, std::slice::from_ref(&header))
+            .expect("queued header is trusted");
+        assert_eq!(hashes, vec![header.hash()]);
+    }
+
+    #[test]
+    fn headers_already_in_the_chain_are_not_returned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(crate::db::Database::open(dir.path()).expect("db"));
+        let chain = Arc::new(Blockchain::with_database(
+            db,
+            crate::config::NetworkType::Testnet,
+        ));
+        chain.init_genesis().expect("genesis");
+        chain.seed_linear_chain_for_testing(1, crate::constants::TARGET_BLOCK_TIME);
+        let block = chain.get_block_by_height(1).expect("seeded block");
+        assert_eq!(chain.get_block_hash(1), Some(block.hash()));
+        // The peer sends a header we already have: nothing to hash, nothing
+        // to queue.
+        let hashes = validate_header_batch(&chain, &HashSet::new(), &[block.header])
+            .expect("a header we hold is valid");
+        assert!(
+            hashes.is_empty(),
+            "held headers must not be queued: {:?}",
+            hashes
+        );
+    }
+
+    #[test]
+    fn header_pow_runs_one_epoch_at_a_time() {
+        let (_chain, genesis) = setup();
+        // The first height whose RandomX key differs from its parent's.
+        let Some(boundary) = (1..10_000u64).find(|&h| !same_pow_epoch(h - 1, h)) else {
+            return; // no epochs in this build
+        };
+        let headers: Vec<BlockHeader> = (boundary - 2..boundary + 2)
+            .map(|height| {
+                let mut header = first_header(&genesis);
+                header.height = height;
+                header
+            })
+            .collect();
+        assert_eq!(
+            epoch_groups(&headers, &[0, 1, 2, 3]),
+            vec![vec![0, 1], vec![2, 3]],
+            "headers on each side of the boundary are hashed as separate groups"
+        );
+        assert!(epoch_groups(&headers, &[]).is_empty());
     }
 }
 
@@ -599,7 +737,21 @@ pub(super) async fn handle_headers(
                 return Ok(());
             }
 
-            let hashes = match validate_header_batch(chain, &headers_msg.headers) {
+            // A full batch is 2000 headers = 2000 RandomX hashes, tens of
+            // seconds in light mode. Verify it with the lock RELEASED: the
+            // sync driver takes this lock every tick, and holding it here
+            // stalled the driver for the whole verification (audit map, 9). The
+            // validating flag keeps `headers_request_pending()` true so the
+            // driver does not issue a second GetHeaders meanwhile.
+            let known = sync_guard.queued_header_hashes();
+            sync_guard.begin_headers_validation();
+            drop(sync_guard);
+
+            let validated = validate_header_batch(chain, &known, &headers_msg.headers);
+
+            let mut sync_guard = sync.write().await;
+            sync_guard.end_headers_validation();
+            let hashes = match validated {
                 Ok(hashes) => hashes,
                 Err(error) => {
                     warn!(
@@ -756,6 +908,71 @@ mod handle_headers_tests {
 
         assert!(scorer.read().await.get(&addr).is_none(), "no scoring");
         assert!(!sync.read().await.headers_request_pending());
+    }
+
+    #[tokio::test]
+    async fn handle_headers_rejected_batch_clears_validation_flag() {
+        // The batch is verified with the ChainSync lock released, bracketed by
+        // the validating flag. The flag must be cleared on the reject path too,
+        // or no GetHeaders could ever be issued again.
+        let peer = [15u8; 32];
+        let addr = addr_for(31005);
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr, false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let nonce = sync.write().await.begin_headers_request(peer, 123).unwrap();
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let genesis = chain.get_block_by_height(0).expect("genesis block");
+        let mut header = genesis.header.clone();
+        header.height = 1;
+        header.prev_hash = Hash::from_bytes([0xA5; 32]); // unknown parent
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: vec![header],
+            nonce,
+        })
+        .unwrap();
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert!(scorer.read().await.get(&addr).is_some(), "reject is scored");
+        assert!(
+            !sync.read().await.headers_request_pending(),
+            "validating flag cleared after a rejected batch"
+        );
+        let reissued = sync.write().await.begin_headers_request(peer, 124);
+        assert!(reissued.is_some(), "a new GetHeaders can be issued");
+    }
+
+    #[tokio::test]
+    async fn handle_headers_valid_batch_queues_and_clears_validation_flag() {
+        use crate::network::sync::SyncState;
+
+        let peer = [16u8; 32];
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr_for(31006), false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let nonce = sync.write().await.begin_headers_request(peer, 123).unwrap();
+        let chain = genesis_chain();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let genesis = chain.get_block_by_height(0).expect("genesis block");
+        let header = super::tests::first_header(&genesis);
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: vec![header],
+            nonce,
+        })
+        .unwrap();
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        let sg = sync.read().await;
+        assert!(!sg.headers_request_pending(), "flag cleared after accept");
+        assert_eq!(sg.pending_count(), 1, "verified header hash queued");
+        assert_eq!(sg.state(), SyncState::Blocks);
     }
 
     #[tokio::test]

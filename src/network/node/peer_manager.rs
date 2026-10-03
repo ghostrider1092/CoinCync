@@ -30,8 +30,9 @@
 //!   THREAT: without these gates the connector self-connects, thrashes a
 //!   single peer in a connect/disconnect loop, or burns Noise handshake
 //!   slots retrying too fast — starving real address-book progress.
-//!   TESTS: (gap — no unit test for `is_self_dial` or
-//!   `connection_attempt_deferred` in isolation).
+//!   TESTS: `schedule_retry_grows_the_delay_and_caps_it_when_isolated` (the
+//!   backoff step); no unit test yet for `is_self_dial` or
+//!   `connection_attempt_deferred` in isolation.
 //! - **§4 `spawn_outbound_connector` per-/16 eclipse cap
 //!   (`try_track_outbound_subnet_owned`, RAII `outbound_slot`)** —
 //!   INVARIANT: an attacker controlling one /16 cannot hold more than
@@ -69,8 +70,9 @@
 //!   THREAT: a scoring bug that zeroes out weights entirely would make
 //!   relay/target selection silently starve, biasing propagation or making
 //!   Dandelion routing predictable.
-//!   TESTS: (gap — no test drives `pick_scored_peer`'s weighted-random
-//!   selection or its zero-weight/lock-contention fallback path).
+//!   TESTS: `pick_scored_peer_only_considers_allowed_peers` (gap — nothing
+//!   drives the weighted-random selection itself or its zero-weight /
+//!   lock-contention fallback path).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -105,17 +107,67 @@ use super::runtime::wait_for_shutdown;
 use super::types::NodeEvent;
 use super::PeerMessage;
 
-type BackoffMap = Arc<
-    tokio::sync::Mutex<
-        std::collections::HashMap<
-            SocketAddr,
-            (
-                std::time::Instant,
-                super::super::framing::ExponentialBackoff,
-            ),
-        >,
-    >,
+/// Redial pacing while the node has no peer at all. With one
+/// reachable seed on the network, a dropped connection otherwise sat behind
+/// the 30 s minimum and the exponential dial backoff (up to 300 s) for
+/// minutes while the seed was back within seconds.
+const ISOLATED_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+const ISOLATED_MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+fn dial_retry_delay(backoff: Duration, isolated: bool) -> Duration {
+    if isolated {
+        backoff.min(ISOLATED_MAX_BACKOFF)
+    } else {
+        backoff
+    }
+}
+
+type BackoffTable = std::collections::HashMap<
+    SocketAddr,
+    (
+        std::time::Instant,
+        super::super::framing::ExponentialBackoff,
+    ),
 >;
+type BackoffMap = Arc<tokio::sync::Mutex<BackoffTable>>;
+
+/// Push the next attempt at `addr` out by its exponential backoff and return
+/// the delay; capped while the node has no peer at all (`dial_retry_delay`).
+fn schedule_retry(backoffs: &mut BackoffTable, addr: SocketAddr, isolated: bool) -> Duration {
+    let (next_attempt, backoff) = backoffs.entry(addr).or_insert_with(|| {
+        (
+            std::time::Instant::now(),
+            super::super::framing::ExponentialBackoff::new(),
+        )
+    });
+    let delay = dial_retry_delay(backoff.next_delay(), isolated);
+    *next_attempt = std::time::Instant::now() + delay;
+    delay
+}
+
+/// A dial that did not become a peer, whether TCP or the handshake failed.
+async fn note_dial_failure(
+    addr: SocketAddr,
+    error: &str,
+    peers: &DashMap<PeerId, PeerInfo>,
+    addresses: &RwLock<AddressManager>,
+    backoffs: &BackoffMap,
+) {
+    let isolated = !peers.iter().any(|peer| peer.state == PeerState::Connected);
+    addresses.write().await.mark_tried(addr);
+    let delay = schedule_retry(&mut *backoffs.lock().await, addr, isolated);
+    if isolated {
+        info!(
+            "Connection to {} failed ({}); no peers, retrying in {:?}",
+            addr, error, delay
+        );
+    } else {
+        debug!(
+            "Connection to {} failed ({}); next retry in {:?}",
+            addr, error, delay
+        );
+    }
+}
 type LastAttemptMap =
     Arc<tokio::sync::Mutex<std::collections::HashMap<SocketAddr, std::time::Instant>>>;
 
@@ -488,6 +540,10 @@ pub(super) fn spawn_outbound_connector(
             let outbound_count =
                 observe_outbound_health(&connector_peers, &connector_addresses, &connector_tracker)
                     .await;
+            // No connected peer at all, inbound included.
+            let isolated = !connector_peers
+                .iter()
+                .any(|peer| peer.state == PeerState::Connected);
 
             // Enforce the global outbound peer ceiling.
             // Eclipse protection (per-/16 diversity) is now handled
@@ -534,7 +590,7 @@ pub(super) fn spawn_outbound_connector(
                     .unwrap_or(false);
                 let proxy_active = connector_proxy.is_some();
                 info!(
-                    "Outbound isolation: {} outbound peers and address book exhausted — \
+                    "Outbound isolation: {} outbound peers and address book exhausted - \
                      re-bootstrapping from DNS seeds (next retry in \u{2265}{}s if still isolated)",
                     outbound_count,
                     rebootstrap_backoff.as_secs()
@@ -616,16 +672,19 @@ pub(super) fn spawn_outbound_connector(
                 // been tried, so this isn't permanent exclusion.
                 if connector_peers.iter().any(|p| p.addr == addr) {
                     trace!(
-                        "Skipping {} — already have an active peer at this address",
+                        "Skipping {} - already have an active peer at this address",
                         addr
                     );
                     connector_addresses.write().await.mark_tried(addr);
                     continue;
                 }
 
-                if connection_attempt_deferred(addr, &last_attempt, &backoffs, MIN_RECONNECT_DELAY)
-                    .await
-                {
+                let min_delay = if isolated {
+                    ISOLATED_RECONNECT_DELAY
+                } else {
+                    MIN_RECONNECT_DELAY
+                };
+                if connection_attempt_deferred(addr, &last_attempt, &backoffs, min_delay).await {
                     continue;
                 }
 
@@ -776,7 +835,7 @@ async fn observe_outbound_health(
             .collect();
         let (old_sum, new_sum) = tracker.reconcile_outbound_subnets(&live_outbound);
         warn!(
-            "eclipse-defense: significant drift — subnet_sum={} but outbound_count={} (diff={}) :: {} :: RECONCILED {}→{} from {} live outbound",
+            "eclipse-defense: significant drift - subnet_sum={} but outbound_count={} (diff={}) :: {} :: RECONCILED {}->{} from {} live outbound",
             subnet_sum,
             outbound_count,
             drift,
@@ -787,7 +846,7 @@ async fn observe_outbound_health(
         );
     } else if drift == 1 {
         debug!(
-            "eclipse-defense: minor drift (cosmetic) — subnet_sum={} but outbound_count={} :: {}",
+            "eclipse-defense: minor drift (cosmetic) - subnet_sum={} but outbound_count={} :: {}",
             subnet_sum,
             outbound_count,
             pretty.join(", ")
@@ -827,7 +886,6 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
 
     match super::super::proxy::connect_peer(addr, proxy.as_ref(), CONNECT_TIMEOUT).await {
         Ok(stream) => {
-            backoffs.lock().await.remove(&addr);
             let result = handle_connection(
                 stream,
                 generate_peer_id(),
@@ -836,7 +894,7 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
                 our_nonce,
                 height,
                 tip,
-                peers,
+                peers.clone(),
                 senders,
                 event_tx,
                 msg_tx,
@@ -848,25 +906,17 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
             )
             .await;
             if let Err(error) = result {
+                // Err here means the session never started (handshake or
+                // version), so this is a failed dial and backs off like one.
                 warn!("Outbound connection error: {}", error);
-                addresses.write().await.mark_tried(addr);
+                note_dial_failure(addr, &error.to_string(), &peers, &addresses, &backoffs).await;
             } else {
+                backoffs.lock().await.remove(&addr);
                 addresses.write().await.mark_success(addr);
             }
         }
         Err(error) => {
-            debug!("Connection to {} failed: {}", addr, error);
-            addresses.write().await.mark_tried(addr);
-            let mut backoffs = backoffs.lock().await;
-            let (next_attempt, backoff) = backoffs.entry(addr).or_insert_with(|| {
-                (
-                    std::time::Instant::now(),
-                    super::super::framing::ExponentialBackoff::new(),
-                )
-            });
-            let delay = backoff.next_delay();
-            *next_attempt = std::time::Instant::now() + delay;
-            debug!("Backoff for {}: next retry in {:?}", addr, delay);
+            note_dial_failure(addr, &error.to_string(), &peers, &addresses, &backoffs).await;
         }
     }
 }
@@ -880,7 +930,7 @@ async fn connection_attempt_deferred(
     if let Some(attempted_at) = last_attempt.lock().await.get(&addr) {
         if attempted_at.elapsed() < minimum_delay {
             trace!(
-                "Skipping {} — last attempt was {:?} ago (min {:?})",
+                "Skipping {} - last attempt was {:?} ago (min {:?})",
                 addr,
                 attempted_at.elapsed(),
                 minimum_delay
@@ -931,14 +981,16 @@ fn log_connection_task_result(direction: &'static str, result: Result<(), tokio:
     }
 }
 
-/// Pick a connected peer using composite-score weighted randomness.
+/// Pick a connected peer that `allow` accepts, using composite-score weighted
+/// randomness.
 pub(super) fn pick_scored_peer(
     peers: &Arc<DashMap<PeerId, PeerInfo>>,
     scorer: &Arc<RwLock<PeerScorer>>,
+    allow: &dyn Fn(&PeerInfo) -> bool,
 ) -> Option<PeerId> {
     let connected: Vec<(PeerId, SocketAddr)> = peers
         .iter()
-        .filter(|peer| peer.state == PeerState::Connected)
+        .filter(|peer| peer.state == PeerState::Connected && allow(peer.value()))
         .map(|peer| (peer.id, peer.addr))
         .collect();
     if connected.is_empty() {
@@ -1106,6 +1158,60 @@ pub(super) fn disconnect_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolated_node_caps_the_dial_backoff() {
+        assert_eq!(
+            dial_retry_delay(Duration::from_secs(300), true),
+            ISOLATED_MAX_BACKOFF
+        );
+        assert_eq!(
+            dial_retry_delay(Duration::from_secs(3), true),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            dial_retry_delay(Duration::from_secs(300), false),
+            Duration::from_secs(300)
+        );
+    }
+
+    // Each failure pushes the next attempt out; isolated stays under the cap.
+    #[test]
+    fn schedule_retry_grows_the_delay_and_caps_it_when_isolated() {
+        let addr: SocketAddr = "10.0.0.9:28080".parse().unwrap();
+        let mut table = BackoffTable::new();
+        let first = schedule_retry(&mut table, addr, false);
+        let second = schedule_retry(&mut table, addr, false);
+        assert!(second > first, "{:?} then {:?}", first, second);
+        for _ in 0..10 {
+            schedule_retry(&mut table, addr, false);
+        }
+        assert!(schedule_retry(&mut table, addr, false) > Duration::from_secs(200));
+        assert!(schedule_retry(&mut table, addr, true) <= ISOLATED_MAX_BACKOFF);
+        assert!(table[&addr].0 > std::time::Instant::now());
+    }
+
+    #[test]
+    fn pick_scored_peer_only_considers_allowed_peers() {
+        let peers = Arc::new(DashMap::new());
+        let scorer = Arc::new(RwLock::new(PeerScorer::new()));
+        for (id, height) in [([1u8; 32], 50u64), ([2u8; 32], 150)] {
+            let addr: SocketAddr = format!("10.0.0.{}:28080", id[0]).parse().unwrap();
+            let mut info = PeerInfo::new(id, addr, true);
+            info.state = PeerState::Connected;
+            info.height = height;
+            peers.insert(id, info);
+        }
+        let taller = |peer: &PeerInfo| peer.height >= 100;
+        for _ in 0..20 {
+            assert_eq!(pick_scored_peer(&peers, &scorer, &taller), Some([2u8; 32]));
+        }
+        assert_eq!(
+            pick_scored_peer(&peers, &scorer, &|_: &PeerInfo| false),
+            None
+        );
+        assert!(pick_scored_peer(&peers, &scorer, &|_: &PeerInfo| true).is_some());
+    }
 
     #[test]
     fn anchor_round_trip_keeps_only_connected_outbound_peers() {

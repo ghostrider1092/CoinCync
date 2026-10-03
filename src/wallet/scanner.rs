@@ -536,7 +536,7 @@ impl WalletScanner {
                 target: "wallet::scanner::R102",
                 diff_height = diff.height,
                 current_last_height = self.last_height,
-                "R-102: journal entry rejected — height regression \
+                "R-102: journal entry rejected - height regression \
                  ({} < {}). Would allow rewind past legitimate scan \
                  watermark, replaying output detection.",
                 diff.height, self.last_height
@@ -754,7 +754,7 @@ impl WalletScanner {
                     if expected_commitment != output.commitment {
                         tracing::warn!(
                             "scanner coinbase: stealth match but commitment recompute \
-                             mismatch (claimed amount {}) — skipping.",
+                             mismatch (claimed amount {}) - skipping.",
                             amount
                         );
                         continue;
@@ -801,7 +801,7 @@ impl WalletScanner {
                     if expected_commitment != output.commitment {
                         tracing::warn!(
                             "scanner coinbase: stealth match but commitment recompute \
-                             mismatch (claimed amount {}) — skipping.",
+                             mismatch (claimed amount {}) - skipping.",
                             amount
                         );
                         continue;
@@ -912,7 +912,7 @@ impl WalletScanner {
                         output_index = output_index,
                         claimed_amount = amount,
                         "R-103: stealth match with commitment-recompute \
-                         mismatch — likely forged-amount attack from a \
+                         mismatch - likely forged-amount attack from a \
                          malicious sender. Output DROPPED (correctly). \
                          This is a security-visible event; if seen \
                          frequently, investigate the sender."
@@ -1363,7 +1363,7 @@ fn scan_output_with_keys(
                 tracing::debug!(
                     "scanner(parallel): stealth match but commitment recompute \
                      mismatch (tx={}, output_idx={}, claimed amount {}). \
-                     Likely malicious sender or corrupted output — skipping.",
+                     Likely malicious sender or corrupted output - skipping.",
                     tx_hash.to_hex(),
                     output_index,
                     amount,

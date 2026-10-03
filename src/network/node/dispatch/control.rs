@@ -44,7 +44,8 @@
 //!   THREAT: duplicate/uncapped GetHeaders requests wasting bandwidth or
 //!   re-triggering a sync wedge.
 //!   TESTS: `handle_verack_connects_and_sends_getaddr_without_getheaders_when_not_behind`,
-//!   `handle_verack_behind_peer_issues_getheaders_and_replay_does_not_reissue`.
+//!   `handle_verack_behind_peer_issues_getheaders_and_replay_does_not_reissue`,
+//!   `handle_verack_behind_peer_waits_while_blocks_are_downloading`.
 //! - **§6 `handle_ping` / `handle_pong`** — INVARIANT: a malformed (<8-byte)
 //!   Ping scores ProtocolViolation and never elicits a Pong; a well-formed
 //!   Ping echoes its nonce exactly; Pong itself is a no-op.
@@ -151,7 +152,7 @@ pub(super) async fn handle_version(
         if version.nonce == our_nonce {
             warn!(
                 "Self-connection nonce match from peer {:?} \
-                 — disconnecting. NOT marking as self-address \
+                 - disconnecting. NOT marking as self-address \
                  because the nonce is replayable; if this fires \
                  repeatedly for legitimately-yours addresses, \
                  check that --addnode doesn't list this node's \
@@ -371,7 +372,7 @@ pub(super) async fn handle_consensus_fingerprint(
     let local = crate::consensus::fingerprint::consensus_fingerprint_bytes(chain.network());
     if msg.fingerprint != local {
         warn!(
-            "Peer {:?} consensus-fingerprint MISMATCH: peer={} local={} — peer may run divergent \
+            "Peer {:?} consensus-fingerprint MISMATCH: peer={} local={} - peer may run divergent \
              consensus rules (advisory; not disconnecting)",
             &peer_id[..4],
             hex::encode(msg.fingerprint),
@@ -515,10 +516,17 @@ pub(super) async fn handle_verack(
         let _ = send_to_peer(senders, &peer_id, data).await;
     }
 
-    // Handshake complete — if this peer is ahead, send GetHeaders with nonce.
+    // Handshake complete: if this peer is ahead, send GetHeaders with nonce.
+    // Not while a block download is in progress, though. The driver asks for
+    // headers as soon as the queue drains, and a header round started now
+    // hashes the next RandomX epoch while the chain task still hashes blocks
+    // of the current one; the single-slot cache then flips keys on every hash
+    // (a Windows node whose peer reconnected every 40 s spent 26 minutes of a
+    // 97-minute sync rebuilding the cache, 664 times).
     let peer_height = peers.get(&peer_id).map(|p| p.height).unwrap_or(0);
     let our_height = chain.height();
-    if peer_height > our_height {
+    let downloading = sync.read().await.pending_count() > 0;
+    if peer_height > our_height && !downloading {
         let locator = build_locator(our_height, |h| chain.get_block_hash(h));
         if !locator.is_empty() {
             let now = chrono::Utc::now().timestamp() as u64;
@@ -533,7 +541,7 @@ pub(super) async fn handle_verack(
                     };
                 if sent {
                     info!(
-                        "Handshake complete — GetHeaders nonce={} to peer {:?} (h={}, we={})",
+                        "Handshake complete - GetHeaders nonce={} to peer {:?} (h={}, we={})",
                         nonce,
                         &peer_id[..4],
                         peer_height,
@@ -1081,5 +1089,36 @@ mod handler_tests {
             "replayed Verack on an already-Connected peer is a no-op (nothing re-sent)"
         );
         assert!(sync.read().await.headers_request_pending());
+    }
+
+    #[tokio::test]
+    async fn handle_verack_behind_peer_waits_while_blocks_are_downloading() {
+        let peer_id = [17u8; 32];
+        let addr = addr_for(30017);
+        let peers = DashMap::new();
+        let mut info = PeerInfo::new(peer_id, addr, false);
+        info.state = PeerState::VersionReceived;
+        info.height = 100; // ahead of our genesis-only chain (height 0)
+        peers.insert(peer_id, info);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(peer_id, stx);
+        let dand = dandelion();
+        // A block download is in progress: one hash queued from another peer.
+        let mut cs = ChainSync::new(0, Hash::zero());
+        cs.queue_headers_from_peer([18u8; 32], vec![Hash::from_bytes([1u8; 32])]);
+        assert!(cs.pending_count() > 0);
+        let sync = RwLock::new(cs);
+        let chain = genesis_chain();
+        handle_verack(peer_id, MAGIC, &peers, &senders, &dand, &sync, &chain)
+            .await
+            .unwrap();
+        assert_eq!(peers.get(&peer_id).unwrap().state, PeerState::Connected);
+        assert!(srx.try_recv().is_ok(), "GetAddr sent");
+        assert!(
+            srx.try_recv().is_err(),
+            "no GetHeaders while blocks are downloading"
+        );
+        assert!(!sync.read().await.headers_request_pending());
     }
 }

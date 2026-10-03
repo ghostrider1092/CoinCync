@@ -71,7 +71,7 @@ impl Blockchain {
         let utxos = self.available_output_count();
         if tip.height > 0 && utxos == 0 {
             tracing::warn!(
-                "boot integrity: chain at height {} but the UTXO set is empty — possible corruption",
+                "boot integrity: chain at height {} but the UTXO set is empty - possible corruption",
                 tip.height
             );
         }

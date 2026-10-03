@@ -256,7 +256,7 @@ pub(crate) fn harden_secret_file_permissions(path: &Path) {
                 target: "wallet::persistence::R94",
                 path = %path.display(),
                 error = %e,
-                "R-94: chmod 0o600 failed on wallet secret file — file may \
+                "R-94: chmod 0o600 failed on wallet secret file - file may \
                  be world-readable. Verify with `stat` and remediate."
             );
         }
@@ -275,7 +275,7 @@ pub(crate) fn harden_secret_file_permissions(path: &Path) {
                     target: "wallet::persistence::R94",
                     path = path_str,
                     exit = ?s.code(),
-                    "R-94: icacls /inheritance:r returned non-zero — \
+                    "R-94: icacls /inheritance:r returned non-zero - \
                      inherited ACLs may still grant access. Verify \
                      with `icacls {path_str}`."
                 ),
@@ -283,7 +283,7 @@ pub(crate) fn harden_secret_file_permissions(path: &Path) {
                     target: "wallet::persistence::R94",
                     path = path_str,
                     error = %e,
-                    "R-94: icacls /inheritance:r failed to spawn — \
+                    "R-94: icacls /inheritance:r failed to spawn - \
                      wallet file may inherit parent-directory ACLs."
                 ),
             }
@@ -318,7 +318,7 @@ pub(crate) fn harden_secret_file_permissions(path: &Path) {
                             target: "wallet::persistence::R94",
                             path = path_str,
                             exit = ?s.code(),
-                            "R-94: icacls /grant:r returned non-zero — restrictive \
+                            "R-94: icacls /grant:r returned non-zero - restrictive \
                              ACL may not have applied."
                         ),
                         Err(e) => tracing::error!(
@@ -343,7 +343,7 @@ pub(crate) fn harden_secret_file_permissions(path: &Path) {
                 target: "wallet::persistence::R94",
                 path = ?path,
                 "R-94: wallet path is not valid UTF-8; ACL hardening \
-                 skipped — file inherits parent ACLs."
+                 skipped - file inherits parent ACLs."
             );
         }
     }
@@ -1488,7 +1488,7 @@ pub fn load_v4_from_bytes(bytes: &[u8], password: &str) -> Result<WalletData> {
         // distinction for the operator without leaking to the
         // attacker's reachable code path.
         tracing::warn!(
-            "v4 HMAC mismatch on wallet load — file may be tampered, \
+            "v4 HMAC mismatch on wallet load - file may be tampered, \
              or password is incorrect"
         );
         return Err(Error::InvalidSecretKey(
@@ -2498,7 +2498,7 @@ pub fn create_deniable_wallet(
 ) -> crate::error::Result<()> {
     tracing::error!(
         target: "wallet::persistence::deniable",
-        "C37/C38/C39: create_deniable_wallet DISABLED — the pre-fix \
+        "C37/C38/C39: create_deniable_wallet DISABLED - the pre-fix \
          implementation had three structural bugs that defeated the \
          deniability property (silent .hidden file leak, unused padding, \
          race between .hidden write and cleanup). See the fn's audit \

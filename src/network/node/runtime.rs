@@ -144,7 +144,7 @@ pub(super) fn spawn_upnp_setup(port: u16, mut shutdown: watch::Receiver<bool>) -
             result = super::super::bootstrap::setup_upnp(port, port) => {
                 if let Err(error) = result {
                     debug!(
-                        "UPnP setup failed (non-fatal — node works without it): {}",
+                        "UPnP setup failed (non-fatal - node works without it): {}",
                         error
                     );
                 }

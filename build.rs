@@ -62,6 +62,14 @@ fn main() {
         println!("cargo:rerun-if-changed={}", file);
     }
     println!("cargo:rerun-if-changed=.git/HEAD");
+    // HEAD itself only changes on a branch switch; a commit or a pull moves
+    // the ref it points to (or packed-refs), so track those as well.
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
+        if let Some(reference) = head.trim().strip_prefix("ref: ") {
+            println!("cargo:rerun-if-changed=.git/{}", reference);
+        }
+    }
+    println!("cargo:rerun-if-changed=.git/packed-refs");
     println!("cargo:rerun-if-env-changed=PROFILE");
     explorer_assets::assemble();
     println!("cargo:rerun-if-env-changed=COINCYNC_REGEN_LOCK");

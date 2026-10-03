@@ -293,7 +293,7 @@ impl P2PNode {
                         target: "network::identity::P5N1",
                         error = %e,
                         path = %identity_path.display(),
-                        "P5-N1: identity file EXISTS but load FAILED — \
+                        "P5-N1: identity file EXISTS but load FAILED - \
                          falling back to ephemeral identity. This means \
                          our peer_id has CHANGED for this session; peers \
                          will see us as a fresh Sybil twin, and \
@@ -345,7 +345,7 @@ impl P2PNode {
         let mut address_mgr = AddressManager::new(1000);
         if let Some(ext) = config.external_addr {
             address_mgr.mark_self_address(ext);
-            info!("Registered external address {ext} as self — peer gossip echoing our own IP will not cause self-dials");
+            info!("Registered external address {ext} as self - peer gossip echoing our own IP will not cause self-dials");
         }
 
         P2PNode {
@@ -519,7 +519,7 @@ impl P2PNode {
     pub fn queue_transaction_for_broadcast(&self, tx: Transaction) -> Result<()> {
         self.tx_broadcast_tx.try_send(tx).map_err(|e| match e {
             tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                tracing::warn!("Transaction broadcast queue full — dropping transaction");
+                tracing::warn!("Transaction broadcast queue full - dropping transaction");
                 Error::InvalidState("broadcast queue full, try again later".into())
             }
             tokio::sync::mpsc::error::TrySendError::Closed(_) => {
@@ -644,7 +644,7 @@ impl P2PNode {
             tracing::debug!(
                 peer = ?&peer_id[..4],
                 reason = %reason,
-                "notify_block_invalid: MissingParent — not scoring peer, upstream sync should request parents"
+                "notify_block_invalid: MissingParent - not scoring peer, upstream sync should request parents"
             );
             return;
         }
@@ -768,7 +768,7 @@ impl P2PNode {
                 window_secs = super::scoring::ORPHAN_FLOOD_WINDOW_SECS,
                 orphan = ?orphan_hash,
                 parent = ?parent_hash,
-                "notify_block_orphan: rate above threshold — logging as observability only, \
+                "notify_block_orphan: rate above threshold - logging as observability only, \
                  NOT scoring peer (see method doc-comment for the 2026-06-22 partition rationale)"
             );
         }
@@ -850,7 +850,7 @@ impl P2PNode {
         let anchors = peer_manager::load_anchors_from_disk(&self.config.data_dir);
         if !anchors.is_empty() {
             info!(
-                "Loaded {} anchor peers — dialing them first on startup",
+                "Loaded {} anchor peers - dialing them first on startup",
                 anchors.len()
             );
             self.addresses.write().await.set_anchors(anchors);
@@ -882,7 +882,7 @@ impl P2PNode {
             }
         } else {
             info!(
-                "Skipping bootstrap — using {} pre-configured seed addresses",
+                "Skipping bootstrap - using {} pre-configured seed addresses",
                 self.addresses.read().await.len()
             );
         }

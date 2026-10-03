@@ -548,7 +548,7 @@ pub fn create_range_proof_bp_plus<R: RngCore + CryptoRng>(
 
     let proof_bytes = proof.to_bytes();
     tracing::info!(
-        "BP+ range proof created ({} bytes) — ~96 bytes shorter than standard",
+        "BP+ range proof created ({} bytes) - ~96 bytes shorter than standard",
         proof_bytes.len()
     );
 
