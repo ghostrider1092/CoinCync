@@ -55,12 +55,11 @@ pub const MAINNET_DNS_SEEDS: &[&str] = &[
     "seed3.coincync.org",
 ];
 
-// Must match `TESTNET_DNS_SEEDS` in `src/testnet.rs` (Bootstrapper default).
-pub const TESTNET_DNS_SEEDS: &[&str] = &[
-    "seed1.coincync.network",
-    "seed2.coincync.network",
-    "seed3.coincync.network",
-];
+// Single source of truth: defined in `src/testnet.rs` (the Bootstrapper default)
+// and re-exported here so the two paths can't drift. Previously these were two
+// independent lists synced by comment only, with no test enforcing it — the #173
+// bug class.
+pub use crate::testnet::TESTNET_DNS_SEEDS;
 
 /// Hardcoded fallback IPs — used when DNS is unavailable. Ports match
 /// `MAINNET_P2P_PORT` (19080) and `TESTNET_P2P_PORT` (28080) from
