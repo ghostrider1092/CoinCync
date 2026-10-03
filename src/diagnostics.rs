@@ -228,6 +228,9 @@ pub fn lookup(code: &str) -> Option<&'static Diagnostic> {
 pub const CYNC_CONS_001: &str = "CYNC-CONS-001";
 /// A transaction double-spends an already-spent output (key image reused).
 pub const CYNC_CONS_002: &str = "CYNC-CONS-002";
+/// Consensus safety: two honest nodes hold different blocks at a height at or
+/// below the finality floor (a fork that should be impossible became visible).
+pub const CYNC_CONS_003: &str = "CYNC-CONS-003";
 /// Coinbase output exceeds the scheduled block reward + fees.
 pub const CYNC_EMIT_001: &str = "CYNC-EMIT-001";
 /// Difficulty retarget stepped outside the permitted per-block bounds.
@@ -263,6 +266,18 @@ pub const CATALOG: &[Diagnostic] = &[
         spec: "docs/design (CLSAG / key images)",
         help: "a tx re-used a key image already in the spent set — reject. \
                If this fires in a reorg, check the spent-set rewind path.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_003,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "consensus safety violation: honest nodes diverged below finality",
+        invariant: "no two honest nodes hold different blocks at or below the finality floor",
+        location: "tests/common/sim (check_safety) + consensus fork-choice",
+        spec: "docs/testing/L3-byzantine-simulator.md (SAFETY)",
+        help: "two honest nodes finalized conflicting history — a deep safety break. \
+               Reproduce with the simulator's printed seed; inspect fork-choice and \
+               the configured finality depth.",
     },
     Diagnostic {
         code: CYNC_EMIT_001,

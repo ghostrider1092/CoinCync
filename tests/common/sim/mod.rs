@@ -36,7 +36,12 @@ pub enum Behavior {
     /// Double-signs: mines two valid twin blocks at the same height and sends
     /// different ones to different halves of its peers.
     Equivocate,
-    // Further Byzantine variants (Withhold / InvalidSpam / demon-timing) next.
+    /// Withholds: mines a valid block and adopts it locally, but NEVER broadcasts
+    /// it (selfish mining / block withholding). With another honest miner present
+    /// the honest majority ignores the withholder and converges on the public
+    /// chain. Still relays OTHER nodes' blocks normally — only its own are withheld.
+    Withhold,
+    // Further Byzantine variants (InvalidSpam / demon-timing) next.
 }
 
 pub struct Node {
@@ -78,6 +83,20 @@ impl Ord for Event {
     }
 }
 
+/// A network partition active over the virtual-time window `[start, end)`.
+///
+/// While active, a message between two nodes in DIFFERENT `groups` is blocked
+/// (eclipse / split-brain). A node listed in no group is fully reachable, so a
+/// partition can isolate a subset and leave the rest connected. An empty
+/// `partitions` list (the default) is a fully-connected network — the pre-Phase-B
+/// behavior. Reordering and latency are already modeled by the seeded event queue.
+#[derive(Clone)]
+pub struct Partition {
+    pub start: u64,
+    pub end: u64,
+    pub groups: Vec<Vec<NodeId>>,
+}
+
 pub struct SimConfig {
     pub seed: u64,
     pub n_nodes: usize,
@@ -90,6 +109,8 @@ pub struct SimConfig {
     pub block_spacing_secs: u64,
     pub finality_depth: u64,
     pub rounds: u64,
+    /// Network partitions to apply over virtual time (empty = fully connected).
+    pub partitions: Vec<Partition>,
 }
 
 pub struct Sim {
@@ -195,7 +216,7 @@ impl Sim {
                     .chain
                     .add_block(blk.clone())
                     .expect("miner add");
-                self.broadcast_to(Arc::new(blk), &peers);
+                self.broadcast_to(miner, Arc::new(blk), &peers);
             }
             Behavior::Equivocate => {
                 // Twin A uses the miner's normal coinbase; twin B pays a DISTINCT
@@ -228,14 +249,41 @@ impl Sim {
                 // A to the first half of peers, B to the second half.
                 let mid = peers.len() / 2;
                 let (pa, pb) = peers.split_at(mid);
-                self.broadcast_to(Arc::new(a), pa);
-                self.broadcast_to(Arc::new(b), pb);
+                self.broadcast_to(miner, Arc::new(a), pa);
+                self.broadcast_to(miner, Arc::new(b), pb);
+            }
+            Behavior::Withhold => {
+                // Mine a valid block and adopt it locally, but NEVER broadcast —
+                // the block is withheld from the network (selfish mining).
+                let blk = mine_block(&parent, h, base, target, vec![cb], miner_pk, self.magic);
+                self.nodes[miner]
+                    .chain
+                    .add_block(blk)
+                    .expect("withhold add");
+                let _ = &peers; // deliberately NOT broadcast
             }
         }
     }
 
-    fn broadcast_to(&mut self, block: Arc<Block>, targets: &[NodeId]) {
+    /// Whether a message from `from` to `to` is blocked by an active partition at
+    /// virtual time `at`. Nodes in different partition groups cannot reach each
+    /// other; a node in no group is always reachable.
+    fn blocked(&self, from: NodeId, to: NodeId, at: u64) -> bool {
+        self.cfg.partitions.iter().any(|p| {
+            if at < p.start || at >= p.end {
+                return false;
+            }
+            let g_from = p.groups.iter().position(|g| g.contains(&from));
+            let g_to = p.groups.iter().position(|g| g.contains(&to));
+            matches!((g_from, g_to), (Some(a), Some(b)) if a != b)
+        })
+    }
+
+    fn broadcast_to(&mut self, from: NodeId, block: Arc<Block>, targets: &[NodeId]) {
         for &peer in targets {
+            if self.blocked(from, peer, self.clock) {
+                continue; // partitioned: no link between these nodes right now
+            }
             if self.rng.gen::<f64>() < self.cfg.drop_prob {
                 continue; // link dropped this message
             }
@@ -288,7 +336,7 @@ impl Sim {
                             // that already have it return AlreadyKnown and do not
                             // re-relay, so the flood terminates.
                             let peers = self.nodes[to].peers.clone();
-                            self.broadcast_to(Arc::clone(&block), &peers);
+                            self.broadcast_to(to, Arc::clone(&block), &peers);
                         }
                         Ok(_) => {} // AlreadyKnown / Orphan — no relay
                     }
@@ -334,9 +382,16 @@ impl Sim {
                     match reference {
                         None => reference = Some(hh),
                         Some(r) if r != hh => {
-                            return Err(format!(
-                                "SAFETY VIOLATION at height {h}: honest nodes hold different blocks"
-                            ))
+                            // Phase D: emit the SAME coded report the validator and
+                            // runtime guards use (CYNC-CONS-003), via the consensus
+                            // invariant registry, with a reproduce-from-seed hint —
+                            // not a bespoke ad-hoc string.
+                            return coincync::consensus::invariants::check(
+                                coincync::diagnostics::CYNC_CONS_003,
+                                false,
+                                format!("height {h} (seed {:#x})", self.cfg.seed),
+                            )
+                            .map_err(|rep| rep.to_string());
                         }
                         _ => {}
                     }
