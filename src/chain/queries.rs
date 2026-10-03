@@ -220,15 +220,13 @@ impl Blockchain {
         // chain is clearly producing blocks (not actually stalled).
         if target.saturating_sub(h) <= 2 {
             let tip_timestamp = self.inner.read().tip.timestamp;
-            if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                let now_secs = d.as_secs();
-                let age = now_secs.saturating_sub(tip_timestamp);
-                // 3× testnet target block time. Same threshold is fine
-                // for mainnet (also 120s target).
-                const FRESH_TIP_SECS: u64 = 3 * crate::constants::TARGET_BLOCK_TIME;
-                if age <= FRESH_TIP_SECS {
-                    return true;
-                }
+            let now_secs = crate::clock::unix_now(); // E1: single-source clock
+            let age = now_secs.saturating_sub(tip_timestamp);
+            // 3× testnet target block time. Same threshold is fine
+            // for mainnet (also 120s target).
+            const FRESH_TIP_SECS: u64 = 3 * crate::constants::TARGET_BLOCK_TIME;
+            if age <= FRESH_TIP_SECS {
+                return true;
             }
         }
         false
@@ -259,7 +257,7 @@ impl Blockchain {
         for _ in 0..crate::constants::MTP_WINDOW {
             match self.get_block(&cursor) {
                 Some(ancestor) => {
-                    timestamps.push(ancestor.header.timestamp);
+                    timestamps.push(ancestor.header.timestamp.as_secs());
                     cursor = ancestor.header.prev_hash;
                 }
                 None => break,
@@ -491,10 +489,7 @@ impl Blockchain {
         if last == 0 {
             return None;
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = crate::clock::unix_now(); // E1: single-source clock
         Some(now.saturating_sub(last))
     }
 
@@ -512,10 +507,7 @@ impl Blockchain {
             return false;
         }
         let last = self.last_block_received_at.load(Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = crate::clock::unix_now(); // E1: single-source clock
         // If `last` is 0 we have never accepted a peer block since startup;
         // treat that as "long ago" so a phantom detected at boot still fires.
         now.saturating_sub(last) >= stall_secs

@@ -272,7 +272,7 @@ pub fn rpc_methods_doc() -> serde_json::Value {
             },
             {
                 "name": "get_sync_checkpoints",
-                "description": "Periodic trust anchors so a fresh light wallet can skip ancient history and start scanning from a recent height. Wallets MUST cross-check against the hardcoded CONSENSUS_CHECKPOINTS in src/constants.rs until miner-signed authentication ships in v1.0.1 (CIP-009.D activation track).",
+                "description": "Periodic trust anchors so a fresh light wallet can skip ancient history and start scanning from a recent height. Wallets MUST cross-check against the node's hardcoded consensus checkpoints until miner-signed authentication ships in v1.0.1 (CIP-009.D activation track).",
                 "params": [
                     { "name": "stride", "type": "number", "required": false, "description": "Emit one checkpoint every `stride` blocks. Default 10000 (~14 days at 120s). Clamped to [1, 50000]." }
                 ],
@@ -283,7 +283,7 @@ pub fn rpc_methods_doc() -> serde_json::Value {
                         "chain_height": "number - tracker's current chain tip",
                         "count": "number - checkpoints returned",
                         "checkpoints": "array of SyncCheckpoint objects",
-                        "auth_note": "string - reminder that wallets must cross-check against CONSENSUS_CHECKPOINTS"
+                        "auth_note": "string - reminder that wallets must cross-check against the node's hardcoded consensus checkpoints"
                     }
                 },
                 "auth": false

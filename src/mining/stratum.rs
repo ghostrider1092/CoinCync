@@ -458,7 +458,7 @@ struct Worker {
     /// Timestamp (ms) of last submit attempt.
     last_submit_ms: u64,
     /// Consecutive invalid/stale/duplicate submits.
-    invalid_streak: u32,
+    invalid_breaker: crate::colony::guard::breaker::CircuitBreaker,
     /// Last activity timestamp
     last_activity: u64,
     /// Message sender
@@ -796,7 +796,7 @@ impl StratumServer {
                 difficulty: share_difficulty,
                 authorized: false,
                 last_submit_ms: 0,
-                invalid_streak: 0,
+                invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
                 last_activity: timestamp_now(),
                 tx: tx.clone(),
             };
@@ -1200,7 +1200,7 @@ async fn handle_stratum_message(
                     let mut wr = workers.write().await;
                     if let Some(w) = wr.get_mut(&worker_id) {
                         w.invalid_shares += 1;
-                        w.invalid_streak = w.invalid_streak.saturating_add(1);
+                        w.invalid_breaker.record_failure();
                     }
                     return Some(
                         serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
@@ -1270,7 +1270,7 @@ async fn handle_stratum_message(
                 let mut wr = workers.write().await;
                 if let Some(w) = wr.get_mut(&worker_id) {
                     w.valid_shares += 1;
-                    w.invalid_streak = 0;
+                    w.invalid_breaker.record_success();
                 }
                 let mut s = stats.write().await;
                 s.total_shares += 1;
@@ -1407,8 +1407,8 @@ async fn handle_stratum_message(
                     if worker.last_submit_ms > 0
                         && now_ms.saturating_sub(worker.last_submit_ms) < MIN_SUBMIT_INTERVAL_MS
                     {
-                        worker.invalid_streak = worker.invalid_streak.saturating_add(1);
-                        if worker.invalid_streak >= MAX_INVALID_STREAK {
+                        worker.invalid_breaker.record_failure();
+                        if worker.invalid_breaker.is_open() {
                             worker.authorized = false;
                             warn!(
                                 "Worker {} hit submit-rate abuse threshold; deauthorizing",
@@ -1513,22 +1513,22 @@ async fn handle_stratum_message(
                     match &share_result {
                         ShareResult::Valid | ShareResult::Block(_) => {
                             worker.valid_shares += 1;
-                            worker.invalid_streak = 0;
+                            worker.invalid_breaker.record_success();
                         }
                         ShareResult::Stale => {
                             worker.stale_shares += 1;
-                            worker.invalid_streak = worker.invalid_streak.saturating_add(1);
+                            worker.invalid_breaker.record_failure();
                         }
                         ShareResult::Invalid | ShareResult::Duplicate => {
                             worker.invalid_shares += 1;
-                            worker.invalid_streak = worker.invalid_streak.saturating_add(1);
+                            worker.invalid_breaker.record_failure();
                         }
                     }
-                    if worker.invalid_streak >= MAX_INVALID_STREAK {
+                    if worker.invalid_breaker.is_open() {
                         worker.authorized = false;
                         warn!(
                             "Worker {} exceeded invalid share streak {}; deauthorizing",
-                            worker_id, worker.invalid_streak
+                            worker_id, worker.invalid_breaker.failures()
                         );
                         should_strike_for_invalid_streak = true;
                     }
@@ -1994,7 +1994,7 @@ mod tests {
             authorized: true,
             // Force immediate throttle path.
             last_submit_ms: timestamp_now_ms(),
-            invalid_streak: MAX_INVALID_STREAK - 1,
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::preloaded("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64, (MAX_INVALID_STREAK - 1) as u64),
             last_activity: timestamp_now(),
             tx,
         };
@@ -2141,7 +2141,7 @@ mod tests {
             difficulty: 1000,
             authorized: true,
             last_submit_ms: 0,
-            invalid_streak: 0,
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
             last_activity: timestamp_now(),
             tx,
         };
@@ -2256,7 +2256,7 @@ mod tests {
             difficulty: 1000,
             authorized: false,
             last_submit_ms: 0,
-            invalid_streak: 0,
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
             last_activity: timestamp_now(),
             tx,
         };
@@ -2407,7 +2407,7 @@ mod tests {
             difficulty: 1000,
             authorized,
             last_submit_ms: 0,
-            invalid_streak: 0,
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
             last_activity: timestamp_now(),
             tx,
         }

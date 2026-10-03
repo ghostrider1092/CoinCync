@@ -2132,7 +2132,7 @@ mod tests {
                     network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
                     version: 1,
                     height,
-                    timestamp: 1_000 + height,
+                    timestamp: crate::primitives::Timestamp::from_secs(1_000 + height),
                     prev_hash: prev,
                     tx_root: {
                         let mut b = [0u8; 32];
@@ -2238,7 +2238,7 @@ mod tests {
                     network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
                     version: 1,
                     height,
-                    timestamp: 1_000 + height,
+                    timestamp: crate::primitives::Timestamp::from_secs(1_000 + height),
                     prev_hash: prev,
                     tx_root: {
                         let mut b = [0u8; 32];
@@ -3670,7 +3670,7 @@ mod tests {
                     network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
                     version: 1,
                     height,
-                    timestamp: 1_000 + height,
+                    timestamp: crate::primitives::Timestamp::from_secs(1_000 + height),
                     prev_hash: Hash::zero(),
                     tx_root: Hash::zero(),
                     anchor: Hash::zero(),

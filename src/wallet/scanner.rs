@@ -1579,7 +1579,7 @@ impl BackgroundScanner {
     pub fn scan_and_persist(&mut self, block: &Block) -> Result<usize> {
         let height = block.height();
         let block_hash = block.hash();
-        let timestamp = block.header.timestamp;
+        let timestamp = block.header.timestamp.as_secs();
 
         let found = match self.scanner.scan_block_with_result(block) {
             ScanResult::Scanned { outputs, .. } => outputs,
@@ -2633,7 +2633,7 @@ mod tests {
                 network_magic: NetworkType::Testnet.magic_bytes(),
                 version: 1,
                 height: 10,
-                timestamp: 1000,
+                timestamp: crate::primitives::Timestamp::from_secs(1000),
                 prev_hash: Hash::zero(),
                 tx_root: Hash::zero(),
                 anchor: Hash::zero(),
@@ -2765,7 +2765,7 @@ mod tests {
                 network_magic: NetworkType::Testnet.magic_bytes(),
                 version: 1,
                 height: 42,
-                timestamp: 1000,
+                timestamp: crate::primitives::Timestamp::from_secs(1000),
                 prev_hash: Hash::zero(),
                 tx_root: Hash::zero(),
                 anchor: Hash::zero(),
@@ -2866,7 +2866,7 @@ mod tests {
                 network_magic: NetworkType::Testnet.magic_bytes(),
                 version: 1,
                 height,
-                timestamp: 1000 + height,
+                timestamp: crate::primitives::Timestamp::from_secs(1000 + height),
                 prev_hash,
                 tx_root: Hash::zero(),
                 anchor: Hash::zero(),

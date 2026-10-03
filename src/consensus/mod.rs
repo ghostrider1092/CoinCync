@@ -28,6 +28,7 @@ pub mod fee_market;
 pub mod finality;
 pub mod fork_signal;
 pub mod header;
+pub mod invariants;
 pub mod pow;
 pub mod pow_cache;
 pub mod privacy_policy;

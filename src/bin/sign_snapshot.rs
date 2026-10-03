@@ -58,7 +58,10 @@ use ed25519_dalek::{Signer, SigningKey};
 /// `src/network/peer_snapshot.rs`. If these drift, signatures will
 /// verify individually against the wrong domain and the consumer will
 /// reject them all. Kept as a duplicate string literal on purpose so
-/// this binary doesn't pull in the whole crate at build time.
+/// this binary doesn't pull in the whole crate at build time. Drift is
+/// guarded by anchoring BOTH sides to the same literal in tests: this
+/// file's `namespace_bytes_are_exactly_the_string` and peer_snapshot's
+/// `namespace_is_the_canonical_literal`.
 const SIGNATURE_NAMESPACE: &[u8] = b"coincync-peer-snapshot-v1";
 
 fn main() -> ExitCode {

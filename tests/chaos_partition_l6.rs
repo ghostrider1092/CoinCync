@@ -51,7 +51,7 @@ impl Bus {
             chain
                 .restore_state(0, genesis.hash(), 1)
                 .expect("seed base");
-            base_ts = genesis.header.timestamp;
+            base_ts = genesis.header.timestamp.as_secs();
             // Per-node miner keys so two nodes produce DISTINCT blocks at the
             // same height (different coinbase => different tx_root => real fork).
             let (_s, spend_pub) = generate_keypair();

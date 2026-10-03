@@ -62,7 +62,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tokio::net::TcpStream;
+use crate::network::transport::NetStream;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, info, warn};
@@ -118,14 +118,17 @@ impl Drop for AbortOnDrop {
 /// it makes two sequential read_exact calls with a nonce increment between
 /// them. If a select! arm cancels the future mid-read, the nonce gets
 /// permanently desynced and all subsequent decryptions fail.
-async fn noise_bridge(
+async fn noise_bridge<R, W>(
     transport: NoiseTransport,
-    tcp_reader: tokio::net::tcp::OwnedReadHalf,
-    tcp_writer: tokio::net::tcp::OwnedWriteHalf,
+    tcp_reader: R,
+    tcp_writer: W,
     from_app: tokio::io::DuplexStream, // plaintext from MessageFramer
     to_app: tokio::io::DuplexStream,   // plaintext to MessageFramer
     traffic_shaper: Arc<TrafficShaper>,
-) {
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     // Split the transport into send and recv halves so each direction can
     // run in its own task without interfering with the other's nonce state.
     let (send_state, recv_state) = transport.split_into_send_recv();
@@ -149,12 +152,14 @@ async fn noise_bridge(
     while directions.join_next().await.is_some() {}
 }
 
-async fn noise_bridge_reader(
+async fn noise_bridge_reader<R>(
     state: NoiseRecvState,
-    mut tcp_reader: tokio::net::tcp::OwnedReadHalf,
+    mut tcp_reader: R,
     mut to_app: tokio::io::DuplexStream,
     traffic_shaper: Arc<TrafficShaper>,
-) {
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
     use tokio::io::AsyncWriteExt;
     loop {
         let record = {
@@ -288,7 +293,7 @@ fn cleanup_connection(
 
 /// Handle a new connection (inbound or outbound) with proper message framing
 pub(super) async fn handle_connection(
-    stream: TcpStream,
+    stream: NetStream,
     peer_id: PeerId,
     outbound: bool,
     magic: [u8; 4],
@@ -442,7 +447,7 @@ pub(super) async fn handle_connection(
         DynWrite,
         Option<tokio::task::JoinHandle<()>>,
     ) = if let Some((transport, _remote_id)) = noise_result {
-        let (tcp_reader, tcp_writer) = stream.into_split();
+        let (tcp_reader, tcp_writer) = tokio::io::split(stream);
         let (app_read, bridge_write) = tokio::io::duplex(64 * 1024);
         let (bridge_read, app_write) = tokio::io::duplex(64 * 1024);
 
@@ -458,7 +463,7 @@ pub(super) async fn handle_connection(
 
         (Box::new(app_read), Box::new(app_write), Some(handle))
     } else {
-        let (tcp_reader, tcp_writer) = stream.into_split();
+        let (tcp_reader, tcp_writer) = tokio::io::split(stream);
         (Box::new(tcp_reader), Box::new(tcp_writer), None)
     };
     let _noise_bridge_guard = noise_bridge_handle.map(AbortOnDrop);
