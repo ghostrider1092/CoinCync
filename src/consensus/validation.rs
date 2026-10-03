@@ -194,6 +194,13 @@ pub struct BlockValidation {
     pub valid: bool,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
+    /// Diagnostic codes (`CYNC-*`) for errors raised via [`add_error_coded`], in
+    /// the order raised — the machine-readable companion to `errors` (F3). Lets a
+    /// consumer map a rejection to its catalog entry without string-matching, and
+    /// is the hook the deterministic-simulation harness checks against.
+    ///
+    /// [`add_error_coded`]: BlockValidation::add_error_coded
+    pub codes: Vec<&'static str>,
 }
 
 impl BlockValidation {
@@ -202,6 +209,7 @@ impl BlockValidation {
             valid: true,
             errors: vec![],
             warnings: vec![],
+            codes: vec![],
         }
     }
 
@@ -210,6 +218,7 @@ impl BlockValidation {
             valid: false,
             errors: vec![msg.into()],
             warnings: vec![],
+            codes: vec![],
         }
     }
 
@@ -220,6 +229,25 @@ impl BlockValidation {
 
     pub fn add_warning(&mut self, msg: impl Into<String>) {
         self.warnings.push(msg.into());
+    }
+
+    /// Record a rejection that breaches a registered consensus invariant (F3).
+    ///
+    /// Pushes `msg` to `errors` exactly like [`add_error`] — so existing consumers
+    /// and message assertions are unaffected — AND records the invariant's
+    /// `CYNC-*` code in `codes`, giving a machine-readable mapping from the
+    /// rejection to its diagnostic-catalog entry. `code` must be a `CYNC_*`
+    /// catalog constant (debug-asserted).
+    ///
+    /// [`add_error`]: BlockValidation::add_error
+    pub fn add_error_coded(&mut self, code: &'static str, msg: impl Into<String>) {
+        debug_assert!(
+            crate::diagnostics::lookup(code).is_some(),
+            "add_error_coded: unknown diagnostic code {code}"
+        );
+        self.errors.push(msg.into());
+        self.codes.push(code);
+        self.valid = false;
     }
 }
 
@@ -411,7 +439,11 @@ pub fn validate_block_ctx(
                         tracing::debug!("Block {} PoW verified successfully", block.height());
                     }
                     Err(e) => {
-                        result.add_error(format!("Proof of work validation error: {}", e));
+                        // F3: a PoW-target failure is a registered invariant.
+                        result.add_error_coded(
+                            crate::diagnostics::CYNC_CONS_001,
+                            format!("Proof of work validation error: {}", e),
+                        );
                     }
                 }
             }
@@ -1086,12 +1118,17 @@ fn check_block_tail_supply(block: &Block, expected_reward: Amount, result: &mut 
     // absolute maximum any block may legitimately carry.
     let genesis_reward = calculate_block_reward(0).as_atomic();
     if reward > genesis_reward {
-        result.add_error(format!(
-            "Emission reward {} exceeds the height-0 maximum {} at height {} (emission curve must be non-increasing)",
-            reward,
-            genesis_reward,
-            block.height()
-        ));
+        // F3: a supply-ceiling breach is a registered invariant — record its
+        // CYNC-EMIT-001 code alongside the (unchanged) message.
+        result.add_error_coded(
+            crate::diagnostics::CYNC_EMIT_001,
+            format!(
+                "Emission reward {} exceeds the height-0 maximum {} at height {} (emission curve must be non-increasing)",
+                reward,
+                genesis_reward,
+                block.height()
+            ),
+        );
     }
 }
 
@@ -1123,7 +1160,11 @@ fn check_block_duplicate_key_images(block: &Block, result: &mut BlockValidation)
     for tx in &block.transactions {
         for input in &tx.inputs {
             if !seen.insert(&input.key_image) {
-                result.add_error(format!("Duplicate key image in block: {}", input.key_image));
+                // F3: in-block double-spend is a registered invariant.
+                result.add_error_coded(
+                    crate::diagnostics::CYNC_CONS_002,
+                    format!("Duplicate key image in block: {}", input.key_image),
+                );
             }
         }
     }
@@ -1219,7 +1260,10 @@ fn check_header_vs_prev(
         result.add_error("Previous hash mismatch");
     }
     if header.timestamp <= prev.timestamp {
-        result.add_error("Timestamp not greater than previous block");
+        result.add_error_coded(
+            crate::diagnostics::CYNC_CONS_005,
+            "Timestamp not greater than previous block",
+        );
     }
 }
 
@@ -1279,7 +1323,10 @@ fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidat
         result.add_warning("System clock appears to be set incorrectly (before 2020)");
     }
     if header.height > 0 && header.timestamp > current_time + MAX_TIMESTAMP_DRIFT {
-        result.add_error("Block timestamp too far in future");
+        result.add_error_coded(
+            crate::diagnostics::CYNC_CONS_004,
+            "Block timestamp too far in future",
+        );
     }
 }
 
@@ -1349,13 +1396,20 @@ fn validate_difficulty_target(
     let target_value = target_to_u128(target.as_bytes());
     let max_value = target_to_u128(max.as_bytes());
     if target_value > max_value {
-        result.add_error("Target easier than max_target (minimum difficulty)");
+        // F3: a difficulty-target out-of-bounds is a registered invariant.
+        result.add_error_coded(
+            crate::diagnostics::CYNC_POW_001,
+            "Target easier than max_target (minimum difficulty)",
+        );
         return;
     }
 
     // Check 2: Target must be non-zero (would be impossibly hard)
     if target.as_bytes().iter().all(|&b| b == 0) {
-        result.add_error("Target is zero (impossible difficulty)");
+        result.add_error_coded(
+            crate::diagnostics::CYNC_POW_001,
+            "Target is zero (impossible difficulty)",
+        );
         return;
     }
 
@@ -2988,6 +3042,13 @@ mod tests {
             !above.valid,
             "reward above the genesis maximum must be rejected"
         );
+        // F3: the ceiling breach records its diagnostic code, so the rejection
+        // maps to the catalog without string-matching.
+        assert!(
+            above.codes.contains(&crate::diagnostics::CYNC_EMIT_001),
+            "ceiling breach must record CYNC-EMIT-001; got {:?}",
+            above.codes
+        );
     }
 
     #[test]
@@ -3568,6 +3629,8 @@ mod tests {
             .errors
             .iter()
             .any(|e| e.contains("Duplicate key image in block")));
+        // F3: the double-spend breach records its diagnostic code.
+        assert!(result.codes.contains(&crate::diagnostics::CYNC_CONS_002));
     }
 
     /// Regression (issue #105): the in-block duplicate-key-image scan was done
@@ -3855,6 +3918,8 @@ mod tests {
             "below-checkpoint block must still be PoW-verified in a non-fast-sync build, got: {:?}",
             result.errors
         );
+        // F3: the PoW-failure rejection records its diagnostic code.
+        assert!(result.codes.contains(&crate::diagnostics::CYNC_CONS_001));
     }
 
     // ── v1_0_12_rules_active differential ───────────────────────────────
