@@ -18,6 +18,7 @@
 //! can never affect block validity. A guard bug degrades *margin*, never
 //! *validity* (colony README invariant B.3 — "never weaken a defense").
 
+pub mod breaker;
 pub mod diversity;
 pub mod kill_switch;
 pub mod rate_limit;
