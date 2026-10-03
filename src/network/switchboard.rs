@@ -138,6 +138,61 @@ impl Default for Switchboard {
     }
 }
 
+/// Sim-side dial handle for one node: dials always originate from `local`, so
+/// this mirrors "a node's outbound connector" (the prod analogue being
+/// `TcpStream::connect` via the proxy). Cheap to clone (shares the `Arc`).
+#[derive(Clone)]
+pub struct SimConnector {
+    switchboard: std::sync::Arc<Switchboard>,
+    local: SocketAddr,
+}
+
+impl SimConnector {
+    pub fn new(switchboard: std::sync::Arc<Switchboard>, local: SocketAddr) -> Self {
+        Self { switchboard, local }
+    }
+
+    /// Dial `to`, yielding a connected [`NetStream`] (or a [`DialError`] if the
+    /// edge is partitioned / nothing listens). Mirrors an outbound TCP connect.
+    pub fn connect(&self, to: SocketAddr) -> Result<NetStream, DialError> {
+        self.switchboard.connect(self.local, to)
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local
+    }
+}
+
+/// Sim-side accept handle for one node: awaits inbound connections the way a
+/// `TcpListener` does, returning `(stream, peer_addr)`. The prod analogue is
+/// `TcpListener::accept`.
+pub struct SimListener {
+    addr: SocketAddr,
+    rx: mpsc::UnboundedReceiver<NetStream>,
+}
+
+impl SimListener {
+    /// Begin listening on `addr` through `switchboard`.
+    pub fn bind(switchboard: &Switchboard, addr: SocketAddr) -> Self {
+        Self {
+            addr,
+            rx: switchboard.listen(addr),
+        }
+    }
+
+    /// Await the next inbound connection. Returns `None` once the switchboard
+    /// stops listening on this address (the accept queue closed).
+    pub async fn accept(&mut self) -> Option<(NetStream, SocketAddr)> {
+        let stream = self.rx.recv().await?;
+        let peer = stream.peer_addr().unwrap_or(self.addr);
+        Some((stream, peer))
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +257,32 @@ mod tests {
             sb.connect(addr(1), addr(9)),
             Err(DialError::NoListener)
         ));
+    }
+
+    #[tokio::test]
+    async fn connector_and_listener_mirror_tcp_connect_accept() {
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let sb = Arc::new(Switchboard::new());
+        let a = addr(1);
+        let b = addr(2);
+
+        // b listens; a has a connector bound to its own address.
+        let mut b_listener = SimListener::bind(&sb, b);
+        let a_conn = SimConnector::new(Arc::clone(&sb), a);
+        assert_eq!(a_conn.local_addr(), a);
+        assert_eq!(b_listener.local_addr(), b);
+
+        // a dials b; b accepts — just like TcpStream::connect / TcpListener::accept.
+        let mut dialer = a_conn.connect(b).expect("connect");
+        let (mut accepted, peer) = b_listener.accept().await.expect("accept");
+        assert_eq!(peer, a, "accept reports the dialer's address");
+
+        dialer.write_all(b"frame").await.unwrap();
+        dialer.flush().await.unwrap();
+        let mut buf = [0u8; 5];
+        accepted.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"frame");
     }
 }
