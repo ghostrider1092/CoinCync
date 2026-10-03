@@ -537,11 +537,45 @@ impl ShieldedStore {
         // reconstructs the rewound state instead of resurrecting the
         // disconnected block's commitments and nullifiers.
         if let Some(p) = &self.persistence {
+            // R-63 parity (was silent `let _ = remove()`): a swallowed delete
+            // failure lets `open_with_db` resurrect the disconnected block's
+            // commitments/nullifiers, diverging the shielded anchor or freezing a
+            // live note via a stale nullifier. Mirror KernelStore::rewind — log
+            // loudly so the operator knows a reindex is required.
+            let mut remove_failures = 0usize;
             for pos in &removed_positions {
-                let _ = p.entries.remove(pos.to_be_bytes());
+                if let Err(e) = p.entries.remove(pos.to_be_bytes()) {
+                    remove_failures += 1;
+                    tracing::error!(
+                        target: "storage::shielded",
+                        position = pos,
+                        error = %e,
+                        "R-63: rewind failed to remove on-disk shielded entry {} — \
+                         disk may replay an orphan commitment on next open, \
+                         corrupting the shielded anchor. Reindex required.",
+                        pos
+                    );
+                }
             }
             for nf in &removed_nullifiers {
-                let _ = p.nullifiers.remove(nf);
+                if let Err(e) = p.nullifiers.remove(nf) {
+                    remove_failures += 1;
+                    tracing::error!(
+                        target: "storage::shielded",
+                        error = %e,
+                        "R-63: rewind failed to remove an on-disk shielded nullifier \
+                         — a resurrected nullifier on next open can freeze a live \
+                         note. Reindex required."
+                    );
+                }
+            }
+            if remove_failures > 0 {
+                tracing::error!(
+                    target: "storage::shielded",
+                    remove_failures = remove_failures,
+                    "R-63: {} shielded row removes failed during rewind",
+                    remove_failures
+                );
             }
         }
 

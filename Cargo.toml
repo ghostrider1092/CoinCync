@@ -63,6 +63,12 @@ testnet = ["randomx"]
 mainnet = ["randomx"]
 randomx = ["randomx-rs"]
 metrics = []
+# CIP-Fee-Reservoir "water battery": the PURE charge/discharge/decay rule in
+# `consensus::fee_market` (reservoir_step). Off by default — not wired into the
+# coinbase claim, header commitment, or reorg state (that is the activation-
+# gated follow-up). Gated so production builds are unaffected; lets the rule be
+# built, modelled, and reviewed ahead of any activation decision.
+fee-reservoir = []
 # Rolling soft-finality (CIP-009.D) consensus-layer adapter. Off by
 # default: compiles in `src/consensus/rolling_finality.rs` and pulls
 # the `coincync-rolling-finality` crate only when explicitly enabled.

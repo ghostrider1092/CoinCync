@@ -195,6 +195,108 @@ impl FeeDistribution {
 }
 
 // =============================================================================
+// §5b  FEE RESERVOIR — the "water battery" (CIP-Fee-Reservoir)
+//
+// A pumped-storage analogue for the security budget: CHARGE fee surplus into an
+// on-chain reservoir when congestion is LOW, DISCHARGE it to miners when
+// congestion is HIGH, with a per-block DECAY burn (the round-trip loss) that
+// keeps the reservoir a NET CONSUMER — it can never mint, only redistribute
+// already-collected fees minus decay.
+//
+// This is the PURE transition rule ONLY (unit-testable like `distribute_fee`).
+// It is NOT wired into consensus, the coinbase claim, header commitment, or
+// reorg state — that is the activation-gated follow-up (CIP-Fee-Reservoir).
+// Gated `feature = "fee-reservoir"`, off by default, so production builds are
+// byte-identical to a build without it.
+// =============================================================================
+
+/// Reservoir tuning (basis points / congestion thresholds). PROVISIONAL — to be
+/// modelled via fee-series replay (cf. `tests/difficulty_replay.rs`) and ratified
+/// before any activation.
+#[cfg(feature = "fee-reservoir")]
+pub mod reservoir {
+    /// Charge below this congestion (surplus — pump uphill).
+    pub const LOW_WATER: u64 = 25;
+    /// Discharge above this congestion (peak — generate).
+    pub const HIGH_WATER: u64 = 75;
+    /// Fraction of a block's fees diverted into the reservoir while charging.
+    pub const CHARGE_BPS: u64 = 2_000; // 20%
+    /// Fraction of a block's fees paid out from the reservoir while discharging.
+    pub const DISCHARGE_BPS: u64 = 2_000; // 20%
+    /// Per-block decay burn on the reservoir (models the round-trip loss).
+    /// Strictly > 0 so the reservoir is a net consumer and never an inflation path.
+    pub const DECAY_BPS: u64 = 10; // 0.1%/block
+    /// Hard cap on the reservoir balance (atomic units); excess stays with the
+    /// miner rather than being stored. PROVISIONAL.
+    pub const CAP_ATOMIC: u64 = 1_000_000_000_000;
+}
+
+/// The outcome of one reservoir step: what the miner is paid this block, the
+/// reservoir balance AFTER the step, and the amount burned (decay). Issuance-
+/// neutral by construction:
+/// `to_miner + reservoir_after + burned == reservoir_before + fees`.
+#[cfg(feature = "fee-reservoir")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReservoirTransition {
+    pub to_miner: Amount,
+    pub reservoir_after: Amount,
+    pub burned: Amount,
+}
+
+/// Pure reservoir transition for one block. `reservoir_before` is the current
+/// reservoir balance, `fees` this block's total fees, `congestion_pct ∈ [0,100]`.
+///
+/// - congestion < `LOW_WATER`  → CHARGE: divert up to `CHARGE_BPS` of fees into
+///   the reservoir (capped at `CAP_ATOMIC`); the remainder pays the miner.
+/// - congestion > `HIGH_WATER` → DISCHARGE: pay the miner the fees PLUS up to
+///   `DISCHARGE_BPS` of fees drawn from the reservoir (bounded by its balance).
+/// - otherwise                 → PASS-THROUGH: the miner gets the fees.
+/// Then a DECAY burn removes `DECAY_BPS` of the resulting reservoir.
+///
+/// Guarantees (see tests): value is conserved (issuance-neutral, exact — u128
+/// intermediates, burn taken as an exact term); the reservoir never goes
+/// negative and never exceeds `CAP_ATOMIC`; the miner is never paid more than
+/// `fees + reservoir_before` (no minting); decay never increases the reservoir.
+#[cfg(feature = "fee-reservoir")]
+pub fn reservoir_step(
+    reservoir_before: Amount,
+    fees: Amount,
+    congestion_pct: u64,
+) -> ReservoirTransition {
+    use reservoir::*;
+    let r0 = reservoir_before.as_atomic() as u128;
+    let f = fees.as_atomic() as u128;
+
+    // Transition (pre-decay): (miner, reservoir').
+    let (to_miner, r1) = if congestion_pct < LOW_WATER {
+        // Charge: store up to CHARGE_BPS of fees, capped so r never exceeds CAP;
+        // un-stored fees pay the miner.
+        let want = f * CHARGE_BPS as u128 / 10_000;
+        let headroom = (CAP_ATOMIC as u128).saturating_sub(r0);
+        let store = want.min(headroom);
+        (f - store, r0 + store)
+    } else if congestion_pct > HIGH_WATER {
+        // Discharge: pay out up to DISCHARGE_BPS of fees, bounded by the balance.
+        let want = f * DISCHARGE_BPS as u128 / 10_000;
+        let draw = want.min(r0);
+        (f + draw, r0 - draw)
+    } else {
+        (f, r0)
+    };
+
+    // Decay burn (round-trip loss) on the post-transition reservoir. Taken as an
+    // exact term so conservation holds with zero rounding loss.
+    let burn = r1 * DECAY_BPS as u128 / 10_000;
+    let r_after = r1 - burn;
+
+    ReservoirTransition {
+        to_miner: Amount::from_atomic(to_miner as u64),
+        reservoir_after: Amount::from_atomic(r_after as u64),
+        burned: Amount::from_atomic(burn as u64),
+    }
+}
+
+// =============================================================================
 // §6  BLOCK FEE STATS  (for auditing)
 // =============================================================================
 
@@ -680,5 +782,128 @@ mod tests {
             assert_eq!(via_calc.to_protocol.as_atomic(), via_free.to_protocol.as_atomic());
             assert_eq!(via_calc.total.as_atomic(), via_free.total.as_atomic());
         }
+    }
+}
+
+#[cfg(all(test, feature = "fee-reservoir"))]
+mod reservoir_tests {
+    use super::reservoir::*;
+    use super::*;
+
+    fn step(r0: u64, f: u64, c: u64) -> ReservoirTransition {
+        reservoir_step(Amount::from_atomic(r0), Amount::from_atomic(f), c)
+    }
+
+    #[test]
+    fn conserves_value_and_never_mints_in_all_regimes() {
+        for &(r0, f) in &[(0u64, 0u64), (0, 1_000), (500_000, 1_000), (10_000_000, 250_000)] {
+            for c in [0u64, LOW_WATER - 1, LOW_WATER, 50, HIGH_WATER, HIGH_WATER + 1, 100] {
+                let t = step(r0, f, c);
+                assert_eq!(
+                    t.to_miner.as_atomic() + t.reservoir_after.as_atomic() + t.burned.as_atomic(),
+                    r0 + f,
+                    "value not conserved at r0={r0} f={f} c={c}"
+                );
+                assert!(t.to_miner.as_atomic() <= f + r0, "minted at r0={r0} f={f} c={c}");
+            }
+        }
+    }
+
+    #[test]
+    fn charges_when_uncongested() {
+        let t = step(0, 10_000, 0);
+        assert!(t.reservoir_after.as_atomic() > 0, "reservoir should charge");
+        assert!(t.to_miner.as_atomic() < 10_000, "miner paid less than fees while charging");
+    }
+
+    #[test]
+    fn discharges_when_congested_and_funded() {
+        let t = step(1_000_000, 10_000, 100);
+        assert!(t.to_miner.as_atomic() > 10_000, "miner topped up from the reservoir");
+        assert!(t.reservoir_after.as_atomic() < 1_000_000, "reservoir drawn down");
+    }
+
+    #[test]
+    fn empty_reservoir_discharge_is_pass_through() {
+        let t = step(0, 10_000, 100);
+        assert_eq!(t.to_miner.as_atomic(), 10_000);
+        assert_eq!(t.reservoir_after.as_atomic(), 0);
+        assert_eq!(t.burned.as_atomic(), 0);
+    }
+
+    #[test]
+    fn never_exceeds_cap() {
+        let t = step(CAP_ATOMIC, 1_000_000, 0);
+        assert!(t.reservoir_after.as_atomic() <= CAP_ATOMIC, "cap respected");
+        assert_eq!(t.to_miner.as_atomic(), 1_000_000, "at cap, all fees go to the miner");
+    }
+
+    #[test]
+    fn decay_only_shrinks_the_reservoir() {
+        let t = step(1_000_000, 5_000, 50); // nominal → pass-through + decay
+        assert!(t.reservoir_after.as_atomic() <= 1_000_000);
+        assert_eq!(t.burned.as_atomic(), 1_000_000 * DECAY_BPS / 10_000);
+    }
+
+    /// Replay a synthetic fee series (calm high-fee/low-congestion blocks
+    /// alternating with drought high-congestion/low-fee blocks) and assert the
+    /// reservoir does its job: it CHARGES in calm and DISCHARGES in drought,
+    /// reducing the variance of miner revenue vs. raw fees, while staying
+    /// bounded and issuance-neutral over the whole run. This is the CIP's
+    /// "model the params via replay" step (difficulty_replay.rs style).
+    #[test]
+    fn replay_reduces_miner_revenue_variance_and_conserves_value() {
+        // 600 blocks: 50-block calm/drought phases.
+        let mut series = Vec::new();
+        for block in 0..600u64 {
+            if (block / 50) % 2 == 0 {
+                series.push((10_000u64, 10u64)); // calm: low congestion → charge
+            } else {
+                series.push((2_000u64, 90u64)); // drought: high congestion → discharge
+            }
+        }
+
+        let raw: Vec<u64> = series.iter().map(|(f, _)| *f).collect();
+
+        let mut reservoir = Amount::from_atomic(0);
+        let mut smoothed = Vec::with_capacity(series.len());
+        let (mut miner_total, mut burned_total, mut fees_total) = (0u128, 0u128, 0u128);
+        for (f, c) in &series {
+            let before = reservoir.as_atomic() as u128;
+            let t = reservoir_step(reservoir, Amount::from_atomic(*f), *c);
+            // Per-step conservation.
+            assert_eq!(
+                t.to_miner.as_atomic() as u128
+                    + t.reservoir_after.as_atomic() as u128
+                    + t.burned.as_atomic() as u128,
+                before + *f as u128
+            );
+            reservoir = t.reservoir_after;
+            smoothed.push(t.to_miner.as_atomic());
+            miner_total += t.to_miner.as_atomic() as u128;
+            burned_total += t.burned.as_atomic() as u128;
+            fees_total += *f as u128;
+        }
+
+        // Bounded, and issuance-neutral over the whole run (net consumer): all
+        // fees end up with miners, in the reservoir, or burned — never minted.
+        assert!(reservoir.as_atomic() <= CAP_ATOMIC, "reservoir stayed within the cap");
+        assert_eq!(
+            miner_total + reservoir.as_atomic() as u128 + burned_total,
+            fees_total,
+            "value conserved across the run"
+        );
+
+        // Smoothing: miner-revenue variance is reduced vs. raw fees.
+        let variance = |xs: &[u64]| -> f64 {
+            let n = xs.len() as f64;
+            let mean = xs.iter().map(|&x| x as f64).sum::<f64>() / n;
+            xs.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n
+        };
+        let (var_raw, var_smoothed) = (variance(&raw), variance(&smoothed));
+        assert!(
+            var_smoothed < var_raw,
+            "reservoir must reduce miner-revenue variance (raw {var_raw:.0} vs smoothed {var_smoothed:.0})"
+        );
     }
 }
