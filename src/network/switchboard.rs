@@ -101,7 +101,7 @@ impl Switchboard {
     /// endpoint and the listener at `to` receives the other end on its accept
     /// queue. Fails if the edge is partitioned or nothing listens at `to`.
     pub fn connect(&self, from: SocketAddr, to: SocketAddr) -> Result<NetStream, DialError> {
-        let mut inner = self.lock();
+        let inner = self.lock();
         if inner.partitions.contains(&edge(from, to)) {
             return Err(DialError::Partitioned);
         }
@@ -185,8 +185,10 @@ mod tests {
 
         sb.partition(a, b);
         assert!(sb.is_partitioned(a, b) && sb.is_partitioned(b, a));
-        assert_eq!(sb.connect(a, b), Err(DialError::Partitioned));
-        assert_eq!(sb.connect(b, a), Err(DialError::Partitioned)); // both ways
+        // NetStream has no PartialEq/Debug, so match the error variant rather
+        // than assert_eq on the Result.
+        assert!(matches!(sb.connect(a, b), Err(DialError::Partitioned)));
+        assert!(matches!(sb.connect(b, a), Err(DialError::Partitioned))); // both ways
 
         sb.heal(a, b);
         assert!(!sb.is_partitioned(a, b));
@@ -196,6 +198,9 @@ mod tests {
     #[test]
     fn dialing_a_non_listener_fails() {
         let sb = Switchboard::new();
-        assert_eq!(sb.connect(addr(1), addr(9)), Err(DialError::NoListener));
+        assert!(matches!(
+            sb.connect(addr(1), addr(9)),
+            Err(DialError::NoListener)
+        ));
     }
 }
