@@ -226,7 +226,7 @@ mod tests {
             network_magic: [0, 0, 0, 0],
             version: 1,
             height,
-            timestamp: 0,
+            timestamp: crate::primitives::Timestamp::from_secs(0),
             prev_hash: prev,
             tx_root: Hash::zero(),
             anchor: Hash::zero(),

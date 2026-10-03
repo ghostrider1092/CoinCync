@@ -51,7 +51,7 @@ impl Blockchain {
                 hash,
                 height: 0,
                 difficulty: 1,
-                timestamp: genesis.header.timestamp,
+                timestamp: genesis.header.timestamp.as_secs(),
             };
 
             inner.stats.height = 0;
@@ -197,7 +197,7 @@ impl Blockchain {
                             hash: state.tip_hash,
                             height: state.height,
                             difficulty,
-                            timestamp: tip_block.header.timestamp,
+                            timestamp: tip_block.header.timestamp.as_secs(),
                         };
                         inner.stats.height = state.height;
                         inner.stats.total_supply = state.total_supply;

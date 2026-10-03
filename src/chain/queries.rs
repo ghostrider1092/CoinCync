@@ -257,7 +257,7 @@ impl Blockchain {
         for _ in 0..crate::constants::MTP_WINDOW {
             match self.get_block(&cursor) {
                 Some(ancestor) => {
-                    timestamps.push(ancestor.header.timestamp);
+                    timestamps.push(ancestor.header.timestamp.as_secs());
                     cursor = ancestor.header.prev_hash;
                 }
                 None => break,

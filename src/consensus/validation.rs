@@ -399,7 +399,7 @@ pub fn validate_block_ctx(
                 match verify_pow(
                     &prev.header.hash(),
                     block.height(),
-                    block.header.timestamp,
+                    block.header.timestamp.as_secs(),
                     block.header.nonce,
                     &block.header.tx_root,
                     &block.header.target,
@@ -1283,7 +1283,7 @@ fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidat
     if current_time < MIN_REASONABLE_TIME {
         result.add_warning("System clock appears to be set incorrectly (before 2020)");
     }
-    if header.height > 0 && header.timestamp > current_time + MAX_TIMESTAMP_DRIFT {
+    if header.height > 0 && header.timestamp.as_secs() > current_time + MAX_TIMESTAMP_DRIFT {
         result.add_error("Block timestamp too far in future");
     }
 }
@@ -1389,7 +1389,7 @@ fn validate_difficulty_target(
 
             // Normal bounds: target can change by at most 4x in either direction
             // 4x = ratio_scaled 4000, 0.25x = ratio_scaled 250
-            let time_diff = block.header.timestamp.saturating_sub(prev.header.timestamp);
+            let time_diff = block.header.timestamp.saturating_secs_since(prev.header.timestamp);
             let expected_time = crate::constants::TARGET_BLOCK_TIME;
 
             // NOTE: The sanity check here is intentionally loose because the exact
@@ -2931,7 +2931,7 @@ mod tests {
             network_magic: test_magic(),
             version: 1,
             height,
-            timestamp: 0,
+            timestamp: crate::primitives::Timestamp::from_secs(0),
             prev_hash: Hash::zero(),
             tx_root: Hash::zero(),
             anchor: Hash::zero(),
@@ -3031,7 +3031,7 @@ mod tests {
             network_magic: test_magic(),
             version: 1,
             height: 1,
-            timestamp: 0,
+            timestamp: crate::primitives::Timestamp::from_secs(0),
             prev_hash: Hash::zero(),
             tx_root: Hash::zero(),
             anchor: Hash::zero(),
@@ -3272,7 +3272,7 @@ mod tests {
     fn child_block(height: u64, txs: Vec<Transaction>, prev: &Block) -> Block {
         let mut h = block_at_height(height).header;
         h.prev_hash = prev.header.hash();
-        h.timestamp = 1_000_000;
+        h.timestamp = crate::primitives::Timestamp::from_secs(1_000_000);
         Block::new(h, txs)
     }
 
@@ -3664,7 +3664,7 @@ mod tests {
         let mut header = block_at_height(1).header;
         header.version = 1; // downgrade v2 -> v1
         header.prev_hash = prev_header.hash();
-        header.timestamp = prev_header.timestamp + 1;
+        header.timestamp = prev_header.timestamp + std::time::Duration::from_secs(1);
         let mut result = BlockValidation::ok();
         check_header_vs_prev(&header, Some(&prev_header), &mut result);
         assert!(!result.valid);
@@ -3742,7 +3742,7 @@ mod tests {
     #[test]
     fn check_header_future_timestamp_genesis_exempt() {
         let mut header = block_at_height(0).header; // height 0
-        header.timestamp = u64::MAX / 2; // absurd future
+        header.timestamp = crate::primitives::Timestamp::from_secs(u64::MAX / 2); // absurd future
         let mut result = BlockValidation::ok();
         check_header_future_timestamp(&header, &mut result);
         assert!(
@@ -3828,7 +3828,7 @@ mod tests {
         let mut blk_t = [0u8; 32];
         blk_t[0] = 1;
         block.header.target = Hash::from_bytes(blk_t);
-        block.header.timestamp = prev.header.timestamp + 1; // normal (non-emergency) window
+        block.header.timestamp = crate::primitives::Timestamp::from_secs(prev.header.timestamp.as_secs() + 1); // normal (non-emergency) window
         let mut result = BlockValidation::ok();
         validate_difficulty_target(&block, Some(&prev), &mut result);
         assert!(!result.valid);

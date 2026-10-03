@@ -215,7 +215,7 @@ pub fn testnet_genesis() -> Block {
         network_magic: params.magic,
         version: 1,
         height: 0,
-        timestamp,
+        timestamp: crate::primitives::Timestamp::from_secs(timestamp),
         prev_hash: Hash::zero(),
         tx_root: crate::primitives::merkle_root(&[coinbase_tx.hash()]),
         anchor: Hash::zero(),

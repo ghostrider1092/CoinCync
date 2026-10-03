@@ -1138,7 +1138,7 @@ impl Blockchain {
                         hash: new_tip_hash,
                         height: target_height,
                         difficulty: calculate_difficulty_from_target(&tip_block.header.target),
-                        timestamp: tip_block.header.timestamp,
+                        timestamp: tip_block.header.timestamp.as_secs(),
                     };
                 } else {
                     inner.tip.hash = new_tip_hash;
@@ -1254,7 +1254,7 @@ impl Blockchain {
                 network_magic: magic,
                 version: 1,
                 height: h,
-                timestamp: base_ts + (h - start_height + 1) * block_time,
+                timestamp: crate::primitives::Timestamp::from_secs(base_ts + (h - start_height + 1) * block_time),
                 prev_hash,
                 tx_root: Hash::zero(),
                 anchor: Hash::zero(),
@@ -1471,10 +1471,10 @@ impl Blockchain {
         // on the common path. Mirrors the fork-aware difficulty window below.
         if block.header.height >= 11 {
             if let Some(mtp) = self.median_time_past_of_lineage(block.header.prev_hash) {
-                if block.header.timestamp <= mtp {
+                if block.header.timestamp.as_secs() <= mtp {
                     return Ok(BlockStatus::Invalid(format!(
                         "Block timestamp {} is not greater than median-time-past {} (median of last 11 blocks on its own chain)",
-                        block.header.timestamp, mtp
+                        block.header.timestamp.as_secs(), mtp
                     )));
                 }
             }
@@ -1556,7 +1556,7 @@ impl Blockchain {
                         hash,
                         height: block.header.height,
                         difficulty,
-                        timestamp: block.header.timestamp,
+                        timestamp: block.header.timestamp.as_secs(),
                     };
                     inner.stats.height = block.header.height;
                     inner.stats.total_blocks += 1;
@@ -2283,7 +2283,7 @@ impl Blockchain {
                                         if let Ok(Some(b)) = db.blocks.get_by_height(h) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
-                                                timestamp: b.header.timestamp,
+                                                timestamp: b.header.timestamp.as_secs(),
                                                 target: b.header.target,
                                             });
                                         }
@@ -2291,7 +2291,7 @@ impl Blockchain {
                                         if let Some(b) = inner.blocks.get(hash) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
-                                                timestamp: b.header.timestamp,
+                                                timestamp: b.header.timestamp.as_secs(),
                                                 target: b.header.target,
                                             });
                                         }
@@ -2303,7 +2303,7 @@ impl Blockchain {
                                         let fb = &fork_blocks[offset];
                                         diff_blocks.push(DifficultyBlock {
                                             height: fb.header.height,
-                                            timestamp: fb.header.timestamp,
+                                            timestamp: fb.header.timestamp.as_secs(),
                                             target: fb.header.target,
                                         });
                                     }
@@ -2676,7 +2676,7 @@ impl Blockchain {
                                         if let Ok(Some(b)) = db.blocks.get_by_height(h) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
-                                                timestamp: b.header.timestamp,
+                                                timestamp: b.header.timestamp.as_secs(),
                                                 target: b.header.target,
                                             });
                                         }
@@ -2684,7 +2684,7 @@ impl Blockchain {
                                         if let Some(b) = inner.blocks.get(hash) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
-                                                timestamp: b.header.timestamp,
+                                                timestamp: b.header.timestamp.as_secs(),
                                                 target: b.header.target,
                                             });
                                         }
@@ -2695,7 +2695,7 @@ impl Blockchain {
                                         let fb = &fork_blocks[offset];
                                         diff_blocks.push(DifficultyBlock {
                                             height: fb.header.height,
-                                            timestamp: fb.header.timestamp,
+                                            timestamp: fb.header.timestamp.as_secs(),
                                             target: fb.header.target,
                                         });
                                     }
@@ -2891,7 +2891,7 @@ impl Blockchain {
                             hash,
                             height: block.header.height,
                             difficulty: fork_difficulty,
-                            timestamp: block.header.timestamp,
+                            timestamp: block.header.timestamp.as_secs(),
                         };
                         inner.stats.height = block.header.height;
                         inner.stats.difficulty = fork_difficulty;
@@ -3884,7 +3884,7 @@ mod tests {
             let mut b = genesis.clone();
             b.header.height = height;
             b.header.prev_hash = prev;
-            b.header.timestamp = ts;
+            b.header.timestamp = crate::primitives::Timestamp::from_secs(ts);
             b.header.nonce = nonce;
             b
         };
