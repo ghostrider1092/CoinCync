@@ -52,6 +52,10 @@ class Rule:
     include: tuple[str, ...] = ()   # path prefixes it applies to (() = all under root scope)
     exclude: tuple[str, ...] = ()   # path prefixes to skip
     skip_tests: bool = True          # ignore matches inside #[cfg(test)] / mod tests
+    # If set and found within `window` lines of the match, the finding is
+    # considered satisfied and suppressed (e.g. an error IS coded → a CYNC_ is near).
+    satisfied_by: Optional[re.Pattern] = None
+    window: int = 3
 
     def applies_to(self, rel: str) -> bool:
         if self.include and not rel.startswith(self.include):
@@ -94,6 +98,26 @@ RULES: list[Rule] = [
         "the node (a remote DoS) instead of being rejected.",
         "Return an Error (reject the input) rather than unwrap/expect/panic.",
         where="code", include=("src/consensus/",),
+    ),
+    Rule(
+        "CAST-TRUNCATE", WARN, re.compile(r"\bas\s+(u8|u16|u32|i8|i16|i32)\b"),
+        "A narrowing integer cast on the consensus path. `as` truncates SILENTLY, "
+        "so a value that doesn't fit produces a wrong consensus number with no "
+        "error (an inflation / divergence risk).",
+        "Use a checked conversion (u32::try_from(x)? / x.try_into()) and handle the "
+        "overflow; if the value provably fits, mark it `// check-allow: CAST-TRUNCATE`.",
+        where="code", include=("src/consensus/",),
+    ),
+    Rule(
+        "ERROR-UNCODED", INFO,
+        re.compile(r"Error::(InvalidTransaction|PowValidation|InvalidTxVersion|InvalidSignature|DuplicateKeyImage)\s*\("),
+        "A consensus rejection with no coded diagnostic (CYNC_*) nearby. It won't "
+        "appear in the flight recorder or the coincync-diag registry, so operators "
+        "can't track or explain why a block/tx was rejected.",
+        "Pair it with a coded diagnostic (add_error_coded(CYNC_...) / "
+        "flight_recorder::record(CYNC_..., ...)), or reference the CYNC_ code nearby.",
+        where="code", include=("src/consensus/",),
+        satisfied_by=re.compile(r"CYNC_"), window=4,
     ),
     Rule(
         "HYGIENE-PRINT", WARN,
@@ -218,6 +242,11 @@ def scan_text(text: str, rel: str, active: list[Rule]) -> list[Finding]:
             if haystack and rule.pattern.search(haystack):
                 if allowed(rule.id, raw, prev):
                     continue
+                if rule.satisfied_by is not None:
+                    lo = max(0, i - 1 - rule.window)
+                    hi = min(len(lines), i + rule.window)
+                    if rule.satisfied_by.search("\n".join(lines[lo:hi])):
+                        continue
                 findings.append(
                     Finding(rel, i, rule, section, raw.strip()[:160])
                 )
@@ -233,6 +262,15 @@ let ok = bar.unwrap(); // check-allow: PANIC-CONSENSUS
 // TODO: tidy this
 #[allow(dead_code)]
 unsafe { touch() }
+let n = big as u32;
+return Err(Error::InvalidTransaction("bad".into()));
+let a = 1;
+let b = 2;
+let c = 3;
+let d = 4;
+let e = 5;
+// CYNC_CONS_001
+return Err(Error::PowValidation("x".into()));
 """
 
 
@@ -243,10 +281,15 @@ def selftest() -> int:
     expect_present = [
         ("DET-FLOAT", 1), ("DET-CLOCK", 2), ("PANIC-CONSENSUS", 3),
         ("DET-RNG", 4), ("HYGIENE-MARKER", 6), ("ALLOW-LINT", 7), ("UNSAFE", 8),
+        ("CAST-TRUNCATE", 9), ("ERROR-UNCODED", 10),
     ]
     missing = [e for e in expect_present if e not in got]
-    # Line 5's unwrap is suppressed by the inline check-allow.
-    leaked = [(r, ln) for (r, ln) in got if ln == 5 and r == "PANIC-CONSENSUS"]
+    # Line 5's unwrap is suppressed by the inline check-allow; line 17's error is
+    # satisfied by the CYNC_CONS_001 on line 16 (within the 4-line window).
+    leaked = [
+        (r, ln) for (r, ln) in got
+        if (r == "PANIC-CONSENSUS" and ln == 5) or (r == "ERROR-UNCODED" and ln == 17)
+    ]
     ok = not missing and not leaked
     if ok:
         print("selftest: PASS")

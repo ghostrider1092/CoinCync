@@ -33,6 +33,8 @@ exists, so it is safe to run informally and still usable as a CI gate.
 | `DET-CLOCK` | warn | `src/` (not `clock.rs`/bins) | No direct `SystemTime::now()`/`Instant::now()` — use the clock seam (E1) so runs are deterministic. |
 | `DET-RNG` | warn | consensus/mining/network | No `thread_rng()`/`OsRng` — use the seeded RNG seam (E3) so runs replay from a seed. |
 | `PANIC-CONSENSUS` | warn | `src/consensus/` | No `unwrap`/`expect`/`panic!`/`todo!` on the consensus path — a crafted input would crash the node; return an `Error`. |
+| `CAST-TRUNCATE` | warn | `src/consensus/` | No narrowing `as u8/u16/u32/i8/i16/i32` — `as` truncates silently; use `try_from`/`try_into` and handle overflow. |
+| `ERROR-UNCODED` | info | `src/consensus/` | A consensus rejection (`InvalidTransaction`/`PowValidation`/…) with no `CYNC_*` code within 4 lines — it won't show in the flight recorder / `coincync-diag`. |
 | `HYGIENE-PRINT` | warn | `src/` lib (not bins/cli/explorer) | No `println!`/`eprintln!`/`dbg!` in library code — use `tracing`. |
 | `HYGIENE-MARKER` | info | `src/` | Flags `TODO`/`FIXME`/`XXX`/`HACK`. |
 | `ALLOW-LINT` | info | `src/` | Flags `#[allow(...)]` suppressions to re-justify. |
