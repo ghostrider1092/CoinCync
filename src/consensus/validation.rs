@@ -1889,8 +1889,12 @@ fn check_tx_no_double_spend(tx: &Transaction, utxos: &UtxoSet) -> Result<()> {
 ///
 /// Two lookup paths: live UTXO set (`get_output_by_stealth`), then the
 /// permanent output index that retains ALL historical outputs
-/// (`get_output_index_entry`). Pre-`STRICT_RING_MEMBER_HEIGHT`, ring
-/// members not found in either are logged and allowed (bootstrap gap).
+/// (`get_output_index_entry`). A member found in NEITHER never existed on
+/// this chain and is rejected at every height (#219) — the former
+/// `STRICT_RING_MEMBER_HEIGHT` escape hatch that allowed missing members in
+/// blocks 1-99 was an inflation hole and is removed; those early blocks are
+/// coinbase-only under the 100-block coinbase maturity, so it never
+/// legitimately fired.
 ///
 /// v1.0.12 #5/8 (fork-gated by HARD_FORK_V1_0_12_HEIGHT): also runs the
 /// dup-stealth-address check on tx.outputs at the top of this function,
@@ -2021,24 +2025,32 @@ fn check_tx_ring_members(
                             )?;
                         }
                         None => {
-                            // Output never existed on this chain.
-                            if current_height >= crate::constants::STRICT_RING_MEMBER_HEIGHT {
-                                return Err(Error::InvalidTransaction(format!(
-                                    "Input {} ring member {} references non-existent output \
-                                     (stealth address not found in output index)",
-                                    input_idx, member_idx
-                                )));
-                            } else {
-                                // H3: Pre-activation known bootstrap gap.
-                                tracing::warn!(
-                                    "Ring member {}.{} not found in output index \
-                                     (pre-activation height {}, allowing — \
-                                     known gap, closes at STRICT_RING_MEMBER_HEIGHT)",
-                                    input_idx,
-                                    member_idx,
-                                    current_height
-                                );
-                            }
+                            // #219: the member exists in NEITHER the live UTXO
+                            // set NOR the permanent output index — it never
+                            // existed on this chain, so it is a FABRICATED ring
+                            // member minting unbacked value (CLSAG and the
+                            // balance proof still pass against the forged
+                            // commitment). Reject at EVERY height.
+                            //
+                            // Previously heights below STRICT_RING_MEMBER_HEIGHT
+                            // (100) only logged a warning and fell through — an
+                            // inflation hole for blocks 1-99. That escape hatch
+                            // was never needed and never legitimately fired:
+                            // coinbase maturity is MIN_OUTPUT_AGE_POST_FORK (100)
+                            // from genesis on this network, so no coin can be
+                            // spent before height 100 and blocks 1-99 are
+                            // coinbase-only (coinbase inputs carry no ring, so
+                            // they never reach this check). A legitimate spend at
+                            // ANY height references a real output that IS indexed;
+                            // only a forgery lands here. Rejecting it accepts
+                            // every block a pre-fix node accepts and additionally
+                            // rejects the forgery — a strict tightening, not a
+                            // chain split.
+                            return Err(Error::InvalidTransaction(format!(
+                                "Input {} ring member {} references non-existent output \
+                                 (stealth address not found in output index)",
+                                input_idx, member_idx
+                            )));
                         }
                     }
                 }
@@ -4225,6 +4237,36 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("references non-existent output"), "got: {err}");
+    }
+
+    /// #219 regression: a ring member that exists in neither the UTXO set nor
+    /// the output index must be rejected even BELOW STRICT_RING_MEMBER_HEIGHT.
+    /// Before the fix, heights < 100 only logged a warning and accepted the tx —
+    /// an inflation hole (a fabricated member mints unbacked value while CLSAG +
+    /// the balance proof still verify).
+    #[test]
+    fn ring_members_rejects_nonexistent_output_below_strict_height_219() {
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, ring_of(1, 90))],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let utxos = UtxoSet::new();
+        // Heights well below STRICT_RING_MEMBER_HEIGHT (100), including the
+        // first non-genesis block, must now reject the fabricated member.
+        for height in [1u64, 5, 50, 99] {
+            let err = check_tx_ring_members(NetworkType::Testnet, &tx, &utxos, height, false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("references non-existent output"),
+                "height {height} must reject a fabricated ring member, got: {err}"
+            );
+        }
     }
 
     #[test]
