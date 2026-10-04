@@ -112,6 +112,13 @@ impl MonoInstant {
     pub fn elapsed(self) -> Duration {
         mono_now().saturating_duration_since(self)
     }
+
+    /// `self` minus a duration, or `None` if it would go before the epoch.
+    /// Mirrors `std::time::Instant::checked_sub`.
+    #[inline]
+    pub fn checked_sub(self, d: Duration) -> Option<MonoInstant> {
+        self.0.checked_sub(d).map(MonoInstant)
+    }
 }
 
 impl std::ops::Add<Duration> for MonoInstant {

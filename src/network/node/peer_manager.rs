@@ -109,14 +109,14 @@ type BackoffMap = Arc<
         std::collections::HashMap<
             SocketAddr,
             (
-                std::time::Instant,
+                crate::clock::MonoInstant,
                 super::super::framing::ExponentialBackoff,
             ),
         >,
     >,
 >;
 type LastAttemptMap =
-    Arc<tokio::sync::Mutex<std::collections::HashMap<SocketAddr, std::time::Instant>>>;
+    Arc<tokio::sync::Mutex<std::collections::HashMap<SocketAddr, crate::clock::MonoInstant>>>;
 
 struct OutboundAttempt {
     addr: SocketAddr,
@@ -444,7 +444,7 @@ pub(super) fn spawn_outbound_connector(
         // last-time means "never re-bootstrapped this run" (first isolation
         // triggers immediately); the backoff doubles while re-resolution adds
         // no new addresses and resets on progress.
-        let mut last_rebootstrap: Option<std::time::Instant> = None;
+        let mut last_rebootstrap: Option<crate::clock::MonoInstant> = None;
         let mut rebootstrap_backoff: Duration = REBOOTSTRAP_BACKOFF_MIN;
         // Re-bootstrap can only help if there is something to re-resolve. A
         // seedless config (e.g. regtest, or a node deliberately run with no
@@ -527,12 +527,12 @@ pub(super) fn spawn_outbound_connector(
                 && should_rebootstrap(
                     outbound_count,
                     MESH_FLOOR_PEERS,
-                    std::time::Instant::now(),
+                    crate::clock::mono_now(),
                     last_rebootstrap,
                     rebootstrap_backoff,
                 )
             {
-                last_rebootstrap = Some(std::time::Instant::now());
+                last_rebootstrap = Some(crate::clock::mono_now());
                 let onion_only = connector_proxy
                     .as_ref()
                     .map(|proxy| proxy.onion_only)
@@ -670,7 +670,7 @@ pub(super) fn spawn_outbound_connector(
                 last_attempt
                     .lock()
                     .await
-                    .insert(addr, std::time::Instant::now());
+                    .insert(addr, crate::clock::mono_now());
 
                 let (height, tip) = connector_chain_state.snapshot().await;
                 connections.spawn(run_outbound_attempt(OutboundAttempt {
@@ -716,8 +716,8 @@ pub(super) fn spawn_outbound_connector(
 fn should_rebootstrap(
     outbound_count: usize,
     floor: usize,
-    now: std::time::Instant,
-    last_rebootstrap: Option<std::time::Instant>,
+    now: crate::clock::MonoInstant,
+    last_rebootstrap: Option<crate::clock::MonoInstant>,
     backoff: Duration,
 ) -> bool {
     if outbound_count >= floor {
@@ -725,7 +725,7 @@ fn should_rebootstrap(
     }
     match last_rebootstrap {
         None => true,
-        Some(prev) => now.duration_since(prev) >= backoff,
+        Some(prev) => now.saturating_duration_since(prev) >= backoff,
     }
 }
 
@@ -874,12 +874,12 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
             let mut backoffs = backoffs.lock().await;
             let (next_attempt, backoff) = backoffs.entry(addr).or_insert_with(|| {
                 (
-                    std::time::Instant::now(),
+                    crate::clock::mono_now(),
                     super::super::framing::ExponentialBackoff::new(),
                 )
             });
             let delay = backoff.next_delay();
-            *next_attempt = std::time::Instant::now() + delay;
+            *next_attempt = crate::clock::mono_now() + delay;
             debug!("Backoff for {}: next retry in {:?}", addr, delay);
         }
     }
@@ -907,7 +907,7 @@ async fn connection_attempt_deferred(
         .lock()
         .await
         .get(&addr)
-        .map(|(next_attempt, _)| std::time::Instant::now() < *next_attempt)
+        .map(|(next_attempt, _)| crate::clock::mono_now() < *next_attempt)
         .unwrap_or(false)
 }
 
@@ -1148,10 +1148,10 @@ mod tests {
 
     #[tokio::test]
     async fn save_anchors_caps_to_max_and_keeps_longest_lived() {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
         let data_dir = tempfile::tempdir().unwrap();
         let peers = DashMap::new();
-        let now = Instant::now();
+        let now = std::time::Instant::now();
         // Three connected outbound peers with staggered connect times; the
         // ANCHOR_MAX (2) oldest (longest-lived) must be kept, newest dropped.
         let mk = |n: u8, port: u16, age_secs: u64| {
@@ -1224,7 +1224,7 @@ mod tests {
     fn rebootstrap_gated_off_when_mesh_is_healthy() {
         // At or above the floor, peer-exchange replenishes the book; never
         // re-query DNS even with an exhausted book and no prior re-bootstrap.
-        let now = std::time::Instant::now();
+        let now = crate::clock::mono_now();
         assert!(!should_rebootstrap(
             MESH_FLOOR_PEERS,
             MESH_FLOOR_PEERS,
@@ -1244,7 +1244,7 @@ mod tests {
     #[test]
     fn rebootstrap_fires_immediately_on_first_isolation() {
         // Under-meshed, book exhausted, never re-bootstrapped this run.
-        let now = std::time::Instant::now();
+        let now = crate::clock::mono_now();
         assert!(should_rebootstrap(
             0,
             MESH_FLOOR_PEERS,
@@ -1263,7 +1263,10 @@ mod tests {
 
     #[test]
     fn rebootstrap_respects_backoff_window() {
-        let now = std::time::Instant::now();
+        // MonoInstant's epoch is process-start, so early in a test run `mono_now()`
+        // can be < the backoff window; offset well past the epoch so checked_sub
+        // is valid (no global-clock mutation → parallel-safe).
+        let now = crate::clock::mono_now() + Duration::from_secs(1_000_000);
         let last = now.checked_sub(Duration::from_secs(30)).unwrap();
         // 30s since the last attempt, backoff is 60s → not yet due.
         assert!(!should_rebootstrap(
