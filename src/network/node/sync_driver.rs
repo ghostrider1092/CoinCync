@@ -1009,7 +1009,7 @@ mod tests {
     }
 
     fn mk_connected_peer(id: PeerId, height: u64) -> PeerInfo {
-        let now = crate::clock::mono_now();
+        let now = std::time::Instant::now();
         PeerInfo {
             id,
             addr: "127.0.0.1:28080".parse().unwrap(),

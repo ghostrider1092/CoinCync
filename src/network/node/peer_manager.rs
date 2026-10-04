@@ -1151,7 +1151,7 @@ mod tests {
         use std::time::Duration;
         let data_dir = tempfile::tempdir().unwrap();
         let peers = DashMap::new();
-        let now = crate::clock::mono_now();
+        let now = std::time::Instant::now();
         // Three connected outbound peers with staggered connect times; the
         // ANCHOR_MAX (2) oldest (longest-lived) must be kept, newest dropped.
         let mk = |n: u8, port: u16, age_secs: u64| {
