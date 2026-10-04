@@ -1263,7 +1263,10 @@ mod tests {
 
     #[test]
     fn rebootstrap_respects_backoff_window() {
-        let now = crate::clock::mono_now();
+        // MonoInstant's epoch is process-start, so early in a test run `mono_now()`
+        // can be < the backoff window; offset well past the epoch so checked_sub
+        // is valid (no global-clock mutation → parallel-safe).
+        let now = crate::clock::mono_now() + Duration::from_secs(1_000_000);
         let last = now.checked_sub(Duration::from_secs(30)).unwrap();
         // 30s since the last attempt, backoff is 60s → not yet due.
         assert!(!should_rebootstrap(
