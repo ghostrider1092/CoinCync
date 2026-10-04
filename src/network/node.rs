@@ -351,6 +351,8 @@ impl P2PNode {
             address_mgr.mark_self_address(ext);
             info!("Registered external address {ext} as self — peer gossip echoing our own IP will not cause self-dials");
         }
+        // Read before `config` is moved into the struct below (usize is Copy).
+        let max_connections_per_ip = config.max_connections_per_ip;
 
         P2PNode {
             our_id,
@@ -370,7 +372,10 @@ impl P2PNode {
             cmd_tx,
             running: Arc::new(RwLock::new(false)),
             runtime: tokio::sync::Mutex::new(None),
-            conn_tracker: Arc::new(ConnectionTracker::new(MEMORY_BUDGET_BYTES)),
+            conn_tracker: Arc::new(ConnectionTracker::new_with_cap(
+                MEMORY_BUDGET_BYTES,
+                max_connections_per_ip,
+            )),
             peer_scorer: Arc::new(RwLock::new(PeerScorer::new())),
             relay_scores: Arc::new(RwLock::new(RelayScoreMap::new())),
             orphan_flood: Arc::new(RwLock::new(super::scoring::OrphanFloodTracker::new())),

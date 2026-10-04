@@ -60,6 +60,14 @@ struct Cli {
     #[arg(long)]
     p2p_bind: Option<String>,
 
+    /// Maximum simultaneous inbound connections accepted from a single IP
+    /// (#193). Default 2. Raise this on a seed when several legitimate nodes
+    /// share one public IP (a LAN behind one NAT); raising it weakens per-IP
+    /// Sybil resistance, so set it only on hosts you control and trust the
+    /// clients of.
+    #[arg(long = "max-connections-per-ip", default_value = "2")]
+    max_connections_per_ip: usize,
+
     /// RPC listen address (overrides the network default).
     #[arg(long)]
     rpc_bind: Option<String>,
@@ -574,6 +582,7 @@ async fn main() {
                 cli.mine,
                 cli.mine_threads,
                 cli.allow_solo_mine,
+                cli.max_connections_per_ip,
             )
             .await
             {
@@ -808,6 +817,7 @@ async fn start_node(
     mine: Option<String>,
     mine_threads: usize,
     allow_solo_mine: bool,
+    max_connections_per_ip: usize,
 ) -> coincync::Result<()> {
     info!("CoinCync 1.0 node starting");
     info!("Network:  {:?}", network);
@@ -848,6 +858,15 @@ async fn start_node(
     // --no-peers / regtest clear this again below.
     p2p_config.bootstrap = coincync::network::bootstrap::BootstrapConfig::for_network(network);
     p2p_config.data_dir = data_dir.clone();
+    // #193: configurable per-IP inbound cap (default 2).
+    p2p_config.max_connections_per_ip = max_connections_per_ip;
+    if max_connections_per_ip != coincync::network::connection_tracker::MAX_CONNECTIONS_PER_IP {
+        info!(
+            "Per-IP connection cap set to {} (default {})",
+            max_connections_per_ip,
+            coincync::network::connection_tracker::MAX_CONNECTIONS_PER_IP
+        );
+    }
     if let Some(bind) = &p2p_bind {
         if let Ok(addr) = bind.parse() {
             p2p_config.listen_addr = addr;
