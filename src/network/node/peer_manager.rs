@@ -841,7 +841,14 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
     };
     match connector.connect(addr).await {
         Ok(stream) => {
-            backoffs.lock().await.remove(&addr);
+            // #193: do NOT clear the backoff here. TCP-connect success is not
+            // peer success — the seed accepts the TCP then drops the Noise
+            // handshake when it is over MAX_CONNECTIONS_PER_IP, surfacing as
+            // "unexpected end of file". Clearing the backoff on TCP-connect let
+            // those refusals redial with no backoff at all (one node dialled the
+            // seed 110 times in half an hour, #193). The backoff is now cleared
+            // ONLY on a completed handshake (the success arm below), and a failed
+            // handshake backs off exactly like a failed TCP connect.
             let result = handle_connection(
                 stream,
                 generate_peer_id(),
@@ -864,25 +871,36 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
             if let Err(error) = result {
                 warn!("Outbound connection error: {}", error);
                 addresses.write().await.mark_tried(addr);
+                // #193: a failed handshake backs off too.
+                record_connect_backoff(&backoffs, addr).await;
             } else {
                 addresses.write().await.mark_success(addr);
+                backoffs.lock().await.remove(&addr);
             }
         }
         Err(error) => {
             debug!("Connection to {} failed: {}", addr, error);
             addresses.write().await.mark_tried(addr);
-            let mut backoffs = backoffs.lock().await;
-            let (next_attempt, backoff) = backoffs.entry(addr).or_insert_with(|| {
-                (
-                    crate::clock::mono_now(),
-                    super::super::framing::ExponentialBackoff::new(),
-                )
-            });
-            let delay = backoff.next_delay();
-            *next_attempt = crate::clock::mono_now() + delay;
-            debug!("Backoff for {}: next retry in {:?}", addr, delay);
+            record_connect_backoff(&backoffs, addr).await;
         }
     }
+}
+
+/// Record (or advance) the per-address exponential backoff after a failed
+/// outbound attempt. #193: called for BOTH a failed TCP connect and a failed
+/// Noise handshake — a peer that accepts TCP but refuses the handshake must not
+/// be redialled with no backoff.
+async fn record_connect_backoff(backoffs: &BackoffMap, addr: SocketAddr) {
+    let mut backoffs = backoffs.lock().await;
+    let (next_attempt, backoff) = backoffs.entry(addr).or_insert_with(|| {
+        (
+            crate::clock::mono_now(),
+            super::super::framing::ExponentialBackoff::new(),
+        )
+    });
+    let delay = backoff.next_delay();
+    *next_attempt = crate::clock::mono_now() + delay;
+    debug!("Backoff for {}: next retry in {:?}", addr, delay);
 }
 
 async fn connection_attempt_deferred(
@@ -1120,6 +1138,43 @@ pub(super) fn disconnect_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #193: a failed Noise handshake must install a per-address backoff (the
+    /// same path as a failed TCP connect), so a peer that accepts the TCP then
+    /// refuses the handshake — e.g. the seed over MAX_CONNECTIONS_PER_IP — is
+    /// NOT redialled with no backoff (one node dialled the seed 110 times in
+    /// half an hour). Before the fix the backoff was cleared on TCP-connect, so
+    /// nothing deferred the next dial.
+    #[tokio::test]
+    async fn failed_handshake_installs_backoff_that_defers_redial_193() {
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tokio::sync::Mutex;
+
+        let addr: SocketAddr = "203.0.113.7:28080".parse().unwrap();
+        let backoffs: BackoffMap = Arc::new(Mutex::new(HashMap::new()));
+        let last_attempt: LastAttemptMap = Arc::new(Mutex::new(HashMap::new()));
+
+        // Nothing recorded yet → the next dial is not deferred.
+        assert!(
+            !connection_attempt_deferred(addr, &last_attempt, &backoffs, Duration::from_secs(30))
+                .await
+        );
+
+        // A failed handshake records a backoff → the next dial is deferred.
+        record_connect_backoff(&backoffs, addr).await;
+        let first = backoffs.lock().await.get(&addr).map(|(t, _)| *t).unwrap();
+        assert!(
+            connection_attempt_deferred(addr, &last_attempt, &backoffs, Duration::from_secs(0))
+                .await,
+            "a recorded backoff must defer the next redial"
+        );
+
+        // A second consecutive failure must not SHORTEN the backoff (exponential).
+        record_connect_backoff(&backoffs, addr).await;
+        let second = backoffs.lock().await.get(&addr).map(|(t, _)| *t).unwrap();
+        assert!(second >= first, "repeated failures must not shorten the backoff");
+    }
 
     #[test]
     fn anchor_round_trip_keeps_only_connected_outbound_peers() {
