@@ -245,7 +245,11 @@ impl BlockValidation {
             crate::diagnostics::lookup(code).is_some(),
             "add_error_coded: unknown diagnostic code {code}"
         );
-        self.errors.push(msg.into());
+        let msg = msg.into();
+        // F5: record every coded validation failure into the flight recorder so a
+        // fault dump shows the lead-up, not just the final error.
+        crate::flight_recorder::record(code, msg.clone());
+        self.errors.push(msg);
         self.codes.push(code);
         self.valid = false;
     }
