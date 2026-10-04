@@ -128,6 +128,8 @@ struct OutboundAttempt {
     height: u64,
     tip: crate::primitives::Hash,
     proxy: Option<ProxyConfig>,
+    /// When set (simulation), dial through the Switchboard instead of TCP.
+    sim_connector: Option<crate::network::switchboard::SimConnector>,
     backoffs: BackoffMap,
     identity: Arc<NodeIdentity>,
     encryption: P2PEncryptionConfig,
@@ -372,6 +374,9 @@ pub(super) struct OutboundContext {
     pub senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
     pub chain_state: ChainStateReader,
     pub proxy: Option<ProxyConfig>,
+    /// When set (simulation), the outbound connector dials through the
+    /// Switchboard instead of TCP. `None` in production.
+    pub sim_connector: Option<crate::network::switchboard::SimConnector>,
     pub scorer: Arc<RwLock<PeerScorer>>,
     pub identity: Arc<NodeIdentity>,
     pub encryption: P2PEncryptionConfig,
@@ -402,6 +407,7 @@ pub(super) fn spawn_outbound_connector(
         senders: connector_senders,
         chain_state: connector_chain_state,
         proxy: connector_proxy,
+        sim_connector: connector_sim_connector,
         scorer: connector_scorer,
         identity: connector_identity,
         encryption: connector_encryption,
@@ -677,6 +683,7 @@ pub(super) fn spawn_outbound_connector(
                     height,
                     tip,
                     proxy: connector_proxy.clone(),
+                    sim_connector: connector_sim_connector.clone(),
                     backoffs: backoffs.clone(),
                     identity: connector_identity.clone(),
                     encryption: connector_encryption.clone(),
@@ -814,6 +821,7 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
         height,
         tip,
         proxy,
+        sim_connector,
         backoffs,
         identity,
         encryption,
@@ -824,9 +832,12 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
         our_nonce,
     } = attempt;
 
-    let connector = crate::network::switchboard::Connector::Tcp {
-        proxy,
-        timeout: CONNECT_TIMEOUT,
+    let connector = match sim_connector {
+        Some(c) => crate::network::switchboard::Connector::Sim(c),
+        None => crate::network::switchboard::Connector::Tcp {
+            proxy,
+            timeout: CONNECT_TIMEOUT,
+        },
     };
     match connector.connect(addr).await {
         Ok(stream) => {
