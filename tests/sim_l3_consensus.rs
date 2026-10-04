@@ -247,3 +247,30 @@ fn withholding_miner_cannot_disrupt_the_honest_majority() {
         sim.nodes[1].chain.height()
     );
 }
+
+#[test]
+fn safety_codes_is_empty_when_honest_nodes_agree() {
+    // F3 result.codes hook: a fresh sim (all honest, no mining) leaves every node
+    // at genesis, so there is no divergence below the finality floor — the
+    // structured safety codes are empty. Light: no real-PoW, so not #[ignore].
+    let cfg = SimConfig {
+        seed: 0x5AFE,
+        n_nodes: 3,
+        miners: vec![0],
+        behaviors: vec![Behavior::Honest; 3],
+        min_delay: 50,
+        max_delay: 500,
+        drop_prob: 0.0,
+        dup_prob: 0.0,
+        block_spacing_secs: 3600,
+        finality_depth: 4,
+        rounds: 1,
+        partitions: vec![],
+    };
+    let sim = Sim::new(cfg);
+    assert!(
+        sim.safety_codes().is_empty(),
+        "a fresh honest sim must report no safety-violation codes"
+    );
+    assert!(sim.check_safety().is_ok());
+}

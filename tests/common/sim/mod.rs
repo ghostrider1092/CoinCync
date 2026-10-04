@@ -400,4 +400,17 @@ impl Sim {
         }
         Ok(())
     }
+
+    /// F3 hook: the coded safety-violation reports the sim's current state would
+    /// emit, as structured `CYNC-*` codes (empty when safe). Lets a scenario
+    /// assert `sim.safety_codes().contains(&CYNC_CONS_003)` instead of
+    /// string-matching `check_safety`'s message.
+    pub fn safety_codes(&self) -> Vec<&'static str> {
+        match self.check_safety() {
+            Ok(()) => Vec::new(),
+            // The sim's sole safety invariant is honest-divergence-below-finality
+            // (CYNC-CONS-003); extend this as more are added.
+            Err(_) => vec![coincync::diagnostics::CYNC_CONS_003],
+        }
+    }
 }
