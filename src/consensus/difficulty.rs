@@ -85,7 +85,7 @@ use crate::constants::{
     EMERGENCY_DROP_FACTOR, EMERGENCY_TIME_MULTIPLIER, MAX_DIFFICULTY_ADJ_DEN,
     MAX_DIFFICULTY_ADJ_NUM, MIN_DIFFICULTY_ADJ_DEN, MIN_DIFFICULTY_ADJ_NUM, TARGET_BLOCK_TIME,
 };
-use crate::primitives::Hash;
+use crate::primitives::{Difficulty, Hash};
 
 /// Absolute minimum network difficulty — the consensus floor below which ASERT
 /// cannot drive the chain. Equivalent to a target ceiling of `u128::MAX / 500`.
@@ -473,7 +473,18 @@ pub fn min_target() -> Hash {
     Hash::from_bytes(bytes)
 }
 
-pub fn target_to_difficulty(target: &Hash) -> u128 {
+/// The work-factor of a target as a typed [`Difficulty`] — the public boundary
+/// for fork-choice / reporting consumers. The internal ASERT retarget math stays
+/// in `u128` (see [`target_to_difficulty_raw`]); the newtype deliberately has no
+/// `Mul`/`Div`, so it is applied only where a difficulty is compared/accumulated,
+/// not inside the arithmetic.
+pub fn target_to_difficulty(target: &Hash) -> Difficulty {
+    Difficulty::new(target_to_difficulty_raw(target))
+}
+
+/// Raw `u128` work-factor of a target — the internal computation the retarget
+/// math uses directly.
+fn target_to_difficulty_raw(target: &Hash) -> u128 {
     u128_max_target() / target_to_u128(target)
 }
 
@@ -493,14 +504,14 @@ pub fn estimate_hashrate(blocks: &[DifficultyBlock]) -> f64 {
     }
     let total_work: f64 = blocks
         .iter()
-        .map(|b| target_to_difficulty(&b.target) as f64)
+        .map(|b| target_to_difficulty_raw(&b.target) as f64)
         .sum();
     total_work / time_span
 }
 
 /// Calculate difficulty from target (convenience function).
 pub fn calculate_difficulty_from_target(target: &Hash) -> u128 {
-    target_to_difficulty(target)
+    target_to_difficulty_raw(target)
 }
 
 #[cfg(test)]
@@ -562,7 +573,7 @@ mod tests {
             .map(|i| make_block(i, i * TARGET_BLOCK_TIME))
             .collect();
         let new_target = calculate_difficulty(&blocks, 20);
-        let diff = target_to_difficulty(&new_target);
+        let diff = target_to_difficulty(&new_target).as_u128();
         assert!(diff < 10);
     }
 
@@ -572,8 +583,8 @@ mod tests {
             .map(|i| make_block(i, i * (TARGET_BLOCK_TIME / 2)))
             .collect();
         let new_target = calculate_difficulty(&blocks, 20);
-        let old_diff = target_to_difficulty(&blocks.last().unwrap().target);
-        let new_diff = target_to_difficulty(&new_target);
+        let old_diff = target_to_difficulty(&blocks.last().unwrap().target).as_u128();
+        let new_diff = target_to_difficulty(&new_target).as_u128();
         assert!(new_diff >= old_diff);
     }
 
@@ -610,13 +621,13 @@ mod tests {
         // stale but whose real blocks land on the 120s target, and assert
         // difficulty holds near the initial value instead of collapsing.
         const STALE: u64 = 30 * 24 * 3600; // genesis 30 days before block 1
-        let init_diff = target_to_difficulty(&make_block_realistic(0, 0).target);
+        let init_diff = target_to_difficulty(&make_block_realistic(0, 0).target).as_u128();
         let mut blocks = vec![make_block_realistic(0, 0)]; // genesis at ts=0
         for i in 1..=20u64 {
             // real blocks on the 120s target, offset by the stale genesis gap
             blocks.push(make_block_realistic(i, STALE + i * TARGET_BLOCK_TIME));
         }
-        let new_diff = target_to_difficulty(&calculate_difficulty(&blocks, 20));
+        let new_diff = target_to_difficulty(&calculate_difficulty(&blocks, 20)).as_u128();
         // On-target real blocks must keep difficulty ~stable near init and must
         // NOT collapse toward the floor (which is what happened when genesis was
         // the anchor: time_error ≈ the 30-day gap → difficulty → MIN_DIFFICULTY).
@@ -1021,7 +1032,7 @@ mod tests {
             "emergency drop must not ease target past the max_t cap"
         );
         assert!(
-            target_to_difficulty(&result) >= MIN_DIFFICULTY,
+            target_to_difficulty(&result).as_u128() >= MIN_DIFFICULTY,
             "emergency drop must not push difficulty below the MIN_DIFFICULTY floor"
         );
     }
@@ -1159,7 +1170,7 @@ mod tests {
         let zero = Hash::from_bytes([0u8; 32]);
         assert_eq!(target_to_u128(&zero), 1);
         // And the difficulty derived from a zero target is u128::MAX, no panic.
-        assert_eq!(target_to_difficulty(&zero), u128::MAX);
+        assert_eq!(target_to_difficulty(&zero).as_u128(), u128::MAX);
     }
 
     /// `calculate_difficulty_from_target` is an exact alias of
@@ -1167,7 +1178,7 @@ mod tests {
     #[test]
     fn calculate_difficulty_from_target_equals_target_to_difficulty() {
         for t in [max_target(), min_target(), make_block_realistic(0, 0).target] {
-            assert_eq!(calculate_difficulty_from_target(&t), target_to_difficulty(&t));
+            assert_eq!(calculate_difficulty_from_target(&t), target_to_difficulty(&t).as_u128());
         }
     }
 }

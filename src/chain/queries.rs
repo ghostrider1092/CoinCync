@@ -148,7 +148,7 @@ impl Blockchain {
             // than jumping straight to the floor because the locked ±4x/step
             // sanity layer would reject a single large drop.)
             let parent = blocks.last().map(|b| b.target).unwrap_or_else(max_target);
-            let parent_diff = crate::consensus::difficulty::target_to_difficulty(&parent);
+            let parent_diff = crate::consensus::difficulty::target_to_difficulty(&parent).as_u128();
             let floor = crate::consensus::difficulty::MIN_DIFFICULTY;
             if parent_diff <= floor {
                 return parent;
