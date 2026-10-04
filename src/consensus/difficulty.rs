@@ -175,9 +175,18 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
     };
     let tip_target = target_to_u128(&tip.target);
 
+    // #191 FIX (defect 1 — sliding-anchor re-charge): ASERT must apply the
+    // exponent to the ANCHOR's target, not the tip's. The tip's target already
+    // contains every prior per-block adjustment, so basing the exponent on it
+    // re-charges a one-time idle gap on each of the next SHORT/LONG blocks the
+    // gap sits inside the window — the compounding that collapsed difficulty by
+    // ~13 halvings to the floor. Canonical aserti3-2d bases it on the fixed
+    // anchor target so the gap is paid ONCE as height advances (T·Δh offsets
+    // the gap in Δt). The per-block ±2x clamp + the MIN_DIFFICULTY floor below
+    // remain the rails.
     let short_anchor = get_anchor(blocks, DIFFICULTY_SHORT_WINDOW as usize);
     let short_target = apply_asert(
-        tip_target,
+        target_to_u128(&short_anchor.target),
         short_anchor,
         tip,
         TARGET_BLOCK_TIME,
@@ -186,7 +195,7 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
 
     let long_anchor = get_anchor(blocks, DIFFICULTY_LONG_WINDOW as usize);
     let long_target = apply_asert(
-        tip_target,
+        target_to_u128(&long_anchor.target),
         long_anchor,
         tip,
         TARGET_BLOCK_TIME,
@@ -607,6 +616,100 @@ mod tests {
             "slow blocks should produce target ≥ tip target: old={}, new={}",
             old_val,
             new_val
+        );
+    }
+
+    /// Build a block carrying an explicit u128 target, so a simulation can
+    /// control difficulty headroom above the floor (the `make_block_realistic`
+    /// fixed target sits below the MIN_DIFFICULTY floor and leaves no room to
+    /// observe a *bounded* ease).
+    fn block_with_target(height: u64, timestamp: u64, target: u128) -> DifficultyBlock {
+        DifficultyBlock {
+            height,
+            timestamp,
+            target: u128_to_target(target),
+        }
+    }
+
+    /// Regression for #191 (consensus: difficulty collapse after an idle gap).
+    ///
+    /// A single long inter-block gap followed by fast blocks drove difficulty
+    /// down ~13 halvings to the MIN_DIFFICULTY floor and PINNED it there for
+    /// dozens of blocks — a one-miner flood. Root cause: `apply_asert` based the
+    /// ASERT exponent on the *tip's* target, so the one-time gap, which stays
+    /// inside the sliding SHORT/LONG window for 8/144 blocks, was re-charged on
+    /// top of the already-halved tip every block → compounding to the floor.
+    ///
+    /// The fix bases the exponent on the FIXED anchor target (canonical
+    /// aserti3-2d), so the gap is paid ONCE as height advances. This simulates
+    /// the reported trace — a steady chain, one ~3.2h gap, then 1s blocks — and
+    /// asserts the ease is bounded and difficulty recovers, never collapsing to
+    /// the floor. (Pre-fix, this chain pins at difficulty 500 for ~87 blocks;
+    /// post-fix the minimum is ~31k with ZERO floor blocks — verified against a
+    /// numeric replica of the retarget loop.)
+    #[test]
+    fn idle_gap_does_not_collapse_difficulty_to_floor_191() {
+        // Steady target with ample headroom above the floor: difficulty ≈ 2^18.
+        const T0: u128 = 1u128 << 110;
+        const GAP: u64 = 11_522; // the reported idle gap (seconds)
+        let t0_diff = target_to_difficulty_raw(&u128_to_target(T0));
+        assert!(
+            t0_diff > MIN_DIFFICULTY * 50,
+            "test precondition: steady difficulty must sit well above the floor"
+        );
+
+        // A long steady chain on the 120s target → ASERT at equilibrium.
+        let mut blocks: Vec<DifficultyBlock> = Vec::new();
+        let mut ts = 0u64;
+        for h in 0..200u64 {
+            blocks.push(block_with_target(h, ts, T0));
+            ts += TARGET_BLOCK_TIME;
+        }
+
+        // The gap block itself was mined at the steady target (its difficulty
+        // was fixed by the pre-gap chain); only its TIMESTAMP jumps.
+        let gap_h = blocks.len() as u64;
+        let gap_target = target_to_u128(&calculate_difficulty(&blocks, gap_h));
+        ts = blocks.last().unwrap().timestamp + GAP;
+        blocks.push(block_with_target(gap_h, ts, gap_target));
+
+        // Now mine fast blocks (1s apart). Each block's target is whatever the
+        // retarget produces from the history so far — this is the series #191
+        // showed collapsing to the floor.
+        let mut series: Vec<u128> = Vec::new();
+        for _ in 0..160u64 {
+            let h = blocks.len() as u64;
+            let target = target_to_u128(&calculate_difficulty(&blocks, h));
+            ts = blocks.last().unwrap().timestamp + 1;
+            blocks.push(block_with_target(h, ts, target));
+            series.push(target_to_difficulty_raw(&u128_to_target(target)));
+        }
+
+        let min_diff = *series.iter().min().unwrap();
+        let floor_blocks = series.iter().filter(|&&d| d <= MIN_DIFFICULTY * 2).count();
+
+        // (1) NEVER collapses to the floor — the core #191 defect. Pre-fix this
+        // is 500 (== floor); post-fix the minimum is ~31k.
+        assert_eq!(
+            floor_blocks, 0,
+            "difficulty must never reach the MIN_DIFFICULTY floor after an idle gap \
+             (got {floor_blocks} floor blocks; min diff = {min_diff}, floor = {MIN_DIFFICULTY})"
+        );
+        // (2) The ease is BOUNDED (the one-time gap is paid once, not compounded
+        // ~13 halvings). A 3.2h gap over an 8-block window is ~3.3 halvings, so
+        // the trough must stay within a small factor of the steady difficulty.
+        assert!(
+            min_diff > t0_diff / 16,
+            "ease must be bounded to a few halvings, not a collapse: \
+             min={min_diff} steady={t0_diff}"
+        );
+        // (3) Difficulty RECOVERS: with 1s blocks continuing (120x too fast), the
+        // tail must climb back above the steady difficulty, not sit at the floor.
+        let tail = *series.last().unwrap();
+        assert!(
+            tail >= t0_diff,
+            "difficulty must recover (and rise) as fast blocks continue: \
+             tail={tail} steady={t0_diff}"
         );
     }
 
