@@ -2632,7 +2632,7 @@ mod tests {
             header: crate::consensus::BlockHeader {
                 network_magic: NetworkType::Testnet.magic_bytes(),
                 version: 1,
-                height: 10,
+                height: crate::primitives::Height::new(10),
                 timestamp: crate::primitives::Timestamp::from_secs(1000),
                 prev_hash: Hash::zero(),
                 tx_root: Hash::zero(),
@@ -2764,7 +2764,7 @@ mod tests {
             header: crate::consensus::BlockHeader {
                 network_magic: NetworkType::Testnet.magic_bytes(),
                 version: 1,
-                height: 42,
+                height: crate::primitives::Height::new(42),
                 timestamp: crate::primitives::Timestamp::from_secs(1000),
                 prev_hash: Hash::zero(),
                 tx_root: Hash::zero(),
@@ -2865,7 +2865,7 @@ mod tests {
             header: crate::consensus::BlockHeader {
                 network_magic: NetworkType::Testnet.magic_bytes(),
                 version: 1,
-                height,
+                height: crate::primitives::Height::new(height),
                 timestamp: crate::primitives::Timestamp::from_secs(1000 + height),
                 prev_hash,
                 tx_root: Hash::zero(),

@@ -43,7 +43,7 @@ fn block(magic: [u8; 4], version: u8, height: u64, prev: Hash, ts: u64, n_coinba
     let header = BlockHeader {
         network_magic: magic,
         version,
-        height,
+        height: coincync::primitives::Height::new(height),
         timestamp: ts.into(),
         prev_hash: prev,
         tx_root: Hash::zero(),

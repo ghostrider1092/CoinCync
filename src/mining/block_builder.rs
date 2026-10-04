@@ -112,7 +112,7 @@ impl CandidateBlock {
     /// The RandomX hashing inputs a miner needs: (anchor, tx_root, height).
     /// The PoW input is `hash_concat(anchor, nonce_le, tx_root)`.
     pub fn pow_inputs(&self) -> (Hash, Hash, u64) {
-        (self.header.anchor, self.header.tx_root, self.header.height)
+        (self.header.anchor, self.header.tx_root, self.header.height.as_u64())
     }
 
     /// Finalize into a submittable [`Block`](crate::consensus::block::Block)
@@ -334,7 +334,7 @@ pub fn build_block_from_template(
     let mut header = BlockHeader {
         network_magic,
         version: block_version_at_height(height),
-        height,
+        height: crate::primitives::Height::new(height),
         timestamp: crate::primitives::Timestamp::from_secs(timestamp),
         prev_hash,
         tx_root,
@@ -587,7 +587,7 @@ mod tests {
         .expect("build candidate");
 
         // Header basics.
-        assert_eq!(candidate.header.height, height);
+        assert_eq!(candidate.header.height.as_u64(), height);
         assert_eq!(candidate.header.nonce, 0, "candidate leaves nonce for the miner");
         assert_eq!(candidate.header.prev_hash, Hash::from_bytes([0x11u8; 32]));
         assert_eq!(candidate.header.miner_pubkey, spend);

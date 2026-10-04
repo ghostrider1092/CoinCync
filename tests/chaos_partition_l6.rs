@@ -123,7 +123,7 @@ impl Bus {
                 }
                 // Clone src's outbox first to release the borrow before mutating dst.
                 let mut blocks: Vec<Block> = self.nodes[src].known.clone();
-                blocks.sort_by_key(|b| b.header.height);
+                blocks.sort_by_key(|b| b.header.height.as_u64());
                 for blk in blocks {
                     match self.nodes[dst].chain.add_block(blk.clone()) {
                         Ok(BlockStatus::Accepted)

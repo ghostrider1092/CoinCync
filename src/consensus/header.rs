@@ -182,7 +182,7 @@ mod tests {
         BlockHeader {
             network_magic: [1, 2, 3, 4],
             version: 1,
-            height: 42,
+            height: crate::primitives::Height::new(42),
             timestamp: crate::primitives::Timestamp::from_secs(1_700_000_000),
             prev_hash: Hash::from_bytes([7u8; 32]),
             tx_root: Hash::from_bytes([8u8; 32]),
@@ -261,7 +261,8 @@ mod tests {
 
         assert_field_bound!("network_magic", |h| h.network_magic = [9, 9, 9, 9]);
         assert_field_bound!("version", |h| h.version ^= 1);
-        assert_field_bound!("height", |h| h.height ^= 1);
+        assert_field_bound!("height", |h| h.height =
+            crate::primitives::Height::new(h.height.as_u64() ^ 1));
         assert_field_bound!("timestamp", |h| h.timestamp = crate::primitives::Timestamp::from_secs(h.timestamp.as_secs() ^ 1));
         assert_field_bound!("prev_hash", |h| h.prev_hash = Hash::from_bytes([0x11; 32]));
         assert_field_bound!("tx_root", |h| h.tx_root = Hash::from_bytes([0x22; 32]));

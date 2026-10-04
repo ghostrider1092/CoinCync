@@ -51,10 +51,10 @@ impl Blockchain {
 
         // Resolve parent; a non-genesis block with no parent is an orphan.
         let parent = self.get_block(&block.header.prev_hash);
-        if parent.is_none() && block.header.height > 0 {
+        if parent.is_none() && block.header.height.as_u64() > 0 {
             self.record_event(
                 ChainEventType::OrphanReceived,
-                block.header.height,
+                block.header.height.as_u64(),
                 hash,
                 serde_json::json!({}),
             );

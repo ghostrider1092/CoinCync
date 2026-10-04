@@ -299,7 +299,7 @@ fn mine_block(
     let mut header = BlockHeader {
         network_magic: magic,
         version: block_version_at_height(height),
-        height,
+        height: coincync::primitives::Height::new(height),
         timestamp: timestamp.into(),
         prev_hash,
         tx_root,
@@ -337,7 +337,7 @@ fn mine_block(
 
 fn diff_block(b: &Block) -> DifficultyBlock {
     DifficultyBlock {
-        height: b.header.height,
+        height: b.header.height.as_u64(),
         timestamp: b.header.timestamp.as_secs(),
         target: b.header.target,
     }
@@ -1336,7 +1336,7 @@ fn replay_of_same_blocks_produces_identical_state() {
         assert!(
             matches!(st, BlockStatus::Accepted),
             "B: replayed block at height {} must be accepted, got {st:?}",
-            blk.header.height
+            blk.header.height.as_u64()
         );
     }
 

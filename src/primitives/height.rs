@@ -72,6 +72,29 @@ impl Height {
     pub const fn saturating_blocks_since(self, earlier: Height) -> u64 {
         self.0.saturating_sub(earlier.0)
     }
+
+    /// This height minus `blocks`, saturating at genesis (0). Method form of the
+    /// `Sub<u64>` operator, for call sites that read like `h.saturating_sub(n)`.
+    #[inline]
+    pub const fn saturating_sub(self, blocks: u64) -> Height {
+        Height(self.0.saturating_sub(blocks))
+    }
+
+    /// This height plus `blocks`, saturating at `u64::MAX`.
+    #[inline]
+    pub const fn saturating_add(self, blocks: u64) -> Height {
+        Height(self.0.saturating_add(blocks))
+    }
+
+    /// This height plus `blocks`, or `None` on overflow. Mirrors
+    /// `u64::checked_add`; returns a `Height`.
+    #[inline]
+    pub const fn checked_add(self, blocks: u64) -> Option<Height> {
+        match self.0.checked_add(blocks) {
+            Some(h) => Some(Height(h)),
+            None => None,
+        }
+    }
 }
 
 // Conversions at the boundaries keep the migration mechanical.

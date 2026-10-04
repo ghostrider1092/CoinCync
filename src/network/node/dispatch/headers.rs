@@ -98,12 +98,12 @@ fn header_history(
         };
 
         history.push(DifficultyBlock {
-            height: header.height,
+            height: header.height.as_u64(),
             timestamp: header.timestamp.as_secs(),
             target: header.target,
         });
 
-        if header.height == 0 {
+        if header.height.as_u64() == 0 {
             break;
         }
         cursor = header.prev_hash;
@@ -178,7 +178,7 @@ fn validate_header_batch(
                 MisbehaviorType::ProtocolViolation,
             ));
         }
-        if header.version < crate::constants::block_version_at_height(header.height)
+        if header.version < crate::constants::block_version_at_height(header.height.as_u64())
             || header.version < parent.version
         {
             return Err(reject(
@@ -195,7 +195,7 @@ fn validate_header_batch(
         if header
             .checkpoint_vote
             .as_ref()
-            .is_some_and(|(height, _)| *height >= header.height)
+            .is_some_and(|(height, _)| *height >= header.height.as_u64())
         {
             return Err(reject(
                 "checkpoint vote references a future height".into(),
@@ -205,10 +205,10 @@ fn validate_header_batch(
 
         let checkpoint_match = match chain.network() {
             crate::config::NetworkType::Mainnet => {
-                crate::mainnet::verify_checkpoint(header.height, &header.hash())
+                crate::mainnet::verify_checkpoint(header.height.as_u64(), &header.hash())
             }
             crate::config::NetworkType::Testnet | crate::config::NetworkType::Regtest => {
-                crate::testnet::verify_checkpoint(header.height, &header.hash())
+                crate::testnet::verify_checkpoint(header.height.as_u64(), &header.hash())
             }
         };
         if checkpoint_match == Some(false) {
@@ -244,7 +244,7 @@ fn validate_header_batch(
             // but honors the regtest pin/ease). Calling `calculate_difficulty`
             // directly here diverged from the miner + block validator on regtest
             // and rejected every peer header, wedging regtest multi-node sync.
-            let expected_target = chain.expected_next_target(&history, header.height);
+            let expected_target = chain.expected_next_target(&history, header.height.as_u64());
             if header.target != expected_target {
                 return Err(reject(
                     format!(
@@ -259,7 +259,7 @@ fn validate_header_batch(
 
         verify_pow(
             &header.prev_hash,
-            header.height,
+            header.height.as_u64(),
             header.timestamp.as_secs(),
             header.nonce,
             &header.tx_root,
@@ -437,7 +437,7 @@ mod tests {
         // anchor/nonce, so compute it before setting them).
         let binding = header.pow_binding();
         header.anchor =
-            compute_full_anchor(&header.prev_hash, header.height, header.timestamp.as_secs(), &binding)
+            compute_full_anchor(&header.prev_hash, header.height.as_u64(), header.timestamp.as_secs(), &binding)
                 .expect("anchor")
                 .mixed_hash;
 
@@ -448,7 +448,7 @@ mod tests {
                 &header.anchor,
                 nonce,
                 &header.tx_root,
-                header.height,
+                header.height.as_u64(),
             )
             .expect("RandomX available in default/testnet builds");
             if pow.meets_difficulty(&header.target) {
@@ -467,7 +467,7 @@ mod tests {
 
     fn first_header(genesis: &crate::consensus::Block) -> BlockHeader {
         let mut header = genesis.header.clone();
-        header.height = 1;
+        header.height = crate::primitives::Height::new(1);
         header.version = crate::constants::block_version_at_height(1);
         header.prev_hash = genesis.hash();
         header.timestamp = crate::primitives::Timestamp::from_secs(genesis.header.timestamp.as_secs() + crate::constants::TARGET_BLOCK_TIME);
@@ -489,12 +489,12 @@ mod tests {
         let first = first_header(&genesis);
         let history = [
             DifficultyBlock {
-                height: genesis.header.height,
+                height: genesis.header.height.as_u64(),
                 timestamp: genesis.header.timestamp.as_secs(),
                 target: genesis.header.target,
             },
             DifficultyBlock {
-                height: first.height,
+                height: first.height.as_u64(),
                 timestamp: first.timestamp.as_secs(),
                 target: first.target,
             },
@@ -507,7 +507,7 @@ mod tests {
         };
 
         let mut second = first.clone();
-        second.height = 2;
+        second.height = crate::primitives::Height::new(2);
         second.version = crate::constants::block_version_at_height(2);
         second.prev_hash = first.hash();
         second.timestamp = second.timestamp + std::time::Duration::from_secs(crate::constants::TARGET_BLOCK_TIME);
@@ -528,7 +528,7 @@ mod tests {
         let (chain, genesis) = setup();
         let first = first_header(&genesis);
         let mut second = first.clone();
-        second.height = 2;
+        second.height = crate::primitives::Height::new(2);
         second.prev_hash = genesis.hash();
 
         let error =
@@ -624,7 +624,7 @@ pub(super) async fn handle_headers(
             let max_header_height = headers_msg
                 .headers
                 .last()
-                .map(|header| header.height)
+                .map(|header| header.height.as_u64())
                 .unwrap_or(0);
             sync_guard.update_peer_height(max_header_height);
             sync_guard.update_peer_height_for(peer_id, max_header_height);
