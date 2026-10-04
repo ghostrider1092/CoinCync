@@ -222,7 +222,7 @@ pub fn testnet_genesis() -> Block {
     let header = BlockHeader {
         network_magic: params.magic,
         version: 1,
-        height: 0,
+        height: crate::primitives::Height::new(0),
         timestamp: crate::primitives::Timestamp::from_secs(timestamp),
         prev_hash: Hash::zero(),
         tx_root: crate::primitives::merkle_root(&[coinbase_tx.hash()]),
@@ -266,7 +266,7 @@ fn create_genesis_coinbase(message: &[u8]) -> Transaction {
 }
 
 pub fn verify_genesis(block: &Block) -> bool {
-    block.header.height == 0
+    block.header.height.as_u64() == 0
         && block.header.prev_hash.is_zero()
         && !block.transactions.is_empty()
         && block.transactions[0].tx_type == TxType::Coinbase
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn test_genesis_creation() {
         let g = testnet_genesis();
-        assert_eq!(g.header.height, 0);
+        assert_eq!(g.header.height.as_u64(), 0);
         assert!(verify_genesis(&g));
     }
 

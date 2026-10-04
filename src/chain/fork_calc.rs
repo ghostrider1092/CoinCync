@@ -88,7 +88,7 @@ impl Blockchain {
                     Ok(Some(b)) => b,
                     _ => break, // parent not in DB — can't extend the walk
                 };
-                let h = blk.header.height;
+                let h = blk.header.height.as_u64();
                 if let Ok(Some(main_hash)) = db.blocks.get_hash_by_height(h) {
                     if main_hash == cursor {
                         fork_point = h;
@@ -113,7 +113,7 @@ impl Blockchain {
                     Some(b) => b,
                     None => break,
                 };
-                let h = blk.header.height;
+                let h = blk.header.height.as_u64();
                 if let Some(main_hash) = inner.height_to_hash.get(&h) {
                     if *main_hash == cursor {
                         fork_point = h;
@@ -154,7 +154,7 @@ impl Blockchain {
     /// Walks backwards from the block through its parents, summing difficulty
     /// until reaching the genesis block or a block not in our storage.
     ///
-    /// SECURITY: bounded by `block.header.height + 1` (max walk = genesis →
+    /// SECURITY: bounded by `block.header.height.as_u64() + 1` (max walk = genesis →
     /// block, plus the starting block itself). A corrupt DB with a cycle
     /// in `prev_hash` would otherwise loop forever consuming CPU. Matching
     /// the visited-set pattern in `find_fork_point` (lines 2533+) would
@@ -166,7 +166,7 @@ impl Blockchain {
         let mut current_hash = block.header.prev_hash;
         // +1 covers the starting block; +100 absorbs height-key off-by-one
         // edge cases and is still vanishingly cheap if exercised.
-        let max_steps = block.header.height.saturating_add(100);
+        let max_steps = block.header.height.as_u64().saturating_add(100);
         let mut steps: u64 = 0;
 
         loop {
@@ -177,7 +177,7 @@ impl Blockchain {
                      without reaching genesis — possible prev_hash cycle in DB. Returning \
                      partial work; caller's IronConsensus classifier will reject the fork.",
                     steps,
-                    block.header.height
+                    block.header.height.as_u64()
                 );
                 break;
             }
@@ -197,7 +197,7 @@ impl Blockchain {
                 // false-positived the `work_behind` veto and locked follower
                 // miners out. See recompute_total_difficulty for the canonical
                 // definition this must agree with.
-                if parent.header.height == 0 {
+                if parent.header.height.as_u64() == 0 {
                     total_work = total_work.saturating_add(1);
                     break; // Reached genesis
                 }
@@ -210,7 +210,7 @@ impl Blockchain {
                 if total_work == u128::MAX && prev_work != u128::MAX {
                     tracing::warn!(
                         "Cumulative work saturated at u128::MAX during fork calculation at height {}",
-                        parent.header.height
+                        parent.header.height.as_u64()
                     );
                 }
                 current_hash = parent.header.prev_hash;
@@ -283,13 +283,13 @@ impl Blockchain {
                 tracing::error!(
                     "DB corruption: cycle detected during fork-point search; \
                      starting from fork_block height={} hash={}",
-                    fork_block.header.height,
+                    fork_block.header.height.as_u64(),
                     fork_block.hash().to_hex(),
                 );
                 return None;
             }
             if let Some(parent) = self.get_block(&current_hash) {
-                let height = parent.header.height;
+                let height = parent.header.height.as_u64();
                 if let Some(main_hash) = self.get_block_hash(height) {
                     if main_hash == current_hash {
                         return Some(height);
@@ -304,7 +304,7 @@ impl Blockchain {
                     "DB corruption: prev_hash {} not in storage during fork-point search; \
                      fork_block height={}",
                     current_hash.to_hex(),
-                    fork_block.header.height,
+                    fork_block.header.height.as_u64(),
                 );
                 return None;
             }
@@ -329,7 +329,7 @@ impl Blockchain {
                 break;
             }
             if let Some(block) = self.get_block(&current_hash) {
-                if block.header.height <= fork_point {
+                if block.header.height.as_u64() <= fork_point {
                     break;
                 }
                 current_hash = block.header.prev_hash;

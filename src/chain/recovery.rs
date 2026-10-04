@@ -184,10 +184,10 @@ impl Blockchain {
 
             return match db.blocks.get(&state.tip_hash)? {
                 Some(tip_block) => {
-                    if tip_block.header.height != state.height {
+                    if tip_block.header.height.as_u64() != state.height {
                         return Err(Error::DatabaseError(format!(
                             "chain state height {} does not match tip block height {}",
-                            state.height, tip_block.header.height,
+                            state.height, tip_block.header.height.as_u64(),
                         )));
                     }
                     let difficulty = calculate_difficulty_from_target(&tip_block.header.target);

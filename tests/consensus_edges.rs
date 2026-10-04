@@ -216,7 +216,7 @@ fn base_header(height: u64, timestamp: u64, prev_hash: Hash) -> BlockHeader {
     BlockHeader {
         network_magic: expected_magic(),
         version: 1,
-        height,
+        height: coincync::primitives::Height::new(height),
         timestamp: timestamp.into(),
         prev_hash,
         tx_root: Hash::zero(),

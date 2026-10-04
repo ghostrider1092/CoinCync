@@ -295,7 +295,7 @@ pub fn validate_block(
 #[tracing::instrument(
     skip(block, prev_block, utxos),
     fields(
-        height = block.header.height,
+        height = block.header.height.as_u64(),
         tx_count = block.transactions.len(),
     )
 )]
@@ -1201,7 +1201,7 @@ fn validate_header(
 /// version >= min allows smooth activation; downgrades are still
 /// rejected via `check_header_vs_prev`.
 fn check_header_version_min(header: &BlockHeader, result: &mut BlockValidation) {
-    let min_version = block_version_at_height(header.height);
+    let min_version = block_version_at_height(header.height.as_u64());
     if header.version < min_version {
         result.add_error(format!(
             "Block version {} below minimum {} for height {}",
@@ -1242,7 +1242,7 @@ fn check_header_vs_prev(
     result: &mut BlockValidation,
 ) {
     let Some(prev) = prev_header else {
-        if header.height != 0 {
+        if header.height.as_u64() != 0 {
             result.add_error("Non-genesis block without parent");
         }
         return;
@@ -1277,7 +1277,7 @@ fn check_header_vs_prev(
 /// bug or an attack.
 fn check_header_checkpoint_vote(header: &BlockHeader, result: &mut BlockValidation) {
     if let Some((cp_height, _cp_hash)) = &header.checkpoint_vote {
-        if *cp_height >= header.height {
+        if *cp_height >= header.height.as_u64() {
             result.add_error(format!(
                 "checkpoint_vote references future height {} (block height {})",
                 cp_height, header.height
@@ -1331,7 +1331,7 @@ fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidat
     if current_time < MIN_REASONABLE_TIME {
         result.add_warning("System clock appears to be set incorrectly (before 2020)");
     }
-    if header.height > 0 && header.timestamp.as_secs() > current_time + MAX_TIMESTAMP_DRIFT {
+    if header.height.as_u64() > 0 && header.timestamp.as_secs() > current_time + MAX_TIMESTAMP_DRIFT {
         result.add_error_coded(
             crate::diagnostics::CYNC_CONS_004,
             "Block timestamp too far in future",
@@ -2988,7 +2988,7 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height,
+            height: crate::primitives::Height::new(height),
             timestamp: crate::primitives::Timestamp::from_secs(0),
             prev_hash: Hash::zero(),
             tx_root: Hash::zero(),
@@ -3095,7 +3095,7 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
+            height: crate::primitives::Height::new(1),
             timestamp: crate::primitives::Timestamp::from_secs(0),
             prev_hash: Hash::zero(),
             tx_root: Hash::zero(),

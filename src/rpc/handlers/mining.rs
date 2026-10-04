@@ -87,14 +87,14 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             &block.header.anchor,
             block.header.nonce,
             &block.header.tx_root,
-            block.header.height,
+            block.header.height.as_u64(),
         ) {
             Ok(h) => hex::encode(&h.as_bytes()[..8]),
             Err(e) => format!("pow_err:{}", e),
         };
         warn!(
             "submit_block candidate: h={} nonce={} magic={} prev={} anchor={} tx_root={} target={} pow={} algo={}",
-            block.header.height,
+            block.header.height.as_u64(),
             block.header.nonce,
             hex::encode(block.header.network_magic),
             hex::encode(&block.header.prev_hash.as_bytes()[..8]),
@@ -197,7 +197,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             Ok(crate::chain::BlockStatus::Orphan) => {
                 warn!(
                     "submit_block rejected orphan: h={} nonce={} hash={}",
-                    block_for_broadcast.header.height,
+                    block_for_broadcast.header.height.as_u64(),
                     block_for_broadcast.header.nonce,
                     hex::encode(hash.as_bytes()),
                 );
@@ -210,7 +210,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             Ok(crate::chain::BlockStatus::Invalid(reason)) => {
                 warn!(
                     "submit_block rejected invalid: h={} nonce={} reason={}",
-                    block_for_broadcast.header.height,
+                    block_for_broadcast.header.height.as_u64(),
                     block_for_broadcast.header.nonce,
                     reason,
                 );
@@ -223,7 +223,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             Err(e) => {
                 warn!(
                     "submit_block rejected error: h={} nonce={} err={}",
-                    block_for_broadcast.header.height,
+                    block_for_broadcast.header.height.as_u64(),
                     block_for_broadcast.header.nonce,
                     e,
                 );

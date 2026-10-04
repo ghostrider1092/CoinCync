@@ -217,7 +217,7 @@ impl Sim {
                     continue;
                 }
                 let mut blocks = self.nodes[src].known.clone();
-                blocks.sort_by_key(|b| b.header.height);
+                blocks.sort_by_key(|b| b.header.height.as_u64());
                 for blk in blocks {
                     match self.nodes[dst].chain.add_block(blk.clone()) {
                         Ok(BlockStatus::Accepted)

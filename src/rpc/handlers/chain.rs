@@ -204,7 +204,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             let block_opt = tokio::task::block_in_place(|| state.chain.get_block(&hash));
             match block_opt {
                 Some(block) => {
-                    let height = block.header.height;
+                    let height = block.header.height.as_u64();
                     Ok::<_, ErrorObjectOwned>(serialize_block(&block, height))
                 }
                 None => Err(ErrorObjectOwned::owned(

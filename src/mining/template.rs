@@ -324,7 +324,7 @@ mod congestion_packing_tests {
         BlockHeader {
             network_magic: NetworkType::Regtest.magic_bytes(),
             version: 3,
-            height: 7,
+            height: crate::primitives::Height::new(7),
             timestamp: crate::primitives::Timestamp::from_secs(1_700_000_000),
             prev_hash: Hash::from_bytes([1u8; 32]),
             tx_root: Hash::from_bytes([2u8; 32]),
@@ -356,7 +356,7 @@ mod congestion_packing_tests {
         assert_eq!(template.total_fees, Amount::from_atomic(11));
         assert_eq!(template.expected_reward, Amount::from_atomic(22));
         // Header is retained verbatim.
-        assert_eq!(template.header.height, 7);
+        assert_eq!(template.header.height.as_u64(), 7);
     }
 
     #[test]

@@ -89,7 +89,7 @@ pub fn mainnet_genesis() -> Block {
     let header = BlockHeader {
         network_magic: params.magic,
         version: 1,
-        height: 0,
+        height: crate::primitives::Height::new(0),
         timestamp: crate::primitives::Timestamp::from_secs(timestamp),
         prev_hash: Hash::zero(),
         tx_root: crate::primitives::merkle_root(&[coinbase_tx.hash()]),
@@ -138,7 +138,7 @@ fn create_genesis_coinbase(message: &[u8]) -> Transaction {
 
 /// Verify genesis block
 pub fn verify_genesis(block: &Block) -> bool {
-    if block.header.height != 0 {
+    if block.header.height.as_u64() != 0 {
         return false;
     }
     if !block.header.prev_hash.is_zero() {
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn test_mainnet_genesis_creation() {
         let genesis = mainnet_genesis();
-        assert_eq!(genesis.header.height, 0);
+        assert_eq!(genesis.header.height.as_u64(), 0);
         assert!(genesis.header.prev_hash.is_zero());
         assert!(!genesis.transactions.is_empty());
         assert_eq!(genesis.header.timestamp.as_secs(), 1790812800);

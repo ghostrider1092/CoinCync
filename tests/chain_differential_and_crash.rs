@@ -274,7 +274,7 @@ fn mine_block(
     let mut header = BlockHeader {
         network_magic: magic,
         version: block_version_at_height(height),
-        height,
+        height: coincync::primitives::Height::new(height),
         timestamp: timestamp.into(),
         prev_hash,
         tx_root,
@@ -312,7 +312,7 @@ fn mine_block(
 
 fn diff_block(b: &Block) -> DifficultyBlock {
     DifficultyBlock {
-        height: b.header.height,
+        height: b.header.height.as_u64(),
         timestamp: b.header.timestamp.as_secs(),
         target: b.header.target,
     }
@@ -821,7 +821,7 @@ fn accepted_reorg_reapplies_real_transfers_correctly() {
 
     // ── Heavier fork off B10: F11..F15 (5 blocks > main's B11,B12) ─────────
     let b10 = lineage.last().expect("B10").clone();
-    assert_eq!(b10.header.height, 10, "fork point must be B10");
+    assert_eq!(b10.header.height.as_u64(), 10, "fork point must be B10");
 
     // F15 re-applies a real transfer spending KB(h3)+KB2(h4), matured by h15.
     let fork_targets = [

@@ -85,13 +85,13 @@ impl Block {
         self.header.hash()
     }
     pub fn height(&self) -> u64 {
-        self.header.height
+        self.header.height.as_u64()
     }
     pub fn tx_count(&self) -> usize {
         self.transactions.len()
     }
     pub fn is_genesis(&self) -> bool {
-        self.header.height == 0
+        self.header.height.as_u64() == 0
     }
 
     /// The coinbase transaction (first transaction).
@@ -233,7 +233,7 @@ mod tests {
         BlockHeader {
             network_magic: [0, 0, 0, 0],
             version: 1,
-            height: 1,
+            height: crate::primitives::Height::new(1),
             timestamp: crate::primitives::Timestamp::from_secs(1),
             prev_hash: Hash::zero(),
             tx_root,
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn test_is_genesis_true_at_height_zero() {
         let mut header = mk_header(Hash::zero());
-        header.height = 0;
+        header.height = crate::primitives::Height::new(0);
         let block = Block::new(header, vec![]);
         assert!(block.is_genesis());
     }

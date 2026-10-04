@@ -267,7 +267,7 @@ mod tests {
         BlockHeader {
             network_magic: [0, 0, 0, 0],
             version: 1,
-            height: 1,
+            height: crate::primitives::Height::new(1),
             timestamp: crate::primitives::Timestamp::from_secs(1),
             prev_hash: Hash::zero(),
             tx_root: Hash::zero(),

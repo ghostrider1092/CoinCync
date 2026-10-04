@@ -97,7 +97,7 @@ impl OrphanPool {
         }
         tracing::info!(
             "[ORPHAN] Stored h={} hash={} prev={}",
-            block.header.height,
+            block.header.height.as_u64(),
             &hash.to_hex()[..12],
             &prev.to_hex()[..12]
         );
@@ -225,7 +225,7 @@ mod tests {
         let header = BlockHeader {
             network_magic: [0, 0, 0, 0],
             version: 1,
-            height,
+            height: crate::primitives::Height::new(height),
             timestamp: crate::primitives::Timestamp::from_secs(0),
             prev_hash: prev,
             tx_root: Hash::zero(),

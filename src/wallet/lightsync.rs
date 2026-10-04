@@ -1042,7 +1042,7 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
+            height: crate::primitives::Height::new(1),
             timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx_hash,
@@ -1087,7 +1087,7 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
+            height: crate::primitives::Height::new(1),
             timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
@@ -1139,7 +1139,7 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
+            height: crate::primitives::Height::new(1),
             timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
@@ -1193,7 +1193,7 @@ mod tests {
             let header = BlockHeader {
                 network_magic: test_magic(),
                 version: 1,
-                height: h,
+                height: crate::primitives::Height::new(h),
                 timestamp: crate::primitives::Timestamp::from_secs(1000 + h * 30),
                 prev_hash,
                 tx_root: tx.hash(),
@@ -1247,7 +1247,7 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height,
+            height: crate::primitives::Height::new(height),
             timestamp: crate::primitives::Timestamp::from_secs(1000 + height * 30),
             prev_hash,
             tx_root: tx.hash(),
@@ -1459,7 +1459,7 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
+            height: crate::primitives::Height::new(1),
             timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
@@ -1520,7 +1520,7 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height,
+            height: crate::primitives::Height::new(height),
             timestamp: crate::primitives::Timestamp::from_secs(1000 + height),
             prev_hash,
             tx_root: tx.hash(),
