@@ -246,7 +246,7 @@ pub(super) fn spawn_listener_acceptor(
                             .filter(|p| !p.outbound)
                             .map(|p| p.clone())
                             .collect();
-                        let now = crate::clock::mono_now();
+                        let now = std::time::Instant::now();
                         let victim_ref: Vec<&crate::network::peer::PeerInfo> =
                             snapshot.iter().collect();
                         let relay_guard = acceptor_relay_scores.read().await;
@@ -1013,7 +1013,7 @@ pub(super) fn save_anchors_to_disk(peers: &DashMap<PeerId, PeerInfo>, data_dir: 
     // Longevity-ranked, bounded anchor set: keep the ANCHOR_MAX longest-lived
     // connected outbound peers (oldest connection first = most stable), rather
     // than every momentarily-connected outbound peer. Bitcoin Core persists 2.
-    let mut candidates: Vec<(crate::clock::MonoInstant, SocketAddr)> = peers
+    let mut candidates: Vec<(std::time::Instant, SocketAddr)> = peers
         .iter()
         .filter(|peer| peer.outbound && peer.state == PeerState::Connected)
         .map(|peer| (peer.connected_at, peer.addr))
