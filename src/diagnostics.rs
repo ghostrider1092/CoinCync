@@ -245,6 +245,78 @@ pub const CYNC_STOR_001: &str = "CYNC-STOR-001";
 pub const CYNC_NET_001: &str = "CYNC-NET-001";
 /// Shielded pool value went negative (value created across the veil).
 pub const CYNC_SHLD_001: &str = "CYNC-SHLD-001";
+/// Unsupported transaction version.
+pub const CYNC_CONS_006: &str = "CYNC-CONS-006";
+/// Output encrypted_amount wrong size.
+pub const CYNC_CONS_007: &str = "CYNC-CONS-007";
+/// Output encrypted_memo exceeds cap (structural).
+pub const CYNC_CONS_008: &str = "CYNC-CONS-008";
+/// Input:output ratio exceeds cap.
+pub const CYNC_CONS_009: &str = "CYNC-CONS-009";
+/// Output:input ratio exceeds cap.
+pub const CYNC_CONS_010: &str = "CYNC-CONS-010";
+/// Transfer/churn input count mismatch.
+pub const CYNC_CONS_011: &str = "CYNC-CONS-011";
+/// Transfer/churn output count mismatch.
+pub const CYNC_CONS_012: &str = "CYNC-CONS-012";
+/// Churn output count mismatch.
+pub const CYNC_CONS_013: &str = "CYNC-CONS-013";
+/// Duplicate key image within block.
+pub const CYNC_CONS_014: &str = "CYNC-CONS-014";
+/// Duplicate output stealth address.
+pub const CYNC_CONS_015: &str = "CYNC-CONS-015";
+/// Output stealth collides with on-chain output.
+pub const CYNC_CONS_016: &str = "CYNC-CONS-016";
+/// Ring member commitment mismatch (live UTXO).
+pub const CYNC_CONS_017: &str = "CYNC-CONS-017";
+/// Ring member commitment mismatch (spent record).
+pub const CYNC_CONS_018: &str = "CYNC-CONS-018";
+/// Ring member references non-existent output.
+pub const CYNC_CONS_019: &str = "CYNC-CONS-019";
+/// Ring member references immature coinbase.
+pub const CYNC_CONS_020: &str = "CYNC-CONS-020";
+/// Ring member references time-locked output.
+pub const CYNC_CONS_021: &str = "CYNC-CONS-021";
+/// Duplicate ring member within input.
+pub const CYNC_CONS_022: &str = "CYNC-CONS-022";
+/// Ring signature (CLSAG) verification failed.
+pub const CYNC_CONS_023: &str = "CYNC-CONS-023";
+/// Transaction validation failed.
+pub const CYNC_CONS_024: &str = "CYNC-CONS-024";
+/// Output stealth address is zero.
+pub const CYNC_CONS_025: &str = "CYNC-CONS-025";
+/// Output stealth address not a valid point.
+pub const CYNC_CONS_026: &str = "CYNC-CONS-026";
+/// Output tx_public_key is identity.
+pub const CYNC_CONS_027: &str = "CYNC-CONS-027";
+/// Output tx_public_key not a valid point.
+pub const CYNC_CONS_028: &str = "CYNC-CONS-028";
+/// Output commitment is identity.
+pub const CYNC_CONS_029: &str = "CYNC-CONS-029";
+/// Output commitment not a valid point.
+pub const CYNC_CONS_030: &str = "CYNC-CONS-030";
+/// Transaction has no inputs.
+pub const CYNC_CONS_031: &str = "CYNC-CONS-031";
+/// Transaction has no outputs.
+pub const CYNC_CONS_032: &str = "CYNC-CONS-032";
+/// Ring size below minimum.
+pub const CYNC_CONS_033: &str = "CYNC-CONS-033";
+/// Missing range proof.
+pub const CYNC_CONS_034: &str = "CYNC-CONS-034";
+/// Duplicate key image within transaction.
+pub const CYNC_CONS_035: &str = "CYNC-CONS-035";
+/// Encrypted_amount exceeds cap.
+pub const CYNC_CONS_036: &str = "CYNC-CONS-036";
+/// Encrypted_memo exceeds cap.
+pub const CYNC_CONS_037: &str = "CYNC-CONS-037";
+/// Input key image is zero.
+pub const CYNC_CONS_038: &str = "CYNC-CONS-038";
+/// Input key image not a valid point.
+pub const CYNC_CONS_039: &str = "CYNC-CONS-039";
+/// RandomX anchor mismatch.
+pub const CYNC_POW_002: &str = "CYNC-POW-002";
+/// PoW algorithm mismatch.
+pub const CYNC_POW_003: &str = "CYNC-POW-003";
 
 /// The canonical diagnostic catalog — the single source of truth for runtime
 /// messages, `explain`, and the generated `DIAGNOSTICS.md`.
@@ -361,6 +433,366 @@ pub const CATALOG: &[Diagnostic] = &[
         spec: "docs/design/cip-shielded-anonset.md (pool turnstile)",
         help: "a spend's value_balance exceeded the pool — value was created across \
                the veil. Check the balance/turnstile in crypto/spark_turnstile.rs.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_006,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "unsupported transaction version",
+        invariant: "tx.version is an accepted protocol version",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (transaction format)",
+        help: "a tx declared an unknown version; check the version gate.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_007,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "output encrypted_amount wrong size",
+        invariant: "each output's encrypted_amount is exactly 8 bytes",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (output format)",
+        help: "an output's encrypted_amount was not 8 bytes.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_008,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "output encrypted_memo exceeds cap (structural)",
+        invariant: "each output's encrypted_memo is within the size cap",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (output format)",
+        help: "an output memo exceeded the per-output byte cap.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_009,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "input:output ratio exceeds cap",
+        invariant: "the input:output count ratio is within the anti-bloat cap",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (anti-bloat limits)",
+        help: "too many inputs per output; likely a bloat/DoS shape.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_010,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "output:input ratio exceeds cap",
+        invariant: "the output:input count ratio is within the anti-bloat cap",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (anti-bloat limits)",
+        help: "too many outputs per input; likely a bloat/DoS shape.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_011,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "transfer/churn input count mismatch",
+        invariant: "a post-activation Transfer/Churn has the fixed input count",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (CYNC tx shape)",
+        help: "the tx did not have the required number of inputs for its type.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_012,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "transfer/churn output count mismatch",
+        invariant: "a post-activation Transfer/Churn has the fixed output count",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (CYNC tx shape)",
+        help: "the tx did not have the required number of outputs for its type.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_013,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "churn output count mismatch",
+        invariant: "a Churn has the fixed CYNC output count",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (CYNC tx shape)",
+        help: "a Churn tx had the wrong number of outputs.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_014,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "duplicate key image within block",
+        invariant: "a key image appears at most once across the block's txs",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (CLSAG / key images)",
+        help: "two txs in the block spent the same key image.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_015,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "duplicate output stealth address",
+        invariant: "output stealth addresses are unique within a transaction",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (stealth addresses)",
+        help: "a tx reused a stealth address across its outputs.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_016,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "output stealth collides with on-chain output",
+        invariant: "a new output stealth address does not collide with an existing on-chain one",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (stealth addresses)",
+        help: "an output stealth address already exists on-chain (forced-reuse / burn risk).",
+    },
+    Diagnostic {
+        code: CYNC_CONS_017,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "ring member commitment mismatch (live UTXO)",
+        invariant: "a ring member's commitment equals the live UTXO's commitment",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (CLSAG rings)",
+        help: "a ring member's commitment did not match the live UTXO (inflation vector).",
+    },
+    Diagnostic {
+        code: CYNC_CONS_018,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "ring member commitment mismatch (spent record)",
+        invariant: "a ring member's commitment equals the on-chain spent-output record",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (CLSAG rings)",
+        help: "a ring member's commitment did not match the on-chain spent record.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_019,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "ring member references non-existent output",
+        invariant: "every ring member exists in the UTXO set or the output index",
+        location: "src/consensus/validation.rs",
+        spec: "issue #219 (fabricated ring members)",
+        help: "a ring member was never created on this chain (fabricated/inflation).",
+    },
+    Diagnostic {
+        code: CYNC_CONS_020,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "ring member references immature coinbase",
+        invariant: "coinbase ring members satisfy the coinbase-maturity floor",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (coinbase maturity)",
+        help: "a ring member spent a coinbase before it matured.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_021,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "ring member references time-locked output",
+        invariant: "ring members are past their unlock height",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (time locks)",
+        help: "a ring member referenced a still-time-locked output.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_022,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "duplicate ring member within input",
+        invariant: "an input's ring members are distinct",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (CLSAG rings)",
+        help: "an input listed the same ring member twice.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_023,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "ring signature (CLSAG) verification failed",
+        invariant: "each input's CLSAG signature verifies against its ring",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (CLSAG)",
+        help: "an input's ring signature did not verify.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_024,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "transaction validation failed",
+        invariant: "each referenced transaction passes full validation",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (transaction validation)",
+        help: "a contained transaction failed full validation (see wrapped reason).",
+    },
+    Diagnostic {
+        code: CYNC_CONS_025,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "output stealth address is zero",
+        invariant: "an output stealth address is not the zero/identity point",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (output soundness)",
+        help: "a zero stealth address makes the output unspendable (burn).",
+    },
+    Diagnostic {
+        code: CYNC_CONS_026,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "output stealth address not a valid point",
+        invariant: "an output stealth address is a valid Ristretto point",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (output soundness)",
+        help: "the stealth address was not a valid Ristretto point (unspendable).",
+    },
+    Diagnostic {
+        code: CYNC_CONS_027,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "output tx_public_key is identity",
+        invariant: "an output tx_public_key is not the identity point",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (stealth ECDH)",
+        help: "an identity tx_public_key breaks stealth ECDH (deanon).",
+    },
+    Diagnostic {
+        code: CYNC_CONS_028,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "output tx_public_key not a valid point",
+        invariant: "an output tx_public_key is a valid Ristretto point",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (stealth ECDH)",
+        help: "the tx_public_key was not a valid Ristretto point (unspendable).",
+    },
+    Diagnostic {
+        code: CYNC_CONS_029,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "output commitment is identity",
+        invariant: "an output commitment is not the identity point",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (Pedersen commitments)",
+        help: "an identity commitment makes the balance equation breakable.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_030,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "output commitment not a valid point",
+        invariant: "an output commitment is a valid Ristretto point",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (Pedersen commitments)",
+        help: "the commitment was not a valid Ristretto point.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_031,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "transaction has no inputs",
+        invariant: "a non-coinbase transaction has at least one input",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (transaction format)",
+        help: "a non-coinbase tx carried zero inputs.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_032,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "transaction has no outputs",
+        invariant: "a transaction has at least one output",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (transaction format)",
+        help: "a tx carried zero outputs.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_033,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "ring size below minimum",
+        invariant: "each input's ring size is at least the mandatory minimum",
+        location: "src/consensus/validation.rs",
+        spec: "docs/BILL_OF_RIGHTS.md (mandatory privacy)",
+        help: "an input's ring was smaller than the mandatory minimum.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_034,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "missing range proof",
+        invariant: "a transaction with outputs carries a Bulletproofs range proof",
+        location: "src/consensus/validation.rs",
+        spec: "docs/BILL_OF_RIGHTS.md (range proofs required)",
+        help: "a tx lacked its mandatory range proof.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_035,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "duplicate key image within transaction",
+        invariant: "a transaction's inputs have distinct key images",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (CLSAG / key images)",
+        help: "a tx spent the same key image twice within itself.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_036,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "encrypted_amount exceeds cap",
+        invariant: "encrypted_amount is within the 64-byte cap",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (output format)",
+        help: "encrypted_amount exceeded the 64-byte cap.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_037,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "encrypted_memo exceeds cap",
+        invariant: "encrypted_memo is within the 256-byte cap",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (output format)",
+        help: "encrypted_memo exceeded the 256-byte cap.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_038,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "input key image is zero",
+        invariant: "an input key image is not zero",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (CLSAG / key images)",
+        help: "a zero key image bypasses double-spend detection.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_039,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "input key image not a valid point",
+        invariant: "an input key image is a valid curve point",
+        location: "src/consensus/validation.rs",
+        spec: "docs/design (CLSAG / key images)",
+        help: "the key image was not a valid curve point.",
+    },
+    Diagnostic {
+        code: CYNC_POW_002,
+        domain: Domain::Pow,
+        severity: Severity::Error,
+        title: "RandomX anchor mismatch",
+        invariant: "the claimed PoW anchor equals the recomputed anchor",
+        location: "src/consensus/pow_cache.rs::pow_hash_cached",
+        spec: "docs/design (PoW anchor)",
+        help: "the block's claimed RandomX anchor did not match the recomputed one.",
+    },
+    Diagnostic {
+        code: CYNC_POW_003,
+        domain: Domain::Pow,
+        severity: Severity::Error,
+        title: "PoW algorithm mismatch",
+        invariant: "the claimed PoW algorithm equals the computed one",
+        location: "src/consensus/pow_cache.rs::pow_hash_cached",
+        spec: "docs/design (PoW algorithm)",
+        help: "the block's claimed PoW algorithm did not match the computed one.",
     },
 ];
 

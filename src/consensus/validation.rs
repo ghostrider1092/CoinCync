@@ -1617,6 +1617,7 @@ pub(crate) fn validate_transaction_for_network_ctx(
 /// consensus at the fork).
 fn check_tx_version_range(tx: &Transaction) -> Result<()> {
     if tx.version == 0 || tx.version > MAX_TX_VERSION {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_006, "unsupported tx version");
         return Err(Error::InvalidTxVersion(tx.version));
     }
     Ok(())
@@ -1673,6 +1674,7 @@ fn check_tx_input_output_counts(tx: &Transaction, v1_0_12_active: bool) -> Resul
             // v1.0.12 #3/8 (cf. commit 9c8633e7): encrypted_amount must be
             // exactly 8 bytes post-fork.
             if output.encrypted_amount.len() != 8 {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_007, "output encrypted_amount size");
                 return Err(Error::InvalidTransaction(format!(
                     "output {} encrypted_amount must be exactly 8 bytes, got {}",
                     out_idx,
@@ -1707,6 +1709,7 @@ fn check_tx_input_output_counts(tx: &Transaction, v1_0_12_active: bool) -> Resul
             // tightening to `!= 8` above is strictly stricter than `> 64`,
             // so the > 64 check is dead code after activation.
             if output.encrypted_memo.len() > crate::constants::MAX_OUTPUT_MEMO_SIZE {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_008, "output encrypted_memo size");
                 return Err(Error::InvalidTransaction(format!(
                     "output {} encrypted_memo too large: {} bytes (max {})",
                     out_idx,
@@ -1757,6 +1760,7 @@ fn check_tx_input_output_counts(tx: &Transaction, v1_0_12_active: bool) -> Resul
 fn check_tx_io_ratio_legacy(tx: &Transaction) -> Result<()> {
     let ratio_limit = 32usize;
     if tx.inputs.len() > tx.outputs.len().saturating_mul(ratio_limit) {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_009, "input:output ratio");
         return Err(Error::InvalidTransaction(format!(
             "Input/output ratio too high: {} inputs to {} outputs (max {}:1)",
             tx.inputs.len(),
@@ -1765,6 +1769,7 @@ fn check_tx_io_ratio_legacy(tx: &Transaction) -> Result<()> {
         )));
     }
     if tx.outputs.len() > tx.inputs.len().saturating_mul(ratio_limit) {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_010, "output:input ratio");
         return Err(Error::InvalidTransaction(format!(
             "Output/input ratio too high: {} outputs to {} inputs (max {}:1)",
             tx.outputs.len(),
@@ -1808,6 +1813,7 @@ fn check_tx_uniform_shape(tx: &Transaction, current_height: u64) -> Result<()> {
     }
     // Inputs must always be exactly STANDARD_INPUT_COUNT (== 2).
     if tx.inputs.len() != crate::constants::STANDARD_INPUT_COUNT {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_011, "transfer/churn input count");
         return Err(Error::InvalidTransaction(format!(
             "Post-activation Transfer/Churn must have exactly {} inputs, got {}",
             crate::constants::STANDARD_INPUT_COUNT,
@@ -1820,6 +1826,7 @@ fn check_tx_uniform_shape(tx: &Transaction, current_height: u64) -> Result<()> {
     let cync_shape = crate::constants::STANDARD_OUTPUT_COUNT;
     let asset_shape = crate::constants::STANDARD_OUTPUT_COUNT + 1;
     if tx.outputs.len() != cync_shape && tx.outputs.len() != asset_shape {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_012, "transfer/churn output count");
         return Err(Error::InvalidTransaction(format!(
             "Post-activation Transfer/Churn must have exactly {} outputs (CYNC) \
              or {} outputs (asset), got {}",
@@ -1832,6 +1839,7 @@ fn check_tx_uniform_shape(tx: &Transaction, current_height: u64) -> Result<()> {
     // shape (3 outputs), reject it. Churns by definition spend and
     // re-receive the SAME CYNC, never assets.
     if matches!(tx.tx_type, TxType::Churn) && tx.outputs.len() != cync_shape {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_013, "churn output count");
         return Err(Error::InvalidTransaction(format!(
             "Churn must have exactly {} outputs (CYNC shape), got {}",
             cync_shape,
@@ -1858,11 +1866,13 @@ fn check_tx_no_double_spend(tx: &Transaction, utxos: &UtxoSet) -> Result<()> {
     let mut seen_in_tx = std::collections::HashSet::with_capacity(tx.inputs.len());
     for input in &tx.inputs {
         if !seen_in_tx.insert(input.key_image) {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_014, "duplicate key image");
             return Err(Error::DuplicateKeyImage(
                 "duplicate key image detected".into(),
             ));
         }
         if utxos.contains_key_image(&input.key_image) {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_014, "duplicate key image");
             return Err(Error::DuplicateKeyImage(
                 "duplicate key image detected".into(),
             ));
@@ -1951,12 +1961,14 @@ fn check_tx_ring_members(
         for (out_idx, output) in tx.outputs.iter().enumerate() {
             let addr_bytes = *output.stealth_address.as_bytes();
             if !seen_outputs_in_tx.insert(addr_bytes) {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_015, "duplicate output stealth address");
                 return Err(Error::InvalidTransaction(format!(
                     "duplicate stealth address at output {}",
                     out_idx,
                 )));
             }
             if utxos.get_output_index_entry(&addr_bytes).is_some() {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_016, "output stealth collides on-chain");
                 return Err(Error::InvalidTransaction(format!(
                     "output {} stealth address collides with existing on-chain output",
                     out_idx,
@@ -1971,6 +1983,7 @@ fn check_tx_ring_members(
             match utxos.get_output_by_stealth(stealth_bytes) {
                 Some(output_ref) => {
                     if member.commitment != output_ref.output.commitment {
+                        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_017, "ring commitment mismatch (live UTXO)");
                         return Err(Error::InvalidTransaction(format!(
                             "Input {} ring member {} commitment mismatch \
                              (transaction commitment does not match on-chain UTXO)",
@@ -1997,6 +2010,7 @@ fn check_tx_ring_members(
                     match utxos.get_output_index_entry(stealth_bytes) {
                         Some(idx_entry) => {
                             if member.commitment != idx_entry.commitment {
+                                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_018, "ring commitment mismatch (spent record)");
                                 return Err(Error::InvalidTransaction(format!(
                                     "Input {} ring member {} commitment mismatch \
                                      (spent output commitment does not match on-chain record)",
@@ -2046,6 +2060,7 @@ fn check_tx_ring_members(
                             // every block a pre-fix node accepts and additionally
                             // rejects the forgery — a strict tightening, not a
                             // chain split.
+                            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_019, "ring member non-existent (#219)");
                             return Err(Error::InvalidTransaction(format!(
                                 "Input {} ring member {} references non-existent output \
                                  (stealth address not found in output index)",
@@ -2093,6 +2108,7 @@ fn check_ring_member_coinbase_maturity(
     // network so builds with different features agree on ring-member maturity.
     let required = network.min_output_age(current_height);
     if age < required {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_020, "ring member immature coinbase");
         return Err(Error::InvalidTransaction(format!(
             "Input {} ring member {} references immature coinbase output \
              (height {}, age {} < required {})",
@@ -2119,6 +2135,7 @@ fn check_ring_member_time_lock(
 ) -> Result<()> {
     if let Some(lh) = lock_height {
         if current_height < lh {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_021, "ring member time-locked");
             return Err(Error::InvalidTransaction(format!(
                 "Input {} ring member {} references time-locked output \
                  (unlocks at height {}, current {})",
@@ -2224,6 +2241,7 @@ fn check_tx_ring_size_and_unique_members(
         let mut seen_keys = std::collections::HashSet::new();
         for member in &input.ring_members {
             if !seen_keys.insert(*member.public_key.as_bytes()) {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_022, "duplicate ring member");
                 return Err(Error::InvalidSignature(format!(
                     "Duplicate ring member in input {}",
                     input_idx
@@ -2253,6 +2271,7 @@ fn check_tx_ring_signatures(tx: &Transaction) -> Result<()> {
     });
     if !all_sigs_valid.load(Ordering::SeqCst) {
         let idx = failed_idx.load(Ordering::SeqCst);
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_023, "CLSAG verification failed");
         return Err(Error::InvalidSignature(format!(
             "Ring signature verification failed for input {}",
             idx
@@ -2642,6 +2661,7 @@ pub fn validate_all_transactions(
     {
         let guard = first_error.lock();
         if let Some((idx, ref e)) = *guard {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_024, "transaction validation failed");
             return Err(Error::InvalidTransaction(format!(
                 "Transaction {} failed: {}",
                 idx, e
@@ -2688,11 +2708,13 @@ fn check_output_curve_points(tx: &Transaction) -> Result<()> {
     for output in &tx.outputs {
         // stealth_address (H-19)
         if output.stealth_address.as_bytes() == &[0u8; 32] {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_025, "output stealth address zero");
             return Err(Error::InvalidTransaction(
                 "output stealth address is zero (unspendable — potential burning attack)".into(),
             ));
         }
         if crate::crypto::PublicPoint::from_bytes(*output.stealth_address.as_bytes()).is_none() {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_026, "output stealth not a point");
             return Err(Error::InvalidTransaction(
                 "output stealth address is not a valid Ristretto point (unspendable)".into(),
             ));
@@ -2700,12 +2722,14 @@ fn check_output_curve_points(tx: &Transaction) -> Result<()> {
 
         // tx_public_key (ephemeral R) — deanonymization / burn vector
         if output.tx_public_key.as_bytes() == &[0u8; 32] {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_027, "tx_public_key identity");
             return Err(Error::InvalidTransaction(
                 "output tx_public_key is zero (identity point — breaks stealth ECDH / deanon)"
                     .into(),
             ));
         }
         if crate::crypto::PublicPoint::from_bytes(*output.tx_public_key.as_bytes()).is_none() {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_028, "tx_public_key not a point");
             return Err(Error::InvalidTransaction(
                 "output tx_public_key is not a valid Ristretto point (unspendable)".into(),
             ));
@@ -2713,11 +2737,13 @@ fn check_output_curve_points(tx: &Transaction) -> Result<()> {
 
         // commitment (H-19)
         if output.commitment == [0u8; 32] {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_029, "output commitment identity");
             return Err(Error::InvalidTransaction(
                 "output commitment is zero (identity point — balance equation breakable)".into(),
             ));
         }
         if crate::crypto::PublicPoint::from_bytes(output.commitment).is_none() {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_030, "output commitment not a point");
             return Err(Error::InvalidTransaction(
                 "output commitment is not a valid Ristretto point".into(),
             ));
@@ -2737,6 +2763,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
     // < V2_TX_ACTIVATION_HEIGHT` check at line ~811), so pre-activation
     // V2 txs are still rejected — just not by this contextless path.
     if tx.version == 0 || tx.version > MAX_TX_VERSION {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_006, "unsupported tx version");
         return Err(Error::InvalidTxVersion(tx.version));
     }
 
@@ -2744,11 +2771,13 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
     // This prevents mempool pollution with malformed transactions that can
     // never be mined (full validate_transaction checks this, but basic didn't).
     if tx.inputs.is_empty() {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_031, "transaction has no inputs");
         return Err(Error::InvalidTransaction(
             "transaction has no inputs".into(),
         ));
     }
     if tx.outputs.is_empty() {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_032, "transaction has no outputs");
         return Err(Error::InvalidTransaction(
             "transaction has no outputs".into(),
         ));
@@ -2787,6 +2816,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         // Ring size must meet minimum (Constitution Article III)
         for input in &tx.inputs {
             if input.ring_members.len() < crate::constants::BOOTSTRAP_MIN_RING_SIZE {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_033, "ring size below minimum");
                 return Err(Error::InvalidTransaction(format!(
                     "UNCONSTITUTIONAL: ring size {} < minimum {} (Article III — Mandatory Privacy)",
                     input.ring_members.len(),
@@ -2796,6 +2826,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         }
         // Range proof must exist (Bill of Rights I — Bulletproofs required)
         if tx.range_proof.is_empty() {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_034, "missing range proof");
             return Err(Error::InvalidTransaction(
                 "UNCONSTITUTIONAL: missing range proof (Bill of Rights I — Bulletproofs required)"
                     .into(),
@@ -2815,6 +2846,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         let mut seen_key_images = std::collections::HashSet::new();
         for input in &tx.inputs {
             if !seen_key_images.insert(input.key_image) {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_035, "duplicate key image within tx");
                 return Err(Error::InvalidTransaction(
                     "duplicate key image within transaction".into(),
                 ));
@@ -2849,6 +2881,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         }
         // encrypted_amount: exactly 8 bytes (XOR'd u64)
         if output.encrypted_amount.len() > 64 {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_036, "encrypted_amount cap");
             return Err(Error::InvalidTransaction(format!(
                 "encrypted_amount too large: {} bytes (max 64)",
                 output.encrypted_amount.len()
@@ -2856,6 +2889,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         }
         // encrypted_memo: optional, max 256 bytes to prevent blockchain bloat
         if output.encrypted_memo.len() > 256 {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_037, "encrypted_memo cap");
             return Err(Error::InvalidTransaction(format!(
                 "encrypted_memo too large: {} bytes (max 256)",
                 output.encrypted_memo.len()
@@ -2881,12 +2915,14 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         for (idx, input) in tx.inputs.iter().enumerate() {
             let ki_bytes = input.key_image.as_bytes();
             if ki_bytes == &[0u8; 32] {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_038, "input key image zero");
                 return Err(Error::InvalidTransaction(format!(
                     "input {} has zero key image (double-spend detection bypass)",
                     idx
                 )));
             }
             if crate::crypto::PublicPoint::from_bytes(*ki_bytes).is_none() {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_039, "input key image not a point");
                 return Err(Error::InvalidTransaction(format!(
                     "input {} key image is not a valid curve point",
                     idx
