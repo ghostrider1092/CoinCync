@@ -55,7 +55,6 @@
 //!   TESTS: `pacer_bounded_queue_signals_caller_to_direct_send`.
 
 use crate::colony::stick_insect::{padded_len, SIZE_BUCKETS};
-use rand::Rng;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -206,9 +205,10 @@ impl TrafficShaper {
         // Fill remaining space with random bytes.
         if padded.len() < target_size {
             let pad_len = target_size - padded.len();
-            let mut rng = rand::thread_rng();
             let mut pad = vec![0u8; pad_len];
-            rng.fill(&mut pad[..]);
+            // Non-security cover-traffic padding (E3): seedable for DST, draws
+            // from the real CSPRNG in production. Never key material.
+            crate::rng::fill_bytes(&mut pad[..]);
             padded.extend_from_slice(&pad);
         }
 
@@ -275,7 +275,7 @@ impl TrafficShaper {
         if !self.config.jitter_enabled || !self.is_enabled() {
             return;
         }
-        let jitter_ms = rand::thread_rng().gen_range(0..=self.config.max_jitter_ms);
+        let jitter_ms = crate::rng::gen_range_u64(0, self.config.max_jitter_ms);
         if jitter_ms > 0 {
             trace!(jitter_ms, "applying timing jitter");
             sleep(Duration::from_millis(jitter_ms)).await;
@@ -308,9 +308,9 @@ impl TrafficShaper {
     /// receiver's framer rejects messages whose magic doesn't match.
     pub fn generate_padding_packet(magic: [u8; 4]) -> Vec<u8> {
         use super::protocol::{Message, MessageType};
-        let mut rng = rand::thread_rng();
         let mut payload = vec![0u8; 32];
-        rng.fill(&mut payload[..]);
+        // Non-security dummy payload (E3): discarded by the receiver's framer.
+        crate::rng::fill_bytes(&mut payload[..]);
         Message::new(magic, MessageType::Padding, payload)
             .to_bytes()
             .unwrap_or_default()
