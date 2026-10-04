@@ -15,7 +15,9 @@ one analyses code and explains each finding.
 python scripts/check_code_practices.py                 # check src/ (default)
 python scripts/check_code_practices.py src/consensus   # a subtree or single file
 python scripts/check_code_practices.py --errors-only    # only error-severity
+python scripts/check_code_practices.py --min-severity warn   # warn and above
 python scripts/check_code_practices.py --rule DET-FLOAT # one rule
+python scripts/check_code_practices.py --list-rules     # the rule catalog
 python scripts/check_code_practices.py --summary        # counts only
 python scripts/check_code_practices.py --json           # machine-readable
 python scripts/check_code_practices.py --selftest       # verify the rules
@@ -35,6 +37,9 @@ exists, so it is safe to run informally and still usable as a CI gate.
 | `PANIC-CONSENSUS` | warn | `src/consensus/` | No `unwrap`/`expect`/`panic!`/`todo!` on the consensus path — a crafted input would crash the node; return an `Error`. |
 | `CAST-TRUNCATE` | warn | `src/consensus/` | No narrowing `as u8/u16/u32/i8/i16/i32` — `as` truncates silently; use `try_from`/`try_into` and handle overflow. |
 | `ERROR-UNCODED` | info | `src/consensus/` | A consensus rejection (`InvalidTransaction`/`PowValidation`/…) with no `CYNC_*` code within 4 lines — it won't show in the flight recorder / `coincync-diag`. |
+| `INDEXING` | warn | `src/consensus/` | Raw `foo[i]` / `buf[a..b]` — panics on an out-of-range index; use `.get()` and return an `Error`. |
+| `UNWRAP-LOCK` | warn | `src/` | `.lock()/.read()/.write().unwrap()` — panics on a poisoned lock; recover the guard or propagate the `PoisonError`. |
+| `SERDE-WIRE` | warn | `src/consensus/` | A hand-written `impl Serialize/Deserialize/Borsh…` — a byte-layout slip forks the chain; prefer `#[derive]` + a round-trip test. |
 | `HYGIENE-PRINT` | warn | `src/` lib (not bins/cli/explorer) | No `println!`/`eprintln!`/`dbg!` in library code — use `tracing`. |
 | `HYGIENE-MARKER` | info | `src/` | Flags `TODO`/`FIXME`/`XXX`/`HACK`. |
 | `ALLOW-LINT` | info | `src/` | Flags `#[allow(...)]` suppressions to re-justify. |
@@ -51,8 +56,10 @@ Add an inline marker on the flagged line or the line directly above it:
 pub fn estimate_hashrate(..) -> f64 { .. }   // informational, not consensus
 ```
 
-Use `check-allow: all` to suppress every rule on that line. Prefer fixing the
-cause; suppress only genuinely-correct exceptions, and leave the reason nearby.
+Use `check-allow: all` to suppress every rule on that line. To suppress a rule
+for a WHOLE file, put `// check-allow-file: RULE-ID` anywhere in it. Prefer
+fixing the cause; suppress only genuinely-correct exceptions, and leave the
+reason nearby.
 
 ## Adding a rule
 

@@ -120,6 +120,35 @@ RULES: list[Rule] = [
         satisfied_by=re.compile(r"CYNC_"), window=4,
     ),
     Rule(
+        "INDEXING", WARN, re.compile(r"\b[a-z_][a-z0-9_]*\s*\[(?!\.)"),
+        "A raw index/slice on the consensus path. `foo[i]` / `buf[a..b]` panics on "
+        "an out-of-range index, crashing the node on a crafted input (like unwrap).",
+        "Use .get(i) / .get(a..b) and return an Error on None, or prove the index is "
+        "in range and mark it `// check-allow: INDEXING`.",
+        where="code", include=("src/consensus/",),
+    ),
+    Rule(
+        "UNWRAP-LOCK", WARN,
+        re.compile(r"\.(lock|read|write)\s*\(\s*\)\s*\.(unwrap|expect)\s*\("),
+        "A lock taken with .unwrap()/.expect(). If the lock is poisoned (a thread "
+        "panicked while holding it), this panics too — turning one fault into a "
+        "node-wide crash.",
+        "Recover the guard: `.lock().unwrap_or_else(|e| e.into_inner())`, or propagate "
+        "the PoisonError, so a poisoned lock doesn't take the node down.",
+        where="code", include=("src/",),
+    ),
+    Rule(
+        "SERDE-WIRE", WARN,
+        re.compile(r"\bimpl\b.*\b(BorshSerialize|BorshDeserialize|Serialize|Deserialize)\b.*\bfor\b"),
+        "A HAND-WRITTEN (de)serialization impl on the consensus path. A byte-layout "
+        "mistake changes the wire/hash format and forks the chain — far riskier than "
+        "a #[derive].",
+        "Prefer #[derive(...)]; if hand-rolling is required, ensure a byte-stability "
+        "round-trip test covers it (see the wire-transparent newtype tests in "
+        "src/primitives/).",
+        where="code", include=("src/consensus/",),
+    ),
+    Rule(
         "HYGIENE-PRINT", WARN,
         re.compile(r"\b(println!|eprintln!|dbg!)\s*\("),
         "Ad-hoc stdout/stderr printing (or a leftover dbg!) in library code.",
@@ -159,15 +188,21 @@ IMPL_RE = re.compile(r"^\s*impl(?:<[^>]*>)?\s+(.+?)(?:\s+where\b.*)?\s*\{")
 MOD_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)")
 TEST_RE = re.compile(r"#\[cfg\(test\)\]|^\s*mod\s+tests\b")
 # Intentional, reviewed exception: `// check-allow: RULE-ID[, RULE-ID]` (or `all`)
-# on the flagged line or the line directly above it.
-ALLOW_RE = re.compile(r"check-allow:\s*([A-Za-z0-9_,\- ]+)")
+# on the flagged line or the line directly above it. `// check-allow-file: ...`
+# anywhere in a file suppresses that rule for the WHOLE file.
+ALLOW_RE = re.compile(r"(?<!-)check-allow:\s*([A-Za-z0-9_,\- ]+)")
+FILE_ALLOW_RE = re.compile(r"check-allow-file:\s*([A-Za-z0-9_,\- ]+)")
+
+
+def _ids(group: str) -> set[str]:
+    return {t.strip().upper() for t in group.split(",")}
 
 
 def allowed(rule_id: str, *lines: str) -> bool:
     for line in lines:
         m = ALLOW_RE.search(line)
         if m:
-            ids = {t.strip().upper() for t in m.group(1).split(",")}
+            ids = _ids(m.group(1))
             if "ALL" in ids or rule_id in ids:
                 return True
     return False
@@ -219,6 +254,10 @@ def scan_text(text: str, rel: str, active: list[Rule]) -> list[Finding]:
     in_block = False
     in_tests = False
     lines = text.splitlines()
+    # Whole-file suppressions: `// check-allow-file: RULE[, RULE]` (or `all`).
+    file_allow: set[str] = set()
+    for m in FILE_ALLOW_RE.finditer(text):
+        file_allow.update(_ids(m.group(1)))
     for i, raw in enumerate(lines, start=1):
         prev = lines[i - 2] if i >= 2 else ""
         if TEST_RE.search(raw):
@@ -235,6 +274,8 @@ def scan_text(text: str, rel: str, active: list[Rule]) -> list[Finding]:
 
         for rule in active:
             if not rule.applies_to(rel):
+                continue
+            if "ALL" in file_allow or rule.id in file_allow:
                 continue
             if rule.skip_tests and in_tests:
                 continue
@@ -271,6 +312,9 @@ let d = 4;
 let e = 5;
 // CYNC_CONS_001
 return Err(Error::PowValidation("x".into()));
+let v = blocks[i];
+let g = m.lock().unwrap();
+impl BorshSerialize for Foo {}
 """
 
 
@@ -282,6 +326,7 @@ def selftest() -> int:
         ("DET-FLOAT", 1), ("DET-CLOCK", 2), ("PANIC-CONSENSUS", 3),
         ("DET-RNG", 4), ("HYGIENE-MARKER", 6), ("ALLOW-LINT", 7), ("UNSAFE", 8),
         ("CAST-TRUNCATE", 9), ("ERROR-UNCODED", 10),
+        ("INDEXING", 18), ("UNWRAP-LOCK", 19), ("SERDE-WIRE", 20),
     ]
     missing = [e for e in expect_present if e not in got]
     # Line 5's unwrap is suppressed by the inline check-allow; line 17's error is
@@ -319,8 +364,11 @@ def iter_sources(targets: list[Path]) -> list[tuple[Path, str]]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("paths", nargs="*", default=["src"], help="files/dirs to check (default: src)")
-    ap.add_argument("--errors-only", action="store_true", help="only error-severity findings")
+    ap.add_argument("--errors-only", action="store_true", help="only error-severity findings (alias for --min-severity error)")
+    ap.add_argument("--min-severity", choices=[ERROR, WARN, INFO], default=INFO,
+                    help="show findings at this severity or higher (default: info = all)")
     ap.add_argument("--rule", action="append", default=[], help="limit to rule id(s)")
+    ap.add_argument("--list-rules", action="store_true", help="print the rule catalog and exit")
     ap.add_argument("--summary", action="store_true", help="print only the summary")
     ap.add_argument("--strict", action="store_true", help="exit 1 if any error-severity finding")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
@@ -335,6 +383,15 @@ def main() -> int:
 
     if args.selftest:
         return selftest()
+
+    if args.list_rules:
+        print(f"{len(RULES)} rules:\n")
+        for r in RULES:
+            scope = ", ".join(r.include) if r.include else "all"
+            print(f"  {r.id:<16} [{r.severity:<5}] scope: {scope}")
+            print(f"      {r.problem}")
+            print(f"      right way: {r.right_way}\n")
+        return 0
 
     active = RULES
     if args.rule:
@@ -352,8 +409,8 @@ def main() -> int:
     for path, rel in sources:
         findings.extend(scan_file(path, rel, active))
 
-    if args.errors_only:
-        findings = [f for f in findings if f.rule.severity == ERROR]
+    min_sev = ERROR if args.errors_only else args.min_severity
+    findings = [f for f in findings if SEV_ORDER[f.rule.severity] <= SEV_ORDER[min_sev]]
 
     findings.sort(key=lambda f: (f.file, f.line))
 
