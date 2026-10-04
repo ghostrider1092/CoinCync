@@ -69,8 +69,12 @@ impl CircuitBreaker {
     /// reaches a non-zero `threshold`. Returns whether the breaker is now open.
     pub fn record_failure(&self) -> bool {
         let n = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
-        if self.threshold != 0 && n >= self.threshold {
-            self.open.store(true, Ordering::Relaxed);
+        if self.threshold != 0 && n >= self.threshold && !self.open.swap(true, Ordering::Relaxed) {
+            // F5: record only the closed→open transition (not every later failure).
+            crate::flight_recorder::record(
+                self.code,
+                format!("breaker '{}' opened after {} failures", self.name, n),
+            );
         }
         self.is_open()
     }
@@ -85,7 +89,9 @@ impl CircuitBreaker {
     /// Open the breaker immediately, regardless of the failure count (e.g. a
     /// single catastrophic event).
     pub fn trip(&self) {
-        self.open.store(true, Ordering::Relaxed);
+        if !self.open.swap(true, Ordering::Relaxed) {
+            crate::flight_recorder::record(self.code, format!("breaker '{}' tripped", self.name));
+        }
     }
 
     /// Close the breaker and clear its failure streak — deliberate recovery.
@@ -273,5 +279,19 @@ mod tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), 6, "every node breaker needs a unique code");
+    }
+
+    #[test]
+    fn opening_a_breaker_is_recorded_in_the_flight_recorder() {
+        // F5 wiring: a breaker's closed→open transition records to the flight
+        // recorder. Unique code so the assertion is robust to the process-global
+        // recorder being shared with other tests.
+        let b = CircuitBreaker::new("f5_tap_test", "CYNC-TEST-F5TAP", 1);
+        b.record_failure(); // crosses threshold → opens → records
+        let snap = crate::flight_recorder::snapshot();
+        assert!(
+            snap.iter().any(|e| e.code == "CYNC-TEST-F5TAP"),
+            "a breaker opening should appear in the flight recorder"
+        );
     }
 }
