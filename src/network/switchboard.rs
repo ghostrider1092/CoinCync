@@ -138,6 +138,35 @@ impl Default for Switchboard {
     }
 }
 
+/// The node's inbound-connection source: a real `TcpListener` in production, or
+/// a [`SimListener`] under simulation. `spawn_listener_acceptor` holds one of
+/// these and awaits `accept()` without caring which — so the real accept loop
+/// runs over the Switchboard with no sockets (F2 node-wiring, accept side).
+pub enum Acceptor {
+    /// Production: a bound TCP listener.
+    Tcp(tokio::net::TcpListener),
+    /// Simulation: this node's Switchboard inbound queue.
+    Sim(SimListener),
+}
+
+impl Acceptor {
+    /// Await the next inbound connection as a [`NetStream`] + peer address.
+    /// The TCP arm wraps the accepted socket (byte-identical to the prior direct
+    /// `TcpListener::accept` + `NetStream::tcp`); the sim arm surfaces a closed
+    /// accept queue as a `BrokenPipe` error so the caller's loop ends cleanly.
+    pub async fn accept(&mut self) -> std::io::Result<(NetStream, SocketAddr)> {
+        match self {
+            Acceptor::Tcp(l) => l.accept().await.map(|(s, a)| (NetStream::tcp(s), a)),
+            Acceptor::Sim(l) => l.accept().await.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "switchboard accept queue closed",
+                )
+            }),
+        }
+    }
+}
+
 /// Sim-side dial handle for one node: dials always originate from `local`, so
 /// this mirrors "a node's outbound connector" (the prod analogue being
 /// `TcpStream::connect` via the proxy). Cheap to clone (shares the `Arc`).
@@ -160,6 +189,37 @@ impl SimConnector {
 
     pub fn local_addr(&self) -> SocketAddr {
         self.local
+    }
+}
+
+/// The node's outbound dialer: real TCP (via the proxy layer) in production, or
+/// a [`SimConnector`] under simulation. The outbound connector holds one of these
+/// and calls `connect()` without caring which — the dial half of running the real
+/// node over the Switchboard (symmetric with [`Acceptor`]).
+pub enum Connector {
+    /// Production: dial over TCP (honoring the configured proxy), the exact path
+    /// `proxy::connect_peer` + `NetStream::tcp` took before.
+    Tcp {
+        proxy: Option<crate::config::ProxyConfig>,
+        timeout: std::time::Duration,
+    },
+    /// Simulation: dial through the Switchboard.
+    Sim(SimConnector),
+}
+
+impl Connector {
+    /// Dial `addr`, yielding a connected [`NetStream`].
+    pub async fn connect(&self, addr: SocketAddr) -> crate::error::Result<NetStream> {
+        match self {
+            Connector::Tcp { proxy, timeout } => {
+                crate::network::proxy::connect_peer(addr, proxy.as_ref(), *timeout)
+                    .await
+                    .map(NetStream::tcp)
+            }
+            Connector::Sim(c) => c
+                .connect(addr)
+                .map_err(|e| crate::error::Error::ConnectionFailed(e.to_string())),
+        }
     }
 }
 

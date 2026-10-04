@@ -78,7 +78,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::interval;
@@ -129,6 +128,8 @@ struct OutboundAttempt {
     height: u64,
     tip: crate::primitives::Hash,
     proxy: Option<ProxyConfig>,
+    /// When set (simulation), dial through the Switchboard instead of TCP.
+    sim_connector: Option<crate::network::switchboard::SimConnector>,
     backoffs: BackoffMap,
     identity: Arc<NodeIdentity>,
     encryption: P2PEncryptionConfig,
@@ -157,7 +158,7 @@ pub(super) struct AcceptorContext {
 }
 
 pub(super) fn spawn_listener_acceptor(
-    listener: TcpListener,
+    mut acceptor: crate::network::switchboard::Acceptor,
     context: AcceptorContext,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
@@ -195,7 +196,7 @@ pub(super) fn spawn_listener_acceptor(
                     log_connection_task_result("inbound", result);
                     continue;
                 }
-                accepted = listener.accept() => accepted,
+                accepted = acceptor.accept() => accepted,
             };
             match accepted {
                 Ok((stream, addr)) => {
@@ -325,7 +326,7 @@ pub(super) fn spawn_listener_acceptor(
                         // disconnect), freeing an in-flight slot.
                         let _permit = permit;
                         let result = handle_connection(
-                            crate::network::transport::NetStream::tcp(stream),
+                            stream,
                             peer_id,
                             false,
                             magic,
@@ -373,6 +374,9 @@ pub(super) struct OutboundContext {
     pub senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
     pub chain_state: ChainStateReader,
     pub proxy: Option<ProxyConfig>,
+    /// When set (simulation), the outbound connector dials through the
+    /// Switchboard instead of TCP. `None` in production.
+    pub sim_connector: Option<crate::network::switchboard::SimConnector>,
     pub scorer: Arc<RwLock<PeerScorer>>,
     pub identity: Arc<NodeIdentity>,
     pub encryption: P2PEncryptionConfig,
@@ -403,6 +407,7 @@ pub(super) fn spawn_outbound_connector(
         senders: connector_senders,
         chain_state: connector_chain_state,
         proxy: connector_proxy,
+        sim_connector: connector_sim_connector,
         scorer: connector_scorer,
         identity: connector_identity,
         encryption: connector_encryption,
@@ -678,6 +683,7 @@ pub(super) fn spawn_outbound_connector(
                     height,
                     tip,
                     proxy: connector_proxy.clone(),
+                    sim_connector: connector_sim_connector.clone(),
                     backoffs: backoffs.clone(),
                     identity: connector_identity.clone(),
                     encryption: connector_encryption.clone(),
@@ -815,6 +821,7 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
         height,
         tip,
         proxy,
+        sim_connector,
         backoffs,
         identity,
         encryption,
@@ -825,11 +832,18 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
         our_nonce,
     } = attempt;
 
-    match super::super::proxy::connect_peer(addr, proxy.as_ref(), CONNECT_TIMEOUT).await {
+    let connector = match sim_connector {
+        Some(c) => crate::network::switchboard::Connector::Sim(c),
+        None => crate::network::switchboard::Connector::Tcp {
+            proxy,
+            timeout: CONNECT_TIMEOUT,
+        },
+    };
+    match connector.connect(addr).await {
         Ok(stream) => {
             backoffs.lock().await.remove(&addr);
             let result = handle_connection(
-                crate::network::transport::NetStream::tcp(stream),
+                stream,
                 generate_peer_id(),
                 true,
                 magic,
