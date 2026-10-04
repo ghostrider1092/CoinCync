@@ -78,7 +78,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::interval;
@@ -157,7 +156,7 @@ pub(super) struct AcceptorContext {
 }
 
 pub(super) fn spawn_listener_acceptor(
-    listener: TcpListener,
+    mut acceptor: crate::network::switchboard::Acceptor,
     context: AcceptorContext,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
@@ -195,7 +194,7 @@ pub(super) fn spawn_listener_acceptor(
                     log_connection_task_result("inbound", result);
                     continue;
                 }
-                accepted = listener.accept() => accepted,
+                accepted = acceptor.accept() => accepted,
             };
             match accepted {
                 Ok((stream, addr)) => {
@@ -325,7 +324,7 @@ pub(super) fn spawn_listener_acceptor(
                         // disconnect), freeing an in-flight slot.
                         let _permit = permit;
                         let result = handle_connection(
-                            crate::network::transport::NetStream::tcp(stream),
+                            stream,
                             peer_id,
                             false,
                             magic,

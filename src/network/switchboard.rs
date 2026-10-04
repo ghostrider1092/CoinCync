@@ -138,6 +138,35 @@ impl Default for Switchboard {
     }
 }
 
+/// The node's inbound-connection source: a real `TcpListener` in production, or
+/// a [`SimListener`] under simulation. `spawn_listener_acceptor` holds one of
+/// these and awaits `accept()` without caring which — so the real accept loop
+/// runs over the Switchboard with no sockets (F2 node-wiring, accept side).
+pub enum Acceptor {
+    /// Production: a bound TCP listener.
+    Tcp(tokio::net::TcpListener),
+    /// Simulation: this node's Switchboard inbound queue.
+    Sim(SimListener),
+}
+
+impl Acceptor {
+    /// Await the next inbound connection as a [`NetStream`] + peer address.
+    /// The TCP arm wraps the accepted socket (byte-identical to the prior direct
+    /// `TcpListener::accept` + `NetStream::tcp`); the sim arm surfaces a closed
+    /// accept queue as a `BrokenPipe` error so the caller's loop ends cleanly.
+    pub async fn accept(&mut self) -> std::io::Result<(NetStream, SocketAddr)> {
+        match self {
+            Acceptor::Tcp(l) => l.accept().await.map(|(s, a)| (NetStream::tcp(s), a)),
+            Acceptor::Sim(l) => l.accept().await.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "switchboard accept queue closed",
+                )
+            }),
+        }
+    }
+}
+
 /// Sim-side dial handle for one node: dials always originate from `local`, so
 /// this mirrors "a node's outbound connector" (the prod analogue being
 /// `TcpStream::connect` via the proxy). Cheap to clone (shares the `Arc`).

@@ -945,7 +945,7 @@ impl P2PNode {
         node_runtime.track(
             "listener-acceptor",
             peer_manager::spawn_listener_acceptor(
-                listener,
+                crate::network::switchboard::Acceptor::Tcp(listener),
                 peer_manager::AcceptorContext {
                     peers: self.peers.clone(),
                     event_tx: self.event_tx.clone(),
