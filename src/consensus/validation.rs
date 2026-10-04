@@ -3742,6 +3742,40 @@ mod tests {
     }
 
     #[test]
+    fn clock_poison_future_timestamp_is_rejected_cons004_and_recorded() {
+        // DST clock-poison (#59): with the wall clock pinned (E1 override), a block
+        // timestamped far beyond now + MAX_TIMESTAMP_DRIFT is rejected by the
+        // future-cap with CYNC-CONS-004 (F3), and the rejection is captured by the
+        // flight recorder (F5). Fully deterministic — no mining, clock controlled.
+        let _clock = crate::clock::override_scope(1_700_000_000);
+        let now = crate::clock::unix_now();
+
+        let mut header = block_at_height(1).header;
+        header.timestamp =
+            crate::primitives::Timestamp::from_secs(now + MAX_TIMESTAMP_DRIFT + 10_000);
+        let mut result = BlockValidation::ok();
+        check_header_future_timestamp(&header, &mut result);
+        assert!(!result.valid, "a poisoned future timestamp must be rejected");
+        assert!(
+            result.codes.contains(&crate::diagnostics::CYNC_CONS_004),
+            "rejection must carry CYNC-CONS-004"
+        );
+        assert!(
+            crate::flight_recorder::snapshot()
+                .iter()
+                .any(|e| e.code == crate::diagnostics::CYNC_CONS_004),
+            "the clock-poison rejection must be recorded in the flight recorder (F5)"
+        );
+
+        // The inclusive bound (exactly now + MAX_TIMESTAMP_DRIFT) is accepted.
+        let mut ok_header = block_at_height(1).header;
+        ok_header.timestamp = crate::primitives::Timestamp::from_secs(now + MAX_TIMESTAMP_DRIFT);
+        let mut ok = BlockValidation::ok();
+        check_header_future_timestamp(&ok_header, &mut ok);
+        assert!(ok.valid, "a timestamp exactly at the drift bound is accepted");
+    }
+
+    #[test]
     fn check_header_version_min_accepts_version_above_minimum_fix47() {
         // FIX #47: version >= min is accepted (smooth activation), only < min
         // is rejected. Height 0 has min_version 1; version 2 (the next scheduled
