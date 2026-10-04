@@ -33,6 +33,15 @@ green()  { printf "\033[0;32m%s\033[0m\n" "$*"; }
 yellow() { printf "\033[0;33m%s\033[0m\n" "$*"; }
 bold()   { printf "\033[1m%s\033[0m\n"   "$*"; }
 
+# `cargo test` prints one `test result:` line per test binary (lib, each
+# integration test, doc-tests). Sum the passed counts over all of them;
+# the last line, or the first match in the last few lines, is usually the
+# doc-test summary ("0 passed") and under-reports the suite.
+sum_passed() {
+    grep -E "^test result: " | grep -oE "[0-9]+ passed" \
+        | awk '{ total += $1 } END { print total + 0 }'
+}
+
 bold "═══════════════════════════════════════════════════════════════"
 bold " cyncswap audit smoke test"
 bold "═══════════════════════════════════════════════════════════════"
@@ -59,12 +68,13 @@ fi
 if [ "${STRICT_ONLY:-}" != "1" ]; then
     bold "─── default-feature build + test ──────────────────────────────"
     echo "Running: cargo test -p coincync-swap --quiet"
-    DEFAULT_OUT=$(cargo test -p coincync-swap --quiet 2>&1 | tail -3)
-    echo "$DEFAULT_OUT"
+    DEFAULT_OUT=$(cargo test -p coincync-swap --quiet 2>&1)
+    DEFAULT_STATUS=$?
+    echo "$DEFAULT_OUT" | grep -E "^test result: "
     # audit-prep §10 expects 192+ tests under default features (with
     # the post-2026-05-20 +24 mutation-testing tests, the count is 216+).
-    if echo "$DEFAULT_OUT" | grep -qE "test result: ok\.\s+([0-9]+) passed"; then
-        DEFAULT_COUNT=$(echo "$DEFAULT_OUT" | grep -oE "[0-9]+ passed" | head -1 | grep -oE "[0-9]+")
+    if [ "$DEFAULT_STATUS" -eq 0 ]; then
+        DEFAULT_COUNT=$(echo "$DEFAULT_OUT" | sum_passed)
         if [ "$DEFAULT_COUNT" -lt 192 ]; then
             red "  ✗ default-feature test count $DEFAULT_COUNT < 192 (audit-prep §10 floor)"
             EXIT=3
@@ -85,10 +95,12 @@ fi
 if [ "${FAST_ONLY:-}" != "1" ]; then
     bold "─── cross-curve DLEQ v2 tests ─────────────────────────────────"
     echo "Running: cargo test -p coincync-swap --lib cross_curve_dleq --quiet"
-    DLEQ_OUT=$(cargo test -p coincync-swap --lib cross_curve_dleq --quiet 2>&1 | tail -3)
-    echo "$DLEQ_OUT"
-    if echo "$DLEQ_OUT" | grep -qE "test result: ok\.\s+[1-9][0-9]* passed"; then
-        green "  ✓ cross-curve DLEQ v2 tests passed"
+    DLEQ_OUT=$(cargo test -p coincync-swap --lib cross_curve_dleq --quiet 2>&1)
+    DLEQ_STATUS=$?
+    echo "$DLEQ_OUT" | grep -E "^test result: "
+    DLEQ_COUNT=$(echo "$DLEQ_OUT" | sum_passed)
+    if [ "$DLEQ_STATUS" -eq 0 ] && [ "$DLEQ_COUNT" -gt 0 ]; then
+        green "  ✓ cross-curve DLEQ v2: $DLEQ_COUNT tests passed"
     else
         red "  ✗ cross-curve DLEQ v2 test suite FAILED or ran no tests"
         EXIT=3
@@ -120,12 +132,20 @@ echo
 
 # ─── 5. Property tests are actually being run ────────────────────
 bold "─── property tests exercised ──────────────────────────────────"
+# Select the property-test binaries with `--test`. A bare
+# `property_invariants` argument is a test-NAME filter, and no test
+# function is named that, so it ran zero property tests.
 PROP_OUT=$(cargo test -p coincync-swap --quiet \
-    property_invariants 2>&1 | tail -5)
-if echo "$PROP_OUT" | grep -qE "test result: ok\.\s+[1-9][0-9]* passed"; then
-    green "  ✓ property_invariants tests ran (non-zero count)"
+    --test property_invariants \
+    --test property_invariants_cync \
+    --test state_machine_invariants 2>&1)
+PROP_STATUS=$?
+echo "$PROP_OUT" | grep -E "^test result: "
+PROP_COUNT=$(echo "$PROP_OUT" | sum_passed)
+if [ "$PROP_STATUS" -eq 0 ] && [ "$PROP_COUNT" -gt 0 ]; then
+    green "  ✓ property tests ran: $PROP_COUNT passed"
 else
-    red "  ✗ property_invariants tests did not run"
+    red "  ✗ property tests failed or did not run"
     EXIT=5
 fi
 echo
