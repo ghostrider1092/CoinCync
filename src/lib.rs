@@ -52,6 +52,7 @@ pub mod prelude;
 
 // ── Primitives + types ──────────────────────────────────────
 pub mod decoy;
+pub mod flight_recorder;
 pub mod primitives;
 pub mod rng;
 pub mod transaction;
