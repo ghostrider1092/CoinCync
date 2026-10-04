@@ -37,7 +37,7 @@ exists, so it is safe to run informally and still usable as a CI gate.
 | `PANIC-CONSENSUS` | warn | `src/consensus/` | No `unwrap`/`expect`/`panic!`/`todo!` on the consensus path — a crafted input would crash the node; return an `Error`. |
 | `CAST-TRUNCATE` | warn | `src/consensus/` | No narrowing `as u8/u16/u32/i8/i16/i32` — `as` truncates silently; use `try_from`/`try_into` and handle overflow. |
 | `ERROR-UNCODED` | info | `src/consensus/` | A consensus rejection (`InvalidTransaction`/`PowValidation`/…) with no `CYNC_*` code within 4 lines — it won't show in the flight recorder / `coincync-diag`. |
-| `INDEXING` | warn | `src/consensus/` | Raw `foo[i]` / `buf[a..b]` — panics on an out-of-range index; use `.get()` and return an `Error`. |
+| `INDEXING` | warn | `src/consensus/` | Raw `foo[i]` with a **non-literal** index and **no nearby** `.len()`/`.get()`/`.windows()` guard — panics on an out-of-range index; use `.get()` and return an `Error`. (Literal indices, lifetimes, and guarded accesses are not flagged.) |
 | `UNWRAP-LOCK` | warn | `src/` | `.lock()/.read()/.write().unwrap()` — panics on a poisoned lock; recover the guard or propagate the `PoisonError`. |
 | `SERDE-WIRE` | warn | `src/consensus/` | A hand-written `impl Serialize/Deserialize/Borsh…` — a byte-layout slip forks the chain; prefer `#[derive]` + a round-trip test. |
 | `HYGIENE-PRINT` | warn | `src/` lib (not bins/cli/explorer) | No `println!`/`eprintln!`/`dbg!` in library code — use `tracing`. |

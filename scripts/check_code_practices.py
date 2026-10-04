@@ -120,12 +120,19 @@ RULES: list[Rule] = [
         satisfied_by=re.compile(r"CYNC_"), window=4,
     ),
     Rule(
-        "INDEXING", WARN, re.compile(r"\b[a-z_][a-z0-9_]*\s*\[(?!\.)"),
-        "A raw index/slice on the consensus path. `foo[i]` / `buf[a..b]` panics on "
-        "an out-of-range index, crashing the node on a crafted input (like unwrap).",
-        "Use .get(i) / .get(a..b) and return an Error on None, or prove the index is "
-        "in range and mark it `// check-allow: INDEXING`.",
+        # Flags a NON-LITERAL index (`foo[i]`, not `foo[0]`/`foo[8..12]`) that is a
+        # real variable-bounds risk. `(?<!')` skips lifetimes (`&'a [T]` is a slice
+        # TYPE, not indexing); `(?![\d.\]])` skips literal/range/full-slice indices;
+        # and `satisfied_by` suppresses indexing that sits next to a visible
+        # length/.get/.windows guard (the usual bounded pattern).
+        "INDEXING", WARN, re.compile(r"(?<!')\b[a-z_][a-z0-9_]*\s*\[(?![\d.\]])"),
+        "A raw index/slice with a NON-LITERAL index and no nearby bounds check on "
+        "the consensus path. `foo[i]` panics on an out-of-range index, crashing the "
+        "node on a crafted input (like unwrap).",
+        "Use .get(i) and return an Error on None, or keep a visible length/.windows "
+        "guard near it; if it provably fits, mark `// check-allow: INDEXING`.",
         where="code", include=("src/consensus/",),
+        satisfied_by=re.compile(r"\.len\(\)|\.get\(|\.windows\("), window=3,
     ),
     Rule(
         "UNWRAP-LOCK", WARN,
