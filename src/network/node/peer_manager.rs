@@ -824,11 +824,15 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
         our_nonce,
     } = attempt;
 
-    match super::super::proxy::connect_peer(addr, proxy.as_ref(), CONNECT_TIMEOUT).await {
+    let connector = crate::network::switchboard::Connector::Tcp {
+        proxy,
+        timeout: CONNECT_TIMEOUT,
+    };
+    match connector.connect(addr).await {
         Ok(stream) => {
             backoffs.lock().await.remove(&addr);
             let result = handle_connection(
-                crate::network::transport::NetStream::tcp(stream),
+                stream,
                 generate_peer_id(),
                 true,
                 magic,

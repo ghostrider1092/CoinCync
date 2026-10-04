@@ -192,6 +192,37 @@ impl SimConnector {
     }
 }
 
+/// The node's outbound dialer: real TCP (via the proxy layer) in production, or
+/// a [`SimConnector`] under simulation. The outbound connector holds one of these
+/// and calls `connect()` without caring which — the dial half of running the real
+/// node over the Switchboard (symmetric with [`Acceptor`]).
+pub enum Connector {
+    /// Production: dial over TCP (honoring the configured proxy), the exact path
+    /// `proxy::connect_peer` + `NetStream::tcp` took before.
+    Tcp {
+        proxy: Option<crate::config::ProxyConfig>,
+        timeout: std::time::Duration,
+    },
+    /// Simulation: dial through the Switchboard.
+    Sim(SimConnector),
+}
+
+impl Connector {
+    /// Dial `addr`, yielding a connected [`NetStream`].
+    pub async fn connect(&self, addr: SocketAddr) -> crate::error::Result<NetStream> {
+        match self {
+            Connector::Tcp { proxy, timeout } => {
+                crate::network::proxy::connect_peer(addr, proxy.as_ref(), *timeout)
+                    .await
+                    .map(NetStream::tcp)
+            }
+            Connector::Sim(c) => c
+                .connect(addr)
+                .map_err(|e| crate::error::Error::ConnectionFailed(e.to_string())),
+        }
+    }
+}
+
 /// Sim-side accept handle for one node: awaits inbound connections the way a
 /// `TcpListener` does, returning `(stream, peer_addr)`. The prod analogue is
 /// `TcpListener::accept`.
