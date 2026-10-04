@@ -2266,6 +2266,14 @@ fn check_tx_range_proofs(tx: &Transaction, current_height: u64) -> Result<()> {
 /// commitment arithmetic.
 fn check_tx_balance_proof(tx: &Transaction) -> Result<()> {
     if !verify_balance_proof(tx) {
+        // SHLD-001 (F3): a failed balance proof means the committed input and
+        // output values do not balance — value created or destroyed "across the
+        // veil". Record the coded diagnostic for the fault dump (F5); the hard
+        // rejection below is unchanged, so enforcement is identical.
+        crate::flight_recorder::record(
+            crate::diagnostics::CYNC_SHLD_001,
+            "transaction balance proof failed: shielded value not conserved",
+        );
         return Err(Error::CommitmentMismatch);
     }
 
@@ -4480,6 +4488,21 @@ mod tests {
     fn balance_proof_rejects_identity_pseudo_output_fix44() {
         let tx = bp_tx(vec![bp_input([0u8; 32])], vec![a_valid_output()]);
         assert!(!verify_balance_proof(&tx));
+    }
+
+    #[test]
+    fn balance_proof_failure_is_rejected_and_records_shld001() {
+        // SHLD-001 (F3/F5): a non-conserving balance proof is hard-rejected
+        // (CommitmentMismatch) AND records the coded diagnostic — value created
+        // or destroyed across the veil surfaces in a fault dump.
+        let tx = bp_tx(vec![bp_input([0u8; 32])], vec![a_valid_output()]);
+        assert!(check_tx_balance_proof(&tx).is_err());
+        assert!(
+            crate::flight_recorder::snapshot()
+                .iter()
+                .any(|e| e.code == crate::diagnostics::CYNC_SHLD_001),
+            "a failed balance proof must record CYNC-SHLD-001"
+        );
     }
 
     #[test]
