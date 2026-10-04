@@ -343,7 +343,17 @@ pub fn build_block_from_template(
         algorithm: 0,
         nonce: 0,
         target,
-        miner_pubkey: *payout_spend_pub,
+        // #222: the header's miner_pubkey has NO consensus role — it is only
+        // folded into hash()/pow_binding() (so a PoW solution can't be replayed
+        // with a mutated header); no validator reads its VALUE. Publishing the
+        // payout address's spend public key here linked every block a miner
+        // found to their wallet (and its public coinbase amount) and linked all
+        // of one miner's blocks to each other, defeating the one-time-output
+        // goal. Write all-zero — the value genesis and every other construction
+        // site already use (mainnet.rs, block.rs, chain.rs, compact_blocks.rs) —
+        // so the field leaks nothing and patched miners are indistinguishable
+        // from stock ones.
+        miner_pubkey: PublicKey::from_bytes([0u8; 32]),
         supply_commitment: [0u8; 32],
         checkpoint_vote: None,
         spark_set_root: [0u8; 32],
@@ -590,7 +600,14 @@ mod tests {
         assert_eq!(candidate.header.height.as_u64(), height);
         assert_eq!(candidate.header.nonce, 0, "candidate leaves nonce for the miner");
         assert_eq!(candidate.header.prev_hash, Hash::from_bytes([0x11u8; 32]));
-        assert_eq!(candidate.header.miner_pubkey, spend);
+        // #222: miner_pubkey must be zeroed, NEVER the payout spend key (`spend`,
+        // passed above) — it has no consensus role and publishing it
+        // deanonymizes the miner.
+        assert_eq!(
+            candidate.header.miner_pubkey,
+            PublicKey::from_bytes([0u8; 32]),
+            "#222: header must not carry the payout spend key"
+        );
 
         // Exactly one tx (coinbase) since the template had no mempool txs.
         assert_eq!(candidate.transactions.len(), 1);
