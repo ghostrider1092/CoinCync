@@ -683,6 +683,13 @@ pub const FEE_DISTRIBUTION_HEIGHT: u64 = 0;
 // compile-time consts remain only as the compiled-network convenience; the
 // asserts below pin each to the runtime resolver's value for the compiled
 // network, so the two definitions can never drift out of sync.
+/// Height at which `supply_commitment` production/enforcement activates.
+/// Mirror of `NetworkType::supply_commitment_enforce_height()` — the drift-guards
+/// below pin them equal, matching the other activation heights. GATED OFF
+/// (`u64::MAX`) on every network until audit-gate clearance (a finite value here
+/// is a coordinated hard fork).
+pub const SUPPLY_COMMITMENT_ENFORCE_HEIGHT: u64 = u64::MAX;
+
 #[cfg(feature = "testnet")]
 const _: () = {
     use crate::config::NetworkType::Testnet as N;
@@ -690,6 +697,7 @@ const _: () = {
     assert!(MIN_OUTPUT_AGE_HARDFORK_HEIGHT == N.min_output_age_hardfork_height());
     assert!(ROLLING_FINALITY_ENABLE_HEIGHT == N.rolling_finality_enable_height());
     assert!(ROLLING_FINALITY_ENFORCE_HEIGHT == N.rolling_finality_enforce_height());
+    assert!(SUPPLY_COMMITMENT_ENFORCE_HEIGHT == N.supply_commitment_enforce_height());
 };
 #[cfg(not(feature = "testnet"))]
 const _: () = {
@@ -698,6 +706,7 @@ const _: () = {
     assert!(MIN_OUTPUT_AGE_HARDFORK_HEIGHT == N.min_output_age_hardfork_height());
     assert!(ROLLING_FINALITY_ENABLE_HEIGHT == N.rolling_finality_enable_height());
     assert!(ROLLING_FINALITY_ENFORCE_HEIGHT == N.rolling_finality_enforce_height());
+    assert!(SUPPLY_COMMITMENT_ENFORCE_HEIGHT == N.supply_commitment_enforce_height());
 };
 
 // =============================================================================
@@ -756,40 +765,29 @@ pub fn effective_ring_size(height: u64, available_outputs: usize) -> usize {
 //   - Empty table is acceptable. The validator treats "no checkpoint
 //     for this height" as "allow any consistent block." Initial
 //     deployments and freshly-genesised chains run with empty tables.
-//   - Per-network. Mainnet and testnet ship separate tables, gated
-//     by the `testnet` feature, so a testnet rebuild doesn't lock
-//     mainnet at a testnet hash.
+//   - Per-network. Mainnet and testnet resolve separate sets (the runtime
+//     network selects which canonical function to call), so a testnet rebuild
+//     doesn't lock mainnet at a testnet hash.
 //
-// Format: const slice of `(height, raw_hash_bytes)` tuples. MUST be
-// sorted ascending by height; the lookup is a binary search. The
-// build-time test `test_checkpoints_are_sorted` enforces ordering.
+// Shape: `(height, raw_hash_bytes)` tuples ordered by height (genesis first).
 
-/// Mainnet consensus checkpoints. Pre-launch: empty.
-/// Populated post-launch via the release process; each release ships
-/// with checkpoints up to ~2 weeks before the release date.
-pub const MAINNET_CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = &[
-    // (height, block_hash_bytes)
-    // Empty as of 2026-05-08; populate at first post-launch release.
-];
-
-/// Testnet consensus checkpoints. Empty as of 2026-05-08. Testnet
-/// generally won't carry checkpoints (the chain resets between test
-/// cycles), but the table exists so the validator code path is
-/// exercised on the same data shape mainnet will use. Regtest reuses it.
-pub const TESTNET_CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = &[
-    // (height, block_hash_bytes)
-];
-
-/// Compiled-network checkpoint table, kept as the compiled-network default.
-/// Runtime-network hardening: consensus and wallet code resolve the table from
-/// the RUNTIME network via `NetworkType::consensus_checkpoints()`, so a binary
-/// built for one network but run as another uses the correct checkpoints. This
-/// alias is `==` the runtime resolver's value for the compiled network by
-/// construction (it selects the same per-network table).
-#[cfg(not(feature = "testnet"))]
-pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = MAINNET_CONSENSUS_CHECKPOINTS;
-#[cfg(feature = "testnet")]
-pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = TESTNET_CONSENSUS_CHECKPOINTS;
+// SINGLE SOURCE OF TRUTH (issue #173): the per-network checkpoint set is NOT a
+// constant here. It lives in the canonical functions `mainnet::mainnet_checkpoints()`
+// and `testnet::testnet_checkpoints()` (genesis + the per-network hardcoded list,
+// e.g. `testnet::TESTNET_CHECKPOINT_LIST`). Everything resolves from there via
+// `NetworkType::consensus_checkpoints()` or `expected_checkpoint_hash()` below.
+//
+// Removed: the `MAINNET_CONSENSUS_CHECKPOINTS` / `TESTNET_CONSENSUS_CHECKPOINTS`
+// constants and the `CONSENSUS_CHECKPOINTS` alias. They were a SECOND, always-empty
+// table that only the consensus fingerprint and `expected_checkpoint_hash` read, so
+// a populated testnet list (e.g. the h=10000 anchor) was enforced by `chain.rs` but
+// silently invisible to the fingerprint, the `validation.rs` checkpoint path, and
+// light-wallet auth. Keeping one source of truth prevents that split.
+//
+// To add a checkpoint: edit the canonical list — for testnet,
+// `testnet::TESTNET_CHECKPOINT_LIST`; for mainnet, `mainnet::mainnet_checkpoints()`.
+// Pick a height ~2 weeks behind the tip at release time. See
+// `docs/operations/CHECKPOINT_PROCEDURE.md`.
 
 /// Look up the expected block hash at a given height, if a checkpoint
 /// exists for it. Returns None when:
@@ -800,17 +798,20 @@ pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = TESTNET_CONSENSUS_CHECKPOI
 /// block at this height" — checkpoints are an ADDITIONAL constraint
 /// on top of normal consensus, not a replacement.
 ///
-/// Implementation: binary search since the table is sorted by height.
-/// O(log n) where n is the checkpoint count (expected: dozens).
+/// Resolves from the single canonical source via
+/// [`NetworkType::consensus_checkpoints`](crate::config::NetworkType::consensus_checkpoints),
+/// so validation, the fingerprint, and this lookup can never disagree (#173).
+/// Returns an owned hash (the set is built at runtime, not a `&'static` table).
+/// Linear scan over a small set (expected: dozens).
 pub fn expected_checkpoint_hash(
     network: crate::config::NetworkType,
     height: u64,
-) -> Option<&'static [u8; 32]> {
-    let table = network.consensus_checkpoints();
-    table
-        .binary_search_by_key(&height, |&(h, _)| h)
-        .ok()
-        .map(|idx| &table[idx].1)
+) -> Option<[u8; 32]> {
+    network
+        .consensus_checkpoints()
+        .into_iter()
+        .find(|&(h, _)| h == height)
+        .map(|(_, hash)| hash)
 }
 
 // =============================================================================
@@ -1285,9 +1286,9 @@ pub const STRICT_RING_MEMBER_HEIGHT: u64 = 100;
 mod tests {
     use super::*;
 
-    // Runtime-network hardening: activation/checkpoint lookups now take the
-    // network. The compiled network's table equals the `CONSENSUS_CHECKPOINTS`
-    // alias, so use it to keep these tests exact.
+    // Runtime-network hardening: activation/checkpoint lookups take the network.
+    // NET is the compiled network, so `NET.consensus_checkpoints()` is the set
+    // this binary actually enforces.
     #[cfg(feature = "testnet")]
     const NET: crate::config::NetworkType = crate::config::NetworkType::Testnet;
     #[cfg(not(feature = "testnet"))]
@@ -1463,49 +1464,53 @@ mod tests {
         assert_eq!(effective_ring_size(5, 20), BOOTSTRAP_MIN_RING_SIZE);
     }
 
-    /// CIP-009 Path B invariant: the consensus-checkpoint table must
-    /// be sorted ascending by height. The `expected_checkpoint_hash`
-    /// lookup uses `binary_search_by_key` which returns garbage on
-    /// unsorted input. A sort-violation in the table is a silent
-    /// consensus bug; this test makes it loud at build time.
+    /// CIP-009 Path B invariant: the resolved consensus-checkpoint set must be
+    /// ordered ascending by height and begin with genesis (height 0). Checked
+    /// for BOTH networks so the single resolver (#173) is validated regardless
+    /// of the compiled feature set.
     #[test]
     fn test_consensus_checkpoints_are_sorted_ascending() {
-        let table = CONSENSUS_CHECKPOINTS;
-        for window in table.windows(2) {
-            let (h_prev, _) = window[0];
-            let (h_next, _) = window[1];
-            assert!(
-                h_prev < h_next,
-                "CONSENSUS_CHECKPOINTS must be sorted ascending by height; \
-                 found {} before {}",
-                h_prev,
-                h_next
+        for net in [
+            crate::config::NetworkType::Mainnet,
+            crate::config::NetworkType::Testnet,
+        ] {
+            let table = net.consensus_checkpoints();
+            assert_eq!(
+                table.first().map(|&(h, _)| h),
+                Some(0),
+                "{net:?} checkpoint set must start with genesis (height 0)"
             );
+            for window in table.windows(2) {
+                assert!(
+                    window[0].0 < window[1].0,
+                    "{net:?} checkpoints must be sorted ascending by height; \
+                     found {} before {}",
+                    window[0].0,
+                    window[1].0
+                );
+            }
         }
     }
 
-    /// CIP-009 Path B safety: `expected_checkpoint_hash` returns None
-    /// at heights with no checkpoint, Some at heights that have one.
-    /// Test exercises both paths even when the production table is
-    /// empty, by building a synthetic table at test scope. Confirms
-    /// the binary-search dispatch is wired correctly regardless of
-    /// real-table content.
+    /// CIP-009 Path B safety + #173: `expected_checkpoint_hash` returns Some at
+    /// every checkpoint height (always at least genesis) and None elsewhere, and
+    /// it resolves from the SAME set `consensus_checkpoints()` feeds the
+    /// fingerprint — so the two can never disagree.
     #[test]
     fn test_expected_checkpoint_hash_lookup() {
-        // The production table can be empty (pre-launch); confirm
-        // empty-table behavior: every lookup returns None.
-        if CONSENSUS_CHECKPOINTS.is_empty() {
-            assert!(expected_checkpoint_hash(NET, 0).is_none());
-            assert!(expected_checkpoint_hash(NET, 1).is_none());
-            assert!(expected_checkpoint_hash(NET, 1_000_000).is_none());
-        } else {
-            // If checkpoints exist, the first must be findable.
-            let (first_h, _) = CONSENSUS_CHECKPOINTS[0];
-            assert!(expected_checkpoint_hash(NET, first_h).is_some());
-            // A height NOT in the table must return None.
-            // Pick a height that's clearly between or after entries.
-            let last_h = CONSENSUS_CHECKPOINTS[CONSENSUS_CHECKPOINTS.len() - 1].0;
-            assert!(expected_checkpoint_hash(NET, last_h + 1_000_000).is_none());
+        let table = NET.consensus_checkpoints();
+        // Genesis is always a checkpoint, so height 0 is always findable.
+        assert!(
+            expected_checkpoint_hash(NET, 0).is_some(),
+            "genesis (height 0) must always be a checkpoint"
+        );
+        // A height far above the last checkpoint has none.
+        let last_h = table.last().map(|&(h, _)| h).unwrap_or(0);
+        assert!(expected_checkpoint_hash(NET, last_h + 1_000_000).is_none());
+        // The lookup agrees with the resolved set at every checkpoint height
+        // (the anti-split guard for #173).
+        for &(h, hash) in &table {
+            assert_eq!(expected_checkpoint_hash(NET, h), Some(hash));
         }
     }
 }

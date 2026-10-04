@@ -335,7 +335,7 @@ pub fn build_block_from_template(
         network_magic,
         version: block_version_at_height(height),
         height,
-        timestamp,
+        timestamp: crate::primitives::Timestamp::from_secs(timestamp),
         prev_hash,
         tx_root,
         // Placeholder — set below once the binding-derived anchor is computed.
@@ -613,7 +613,7 @@ mod tests {
         let anchor = compute_full_anchor(
             &candidate.header.prev_hash,
             height,
-            candidate.header.timestamp,
+            candidate.header.timestamp.as_secs(),
             &candidate.header.pow_binding(),
         )
         .expect("anchor");

@@ -449,7 +449,7 @@ impl ChainAdapter for CoincyncAdapter {
         match crate::consensus::pow::verify_pow(
             &header.prev_hash,
             header.height,
-            header.timestamp,
+            header.timestamp.as_secs(),
             header.nonce,
             &header.tx_root,
             &header.target,

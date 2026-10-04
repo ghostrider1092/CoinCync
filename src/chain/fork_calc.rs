@@ -41,7 +41,7 @@ impl Blockchain {
             match db.blocks.get_by_height(height) {
                 Ok(Some(b)) => Some(DifficultyBlock {
                     height,
-                    timestamp: b.header.timestamp,
+                    timestamp: b.header.timestamp.as_secs(),
                     target: b.header.target,
                 }),
                 _ => None,
@@ -52,7 +52,7 @@ impl Blockchain {
             let b = inner.blocks.get(hash)?;
             Some(DifficultyBlock {
                 height,
-                timestamp: b.header.timestamp,
+                timestamp: b.header.timestamp.as_secs(),
                 target: b.header.target,
             })
         }
@@ -95,7 +95,7 @@ impl Blockchain {
                         break;
                     }
                 }
-                fork.push((h, blk.header.timestamp, blk.header.target));
+                fork.push((h, blk.header.timestamp.as_secs(), blk.header.target));
                 if h == 0 {
                     break;
                 }
@@ -120,7 +120,7 @@ impl Blockchain {
                         break;
                     }
                 }
-                fork.push((h, blk.header.timestamp, blk.header.target));
+                fork.push((h, blk.header.timestamp.as_secs(), blk.header.target));
                 if h == 0 {
                     break;
                 }

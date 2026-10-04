@@ -194,6 +194,13 @@ pub struct BlockValidation {
     pub valid: bool,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
+    /// Diagnostic codes (`CYNC-*`) for errors raised via [`add_error_coded`], in
+    /// the order raised — the machine-readable companion to `errors` (F3). Lets a
+    /// consumer map a rejection to its catalog entry without string-matching, and
+    /// is the hook the deterministic-simulation harness checks against.
+    ///
+    /// [`add_error_coded`]: BlockValidation::add_error_coded
+    pub codes: Vec<&'static str>,
 }
 
 impl BlockValidation {
@@ -202,6 +209,7 @@ impl BlockValidation {
             valid: true,
             errors: vec![],
             warnings: vec![],
+            codes: vec![],
         }
     }
 
@@ -210,6 +218,7 @@ impl BlockValidation {
             valid: false,
             errors: vec![msg.into()],
             warnings: vec![],
+            codes: vec![],
         }
     }
 
@@ -220,6 +229,29 @@ impl BlockValidation {
 
     pub fn add_warning(&mut self, msg: impl Into<String>) {
         self.warnings.push(msg.into());
+    }
+
+    /// Record a rejection that breaches a registered consensus invariant (F3).
+    ///
+    /// Pushes `msg` to `errors` exactly like [`add_error`] — so existing consumers
+    /// and message assertions are unaffected — AND records the invariant's
+    /// `CYNC-*` code in `codes`, giving a machine-readable mapping from the
+    /// rejection to its diagnostic-catalog entry. `code` must be a `CYNC_*`
+    /// catalog constant (debug-asserted).
+    ///
+    /// [`add_error`]: BlockValidation::add_error
+    pub fn add_error_coded(&mut self, code: &'static str, msg: impl Into<String>) {
+        debug_assert!(
+            crate::diagnostics::lookup(code).is_some(),
+            "add_error_coded: unknown diagnostic code {code}"
+        );
+        let msg = msg.into();
+        // F5: record every coded validation failure into the flight recorder so a
+        // fault dump shows the lead-up, not just the final error.
+        crate::flight_recorder::record(code, msg.clone());
+        self.errors.push(msg);
+        self.codes.push(code);
+        self.valid = false;
     }
 }
 
@@ -399,7 +431,7 @@ pub fn validate_block_ctx(
                 match verify_pow(
                     &prev.header.hash(),
                     block.height(),
-                    block.header.timestamp,
+                    block.header.timestamp.as_secs(),
                     block.header.nonce,
                     &block.header.tx_root,
                     &block.header.target,
@@ -411,7 +443,11 @@ pub fn validate_block_ctx(
                         tracing::debug!("Block {} PoW verified successfully", block.height());
                     }
                     Err(e) => {
-                        result.add_error(format!("Proof of work validation error: {}", e));
+                        // F3: a PoW-target failure is a registered invariant.
+                        result.add_error_coded(
+                            crate::diagnostics::CYNC_CONS_001,
+                            format!("Proof of work validation error: {}", e),
+                        );
                     }
                 }
             }
@@ -948,7 +984,7 @@ fn check_block_consensus_checkpoint(
     if let Some(expected_hash) = crate::constants::expected_checkpoint_hash(network, block.height())
     {
         let actual_hash = block.hash();
-        if actual_hash.as_bytes() != expected_hash {
+        if actual_hash.as_bytes() != &expected_hash {
             result.add_error(format!(
                 "consensus checkpoint mismatch at height {}: \
                  expected {} but got {} — refusing to accept reorg \
@@ -1086,12 +1122,17 @@ fn check_block_tail_supply(block: &Block, expected_reward: Amount, result: &mut 
     // absolute maximum any block may legitimately carry.
     let genesis_reward = calculate_block_reward(0).as_atomic();
     if reward > genesis_reward {
-        result.add_error(format!(
-            "Emission reward {} exceeds the height-0 maximum {} at height {} (emission curve must be non-increasing)",
-            reward,
-            genesis_reward,
-            block.height()
-        ));
+        // F3: a supply-ceiling breach is a registered invariant — record its
+        // CYNC-EMIT-001 code alongside the (unchanged) message.
+        result.add_error_coded(
+            crate::diagnostics::CYNC_EMIT_001,
+            format!(
+                "Emission reward {} exceeds the height-0 maximum {} at height {} (emission curve must be non-increasing)",
+                reward,
+                genesis_reward,
+                block.height()
+            ),
+        );
     }
 }
 
@@ -1123,7 +1164,11 @@ fn check_block_duplicate_key_images(block: &Block, result: &mut BlockValidation)
     for tx in &block.transactions {
         for input in &tx.inputs {
             if !seen.insert(&input.key_image) {
-                result.add_error(format!("Duplicate key image in block: {}", input.key_image));
+                // F3: in-block double-spend is a registered invariant.
+                result.add_error_coded(
+                    crate::diagnostics::CYNC_CONS_002,
+                    format!("Duplicate key image in block: {}", input.key_image),
+                );
             }
         }
     }
@@ -1219,7 +1264,10 @@ fn check_header_vs_prev(
         result.add_error("Previous hash mismatch");
     }
     if header.timestamp <= prev.timestamp {
-        result.add_error("Timestamp not greater than previous block");
+        result.add_error_coded(
+            crate::diagnostics::CYNC_CONS_005,
+            "Timestamp not greater than previous block",
+        );
     }
 }
 
@@ -1263,23 +1311,31 @@ fn check_header_checkpoint_vote(header: &BlockHeader, result: &mut BlockValidati
 /// nodes on badly-configured hosts still process blocks (validation of
 /// crypto and consensus rules is orthogonal to wall-clock).
 fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidation) {
-    let current_time = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_secs(),
-        Err(e) => {
-            result.add_error(format!(
-                "System clock error: {}. Cannot validate block timestamps.",
-                e
-            ));
-            return;
-        }
-    };
+    // Single source of truth (E1): the future-block cap reads wall time through
+    // the canonical clock, so the deterministic-simulation harness can drive it
+    // (clock-poisoning scenarios). With no override installed this is the real
+    // system clock — production behaviour is unchanged. A broken real clock
+    // (before the Unix epoch) still yields 0 here; preserve the explicit
+    // "cannot validate timestamps" error for that host-misconfiguration case,
+    // but never when a virtual clock is installed (0 can be a valid sim time).
+    let current_time = crate::clock::unix_now();
+    if current_time == 0 && !crate::clock::is_overridden() {
+        result.add_error(
+            "System clock error: time is before the Unix epoch. Cannot validate block timestamps."
+                .to_string(),
+        );
+        return;
+    }
     // Sanity: current time should be reasonably recent (after 2020).
     const MIN_REASONABLE_TIME: u64 = 1577836800; // 2020-01-01 00:00:00 UTC
     if current_time < MIN_REASONABLE_TIME {
         result.add_warning("System clock appears to be set incorrectly (before 2020)");
     }
-    if header.height > 0 && header.timestamp > current_time + MAX_TIMESTAMP_DRIFT {
-        result.add_error("Block timestamp too far in future");
+    if header.height > 0 && header.timestamp.as_secs() > current_time + MAX_TIMESTAMP_DRIFT {
+        result.add_error_coded(
+            crate::diagnostics::CYNC_CONS_004,
+            "Block timestamp too far in future",
+        );
     }
 }
 
@@ -1349,13 +1405,20 @@ fn validate_difficulty_target(
     let target_value = target_to_u128(target.as_bytes());
     let max_value = target_to_u128(max.as_bytes());
     if target_value > max_value {
-        result.add_error("Target easier than max_target (minimum difficulty)");
+        // F3: a difficulty-target out-of-bounds is a registered invariant.
+        result.add_error_coded(
+            crate::diagnostics::CYNC_POW_001,
+            "Target easier than max_target (minimum difficulty)",
+        );
         return;
     }
 
     // Check 2: Target must be non-zero (would be impossibly hard)
     if target.as_bytes().iter().all(|&b| b == 0) {
-        result.add_error("Target is zero (impossible difficulty)");
+        result.add_error_coded(
+            crate::diagnostics::CYNC_POW_001,
+            "Target is zero (impossible difficulty)",
+        );
         return;
     }
 
@@ -1384,7 +1447,7 @@ fn validate_difficulty_target(
 
             // Normal bounds: target can change by at most 4x in either direction
             // 4x = ratio_scaled 4000, 0.25x = ratio_scaled 250
-            let time_diff = block.header.timestamp.saturating_sub(prev.header.timestamp);
+            let time_diff = block.header.timestamp.saturating_secs_since(prev.header.timestamp);
             let expected_time = crate::constants::TARGET_BLOCK_TIME;
 
             // NOTE: The sanity check here is intentionally loose because the exact
@@ -2926,7 +2989,7 @@ mod tests {
             network_magic: test_magic(),
             version: 1,
             height,
-            timestamp: 0,
+            timestamp: crate::primitives::Timestamp::from_secs(0),
             prev_hash: Hash::zero(),
             tx_root: Hash::zero(),
             anchor: Hash::zero(),
@@ -2988,6 +3051,13 @@ mod tests {
             !above.valid,
             "reward above the genesis maximum must be rejected"
         );
+        // F3: the ceiling breach records its diagnostic code, so the rejection
+        // maps to the catalog without string-matching.
+        assert!(
+            above.codes.contains(&crate::diagnostics::CYNC_EMIT_001),
+            "ceiling breach must record CYNC-EMIT-001; got {:?}",
+            above.codes
+        );
     }
 
     #[test]
@@ -3026,7 +3096,7 @@ mod tests {
             network_magic: test_magic(),
             version: 1,
             height: 1,
-            timestamp: 0,
+            timestamp: crate::primitives::Timestamp::from_secs(0),
             prev_hash: Hash::zero(),
             tx_root: Hash::zero(),
             anchor: Hash::zero(),
@@ -3267,7 +3337,7 @@ mod tests {
     fn child_block(height: u64, txs: Vec<Transaction>, prev: &Block) -> Block {
         let mut h = block_at_height(height).header;
         h.prev_hash = prev.header.hash();
-        h.timestamp = 1_000_000;
+        h.timestamp = crate::primitives::Timestamp::from_secs(1_000_000);
         Block::new(h, txs)
     }
 
@@ -3568,6 +3638,8 @@ mod tests {
             .errors
             .iter()
             .any(|e| e.contains("Duplicate key image in block")));
+        // F3: the double-spend breach records its diagnostic code.
+        assert!(result.codes.contains(&crate::diagnostics::CYNC_CONS_002));
     }
 
     /// Regression (issue #105): the in-block duplicate-key-image scan was done
@@ -3659,7 +3731,7 @@ mod tests {
         let mut header = block_at_height(1).header;
         header.version = 1; // downgrade v2 -> v1
         header.prev_hash = prev_header.hash();
-        header.timestamp = prev_header.timestamp + 1;
+        header.timestamp = prev_header.timestamp + std::time::Duration::from_secs(1);
         let mut result = BlockValidation::ok();
         check_header_vs_prev(&header, Some(&prev_header), &mut result);
         assert!(!result.valid);
@@ -3737,7 +3809,7 @@ mod tests {
     #[test]
     fn check_header_future_timestamp_genesis_exempt() {
         let mut header = block_at_height(0).header; // height 0
-        header.timestamp = u64::MAX / 2; // absurd future
+        header.timestamp = crate::primitives::Timestamp::from_secs(u64::MAX / 2); // absurd future
         let mut result = BlockValidation::ok();
         check_header_future_timestamp(&header, &mut result);
         assert!(
@@ -3823,7 +3895,7 @@ mod tests {
         let mut blk_t = [0u8; 32];
         blk_t[0] = 1;
         block.header.target = Hash::from_bytes(blk_t);
-        block.header.timestamp = prev.header.timestamp + 1; // normal (non-emergency) window
+        block.header.timestamp = crate::primitives::Timestamp::from_secs(prev.header.timestamp.as_secs() + 1); // normal (non-emergency) window
         let mut result = BlockValidation::ok();
         validate_difficulty_target(&block, Some(&prev), &mut result);
         assert!(!result.valid);
@@ -3855,6 +3927,8 @@ mod tests {
             "below-checkpoint block must still be PoW-verified in a non-fast-sync build, got: {:?}",
             result.errors
         );
+        // F3: the PoW-failure rejection records its diagnostic code.
+        assert!(result.codes.contains(&crate::diagnostics::CYNC_CONS_001));
     }
 
     // ── v1_0_12_rules_active differential ───────────────────────────────

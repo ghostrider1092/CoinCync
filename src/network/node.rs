@@ -196,6 +196,10 @@ pub struct P2PNode {
     our_id: PeerId,
     /// Configuration
     config: NodeConfig,
+    /// Simulation transport (F2): when set, the node accepts and dials through
+    /// this Switchboard instead of TCP — for the deterministic-simulation
+    /// harness. `None` in production (always TCP).
+    sim: Option<Arc<crate::network::switchboard::Switchboard>>,
     /// Noise Protocol identity (persistent X25519 keypair)
     identity: Arc<super::noise::NodeIdentity>,
     /// Blockchain reference for serving blocks/headers to peers
@@ -351,6 +355,7 @@ impl P2PNode {
         P2PNode {
             our_id,
             config,
+            sim: None,
             identity,
             chain,
             mempool,
@@ -383,6 +388,13 @@ impl P2PNode {
     /// Call this after construction for Tier 2+ nodes.
     pub fn set_dht(&mut self, dht: Arc<parking_lot::Mutex<super::dht::DhtState>>) {
         self.dht = Some(dht);
+    }
+
+    /// Install a simulation transport (F2): the node then accepts and dials
+    /// through `switchboard` instead of TCP. Test / deterministic-simulation
+    /// only — production never calls this, so production always uses TCP.
+    pub fn set_switchboard(&mut self, switchboard: Arc<crate::network::switchboard::Switchboard>) {
+        self.sim = Some(switchboard);
     }
 
     /// Query key image spend status via DHT stripe routing.
@@ -887,30 +899,38 @@ impl P2PNode {
             );
         }
 
-        let socket = socket2::Socket::new(
-            if self.config.listen_addr.is_ipv6() {
-                socket2::Domain::IPV6
-            } else {
-                socket2::Domain::IPV4
-            },
-            socket2::Type::STREAM,
-            Some(socket2::Protocol::TCP),
-        )
-        .map_err(|e| Error::ConnectionFailed(format!("socket create: {e}")))?;
-        socket
-            .set_reuse_address(true)
-            .map_err(|e| Error::ConnectionFailed(format!("SO_REUSEADDR: {e}")))?;
-        socket
-            .set_nonblocking(true)
-            .map_err(|e| Error::ConnectionFailed(format!("set_nonblocking: {e}")))?;
-        socket.bind(&self.config.listen_addr.into()).map_err(|e| {
-            Error::ConnectionFailed(format!("bind {}: {e}", self.config.listen_addr))
-        })?;
-        socket
-            .listen(128)
-            .map_err(|e| Error::ConnectionFailed(format!("listen: {e}")))?;
-        let listener = TcpListener::from_std(socket.into())
-            .map_err(|e| Error::ConnectionFailed(format!("TcpListener::from_std: {e}")))?;
+        let acceptor = if let Some(sb) = &self.sim {
+            // Simulation (F2): accept through the Switchboard — no real socket.
+            crate::network::switchboard::Acceptor::Sim(
+                crate::network::switchboard::SimListener::bind(sb, self.config.listen_addr),
+            )
+        } else {
+            let socket = socket2::Socket::new(
+                if self.config.listen_addr.is_ipv6() {
+                    socket2::Domain::IPV6
+                } else {
+                    socket2::Domain::IPV4
+                },
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            )
+            .map_err(|e| Error::ConnectionFailed(format!("socket create: {e}")))?;
+            socket
+                .set_reuse_address(true)
+                .map_err(|e| Error::ConnectionFailed(format!("SO_REUSEADDR: {e}")))?;
+            socket
+                .set_nonblocking(true)
+                .map_err(|e| Error::ConnectionFailed(format!("set_nonblocking: {e}")))?;
+            socket.bind(&self.config.listen_addr.into()).map_err(|e| {
+                Error::ConnectionFailed(format!("bind {}: {e}", self.config.listen_addr))
+            })?;
+            socket
+                .listen(128)
+                .map_err(|e| Error::ConnectionFailed(format!("listen: {e}")))?;
+            let listener = TcpListener::from_std(socket.into())
+                .map_err(|e| Error::ConnectionFailed(format!("TcpListener::from_std: {e}")))?;
+            crate::network::switchboard::Acceptor::Tcp(listener)
+        };
 
         let broadcast_rx = self
             .tx_broadcast_rx
@@ -945,7 +965,7 @@ impl P2PNode {
         node_runtime.track(
             "listener-acceptor",
             peer_manager::spawn_listener_acceptor(
-                listener,
+                acceptor,
                 peer_manager::AcceptorContext {
                     peers: self.peers.clone(),
                     event_tx: self.event_tx.clone(),
@@ -976,6 +996,12 @@ impl P2PNode {
                     senders: self.peer_senders.clone(),
                     chain_state: self.chain_state.reader(),
                     proxy: self.config.proxy.clone(),
+                    sim_connector: self.sim.as_ref().map(|sb| {
+                        crate::network::switchboard::SimConnector::new(
+                            Arc::clone(sb),
+                            self.config.listen_addr,
+                        )
+                    }),
                     scorer: self.peer_scorer.clone(),
                     identity: self.identity.clone(),
                     encryption: self.config.encryption.clone(),
