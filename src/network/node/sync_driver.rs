@@ -192,6 +192,12 @@ pub(super) fn spawn_sync_driver(
         // 500ms tick during IBD — aggressive sync for fast convergence.
         // Each tick requests up to 500 blocks distributed across all peers.
         let mut tick = interval(Duration::from_millis(500));
+        // #184: if a tick is late (e.g. a slow lock-held operation briefly stalls
+        // the loop), do NOT fire all the missed ticks back-to-back. tokio's default
+        // (Burst) replayed ~90 missed ticks at once, which raced the no-progress
+        // counter to its 60-tick cap and made the watchdog force Headers before the
+        // queued block spans were even requested — net ~100 blocks per round.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let _stall_timeout: u64 = 30; // seconds before considering sync stalled
         let mut driver = SyncDriverState::new(sync_chain.height());
 

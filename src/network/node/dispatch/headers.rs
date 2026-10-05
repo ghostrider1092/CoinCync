@@ -588,8 +588,16 @@ pub(super) async fn handle_headers(
                 }
                 return Ok(());
             }
-            let mut sync_guard = sync.write().await;
-            if !sync_guard.validate_header_nonce(headers_msg.nonce, &peer_id) {
+            // #184: gate on the nonce under a READ lock — cheap and DoS-safe
+            // (reject unsolicited / cross-peer headers before any expensive work)
+            // — but do NOT consume it yet, so `headers_request_time` stays set and
+            // the driver will not re-request during the slow validation below (the
+            // 60s headers timeout comfortably covers the ~24-46s batch verify).
+            if !sync
+                .read()
+                .await
+                .is_header_nonce_outstanding(headers_msg.nonce, &peer_id)
+            {
                 debug!(
                     "Ignoring Headers nonce={} from peer {:?}: not outstanding for this peer \
                      (cross-peer, stale generation, or already consumed)",
@@ -599,6 +607,11 @@ pub(super) async fn handle_headers(
                 return Ok(());
             }
 
+            // #184: verify the header batch WITHOUT holding the ChainSync lock.
+            // This is ~2000 sequential RandomX verifications (~24-46s in light
+            // mode); holding the write lock across it froze the entire sync driver,
+            // so a fresh node advanced only ~100 blocks per batch. Off the lock,
+            // block downloads keep flowing while the headers validate.
             let hashes = match validate_header_batch(chain, &headers_msg.headers) {
                 Ok(hashes) => hashes,
                 Err(error) => {
@@ -609,7 +622,6 @@ pub(super) async fn handle_headers(
                         headers_msg.headers[error.index].height,
                         error.reason.as_str(),
                     );
-                    drop(sync_guard);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                         scorer
                             .write()
@@ -621,6 +633,20 @@ pub(super) async fn handle_headers(
                 }
             };
 
+            // #184: re-acquire the write lock only now — to consume the nonce and
+            // queue the validated hashes. If the nonce is gone (a rare >60s timeout
+            // reset, or a duplicate consumed it during validation), discard: the
+            // driver has already moved on.
+            let mut sync_guard = sync.write().await;
+            if !sync_guard.validate_header_nonce(headers_msg.nonce, &peer_id) {
+                debug!(
+                    "Dropping validated Headers nonce={} from peer {:?}: no longer outstanding \
+                     (timed out or superseded during validation)",
+                    headers_msg.nonce,
+                    &peer_id[..4]
+                );
+                return Ok(());
+            }
             let max_header_height = headers_msg
                 .headers
                 .last()
