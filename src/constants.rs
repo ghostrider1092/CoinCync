@@ -402,6 +402,64 @@ pub const SEQ_PAD_ITERATIONS: u32 = 1;
 /// Must be coordinated across all nodes. Set to a future height agreed by governance.
 pub const V2_TX_ACTIVATION_HEIGHT: u64 = 50_000; // ~69 days at 120s blocks
 
+/// Activation height for shielded (Lelantus-Spark) transactions
+/// (`TxType::Shielded`). Below this height a shielded tx is REJECTED by
+/// consensus (fail-closed). `u64::MAX` = permanently disabled: the wire type
+/// and its validation/apply dispatch exist, but no shielded tx can ever be
+/// accepted until this is set to a real governance-agreed future height AND the
+/// real Spark verifier + accumulator-apply path are wired and audited.
+///
+/// SECURITY: setting this to a finite height is a consensus-breaking wire hard
+/// fork (borsh discriminant 3). It stays `u64::MAX` until the shielded path is
+/// complete, verified, and coordinated. See docs/design/cip-shielded-txtype.md.
+pub const SHIELDED_TX_ACTIVATION_HEIGHT: u64 = u64::MAX;
+
+/// Shielded activation height on **regtest only** — a finite height so the full
+/// shielded verify/apply path (SparkPayload v2 → `verify_block_spark_v2` →
+/// `apply_spark_v2_txs`) can be exercised end-to-end through the real `add_block`
+/// gauntlet in a controlled local regtest, toward the pre-audit 24h soak.
+///
+/// SECURITY: this NEVER affects testnet or mainnet — see
+/// [`shielded_activation_height`], which returns `SHIELDED_TX_ACTIVATION_HEIGHT`
+/// (`u64::MAX`, permanently disabled) for every non-regtest network. Regtest has
+/// no economic value and its genesis is ephemeral, so activating there is safe
+/// and is the only way to soak the shielded consensus path before audit.
+pub const SHIELDED_REGTEST_ACTIVATION_HEIGHT: u64 = 100;
+
+/// Network-scoped shielded activation height. **Regtest** activates at
+/// [`SHIELDED_REGTEST_ACTIVATION_HEIGHT`]; **testnet and mainnet stay
+/// `u64::MAX`** (permanently disabled) until the shielded path is externally
+/// audited and a governance-agreed height is set. This is the ONLY place the
+/// regtest override lives — production networks are unconditionally gated off.
+pub const fn shielded_activation_height(network: crate::config::NetworkType) -> u64 {
+    match network {
+        crate::config::NetworkType::Regtest => {
+            // Regtest activates ONLY in a shielded-feature build (the soak build).
+            // A default/production build keeps regtest at `u64::MAX` too, so it is
+            // byte-identical with shielded off on every network.
+            #[cfg(feature = "sketch-gk-proof")]
+            {
+                SHIELDED_REGTEST_ACTIVATION_HEIGHT
+            }
+            #[cfg(not(feature = "sketch-gk-proof"))]
+            {
+                SHIELDED_TX_ACTIVATION_HEIGHT
+            }
+        }
+        // Testnet + mainnet: permanently disabled until audit.
+        crate::config::NetworkType::Testnet | crate::config::NetworkType::Mainnet => {
+            SHIELDED_TX_ACTIVATION_HEIGHT
+        }
+    }
+}
+
+/// Whether shielded transactions are active for `network` at `height`
+/// (fail-closed: only once a real activation height is set and reached). On
+/// testnet/mainnet this is always `false` (activation height is `u64::MAX`).
+pub const fn shielded_tx_active_at_height(network: crate::config::NetworkType, height: u64) -> bool {
+    height >= shielded_activation_height(network)
+}
+
 pub fn block_version_at_height(height: u64) -> u8 {
     if height >= V2_TX_ACTIVATION_HEIGHT {
         2
@@ -1297,6 +1355,31 @@ mod tests {
     #[test]
     fn test_supply_cap_is_100m() {
         assert_eq!(TOTAL_SUPPLY_TARGET, 100_000_000);
+    }
+
+    #[test]
+    fn shielded_activation_is_network_scoped_production_permanently_off() {
+        use crate::config::NetworkType::{Mainnet, Regtest, Testnet};
+        // SAFETY INVARIANT: testnet + mainnet are permanently disabled — the
+        // activation height is u64::MAX and NO height activates shielded there.
+        assert_eq!(shielded_activation_height(Testnet), u64::MAX);
+        assert_eq!(shielded_activation_height(Mainnet), u64::MAX);
+        assert!(!shielded_tx_active_at_height(Testnet, u64::MAX - 1));
+        assert!(!shielded_tx_active_at_height(Mainnet, 1_000_000_000));
+
+        // Regtest activates ONLY in a shielded-feature build (the soak build);
+        // a default build keeps it disabled too.
+        #[cfg(feature = "sketch-gk-proof")]
+        {
+            assert_eq!(shielded_activation_height(Regtest), SHIELDED_REGTEST_ACTIVATION_HEIGHT);
+            assert!(!shielded_tx_active_at_height(Regtest, SHIELDED_REGTEST_ACTIVATION_HEIGHT - 1));
+            assert!(shielded_tx_active_at_height(Regtest, SHIELDED_REGTEST_ACTIVATION_HEIGHT));
+        }
+        #[cfg(not(feature = "sketch-gk-proof"))]
+        {
+            assert_eq!(shielded_activation_height(Regtest), u64::MAX);
+            assert!(!shielded_tx_active_at_height(Regtest, 1_000_000_000));
+        }
     }
 
     #[test]
