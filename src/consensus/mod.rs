@@ -31,10 +31,17 @@ pub mod shielded_connector; // bridge to the isolated spark-connector crate
 /// Gated + inert; see `docs/design/cip-spark-block-format.md`.
 #[cfg(feature = "sketch-gk-proof")]
 pub mod spark_payload;
+/// Consensus-rules fingerprint advertised in the handshake (advisory divergence
+/// detection). See docs/design/consensus-fingerprint.md.
+pub mod fingerprint;
+/// Non-consensus difficulty / block-interval telemetry (kept out of the
+/// hash-locked difficulty.rs). See docs/design/difficulty-health-telemetry.md.
+pub mod telemetry;
 pub mod fee_market;
 pub mod finality;
 pub mod fork_signal;
 pub mod header;
+pub mod invariants;
 pub mod pow;
 pub mod pow_cache;
 pub mod privacy_policy;

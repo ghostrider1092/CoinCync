@@ -43,8 +43,8 @@ fn block(magic: [u8; 4], version: u8, height: u64, prev: Hash, ts: u64, n_coinba
     let header = BlockHeader {
         network_magic: magic,
         version,
-        height,
-        timestamp: ts,
+        height: coincync::primitives::Height::new(height),
+        timestamp: ts.into(),
         prev_hash: prev,
         tx_root: Hash::zero(),
         anchor: Hash::zero(),
@@ -65,7 +65,7 @@ fn malformed_blocks_are_rejected_identically_by_every_node() {
     let sim = Sim::new(3);
     let magic = NetworkType::Testnet.magic_bytes();
     let genesis = sim.nodes[0].chain.get_block_by_height(0).unwrap().hash();
-    let good_ts = sim.nodes[0].chain.get_block_by_height(0).unwrap().header.timestamp + 3600;
+    let good_ts = sim.nodes[0].chain.get_block_by_height(0).unwrap().header.timestamp.as_secs() + 3600;
     let far_future = good_ts + 10 * 365 * 24 * 3600;
 
     // Deterministic corpus — each block violates a distinct structural rule.

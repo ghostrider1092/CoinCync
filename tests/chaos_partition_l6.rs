@@ -51,7 +51,7 @@ impl Bus {
             chain
                 .restore_state(0, genesis.hash(), 1)
                 .expect("seed base");
-            base_ts = genesis.header.timestamp;
+            base_ts = genesis.header.timestamp.as_secs();
             // Per-node miner keys so two nodes produce DISTINCT blocks at the
             // same height (different coinbase => different tx_root => real fork).
             let (_s, spend_pub) = generate_keypair();
@@ -123,7 +123,7 @@ impl Bus {
                 }
                 // Clone src's outbox first to release the borrow before mutating dst.
                 let mut blocks: Vec<Block> = self.nodes[src].known.clone();
-                blocks.sort_by_key(|b| b.header.height);
+                blocks.sort_by_key(|b| b.header.height.as_u64());
                 for blk in blocks {
                     match self.nodes[dst].chain.add_block(blk.clone()) {
                         Ok(BlockStatus::Accepted)

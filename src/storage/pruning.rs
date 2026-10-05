@@ -304,7 +304,7 @@ impl PrunedBlockData {
             height,
             prev_hash: block.header.prev_hash,
             tx_root: block.header.tx_root,
-            timestamp: block.header.timestamp,
+            timestamp: block.header.timestamp.as_secs(),
             target: block.header.target,
             tx_count: block.transactions.len() as u32,
         }

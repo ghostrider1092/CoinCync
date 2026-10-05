@@ -27,7 +27,9 @@ pub mod peer_security;
 pub mod proxy;
 pub mod relay_score;
 pub mod scoring;
+pub mod switchboard;
 pub mod sync;
+pub mod transport;
 
 /// Shared serialization lock for tests that mutate the process-global
 /// `MAINTAINER_PUBKEY_ENV` (`COINCYNC_PEER_SNAPSHOT_PUBKEY`). Both

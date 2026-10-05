@@ -178,6 +178,31 @@ static SEQ_PAD_CACHE: std::sync::LazyLock<Mutex<SeqPadCache>> =
 #[cfg(feature = "randomx")]
 static RANDOMX_GENESIS_BYTES: OnceLock<[u8; 32]> = OnceLock::new();
 
+/// Whether the built-in solo miner is running in THIS process. Set once at node
+/// startup (from `--mine`). Governs the default RandomX mode (#132): a node that
+/// only VALIDATES verifies one hash per block, so light mode (cache-only) is
+/// strictly better — fast startup, ~256 MB, and no 2 GB dataset rebuild on every
+/// epoch key-switch during sync (the reporter's IBD thrash). Full-mem is
+/// reserved for the miner, where hashrate matters. CONSENSUS-SAFE: hashes are
+/// byte-identical across modes (see `fast_light_equivalence`).
+static NODE_MINING_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Declare whether the built-in miner is active in this process. Call once at
+/// startup, before any block validation/PoW, so the RandomX mode default is
+/// chosen correctly. See [`NODE_MINING_ACTIVE`].
+pub fn set_node_mining_active(active: bool) {
+    NODE_MINING_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the built-in miner has been declared active in this process (see
+/// [`set_node_mining_active`]). Observability + lets non-node consumers of the
+/// shared RandomX cache (e.g. `coincync-rig`) assert they selected full-mem
+/// mode. Does NOT affect consensus — hashes are byte-identical across modes.
+pub fn node_mining_active() -> bool {
+    NODE_MINING_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Bind RandomX epoch keys to the genesis hash for the selected network.
 /// Call once at process startup from `coincync-node` and `coincync-miner` (before PoW).
 pub fn bind_randomx_genesis_for_network(network: crate::config::NetworkType) {
@@ -419,7 +444,6 @@ mod randomx_cache {
     use parking_lot::{Mutex, RwLock};
     use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
     use std::cell::RefCell;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Shared dataset entry — cache + (optional) dataset + flags for
     /// the current epoch key. Cache and Dataset are `Arc<*Inner>`
@@ -446,7 +470,24 @@ mod randomx_cache {
     unsafe impl Sync for DatasetEntry {}
 
     static DATASET_CACHE: RwLock<Option<DatasetEntry>> = RwLock::new(None);
-    static RETRY_AFTER: AtomicU64 = AtomicU64::new(0);
+
+    /// RandomX (re)initialization backoff deadline, on a MONOTONIC clock.
+    /// #142: the previous deadline was a wall-clock `AtomicU64` (`now_secs +
+    /// 60`). When the system clock read before the Unix epoch, every hash/batch
+    /// call CLEARED it — wiping the 60s backoff a genuine init/allocation
+    /// failure had just set, so the mining loop (which retries immediately on
+    /// error) busy-retried the whole init fallback with no throttle. `Instant`
+    /// is immune to wall-clock state, so the backoff now survives a
+    /// misconfigured clock; the wall clock is read only for the operator
+    /// warning below.
+    static RETRY_UNTIL: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+    /// One-shot guard so the "clock before UNIX_EPOCH" warning logs ONCE —
+    /// shared across BOTH hash paths (single-shot `compute_hash` + batched
+    /// `compute_hash_batch`). #142: it previously fired on every hash/batch
+    /// call while the clock read pre-epoch, flooding mining logs even when the
+    /// dataset and VM were already initialized. The PR promised "log once".
+    static PRE_EPOCH_WARN_ONCE: std::sync::Once = std::sync::Once::new();
 
     /// Prewarmed NEXT-epoch dataset, built on a background thread BEFORE the
     /// epoch boundary is crossed so the crossing promotes it instantly
@@ -476,6 +517,35 @@ mod randomx_cache {
         vm: RandomXVM,
     }
 
+    /// #142: warn ONCE (shared across both hash paths via `PRE_EPOCH_WARN_ONCE`)
+    /// if the system wall clock is before the Unix epoch. Backoff is monotonic
+    /// (`RETRY_UNTIL`) and unaffected by a bad wall clock, so this is purely an
+    /// operator heads-up — not a throttle decision. Called on every hash/batch,
+    /// but only the first pre-epoch occurrence logs.
+    fn warn_if_clock_pre_epoch() {
+        if std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .is_err()
+        {
+            PRE_EPOCH_WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "system clock is before UNIX_EPOCH; fix the system clock. \
+                     RandomX (re)init backoff uses a monotonic clock and is unaffected."
+                );
+            });
+        }
+    }
+
+    /// #142: remaining RandomX-backoff seconds if a monotonic (re)init backoff
+    /// is still active, else `None`. Monotonic `Instant`, so a misconfigured
+    /// wall clock cannot spuriously clear or extend it.
+    fn randomx_backoff_remaining() -> Option<u64> {
+        (*RETRY_UNTIL.lock()).and_then(|until| {
+            let now = std::time::Instant::now();
+            (now < until).then(|| until.saturating_duration_since(now).as_secs())
+        })
+    }
+
     /// Hash dispatch — Phase 2 architecture.
     ///
     /// **Hot path** (steady state, no epoch flip):
@@ -498,15 +568,13 @@ mod randomx_cache {
         seed: &[u8; 32],
         input: &[u8],
     ) -> std::result::Result<[u8; 32], crate::error::Error> {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let retry_at = RETRY_AFTER.load(Ordering::Relaxed);
-        if retry_at != 0 && now_secs < retry_at {
+        // #142: monotonic backoff — a pre-epoch wall clock warns (once) but no
+        // longer clears the deadline, so a genuine init-failure throttle holds.
+        warn_if_clock_pre_epoch();
+        if let Some(remaining) = randomx_backoff_remaining() {
             return Err(crate::error::Error::Internal(format!(
                 "RandomX in backoff for {}s",
-                retry_at - now_secs
+                remaining
             )));
         }
 
@@ -514,7 +582,7 @@ mod randomx_cache {
         //    Fast path: read lock + matching key (no allocation).
         //    Slow path: write lock + rebuild (only on epoch boundary or
         //    first hash ever).
-        let (cache, dataset, flags) = match ensure_dataset(seed, now_secs) {
+        let (cache, dataset, flags) = match ensure_dataset(seed) {
             Ok(triple) => triple,
             Err(e) => return Err(e),
         };
@@ -577,22 +645,21 @@ mod randomx_cache {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let retry_at = RETRY_AFTER.load(Ordering::Relaxed);
-        if retry_at != 0 && now_secs < retry_at {
+        // #142: same monotonic backoff + log-once pre-epoch handling as
+        // compute_hash, sharing RETRY_UNTIL and PRE_EPOCH_WARN_ONCE so the
+        // warning fires once across BOTH paths.
+        warn_if_clock_pre_epoch();
+        if let Some(remaining) = randomx_backoff_remaining() {
             return Err(crate::error::Error::Internal(format!(
                 "RandomX in backoff for {}s",
-                retry_at - now_secs
+                remaining
             )));
         }
 
         // Same seed/VM lifecycle as compute_hash: ensure the shared dataset
         // matches the seed, then (re)build this thread's VM if the key
         // rotated, then hash the whole batch through it.
-        let (cache, dataset, flags) = ensure_dataset(seed, now_secs)?;
+        let (cache, dataset, flags) = ensure_dataset(seed)?;
         THREAD_VM.with(|cell| {
             let mut guard = cell.borrow_mut();
             let needs_new = match &*guard {
@@ -626,7 +693,6 @@ mod randomx_cache {
     /// to build a per-thread VM from.
     fn ensure_dataset(
         seed: &[u8; 32],
-        now_secs: u64,
     ) -> std::result::Result<(RandomXCache, Option<RandomXDataset>, RandomXFlag), crate::error::Error>
     {
         // Fast path: read-only check.
@@ -660,7 +726,7 @@ mod randomx_cache {
                 let entry = pw.take().expect("checked Some above");
                 let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
                 *guard = Some(entry);
-                RETRY_AFTER.store(0, Ordering::Relaxed);
+                *RETRY_UNTIL.lock() = None; // #142: init succeeded — clear backoff
                 tracing::info!(
                     "RandomX epoch dataset promoted from prewarm (no build stall), key={}...",
                     hex::encode(&seed[..4])
@@ -673,11 +739,15 @@ mod randomx_cache {
             Ok(entry) => {
                 let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
                 *guard = Some(entry);
-                RETRY_AFTER.store(0, Ordering::Relaxed);
+                *RETRY_UNTIL.lock() = None; // #142: init succeeded — clear backoff
                 Ok(triple)
             }
             Err(e) => {
-                RETRY_AFTER.store(now_secs + 60, Ordering::Relaxed);
+                // #142: throttle re-init on a MONOTONIC deadline so a
+                // misconfigured wall clock can't wipe it and let the mining
+                // loop busy-retry a persistent allocation failure.
+                *RETRY_UNTIL.lock() =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
                 Err(e)
             }
         }
@@ -788,9 +858,19 @@ mod randomx_cache {
             .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
             .unwrap_or(false);
 
+        // #132: default to light mode unless the built-in miner is active. A
+        // validating/syncing node checks one hash per block, so the 2 GB
+        // full-mem dataset buys nothing and — worse — is rebuilt on every epoch
+        // key-switch during IBD (~30s each), which is what stalled the reporter's
+        // sync. Full-mem is kept only when this process mines. The env var still
+        // forces light either way (low-RAM opt-out). Consensus-safe: hashes are
+        // identical across modes (fast_light_equivalence).
+        let use_light = light_mode_forced
+            || !super::NODE_MINING_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
+
         // Tier 1: full-memory mode. JIT + AES + the 2 GB dataset.
-        // Skipped if the operator opted out.
-        if !light_mode_forced {
+        // Used only when this process is mining and full-mem wasn't opted out.
+        if !use_light {
             let full_flags = recommended | RandomXFlag::FLAG_FULL_MEM | secure;
             tracing::info!(
                 "Building RandomX dataset (mode: full-mem): active={:?}, key={}... \
@@ -818,10 +898,12 @@ mod randomx_cache {
                 }
             }
         } else {
-            tracing::info!(
-                "Skipping full-mem RandomX (COINCYNC_RANDOMX_LIGHT_MODE=1 set); \
-                 using light mode directly"
-            );
+            let reason = if light_mode_forced {
+                "COINCYNC_RANDOMX_LIGHT_MODE set"
+            } else {
+                "node is validating-only (not mining) — light mode is sufficient and avoids dataset rebuilds during sync (#132)"
+            };
+            tracing::info!("Using light-mode RandomX directly: {}", reason);
         }
 
         // Tier 2: light mode (cache-only).
@@ -1037,11 +1119,7 @@ mod randomx_cache {
 
             // ensure_dataset must PROMOTE it — consume the prewarm slot and
             // install it as the live dataset, no rebuild.
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            ensure_dataset(&seed, now).expect("ensure_dataset should promote the prewarmed entry");
+            ensure_dataset(&seed).expect("ensure_dataset should promote the prewarmed entry");
 
             assert!(
                 DATASET_CACHE

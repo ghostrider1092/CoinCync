@@ -431,7 +431,7 @@ pub(super) async fn handle_blocks(
                 debug!(
                     "  block[{}]: height={} algo={} size={} txs={}",
                     bi,
-                    block.header.height,
+                    block.header.height.as_u64(),
                     block.header.algorithm,
                     block.size(),
                     block.transactions.len()
@@ -498,8 +498,8 @@ pub(super) async fn handle_blocks(
                 // inside) — the relay previously trusted block.header.anchor.
                 let pow_hash = match crate::consensus::pow_cache::pow_hash_cached(
                     &block.header.prev_hash,
-                    block.header.height,
-                    block.header.timestamp,
+                    block.header.height.as_u64(),
+                    block.header.timestamp.as_secs(),
                     block.header.nonce,
                     &block.header.tx_root,
                     &block.header.anchor,
@@ -679,8 +679,8 @@ pub(super) async fn handle_block_data(
         // single RandomX run; also binds the claimed anchor (recomputed inside).
         let pow_hash = match crate::consensus::pow_cache::pow_hash_cached(
             &block.header.prev_hash,
-            block.header.height,
-            block.header.timestamp,
+            block.header.height.as_u64(),
+            block.header.timestamp.as_secs(),
             block.header.nonce,
             &block.header.tx_root,
             &block.header.anchor,
@@ -780,8 +780,8 @@ mod tests {
             BlockHeader {
                 network_magic: [4, 3, 2, 1],
                 version: 1,
-                height: 1,
-                timestamp: 1,
+                height: crate::primitives::Height::new(1),
+                timestamp: crate::primitives::Timestamp::from_secs(1),
                 prev_hash: Hash::zero(),
                 tx_root: Hash::zero(),
                 anchor: Hash::zero(),
@@ -819,8 +819,8 @@ mod tests {
             BlockHeader {
                 network_magic: magic,
                 version: 1,
-                height: 1,
-                timestamp: 1,
+                height: crate::primitives::Height::new(1),
+                timestamp: crate::primitives::Timestamp::from_secs(1),
                 prev_hash: Hash::zero(),
                 tx_root: Hash::zero(),
                 anchor: Hash::zero(),

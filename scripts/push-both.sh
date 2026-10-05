@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# push-both.sh — push ONE branch to the project's public home(s).
+# push-both.sh — push ONE branch to the project's GitHub home(s).
 #
 #   • PRIMARY  GitHub user  (ghostrider1092/CoinCync)     remote: origin
 #   • MIRROR   GitHub org   (Coincync/Coincync-Testnet-)   remote: mirror
@@ -14,12 +14,11 @@
 # repo is not. This script pushes feature branches to both.
 #
 # Codeberg was REMOVED 2026-08-20: Codeberg's usage policy prohibits
-# cryptocurrency/blockchain projects, so it was never a valid home (the old
-# "crypto-tolerant" label here was wrong) and pushing there risked a ToS
-# takedown. NLnet/NGI0 does not require Codeberg — it is host-agnostic. If you
-# want a non-GitHub fallback that ACTUALLY tolerates the project, use one that
-# permits it (GitLab.com, sourcehut, a self-hosted Forgejo/Gitea, or Radicle) —
-# NOT Codeberg — and wire it into the optional block below.
+# cryptocurrency/blockchain projects, so it was never a valid home and pushing
+# there risked a ToS takedown. NLnet/NGI0 is host-agnostic and does not require
+# it. If you want a non-GitHub fallback that ACTUALLY tolerates the project, use
+# one that permits it (GitLab.com, sourcehut, self-hosted Forgejo/Gitea, or
+# Radicle) — NOT Codeberg — and add it to the mirror list below.
 #
 # Usage:  scripts/push-both.sh <branch>
 #

@@ -420,8 +420,8 @@ mod tests {
             header: BlockHeader {
                 network_magic: test_magic,
                 version: 1,
-                height: 0,
-                timestamp: 0,
+                height: crate::primitives::Height::new(0),
+                timestamp: crate::primitives::Timestamp::from_secs(0),
                 prev_hash: Hash::zero(),
                 tx_root: Hash::zero(),
                 anchor: Hash::zero(),

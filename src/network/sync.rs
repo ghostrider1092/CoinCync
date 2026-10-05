@@ -248,10 +248,12 @@ pub struct ChainSync {
     // Phase 2a (V3 partial): per-peer total cumulative difficulty.
     // Populated by `update_peer_difficulty_for`, called when we observe
     // a block (announce or response) from `peer` with a known total work.
-    // Currently advisory — peer selection still uses height. Phase 2b
-    // (v1.0.12 protocol bump) will introduce a wire-format handshake
-    // field carrying this value at connection time, at which point peer
-    // trust switches from height to cumulative difficulty.
+    // Used by the work-aware `synced` flag AND — as of #126 — by block-download
+    // peer eligibility via `work_heavier_peers`: a peer on a shorter-but-heavier
+    // fork is admitted as a block source that height-based selection can never
+    // surface. A full Phase 2b handshake field carrying this value at connection
+    // time remains future work; today the signal is learned from ChainWork
+    // advertisements and observed blocks.
     //
     // Why difficulty, not height? Bitcoin Core, zebrad (Zcash), and
     // bitcoin-rs all select the canonical chain by cumulative work, not
@@ -286,6 +288,18 @@ pub struct ChainSync {
     /// progress, so the veto lifts once the grace elapses. See
     /// `work_behind_substantiated`.
     last_work_progress_at: u64,
+    /// #137 false-stall fix — monotonic count of blocks DELIVERED to the chain
+    /// layer by `on_block_received_from` (main-chain extends, requested
+    /// side-chain/fork blocks, and orphans resolved with them). This is the
+    /// download-progress signal the sync driver's stall detector needs: while a
+    /// node pulls down a shorter-but-heavier fork, requested fork blocks are
+    /// delivered and stored side-chain but the ACTIVE TIP does not advance until
+    /// the branch completes and the reorg fires. A height-only progress check
+    /// therefore sees "no progress" mid-download and bounces to Headers at 60
+    /// ticks, abandoning the half-downloaded fork. A rise in this counter proves
+    /// the download pipeline is doing real work even with a frozen tip. Never
+    /// decreases (saturating add), so the driver compares it tick-over-tick.
+    blocks_delivered: u64,
 }
 
 /// Firework Phase 2: a peer work-claim not refreshed within this many
@@ -349,6 +363,7 @@ impl ChainSync {
             next_header_nonce: 1,
             orphans_per_peer: HashMap::new(),
             blocks_entered_at: None,
+            blocks_delivered: 0,
         }
     }
 
@@ -575,6 +590,24 @@ impl ChainSync {
             .map(|(p, d)| (*p, *d))
     }
 
+    /// Peer IDs that currently advertise STRICTLY greater cumulative work than
+    /// our own tip. `peer_difficulties` is maintained to hold exactly these:
+    /// claims at-or-below local work are rejected on insert
+    /// (`update_peer_difficulty_for`), pruned on every local tip advance
+    /// (`set_local_total_difficulty`), and aged out when stale
+    /// (`expire_stale_work_claims`) — plus a bogus-over-claim cap on insert. So
+    /// the keyset is exactly the set of vetted work-heavier sync targets.
+    ///
+    /// This is the block-download counterpart to the work-aware `synced` flag
+    /// (#126): a peer on a shorter-but-HEAVIER fork holds the fork blocks we
+    /// need to reorg, yet a pure height gate in `send_block_spans` filters it
+    /// out, leaving the queued fork hashes undownloaded forever. Admitting these
+    /// peers closes that below-tip heavier-fork wedge without weakening height
+    /// selection (taller peers stay eligible unconditionally).
+    pub fn work_heavier_peers(&self) -> HashSet<PeerId> {
+        self.peer_difficulties.keys().copied().collect()
+    }
+
     pub fn best_known_difficulty(&self) -> u128 {
         self.best_known_difficulty
     }
@@ -696,6 +729,26 @@ impl ChainSync {
     pub fn true_best_height(&self) -> u64 {
         self.best_known_height
             .max(self.peer_heights.values().copied().max().unwrap_or(0))
+    }
+
+    /// #126 recovery hardening: should the sync driver (re-)trigger discovery?
+    /// True when a peer is more than `height_slack` blocks TALLER than us, OR a
+    /// vetted peer advertises more cumulative WORK than our tip (a
+    /// shorter-but-heavier fork — height alone never surfaces it, which left the
+    /// coarse recovery predicates dead for that case). The work arm reuses the
+    /// substantiated signal, so a phantom over-claim cannot pin us in perpetual
+    /// resync once the grace elapses (the same guarantee that protects the miner
+    /// veto). `#136` fixed the *download* selection; this makes the *recovery*
+    /// predicates that decide "are we behind, keep trying" work-aware too.
+    pub fn should_retrigger_sync_at(&self, local_height: u64, height_slack: u64, now: u64) -> bool {
+        self.true_best_height() > local_height.saturating_add(height_slack)
+            || self.work_behind_substantiated(now)
+    }
+
+    /// Production wrapper for [`Self::should_retrigger_sync_at`] using the system
+    /// clock; unit tests drive the `_at(now)` form for deterministic time.
+    pub fn should_retrigger_sync(&self, local_height: u64, height_slack: u64) -> bool {
+        self.should_retrigger_sync_at(local_height, height_slack, unix_now())
     }
 
     /// Drop a peer's cumulative-work claim WITHOUT touching its height.
@@ -1085,6 +1138,12 @@ impl ChainSync {
                     }
                 }
             }
+            // #137: every block handed to the chain layer here is download
+            // progress — including requested side-chain/fork blocks that do NOT
+            // advance the active tip until the branch completes and reorgs.
+            // The driver's stall detector reads this to avoid a false-stall
+            // Headers bounce mid-fork-download.
+            self.blocks_delivered = self.blocks_delivered.saturating_add(out.len() as u64);
             return Ok(out);
         }
 
@@ -1467,6 +1526,24 @@ impl ChainSync {
         }
     }
 
+    /// Non-consuming check that a Headers nonce is outstanding for `from_peer`
+    /// in the current generation — the same predicate as [`validate_header_nonce`]
+    /// but WITHOUT removing the nonce or clearing the request clock.
+    ///
+    /// #184: the Headers handler uses this to cheaply gate (and reject
+    /// unsolicited/cross-peer headers) under a read lock BEFORE the expensive
+    /// ~24-46s batch verification, then calls `validate_header_nonce` to consume
+    /// the nonce only after validation succeeds. Because the nonce stays
+    /// outstanding (and `headers_request_time` stays set) across validation, the
+    /// driver won't re-request in the meantime (the 60s timeout covers it).
+    pub fn is_header_nonce_outstanding(&self, n: u64, from_peer: &PeerId) -> bool {
+        matches!(
+            self.pending_header_nonces.get(&n),
+            Some((peer, generation))
+                if peer == from_peer && *generation == self.header_nonce_generation
+        )
+    }
+
     pub fn headers_timed_out(&self, now: u64) -> bool {
         self.headers_request_time
             .map(|t| now > t + 60)
@@ -1669,6 +1746,14 @@ impl ChainSync {
         self.pending_headers.len() + self.downloading.len()
     }
 
+    /// #137 — monotonic count of blocks delivered to the chain layer (see the
+    /// `blocks_delivered` field doc). The sync driver samples this each tick and
+    /// treats any increase as download progress, so a fork download that keeps
+    /// the active tip frozen no longer trips the no-progress Headers bounce.
+    pub fn blocks_delivered(&self) -> u64 {
+        self.blocks_delivered
+    }
+
     pub fn recover_stuck_downloads(&mut self) -> usize {
         let s: Vec<Hash> = self
             .downloading
@@ -1791,10 +1876,8 @@ impl ChainSync {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    // Single source of truth (E1): delegate to the canonical clock. See src/clock.rs.
+    crate::clock::unix_now()
 }
 
 #[derive(Clone, Debug)]
@@ -2066,8 +2149,8 @@ mod tests {
                 header: BlockHeader {
                     network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
                     version: 1,
-                    height,
-                    timestamp: 1_000 + height,
+                    height: crate::primitives::Height::new(height),
+                    timestamp: crate::primitives::Timestamp::from_secs(1_000 + height),
                     prev_hash: prev,
                     tx_root: {
                         let mut b = [0u8; 32];
@@ -2147,6 +2230,95 @@ mod tests {
         );
     }
 
+    /// #137 regression: `blocks_delivered()` must rise when a REQUESTED
+    /// side-chain/fork block is delivered, EVEN THOUGH the active tip height
+    /// does not advance. This is the signal the sync driver's stall detector
+    /// reads to avoid a false-stall Headers bounce mid-fork-download: while a
+    /// node pulls down a shorter-but-heavier fork, requested fork blocks are
+    /// delivered (and stored side-chain) with the tip frozen until the branch
+    /// completes and reorgs. Pre-fix the driver keyed progress on tip height
+    /// alone, so it saw "no progress" for 60 ticks and bounced to Headers,
+    /// abandoning the half-downloaded fork. A rising delivered counter proves
+    /// the download pipeline is doing real work with a frozen tip.
+    #[test]
+    fn blocks_delivered_rises_on_requested_fork_block_without_tip_advance() {
+        use crate::consensus::BlockHeader;
+        use crate::primitives::PublicKey;
+
+        let mine = |height: u64, prev: Hash, seed: u8| -> Block {
+            let easy = {
+                let mut b = [0xFFu8; 32];
+                b[31] = 0xFE;
+                Hash::from_bytes(b)
+            };
+            let mut blk = Block {
+                header: BlockHeader {
+                    network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
+                    version: 1,
+                    height: crate::primitives::Height::new(height),
+                    timestamp: crate::primitives::Timestamp::from_secs(1_000 + height),
+                    prev_hash: prev,
+                    tx_root: {
+                        let mut b = [0u8; 32];
+                        b[0] = seed;
+                        Hash::from_bytes(b)
+                    },
+                    anchor: Hash::zero(),
+                    algorithm: 0,
+                    nonce: 0,
+                    target: easy,
+                    miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+                    supply_commitment: [0u8; 32],
+                    checkpoint_vote: None,
+                    spark_set_root: [0u8; 32],
+                    mw_kernel_root: [0u8; 32],
+                },
+                transactions: vec![],
+            };
+            for n in 0u64..1_000_000 {
+                blk.header.nonce = n;
+                if blk.hash().meets_difficulty(&blk.header.target) {
+                    return blk;
+                }
+            }
+            panic!("could not mine a test block under the easy target");
+        };
+
+        // Our node sits on a MINORITY fork tip F @ 100; J @ 99 is the ancestor.
+        let j = {
+            let mut b = [0u8; 32];
+            b[0] = 0xAA;
+            Hash::from_bytes(b)
+        };
+        let fork_tip = {
+            let mut b = [0u8; 32];
+            b[0] = 0xFF;
+            Hash::from_bytes(b)
+        };
+        let mut sync = ChainSync::new(100, fork_tip);
+        assert_eq!(sync.blocks_delivered(), 0, "counter starts at zero");
+
+        // Canonical N (=100): a SIDE block (prev = J != our tip F). We requested
+        // it, so it takes the `was_req` delivery path.
+        let k = mine(100, j, 1);
+        let k_hash = k.hash();
+        sync.downloading.insert(k_hash);
+        let out_k = sync.on_block_received(k).expect("side block ok");
+
+        assert!(!out_k.is_empty(), "requested side block is delivered");
+        assert!(
+            sync.blocks_delivered() >= 1,
+            "delivering a requested fork block MUST advance blocks_delivered so \
+             the driver registers download progress"
+        );
+        // The whole point: the active tip did NOT move — a height-only progress
+        // check would (wrongly) see a stall here.
+        assert_eq!(
+            sync.local_height, 100,
+            "active tip height is unchanged by a side-chain delivery"
+        );
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // PHASE 1: state-machine property tests
     //
@@ -2200,6 +2372,31 @@ mod tests {
         assert!(
             !sync.validate_header_nonce(n, &peers[0]),
             "single-use: a consumed nonce must not validate twice"
+        );
+    }
+
+    /// #184: the non-consuming peek matches the same predicate as
+    /// validate_header_nonce (right peer + current generation) but leaves the
+    /// nonce AND the request clock intact, so the handler can gate cheaply under a
+    /// read lock before the slow off-lock validation, then still consume it after.
+    #[test]
+    fn header_nonce_peek_is_non_consuming() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        let n = sync.begin_headers_request(peers[0], 100).unwrap();
+
+        // Peek: true for the issuer, false cross-peer — and it consumes nothing.
+        assert!(sync.is_header_nonce_outstanding(n, &peers[0]));
+        assert!(!sync.is_header_nonce_outstanding(n, &peers[1]));
+        assert!(sync.is_header_nonce_outstanding(n, &peers[0]), "peek is idempotent");
+        assert!(sync.headers_request_pending(), "peek must not clear the request clock");
+
+        // The real consume still works afterwards (single-use).
+        assert!(sync.validate_header_nonce(n, &peers[0]));
+        assert!(!sync.headers_request_pending());
+        assert!(
+            !sync.is_header_nonce_outstanding(n, &peers[0]),
+            "a consumed nonce is no longer outstanding"
         );
     }
 
@@ -2540,6 +2737,46 @@ mod tests {
         assert!(
             !sync.work_behind_substantiated(WORK_SUBSTANTIATION_GRACE_SECS + 1),
             "no progress past the grace → veto lifts, miner resumes on our own tip"
+        );
+    }
+
+    /// #126 recovery hardening: `should_retrigger_sync` fires on a TALLER peer
+    /// (height) OR a work-heavier peer (a shorter-but-heavier fork) — and, like
+    /// the miner veto, its work arm self-heals past the substantiation grace so a
+    /// phantom over-claim can't force perpetual resync.
+    #[test]
+    fn should_retrigger_sync_covers_height_and_work_126() {
+        let peers = peer_pool();
+
+        // (a) Not behind: equal height, no work claim → do not retrigger.
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        assert!(!sync.should_retrigger_sync_at(100, 2, 0), "equal height, no work claim");
+
+        // (b) Height arm: a peer more than `slack` blocks taller → retrigger.
+        sync.update_peer_height_for(peers[0], 110);
+        assert!(sync.should_retrigger_sync_at(100, 2, 0), "taller peer beyond slack");
+
+        // (c) Work arm (#126): a peer NOT taller in height but heavier in
+        // cumulative work → retrigger, which the old height-only test never did.
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        sync.update_peer_difficulty_for(peers[0], 9_000); // heavier; height untouched
+        assert!(
+            sync.true_best_height() <= 100 + 2,
+            "precondition: the heavier peer is not taller by height"
+        );
+        sync.set_work_substantiation_for_test(Some(0), 0);
+        assert!(
+            sync.should_retrigger_sync_at(100, 2, 0),
+            "a work-heavier (shorter) fork must retrigger recovery"
+        );
+
+        // (d) Phantom safety: same claim, past the grace with no progress →
+        // stop retriggering (mirrors the miner-veto self-heal).
+        assert!(
+            !sync.should_retrigger_sync_at(100, 2, WORK_SUBSTANTIATION_GRACE_SECS + 1),
+            "an unsubstantiated work claim must not force perpetual resync"
         );
     }
 
@@ -3475,8 +3712,8 @@ mod tests {
                 header: BlockHeader {
                     network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
                     version: 1,
-                    height,
-                    timestamp: 1_000 + height,
+                    height: crate::primitives::Height::new(height),
+                    timestamp: crate::primitives::Timestamp::from_secs(1_000 + height),
                     prev_hash: Hash::zero(),
                     tx_root: Hash::zero(),
                     anchor: Hash::zero(),

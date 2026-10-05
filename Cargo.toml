@@ -1,5 +1,5 @@
 [workspace]
-members  = [".", "crates/auxpow", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality", "crates/orchard-side", "crates/spark-connector", "crates/tick"]
+members  = [".", "crates/auxpow", "crates/bridge", "crates/coincync-dbg", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality", "crates/orchard-side", "crates/spark-connector", "crates/tick"]
 # crates/cynchub: CIP-002 skeleton (post-mainnet merge-mined liquidity layer).
 # Doesn't define the workspace's "randomx"/"testnet" features, so workspace-
 # wide builds with --features error on its Cargo.toml. Build standalone:
@@ -50,6 +50,12 @@ path = "src/bin/sign_snapshot.rs"
 # RPC + this host's /proc. See src/bin/coincync-tick.rs.
 name = "coincync-tick"
 path = "src/bin/coincync-tick.rs"
+
+[[bin]]
+# Explain CoinCync diagnostic codes (like `rustc --explain`). Read-only; prints
+# from the compile-time diagnostics catalog. See src/bin/diag.rs.
+name = "coincync-diag"
+path = "src/bin/diag.rs"
 
 [features]
 default = ["randomx"]
@@ -181,7 +187,7 @@ rcgen                = "0.13"
 
 # â”€â”€ Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Migrated to RocksDB via the db::shim layer â€” see src/db/shim.rs.
-rocksdb  = { version = "0.22", features = ["multi-threaded-cf", "lz4"] }
+rocksdb  = { version = "0.23", features = ["multi-threaded-cf", "lz4"] }
 bech32   = "0.11"
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 redb     = "2"

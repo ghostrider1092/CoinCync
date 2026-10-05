@@ -105,6 +105,12 @@ pub struct NodeConfig {
     /// Externally reachable address registered as self to prevent gossip-driven
     /// self-dials when nonce detection is unavailable across restarts.
     pub external_addr: Option<SocketAddr>,
+    /// Per-IP inbound connection cap (#193). Defaults to
+    /// [`crate::network::connection_tracker::MAX_CONNECTIONS_PER_IP`] (2);
+    /// raise it on a seed when several legitimate nodes share one public IP
+    /// (a LAN behind one NAT). Raising it network-wide weakens per-IP Sybil
+    /// resistance, so it is a deliberate per-operator choice.
+    pub max_connections_per_ip: usize,
 }
 
 impl Default for NodeConfig {
@@ -121,6 +127,7 @@ impl Default for NodeConfig {
             data_dir: std::path::PathBuf::from("."),
             encryption: crate::config::P2PEncryptionConfig::default(),
             external_addr: None,
+            max_connections_per_ip: crate::network::connection_tracker::MAX_CONNECTIONS_PER_IP,
         }
     }
 }
@@ -133,6 +140,10 @@ pub struct NetworkStats {
     pub inbound: usize,
     pub bytes_recv: u64,
     pub bytes_sent: u64,
+    /// Sustained mesh-floor state: true when connected peers have been below
+    /// `MESH_FLOOR_PEERS` for `MESH_FLOOR_SUSTAIN_TICKS` consecutive heartbeats.
+    /// Observational by default (see docs/design/runtime-mesh-floor.md).
+    pub mesh_degraded: bool,
 }
 
 /// Connection memory accounting exposed by the facade.
