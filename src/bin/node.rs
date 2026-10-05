@@ -823,10 +823,16 @@ async fn start_node(
     info!("Network:  {:?}", network);
     info!("Data dir: {:?}", data_dir);
 
-    // #132: pick the RandomX mode default before any validation/PoW. A
-    // validating-only node uses light mode (fast sync, ~256 MB, no 2 GB dataset
-    // rebuild per epoch key-switch); full-mem is reserved for the built-in miner.
-    coincync::consensus::pow::set_node_mining_active(mine.is_some());
+    // #132/#186: pick the RandomX mode default before any validation/PoW. EVERY
+    // node — including a `--mine` node — starts in light/validating mode (fast
+    // sync, ~256 MB, no 2 GB dataset build per epoch key-switch). Previously a
+    // `--mine` node set this active at STARTUP, so it built the full 2 GB dataset
+    // from block 0 and — with the single-slot dataset cache flipping between the
+    // header-batch epoch and the block-batch epoch — rebuilt it (~23 s) twice per
+    // 100-block IBD round, slowing fresh mining-node sync and spiking RAM. A
+    // `--mine` node now flips to full-memory only once it is synced and about to
+    // mine (see the miner loop below).
+    coincync::consensus::pow::set_node_mining_active(false);
 
     // Self-preflight: refuse to run a binary compiled for one network as
     // another (a mainnet build started as --network testnet, or vice-versa).
@@ -1757,6 +1763,13 @@ async fn start_node(
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             continue;
                         }
+                        // #186: synced and about to mine — NOW switch to the
+                        // full-memory RandomX dataset. Idempotent atomic store;
+                        // pow builds the 2 GB dataset lazily on the first mined
+                        // hash. Until this point a --mine node validated IBD in
+                        // light mode, so it never built the full dataset during
+                        // sync.
+                        coincync::consensus::pow::set_node_mining_active(true);
                         let candidate = match coincync::mining::block_builder::build_candidate_block(
                             &chain_m,
                             &mempool_m,
