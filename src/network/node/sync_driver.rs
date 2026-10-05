@@ -149,6 +149,42 @@ impl SyncDriverState {
         self.started_at.elapsed().as_secs()
     }
 
+    /// Refresh the progress-time stall clock for this tick.
+    ///
+    /// The chain is "making progress" when ANY of these hold:
+    /// - the active tip advanced past the last recorded progress height, or
+    /// - #137: blocks were delivered to the chain layer this tick (a heavier
+    ///   shorter fork downloads/stores side-chain blocks without moving the tip
+    ///   until the reorg fires; a height-only check reads that as a stall and,
+    ///   at the 60-tick net, abandons the half-downloaded fork), or
+    /// - #192: we are effectively synced (caught up to every live peer). The
+    ///   clock used to advance ONLY on a tip move or an active download, so idle
+    ///   time sitting AT THE TIP accumulated as if it were a stall — then the
+    ///   instant a taller peer appeared (effectively_synced → false) the 300s
+    ///   threshold was already exceeded and EMERGENCY-TIER-3 fired on that same
+    ///   tick, before the announced block had even been requested. Counting
+    ///   idle-at-tip as progress starts the stall clock when we actually fall
+    ///   behind.
+    ///
+    /// On progress it also clears the emergency re-fire counter and the
+    /// Blocks-state 60-tick "No progress → Forcing Headers" counter (the latter
+    /// is only incremented in the Blocks arm, but this is the single
+    /// idle-is-not-a-stall reset point). `last_progress_height` itself is
+    /// updated in the Blocks arm, kept there for the Tier-2 counter-reset path.
+    fn note_progress_tick(
+        &mut self,
+        monotonic_now: u64,
+        current_height: u64,
+        blocks_flowing: bool,
+        effectively_synced: bool,
+    ) {
+        if current_height > self.last_progress_height || blocks_flowing || effectively_synced {
+            self.last_progress_time_secs = monotonic_now;
+            self.emergency_t3_fires = 0;
+            self.no_progress_ticks = 0;
+        }
+    }
+
     fn emergency_recovery_due(&self, monotonic_now: u64, is_synced: bool) -> bool {
         if is_synced || monotonic_now < EMERGENCY_T3_NO_PROGRESS_SECS {
             return false;
@@ -290,35 +326,7 @@ pub(super) fn spawn_sync_driver(
                 sync_chain.set_work_behind(work_behind);
             }
 
-            // ── PROGRESS-TIME STALL TRACKING (runs every tick) ────
-            // Unconditionally track when height last advanced. This
-            // is the ground truth for "is the chain actually moving."
-            // Don't conflate with the sync-engine's internal is_stalled
-            // predicate — that predicate failed to fire on the 2026-
-            // 06-02 orphan-fetch cascade because the engine was busy
-            // doing internal work (just no useful work).
-            {
-                let current_height_for_progress = sync_chain.height();
-                // #137: a tip advance OR blocks delivered this tick both reset
-                // the progress clock. Without the delivered check, a large
-                // heavier-fork download (tip frozen > EMERGENCY_T3_NO_PROGRESS_SECS
-                // while the branch assembles) would fire emergency Tier-3 deep
-                // recovery mid-download.
-                if current_height_for_progress > driver.last_progress_height || blocks_flowing {
-                    driver.last_progress_time_secs = monotonic_now;
-                    driver.emergency_t3_fires = 0;
-                    // last_progress_height itself is updated by the
-                    // existing else-branch below, kept there for
-                    // back-compat with the Tier-2 counter-reset path.
-                }
-            }
-
-            // ── EMERGENCY TIER-3 (progress-time-based) ────────────
-            // If chain hasn't advanced for EMERGENCY_T3_NO_PROGRESS_SECS
-            // while we believe we're not synced, fire deep recovery
-            // regardless of what is_stalled() thinks. Re-fires every
-            // EMERGENCY_T3_REPEAT_SECS until something works.
-            let secs_since_progress = monotonic_now.saturating_sub(driver.last_progress_time_secs);
+            // ── BEHIND / SYNCED GROUND TRUTH (computed once per tick) ──
             // GROUND-TRUTH behind check (2026-07-09 seed1 idle/limp-while-behind):
             // the manager's is_synced() and even chain.target_height() derive
             // from the peer_heights MAP, which empties under connection churn
@@ -328,9 +336,10 @@ pub(super) fn spawn_sync_driver(
             // CURRENTLY-CONNECTED peers: PeerInfo.height is set at handshake,
             // refreshed by ChainWork, and bound to the connection lifecycle
             // (cleared only on real disconnect), so it does not go stale-empty
-            // the way the manager map does. Fire recovery whenever our tip is
-            // below any live peer's height. This sustains recovery until we
-            // actually catch up, instead of stopping after one burst.
+            // the way the manager map does. We are effectively synced only when
+            // the engine says synced AND our tip is not below any live peer's
+            // height or the work-target. Computed here (before the progress
+            // clock) because #192 uses it to decide idle-is-not-a-stall.
             let max_connected_peer_height = sync_peers
                 .iter()
                 .filter(|p| p.state == PeerState::Connected)
@@ -340,6 +349,26 @@ pub(super) fn spawn_sync_driver(
             let chain_behind =
                 sync_chain.height() < sync_chain.target_height().max(max_connected_peer_height);
             let effectively_synced = sync_sync.read().await.is_synced() && !chain_behind;
+
+            // ── PROGRESS-TIME STALL TRACKING (runs every tick) ────
+            // Track when the chain last made progress. This is the ground truth
+            // for "is the chain actually moving" — NOT the sync-engine's internal
+            // is_stalled predicate (which failed to fire on the 2026-06-02
+            // orphan-fetch cascade because the engine was busy doing internal
+            // work with no useful result). See note_progress_tick for the #137
+            // (blocks-flowing) and #192 (idle-at-tip) ground-truth rules.
+            driver.note_progress_tick(monotonic_now, sync_chain.height(), blocks_flowing, effectively_synced);
+
+            // ── EMERGENCY TIER-3 (progress-time-based) ────────────
+            // If chain hasn't advanced for EMERGENCY_T3_NO_PROGRESS_SECS
+            // while we believe we're not synced, fire deep recovery
+            // regardless of what is_stalled() thinks. Re-fires every
+            // EMERGENCY_T3_REPEAT_SECS until something works.
+            // `effectively_synced` / `chain_behind` are computed once at the top
+            // of the tick (see the behind/synced ground-truth block above) and
+            // gate both the progress-clock refresh and this fire — so the
+            // 300s count is time spent ACTUALLY BEHIND, not idle time at the tip.
+            let secs_since_progress = monotonic_now.saturating_sub(driver.last_progress_time_secs);
             let should_fire_emergency =
                 driver.emergency_recovery_due(monotonic_now, effectively_synced);
 
@@ -933,6 +962,69 @@ mod tests {
         state.emergency_t3_fires = 1;
         assert!(!state.emergency_recovery_due(419, false));
         assert!(state.emergency_recovery_due(420, false));
+    }
+
+    /// Regression for #192: idle time AT THE TIP must not count as a stall, so
+    /// EMERGENCY-TIER-3 must not fire the instant a taller peer appears after a
+    /// long quiet period — it must wait the full threshold measured from when
+    /// the node ACTUALLY fell behind.
+    #[test]
+    fn idle_at_tip_does_not_trip_emergency_the_moment_we_fall_behind_192() {
+        let mut state = SyncDriverState::new(100);
+        // Last real block committed at t=0; then the node sits synced at the tip.
+        state.last_progress_time_secs = 0;
+
+        // Simulate 1000s of synced-at-tip ticks (no tip advance, nothing
+        // downloading). Pre-fix the clock would NOT advance here; the #192 fix
+        // keeps it current because effectively_synced is true.
+        for t in (0..=1000).step_by(5) {
+            state.note_progress_tick(
+                t,          // monotonic_now
+                100,        // current_height — unchanged, still at the tip
+                false,      // blocks_flowing — nothing downloading
+                true,       // effectively_synced — caught up to all peers
+            );
+        }
+        assert_eq!(
+            state.last_progress_time_secs, 1000,
+            "synced-at-tip ticks must keep the progress clock current (#192)"
+        );
+
+        // Now a taller peer appears at t=1000: we are no longer synced. The fire
+        // predicate must treat this as "0s behind", NOT "1000s stalled".
+        assert!(
+            !state.emergency_recovery_due(1000, false),
+            "must NOT fire immediately on falling behind — the clock was current"
+        );
+        assert!(
+            !state.emergency_recovery_due(1000 + EMERGENCY_T3_NO_PROGRESS_SECS - 1, false),
+            "must not fire before the threshold elapses from when we fell behind"
+        );
+        assert!(
+            state.emergency_recovery_due(1000 + EMERGENCY_T3_NO_PROGRESS_SECS, false),
+            "must fire once genuinely behind for the full threshold"
+        );
+    }
+
+    /// #192: note_progress_tick also clears the Blocks-state 60-tick
+    /// "No progress → Forcing Headers" counter on an idle-at-tip tick, so a long
+    /// quiet period cannot leave it primed to bounce us to Headers the instant
+    /// we fall behind.
+    #[test]
+    fn synced_tick_resets_no_progress_counter_192() {
+        let mut state = SyncDriverState::new(100);
+        state.no_progress_ticks = 59; // one short of the Forcing-Headers net
+        state.emergency_t3_fires = 3;
+        state.note_progress_tick(500, 100, false, true);
+        assert_eq!(state.no_progress_ticks, 0, "synced tick must reset the 60-tick net");
+        assert_eq!(state.emergency_t3_fires, 0, "synced tick must reset the emergency re-fire count");
+
+        // But a genuine behind-and-stalled tick (not synced, no delivery, no tip
+        // advance) must NOT reset — otherwise the stall could never be detected.
+        let mut behind = SyncDriverState::new(100);
+        behind.no_progress_ticks = 59;
+        behind.note_progress_tick(500, 100, false, false);
+        assert_eq!(behind.no_progress_ticks, 59, "a real stalled tick must not reset the counter");
     }
 
     fn sync_at(height: u64, local_work: u128) -> ChainSync {
