@@ -104,6 +104,18 @@ fn g_point() -> RistrettoPoint {
     RISTRETTO_BASEPOINT_POINT
 }
 
+/// The value generator `H` of the range-proof Pedersen commitment `C = v·H + r·G`.
+/// Exposed so a shielded value commitment can be linked (via a value-equality
+/// proof) to a range-provable commitment on this exact basis.
+pub fn value_generator() -> RistrettoPoint {
+    *H_POINT
+}
+/// The blinding generator `G` (Ristretto basepoint) of the range-proof
+/// Pedersen commitment `C = v·H + r·G`.
+pub fn blinding_generator() -> RistrettoPoint {
+    g_point()
+}
+
 /// Commit using Monero convention: C = v*H + r*G
 fn pedersen_commit(value: u64, blinding: &Scalar) -> RistrettoPoint {
     Scalar::from(value) * *H_POINT + blinding * g_point()
@@ -977,6 +989,150 @@ mod tests {
 
         // Verification should fail
         assert!(!verify_range_proof(&wrong_commitment, &proof));
+    }
+
+    // ─── Adversarial soundness harness (appended 2026-09-26) ──────────────────
+    // The range-proof verifier is the transparent chain's no-negative-value
+    // inflation guard: a verifier that accepts a mutated or mismatched proof is
+    // a malleability → inflation bug. These tests systematically assert the
+    // verifier REJECTS everything but the exact valid proof for the exact
+    // commitment(s). Seeded RNG ⇒ failures reproduce. This is verifier-soundness
+    // *testing* (implementation robustness), not a proof of the BP+ scheme's
+    // soundness — that remains the external audit's domain.
+
+    #[test]
+    fn range_proof_rejects_bit_flips_across_the_proof() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        let mut rng = StdRng::seed_from_u64(0xB17F_1105);
+        let amount = Amount::from_atomic(1_000);
+        let blinding = BlindingFactor::random(&mut rng);
+        let commitment = PedersenCommitment::commit(amount.as_atomic(), &blinding);
+        let proof = create_range_proof(amount, &blinding, &mut rng).unwrap();
+        assert!(verify_range_proof(&commitment, &proof), "the valid proof must verify");
+
+        let n = proof.data.len();
+        assert!(n > 0, "proof must carry bytes");
+        let step = (n / 48).max(1); // ~48 sampled positions to bound runtime
+        let mut checked = 0usize;
+        for i in (0..n).step_by(step) {
+            for bit in [0u8, 4, 7] {
+                let mut data = proof.data.clone();
+                data[i] ^= 1u8 << bit;
+                let mutated = RangeProof { version: proof.version, data };
+                assert!(
+                    !verify_range_proof(&commitment, &mutated),
+                    "a proof with byte {i} bit {bit} flipped must be rejected"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 30, "sanity: exercised a broad sample of mutations ({checked})");
+    }
+
+    #[test]
+    fn range_proof_rejects_truncation_and_extension() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        let mut rng = StdRng::seed_from_u64(0x7_5EED);
+        let amount = Amount::from_atomic(42_000);
+        let blinding = BlindingFactor::random(&mut rng);
+        let commitment = PedersenCommitment::commit(amount.as_atomic(), &blinding);
+        let proof = create_range_proof(amount, &blinding, &mut rng).unwrap();
+        assert!(verify_range_proof(&commitment, &proof));
+
+        // Truncated by one byte.
+        let mut truncated = proof.data.clone();
+        truncated.pop();
+        assert!(
+            !verify_range_proof(&commitment, &RangeProof { version: proof.version, data: truncated }),
+            "a truncated proof must be rejected"
+        );
+        // Extended by a trailing byte.
+        let mut extended = proof.data.clone();
+        extended.push(0u8);
+        assert!(
+            !verify_range_proof(&commitment, &RangeProof { version: proof.version, data: extended }),
+            "an over-long proof must be rejected"
+        );
+        // Empty payload.
+        assert!(
+            !verify_range_proof(&commitment, &RangeProof { version: proof.version, data: Vec::new() }),
+            "an empty proof must be rejected"
+        );
+    }
+
+    #[test]
+    fn range_proof_binds_to_the_exact_commitment_not_just_the_value() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        let mut rng = StdRng::seed_from_u64(0xB1_11D);
+        let amount = Amount::from_atomic(7_777);
+        let blinding_a = BlindingFactor::random(&mut rng);
+        let commitment_a = PedersenCommitment::commit(amount.as_atomic(), &blinding_a);
+        let proof = create_range_proof(amount, &blinding_a, &mut rng).unwrap();
+        assert!(verify_range_proof(&commitment_a, &proof));
+
+        // Same VALUE, different blinding ⇒ different commitment ⇒ must reject.
+        let blinding_b = BlindingFactor::random(&mut rng);
+        let commitment_b = PedersenCommitment::commit(amount.as_atomic(), &blinding_b);
+        assert_ne!(commitment_a.as_bytes(), commitment_b.as_bytes());
+        assert!(
+            !verify_range_proof(&commitment_b, &proof),
+            "the proof must bind to the exact commitment (blinding), not merely the value"
+        );
+
+        // Different value, same blinding ⇒ must reject.
+        let commitment_c = PedersenCommitment::commit(amount.as_atomic() + 1, &blinding_a);
+        assert!(
+            !verify_range_proof(&commitment_c, &proof),
+            "the proof must not verify against a different-value commitment"
+        );
+    }
+
+    #[test]
+    fn aggregated_range_proof_rejects_swapped_or_reordered_commitments() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        let mut rng = StdRng::seed_from_u64(0xA6_69E);
+        let amounts = [
+            Amount::from_atomic(100),
+            Amount::from_atomic(200),
+            Amount::from_atomic(300),
+        ];
+        let blindings: Vec<BlindingFactor> =
+            (0..3).map(|_| BlindingFactor::random(&mut rng)).collect();
+        let commitments: Vec<PedersenCommitment> = amounts
+            .iter()
+            .zip(blindings.iter())
+            .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
+            .collect();
+        let proof = create_aggregated_range_proof(&amounts, &blindings, &mut rng).unwrap();
+        assert!(verify_range_proofs(&commitments, &proof), "valid aggregated proof verifies");
+
+        // Swap one commitment for an unrelated one ⇒ must reject.
+        let mut swapped = commitments.clone();
+        let other = BlindingFactor::random(&mut rng);
+        swapped[1] = PedersenCommitment::commit(999, &other);
+        assert!(
+            !verify_range_proofs(&swapped, &proof),
+            "replacing one commitment must break the aggregated proof"
+        );
+
+        // Reorder commitments ⇒ must reject (the proof is position-bound).
+        let mut reordered = commitments.clone();
+        reordered.swap(0, 2);
+        assert!(
+            !verify_range_proofs(&reordered, &proof),
+            "reordered commitments must break the aggregated proof"
+        );
+
+        // Wrong count (drop one) ⇒ must reject.
+        let short = commitments[..2].to_vec();
+        assert!(
+            !verify_range_proofs(&short, &proof),
+            "a commitment-count mismatch must be rejected"
+        );
     }
 
     #[test]

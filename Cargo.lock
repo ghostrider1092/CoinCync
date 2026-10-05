@@ -1029,6 +1029,7 @@ dependencies = [
  "signal-hook 0.4.4",
  "snow",
  "socket2",
+ "spark-connector",
  "strsim",
  "subtle",
  "tari_bulletproofs_plus",
@@ -5484,6 +5485,13 @@ dependencies = [
  "log",
  "rand 0.8.6",
  "sha1",
+]
+
+[[package]]
+name = "spark-connector"
+version = "0.0.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
