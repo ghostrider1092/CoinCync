@@ -1,0 +1,69 @@
+{
+  "name": "coincync-dbg",
+  "displayName": "CoinCync Debugger",
+  "description": "Step and set semantic breakpoints on CoinCync consensus state, over the Debug Adapter Protocol.",
+  "version": "0.1.0",
+  "publisher": "coincync",
+  "license": "MIT",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Debuggers"],
+  "activationEvents": ["onDebugResolve:coincync-dbg"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "ccscenario",
+        "extensions": [".ccscenario"],
+        "aliases": ["CoinCync Scenario"]
+      }
+    ],
+    "breakpoints": [{ "language": "ccscenario" }, { "language": "rust" }],
+    "configuration": {
+      "title": "CoinCync Debugger",
+      "properties": {
+        "coincync-dbg.adapterPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the coincync-dbg adapter binary. Empty = auto-detect under the workspace's target/release or target/debug, then fall back to PATH."
+        }
+      }
+    },
+    "debuggers": [
+      {
+        "type": "coincync-dbg",
+        "label": "CoinCync Debugger",
+        "languages": ["rust", "ccscenario"],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "floorMultiple": {
+                "type": "number",
+                "description": "Pause when difficulty <= MIN_DIFFICULTY * this (default 2). Raise it to catch a sharp drop before the absolute floor.",
+                "default": 2
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "coincync-dbg",
+            "request": "launch",
+            "name": "CoinCync: difficulty replay (floor breakpoint)"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "CoinCync: difficulty replay",
+            "description": "Replay difficulty retargeting; break when it reaches the consensus floor.",
+            "body": {
+              "type": "coincync-dbg",
+              "request": "launch",
+              "name": "CoinCync: difficulty replay",
+              "floorMultiple": 2
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

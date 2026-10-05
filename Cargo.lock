@@ -1061,6 +1061,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coincync-dbg"
+version = "0.1.0"
+dependencies = [
+ "coincync",
+ "serde_json",
+]
+
+[[package]]
 name = "coincync-frost-coordinator"
 version = "0.1.0"
 dependencies = [
