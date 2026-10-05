@@ -63,7 +63,7 @@ impl Sim {
     fn step(&mut self, hashrate: u128) -> u64 {
         let height = self.blocks.len() as u64;
         let next_target = calculate_difficulty(&self.blocks, height);
-        let difficulty = target_to_difficulty(&next_target);
+        let difficulty = target_to_difficulty(&next_target).as_u128();
         let spacing = (TARGET_BLOCK_TIME as u128 * difficulty / hashrate).max(1) as u64;
         self.ts += spacing;
         self.blocks.push(DifficultyBlock {
@@ -80,7 +80,7 @@ impl Sim {
     }
 
     fn tip_difficulty(&self) -> u128 {
-        target_to_difficulty(&self.blocks.last().unwrap().target)
+        target_to_difficulty(&self.blocks.last().unwrap().target).as_u128()
     }
 }
 
