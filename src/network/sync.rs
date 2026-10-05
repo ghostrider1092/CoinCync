@@ -1526,6 +1526,24 @@ impl ChainSync {
         }
     }
 
+    /// Non-consuming check that a Headers nonce is outstanding for `from_peer`
+    /// in the current generation — the same predicate as [`validate_header_nonce`]
+    /// but WITHOUT removing the nonce or clearing the request clock.
+    ///
+    /// #184: the Headers handler uses this to cheaply gate (and reject
+    /// unsolicited/cross-peer headers) under a read lock BEFORE the expensive
+    /// ~24-46s batch verification, then calls `validate_header_nonce` to consume
+    /// the nonce only after validation succeeds. Because the nonce stays
+    /// outstanding (and `headers_request_time` stays set) across validation, the
+    /// driver won't re-request in the meantime (the 60s timeout covers it).
+    pub fn is_header_nonce_outstanding(&self, n: u64, from_peer: &PeerId) -> bool {
+        matches!(
+            self.pending_header_nonces.get(&n),
+            Some((peer, generation))
+                if peer == from_peer && *generation == self.header_nonce_generation
+        )
+    }
+
     pub fn headers_timed_out(&self, now: u64) -> bool {
         self.headers_request_time
             .map(|t| now > t + 60)
@@ -2354,6 +2372,31 @@ mod tests {
         assert!(
             !sync.validate_header_nonce(n, &peers[0]),
             "single-use: a consumed nonce must not validate twice"
+        );
+    }
+
+    /// #184: the non-consuming peek matches the same predicate as
+    /// validate_header_nonce (right peer + current generation) but leaves the
+    /// nonce AND the request clock intact, so the handler can gate cheaply under a
+    /// read lock before the slow off-lock validation, then still consume it after.
+    #[test]
+    fn header_nonce_peek_is_non_consuming() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        let n = sync.begin_headers_request(peers[0], 100).unwrap();
+
+        // Peek: true for the issuer, false cross-peer — and it consumes nothing.
+        assert!(sync.is_header_nonce_outstanding(n, &peers[0]));
+        assert!(!sync.is_header_nonce_outstanding(n, &peers[1]));
+        assert!(sync.is_header_nonce_outstanding(n, &peers[0]), "peek is idempotent");
+        assert!(sync.headers_request_pending(), "peek must not clear the request clock");
+
+        // The real consume still works afterwards (single-use).
+        assert!(sync.validate_header_nonce(n, &peers[0]));
+        assert!(!sync.headers_request_pending());
+        assert!(
+            !sync.is_header_nonce_outstanding(n, &peers[0]),
+            "a consumed nonce is no longer outstanding"
         );
     }
 
