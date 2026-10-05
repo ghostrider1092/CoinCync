@@ -2097,7 +2097,7 @@ impl Blockchain {
                     // Feed the libspark v2 pool (add_coin per mint, mark_tag_spent
                     // per spend). Inert unless both features + the pool store.
                     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                    self.apply_spark_v2_txs(&block.transactions, block.header.height);
+                    self.apply_spark_v2_txs(&block.transactions, block.header.height.as_u64());
 
                     // Bound memory: evict output_index entries older than 1000 blocks
                     inner.utxos.evict_old_outputs(block.header.height.as_u64(), 1000);
@@ -2924,7 +2924,7 @@ impl Blockchain {
                         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
                         self.apply_spark_v2_txs(
                             &fork_block.transactions,
-                            fork_block.header.height,
+                            fork_block.header.height.as_u64(),
                         );
 
                         // Add this fork block's emission to supply
