@@ -9,9 +9,17 @@
 // and recent nightlies tightened HRTB inference enough to hit the
 // default limit on this 126-deep `Value<Value<...>>` chain. Reproduces
 // as `error[E0275]: overflow evaluating the requirement`; the compiler
-// itself suggests this fix. Remove once tari_bulletproofs_plus 0.5+
-// is adopted (blocked on utoipa-swagger-ui 9.0.2 compat).
-#![recursion_limit = "1024"]
+// itself suggests this fix. The exact depth the solver reaches on this
+// path is sensitive to monomorphization order across the crate, so
+// adding generic code elsewhere can tip a build that passed at 1024 over
+// the edge (seen on stable 1.88 too, not just nightly). Enabling more
+// gated features together (e.g. sketch-lelantus-spark + sketch-privacy-manifold)
+// adds monomorphization and pushes the depth up; the lib-test build with both
+// sketch features enabled needs 8192. This ceiling only affects builds that
+// actually enable those gated features — the default/production build is far
+// below it. Remove once tari_bulletproofs_plus 0.5+ is adopted (blocked on
+// utoipa-swagger-ui 9.0.2 compat).
+#![recursion_limit = "8192"]
 #![doc = "CoinCync 1.0 — compliant privacy cryptocurrency with CPU-only proof of work."]
 
 // ── Foundation ──────────────────────────────────────────────

@@ -62,6 +62,8 @@ pub mod privacy_connector;
 pub mod kernel_offset; // CIP-004
 #[cfg(feature = "sketch-lelantus-spark")]
 pub mod lelantus_spark; // CIP-005
+#[cfg(feature = "sketch-privacy-manifold")]
+pub mod privacy_manifold; // Underground — uniform-face transaction envelope
 
 pub use bulletproofs::{
     batch_verify_range_proofs, commit, create_aggregated_range_proof,

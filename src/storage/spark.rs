@@ -376,6 +376,42 @@ impl SparkStore {
         self.spent_serials.read().contains_key(serial)
     }
 
+    /// Resolve accumulator indices (coin ids) to their on-chain commitment
+    /// points, for the PUBLIC verification of a Spark spend.
+    ///
+    /// Coins are appended in `coin_id` order (see `add_coin` / `open_with_db`),
+    /// so a coin's `coin_id` equals its position in the accumulator vector: each
+    /// index is looked up at that position and the stored commitment
+    /// decompressed. As a defence against a future sparse or mis-replayed
+    /// accumulator, the entry found at the position must actually carry the
+    /// requested `coin_id`, otherwise the lookup fails closed.
+    ///
+    /// Errors ([`Error::SparkVerifyFailed`]) if any index is out of range, does
+    /// not match its position, or its stored commitment is not a canonical curve
+    /// point — a spend proof referencing an unknown or malformed coin can never
+    /// be accepted.
+    pub fn commitments_for(
+        &self,
+        indices: &[u64],
+    ) -> Result<Vec<curve25519_dalek::ristretto::RistrettoPoint>> {
+        use curve25519_dalek::ristretto::CompressedRistretto;
+        let coins = self.coins.read();
+        let mut out = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            let entry = coins
+                .get(idx as usize)
+                .ok_or(Error::SparkVerifyFailed)?;
+            if entry.coin_id != idx {
+                return Err(Error::SparkVerifyFailed);
+            }
+            let point = CompressedRistretto(entry.commitment)
+                .decompress()
+                .ok_or(Error::SparkVerifyFailed)?;
+            out.push(point);
+        }
+        Ok(out)
+    }
+
     /// Current accumulator size (coin count).
     pub fn size(&self) -> usize {
         self.coins.read().len()

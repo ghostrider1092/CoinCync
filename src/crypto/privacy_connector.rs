@@ -273,15 +273,19 @@ pub fn connect_shielded_spend(
 // ── Lelantus Spark routing (feature-gated) ──────────────────────────────────
 
 /// Connect a Spark spend to chain state: gate → serial-tag double-spend check
-/// against the store → verify the spend proof → record the serial tag. The tag
-/// `T = s*G` is the public nullifier; a repeat tag is a double-spend and is
-/// rejected before verification. Fail-closed.
+/// against the store → resolve the anon-set indices to on-chain commitments →
+/// verify the spend proof against those PUBLIC commitments → record the serial
+/// tag. The tag `T = s*G` is the public nullifier; a repeat tag is a
+/// double-spend and is rejected before verification. Fail-closed.
+///
+/// The verifier needs only public data: the commitments come from the store by
+/// the proof's own `anon_set_indices`, never from the spender, so a spend
+/// referencing an unknown coin fails closed at resolution.
 #[cfg(feature = "sketch-lelantus-spark")]
 pub fn connect_spark_spend(
     gate: &mut ConnectorGate,
     store: &crate::storage::SparkStore,
     proof: &crate::crypto::lelantus_spark::SparkSpendProof,
-    pubkeys: &[curve25519_dalek::ristretto::RistrettoPoint],
 ) -> Result<()> {
     gate.admit(Scheme::LelantusSpark)?;
     let tag = proof.serial_tag;
@@ -289,10 +293,59 @@ pub fn connect_spark_spend(
     if store.is_serial_spent(&tag) {
         return Err(Error::SparkVerifyFailed);
     }
-    // Soundness: the dual-base-bound spend proof must verify.
-    crate::crypto::lelantus_spark::verify_spark_spend(proof, pubkeys)?;
+    // Resolve the referenced anon-set coins to their on-chain commitments.
+    let commitments = store.commitments_for(&proof.anon_set_indices)?;
+    // Soundness: the spend proof must verify against the public commitments.
+    crate::crypto::lelantus_spark::verify_spark_spend(proof, &commitments)?;
     // Commit: burn the coin by recording its serial tag.
     store.mark_serial_spent(tag, gate.current_height);
+    Ok(())
+}
+
+/// Connect a **manifold** spend to chain state (regtest/experimental — the
+/// Underground uniform-envelope path).
+///
+/// The spend arrives as a [`ManifoldEnvelope`](crate::crypto::privacy_manifold::ManifoldEnvelope)
+/// with **no scheme tag on the wire**: validation recovers the carried proof and
+/// verifies it through the real scheme verifier — the "one face, many schemes"
+/// design exercised at the consensus gate rather than in a unit test. This regtest
+/// wiring registers the Spark scheme; a fuller build would trial every registered
+/// scheme (leak-free dispatch). Flow, fail-closed at every step:
+///
+/// gate → uniform-nullifier double-spend check → recover the carried Spark proof
+/// from the padded envelope → require its serial tag to equal the envelope
+/// nullifier (binds the double-spend key to the proof actually verified) →
+/// resolve the anon-set commitments from the store → verify with the real
+/// verifier against public commitments → record the nullifier.
+#[cfg(all(feature = "sketch-privacy-manifold", feature = "sketch-lelantus-spark"))]
+pub fn connect_manifold_spend(
+    gate: &mut ConnectorGate,
+    store: &crate::storage::SparkStore,
+    envelope: &crate::crypto::privacy_manifold::ManifoldEnvelope,
+) -> Result<()> {
+    use borsh::BorshDeserialize;
+    gate.admit(Scheme::LelantusSpark)?;
+    let nullifier = envelope.nullifier;
+    // Double-spend: the uniform nullifier must be unseen.
+    if store.is_serial_spent(&nullifier) {
+        return Err(Error::SparkVerifyFailed);
+    }
+    // Leak-free dispatch (regtest registers Spark). Recover the carried proof by
+    // deserializing from the padded envelope — the reader consumes exactly the
+    // proof and ignores the random pad; a malformed/foreign envelope fails here.
+    let mut slice = &envelope.proof[..];
+    let proof = crate::crypto::lelantus_spark::SparkSpendProof::deserialize_reader(&mut slice)
+        .map_err(|_| Error::SparkVerifyFailed)?;
+    // Bind the double-spend key to the verified proof: the carried serial tag must
+    // equal the envelope's uniform nullifier.
+    if proof.serial_tag != nullifier {
+        return Err(Error::SparkVerifyFailed);
+    }
+    // Resolve the anon-set coins to on-chain commitments and verify (public data).
+    let commitments = store.commitments_for(&proof.anon_set_indices)?;
+    crate::crypto::lelantus_spark::verify_spark_spend(&proof, &commitments)?;
+    // Commit: burn the coin by recording the uniform nullifier.
+    store.mark_serial_spent(nullifier, gate.current_height);
     Ok(())
 }
 
@@ -542,7 +595,8 @@ mod tests {
     #[cfg(feature = "sketch-lelantus-spark")]
     #[test]
     fn connect_spark_spend_detects_double_spend() {
-        use crate::crypto::lelantus_spark::{prove_spark_spend, spark_commit, spark_pubkey};
+        use crate::crypto::lelantus_spark::{prove_spark_spend, spark_commit};
+        use crate::storage::SparkCoinEntry;
         use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar};
         use rand::{rngs::OsRng, RngCore};
 
@@ -552,21 +606,28 @@ mod tests {
             Scalar::from_bytes_mod_order_wide(&b)
         }
 
-        let value = 1000u64;
-        let randomness = rnd();
+        // Independent coins: each has its own value, serial and blinding — the
+        // connector verifies against the PUBLIC commitments resolved from the
+        // store, so decoys need not share the real coin's opening.
         let n = 4usize;
         let real_index = 1usize;
+        let real_value = 1000u64;
         let real_serial = rnd();
+        let real_randomness = rnd();
         let anon: Vec<RistrettoPoint> = (0..n)
-            .map(|i| spark_commit(value, &(if i == real_index { real_serial } else { rnd() }), &randomness))
+            .map(|i| {
+                if i == real_index {
+                    spark_commit(real_value, &real_serial, &real_randomness)
+                } else {
+                    spark_commit(100 + i as u64, &rnd(), &rnd())
+                }
+            })
             .collect();
-        let pubkeys: Vec<RistrettoPoint> =
-            anon.iter().map(|c| spark_pubkey(c, value, &randomness)).collect();
         let note = crate::crypto::lelantus_spark::SparkNote {
             commitment: anon[real_index].compress().to_bytes(),
-            value,
+            value: real_value,
             serial: real_serial.to_bytes(),
-            randomness: randomness.to_bytes(),
+            randomness: real_randomness.to_bytes(),
             diversifier: [0u8; 11],
             height: 1,
             coin_id: real_index as u64,
@@ -578,12 +639,99 @@ mod tests {
 
         let mut g = regtest_active();
         let store = crate::storage::SparkStore::new();
+        // The verifier resolves commitments from the store by coin_id, so the
+        // anon-set coins must be present in the accumulator (coin_id == position).
+        for (i, c) in anon.iter().enumerate() {
+            store.add_coin(SparkCoinEntry {
+                coin_id: i as u64,
+                commitment: c.compress().to_bytes(),
+                height: 1,
+            });
+        }
         // First spend: accepted + recorded.
-        assert!(connect_spark_spend(&mut g, &store, &proof, &pubkeys).is_ok());
+        assert!(connect_spark_spend(&mut g, &store, &proof).is_ok());
         // Second spend of the same coin (same serial tag): double-spend → rejected.
         assert!(
-            connect_spark_spend(&mut g, &store, &proof, &pubkeys).is_err(),
+            connect_spark_spend(&mut g, &store, &proof).is_err(),
             "connector must reject the double-spend via the serial-tag nullifier"
+        );
+    }
+
+    // ── REGTEST: a manifold envelope through the consensus gate, end to end ──
+    #[cfg(all(feature = "sketch-privacy-manifold", feature = "sketch-lelantus-spark"))]
+    #[test]
+    fn connect_manifold_spend_regtest_accepts_then_rejects_double_spend() {
+        use crate::crypto::lelantus_spark::{prove_spark_spend, spark_commit};
+        use crate::crypto::privacy_manifold::{ManifoldEnvelope, MANIFOLD_MIN_FEE};
+        use crate::storage::SparkCoinEntry;
+        use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar};
+        use rand::{rngs::OsRng, RngCore};
+
+        fn rnd() -> Scalar {
+            let mut b = [0u8; 64];
+            OsRng.fill_bytes(&mut b);
+            Scalar::from_bytes_mod_order_wide(&b)
+        }
+
+        // Mint an independent-coin anon set into a regtest Spark accumulator.
+        let n = 4usize;
+        let real_index = 1usize;
+        let real_value = 1000u64;
+        let real_serial = rnd();
+        let real_randomness = rnd();
+        let anon: Vec<RistrettoPoint> = (0..n)
+            .map(|i| {
+                if i == real_index {
+                    spark_commit(real_value, &real_serial, &real_randomness)
+                } else {
+                    spark_commit(100 + i as u64, &rnd(), &rnd())
+                }
+            })
+            .collect();
+        let note = crate::crypto::lelantus_spark::SparkNote {
+            commitment: anon[real_index].compress().to_bytes(),
+            value: real_value,
+            serial: real_serial.to_bytes(),
+            randomness: real_randomness.to_bytes(),
+            diversifier: [0u8; 11],
+            height: 1,
+            coin_id: real_index as u64,
+        };
+        let indices: Vec<u64> = (0..n as u64).collect();
+        let msg = [9u8; 32];
+        let proof =
+            prove_spark_spend(&note, &anon, &indices, real_index, &msg, &mut OsRng).unwrap();
+
+        // Wrap the real proof in the uniform manifold envelope (no scheme tag on
+        // the wire; the serial tag becomes the uniform nullifier).
+        let proof_bytes = borsh::to_vec(&proof).unwrap();
+        let envelope = ManifoldEnvelope::seal_serialized(
+            &proof_bytes,
+            proof.serial_tag,
+            MANIFOLD_MIN_FEE,
+            &mut OsRng,
+        )
+        .unwrap();
+
+        let mut g = regtest_active();
+        let store = crate::storage::SparkStore::new();
+        for (i, c) in anon.iter().enumerate() {
+            store.add_coin(SparkCoinEntry {
+                coin_id: i as u64,
+                commitment: c.compress().to_bytes(),
+                height: 1,
+            });
+        }
+        // First manifold spend: the envelope passes the regtest consensus gate —
+        // recovered, verified against public commitments, nullifier recorded.
+        assert!(
+            connect_manifold_spend(&mut g, &store, &envelope).is_ok(),
+            "a valid manifold envelope must pass the regtest consensus gate"
+        );
+        // Replay the same envelope: identical uniform nullifier → double-spend.
+        assert!(
+            connect_manifold_spend(&mut g, &store, &envelope).is_err(),
+            "the manifold gate must reject a replayed envelope via the uniform nullifier"
         );
     }
 }

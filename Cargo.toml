@@ -83,6 +83,7 @@ sketch-cut-through        = []   # CIP-003 (also see existing src/crypto/mw_cutt
 sketch-block-aggregation  = []   # CIP-003 (pairs with cut-through)
 sketch-kernel-offsets     = []   # CIP-004
 sketch-lelantus-spark     = []   # CIP-005 (gates src/crypto/lelantus_spark.rs)
+sketch-privacy-manifold   = []   # Underground manifold — uniform-face tx envelope (gates src/crypto/privacy_manifold.rs)
 
 [dependencies]
 # â”€â”€ Elliptic curves â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
