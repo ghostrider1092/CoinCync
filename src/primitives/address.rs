@@ -465,13 +465,14 @@ mod tests {
     }
 
     #[test]
-    fn mainnet_subaddress_rejected_but_testnet_subaddress_accepted() {
+    fn subaddress_roundtrips_on_mainnet_and_testnet_after_w1_gate_lift() {
         let (_s1, spend) = generate_ec_keypair();
         let (_s2, view) = generate_ec_keypair();
 
-        // W-1/W-B launch-safety gate: a mainnet subaddress must be rejected at
-        // the parse boundary (funds received at one would be permanently
-        // unspendable in this release).
+        // W-1/W-B gate LIFTED (this PR): the spend-side one-time-secret /
+        // key-image derivation now applies the per-subaddress offset m_i, so
+        // subaddress-received funds are spendable and a mainnet subaddress
+        // parses (round-trips) instead of being rejected at the parse boundary.
         let mainnet_sub = Address {
             network: Network::Mainnet,
             address_type: AddressType::Subaddress,
@@ -479,11 +480,10 @@ mod tests {
             view_public_key: view,
             payment_id: None,
         };
-        let err = Address::from_bytes(&mainnet_sub.to_bytes()).unwrap_err();
-        assert!(matches!(err, Error::InvalidAddress(_)));
+        let parsed = Address::from_bytes(&mainnet_sub.to_bytes()).unwrap();
+        assert_eq!(parsed, mainnet_sub);
 
-        // The same subaddress on testnet is still accepted — the gate is
-        // mainnet-only so the spend-side fix can be developed/round-tripped.
+        // Testnet subaddress round-trips too (always did).
         let testnet_sub = Address {
             network: Network::Testnet,
             address_type: AddressType::Subaddress,

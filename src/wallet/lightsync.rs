@@ -1221,7 +1221,7 @@ mod tests {
 
         let tx = Transaction {
             version: 1,
-            tx_type: TxType::Coinbase,
+            tx_type: TxType::Transfer,
             inputs: vec![],
             outputs: vec![output],
             fee: Amount::from_atomic(0),
@@ -1295,7 +1295,7 @@ mod tests {
 
         let tx = Transaction {
             version: 1,
-            tx_type: TxType::Coinbase,
+            tx_type: TxType::Transfer,
             inputs: vec![],
             outputs: vec![dummy_out, recip_out], // dummy FIRST, recipient second
             fee: Amount::from_atomic(0),
