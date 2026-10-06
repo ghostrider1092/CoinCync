@@ -16,10 +16,27 @@
 //!    note-commitment-tree interface, so the crypto and storage
 //!    sides meet at a stable boundary.
 //!
-//! ## Status: SKELETON
+//! ## Status: SKELETON — UNSOUND, FAIL-CLOSED, NEVER CONSENSUS (#220)
 //!
-//! Every public function in this crate returns
-//! [`Error::NotImplemented`]. The crate exists so that:
+//! **The `ActionCircuit` has ZERO constraints** (`synthesize` is a
+//! passthrough), so its Halo2 proof proves nothing: a raw verify would
+//! accept ANY statement. [`action::verify_action`] is therefore
+//! **FAIL-CLOSED** — after running the real IPA verifier it unconditionally
+//! returns `Err`, so enabling this crate cannot silently accept unsound
+//! Actions. It is **not wired into the node** (nothing in `src/` calls it)
+//! and is **never on the consensus path**; it must NEVER be activated until
+//! the full constraint set lands and is audited.
+//!
+//! Two additional pre-activation blockers are tracked in #220, to fix before
+//! any constraints are trusted:
+//! - `action::pack_statement` reduces non-canonical field inputs mod q, so
+//!   `x` and `x + q` collapse to the same public input.
+//! - The note-commitment tree in `src/storage/shielded.rs` hashes with BLAKE3,
+//!   which an Orchard (Sinsemilla) Merkle-path gadget cannot prove against —
+//!   the in-circuit tree hash must be reconciled before the Merkle constraints
+//!   can be written.
+//!
+//! The crate exists so that:
 //!
 //! - Downstream code (wallet ZK send/receive, the consensus action
 //!   verifier in `src/chain.rs`, the bridge in `crates/bridge/`)

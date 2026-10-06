@@ -57,6 +57,16 @@
 //! [`is_implemented`] stays `false` until the constraint set is
 //! complete and audit-reviewed.
 //!
+//! **UNSOUND — FAIL-CLOSED — NEVER CONSENSUS (#220).** Because the circuit
+//! has zero constraints, a passing `verify_proof` means nothing. To stop any
+//! caller trusting it, [`verify_action`] runs the real verifier and then
+//! unconditionally returns `Err`. Nothing in the node calls this crate, so it
+//! is never on the consensus path; it must NEVER be activated until the
+//! constraint roadmap lands and is audited. See issue #220 (and the two
+//! pre-activation blockers noted in the crate root: non-canonical
+//! `pack_statement` reduction, and the BLAKE3 note tree vs the Orchard Merkle
+//! gadget).
+//!
 //! ## Curve choice
 //!
 //! `Circuit<pallas::Base>` — the circuit data lives over Pallas's
