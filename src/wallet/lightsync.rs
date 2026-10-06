@@ -210,7 +210,11 @@ impl BlockDigest {
                 if idx > 255 {
                     break;
                 } // Same safety as WalletScanner
-                outputs.push(OutputDigest::from_output(output, tx_hash, idx as u8));
+                let mut digest = OutputDigest::from_output(output, tx_hash, idx as u8);
+                // audit H-4: mark coinbase outputs so the light client uses the
+                // coinbase detection path (plaintext amount, no view-tag gate).
+                digest.is_coinbase = is_coinbase;
+                outputs.push(digest);
                 any_output = true;
             }
             // Integrated-address payment ID (issue #50, jun review): the builder
@@ -233,11 +237,6 @@ impl BlockDigest {
                         out.encrypted_payment_id = enc.clone();
                     }
                 }
-                let mut digest = OutputDigest::from_output(output, tx_hash, idx as u8);
-                // audit H-4: mark coinbase outputs so the light client uses the
-                // coinbase detection path (plaintext amount, no view-tag gate).
-                digest.is_coinbase = is_coinbase;
-                outputs.push(digest);
             }
         }
 
