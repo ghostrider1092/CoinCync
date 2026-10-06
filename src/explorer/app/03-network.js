@@ -49,8 +49,8 @@ async function loadMempool(){
       const sz=tx.size||0;
       const firstSeen=tx.first_seen||tx.timestamp||tx.time||0;
       const seenAge=firstSeen?age(firstSeen):'pending';
-      return `<tr onclick="viewTx('${tx.hash}')" style="cursor:pointer" onmouseenter="this.style.background='var(--acb)'" onmouseleave="this.style.background=''">
-      <td><span style="color:var(--t3);font-size:10px;margin-right:6px">#${i+1}</span><span class="hash" style="color:var(--ac2)">${tx.hash?tx.hash.slice(0,20)+'…':'—'}</span> ${tx.hash?`<button onclick="event.stopPropagation();copyText('${tx.hash}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:''}</td>
+      return `<tr onclick="viewTx('${hex(tx.hash)}')" style="cursor:pointer" onmouseenter="this.style.background='var(--acb)'" onmouseleave="this.style.background=''">
+      <td><span style="color:var(--t3);font-size:10px;margin-right:6px">#${i+1}</span><span class="hash" style="color:var(--ac2)">${tx.hash?esc(tx.hash.slice(0,20))+'…':'—'}</span> ${tx.hash?`<button onclick="event.stopPropagation();copyText('${hex(tx.hash)}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:''}</td>
       <td><span class="badge ${tx.kind==='coinbase'?'badge-amber':''}">${tx.kind||'transfer'}</span></td>
       <td style="font-family:var(--mono)">${ins}→${outs}</td>
       <td style="font-family:var(--mono)">${fmtSize(sz)}</td>
@@ -92,7 +92,7 @@ async function loadPeers(){
       <span class="mono" style="font-weight:600">peer-${anonId}</span>
       <span class="badge ${p.outbound?'badge-amber':''}" style="margin-left:auto;font-size:9px">${p.outbound?'out':'in'}</span>
     </div>
-    <div class="age">h:${p.height} · v${p.version} · ${p.user_agent}</div>
+    <div class="age">h:${esc(p.height)} · v${esc(p.version)} · ${esc(p.user_agent)}</div>
   </div>`;}).join('');
 }
 

@@ -10,10 +10,14 @@ use std::net::SocketAddr;
 
 // ── Network constants ────────────────────────────────────────────────────────
 
-pub const TESTNET_MAGIC: [u8; 4] = [0x74, 0x43, 0x59, 0x4E]; // "tCYN"
-pub const TESTNET_P2P_PORT: u16 = 28080;
-pub const TESTNET_RPC_PORT: u16 = 28081;
-pub const TESTNET_ADDRESS_PREFIX: &str = "tCYNC";
+// Single source of truth: the testnet wire identity lives in `crate::constants`
+// (read by the `ChainParams` table and the address layer). Re-exported here so the
+// historical `testnet::` paths (bootstrap, tests) resolve to the SAME definition
+// and can't drift from `constants::` — previously both modules declared these
+// independently, the #173 bug class.
+pub use crate::constants::{
+    TESTNET_ADDRESS_PREFIX, TESTNET_MAGIC, TESTNET_P2P_PORT, TESTNET_RPC_PORT,
+};
 
 /// Public DNS names that must resolve to hosts listening on `TESTNET_P2P_PORT`.
 /// (The `*.testnet.*` hostnames are not deployed in DNS; clearnet bootstrap uses these.)
@@ -61,7 +65,10 @@ pub const TESTNET_SEED_NODES: &[&str] = &[
     // `testnet_fallback_matches_seed_nodes` test enforces this). The home node
     // is residential and stays DNS-only (privacy); append VPS boxes here as the
     // testnet fleet is re-provisioned.
-    "2.28.1.75:28080", // Hetzner (EU) — stable public seed
+    // 2026-09-07: migrated 2.28.1.75 (CPX22, 4 GB) -> 2.29.34.197 (CPX32, 8 GB).
+    // The CPX22 OOM-killed the node (RandomX full-dataset + UTXO exceeded 4 GB);
+    // the CPX32 runs it comfortably. Old box decommissioned.
+    "2.29.34.197:28080", // Hetzner (EU, Falkenstein) — stable public seed
 ];
 
 pub const TESTNET_MIN_RING_SIZE: usize = 11;
@@ -70,7 +77,13 @@ pub const TESTNET_BLOCK_TIME: u64 = crate::constants::TARGET_BLOCK_TIME;
 // Premium AMD 1 vCPU droplets (light mode, no huge pages). Target
 // block time = 120 s → difficulty = 40 × 120 = 4800. from_difficulty
 // rounds to 12 leading zero bits (effective ~4096).
-pub const TESTNET_INITIAL_DIFFICULTY: u64 = 4_800;
+// Calibrated 2026-09-02 to a single home-CPU RandomX hashrate (~530 H/s):
+// initial difficulty ≈ H × TARGET_BLOCK_TIME (120s) so a fresh chain produces
+// ~120s blocks from genesis instead of solving far under target and driving
+// ASERT into a large startup overshoot/stall. See
+// docs/design/difficulty-oscillation-analysis.md §7 (the fix is genesis
+// calibration, NOT an ASERT hard fork — the algorithm is left unchanged).
+pub const TESTNET_INITIAL_DIFFICULTY: u64 = 64_000;
 
 // Recomputed after the header/tx signing-hash domain separator landing.
 // See `BlockHeader::HEADER_HASH_DOMAIN_TAG` in src/consensus/header.rs and
@@ -79,8 +92,8 @@ pub const TESTNET_INITIAL_DIFFICULTY: u64 = 4_800;
 // fails fast so CI catches it before it ships.
 // Public testnet genesis — April 21, 2026 reset
 pub const TESTNET_GENESIS_HASH: [u8; 32] = [
-    0x41, 0xf9, 0x70, 0xdf, 0x61, 0x52, 0x42, 0x5a, 0x29, 0x38, 0x72, 0x54, 0x23, 0x23, 0x5c, 0x2c,
-    0x40, 0xec, 0x52, 0x55, 0x6e, 0xcc, 0x0f, 0xd1, 0x42, 0x2d, 0x58, 0x86, 0x52, 0xcc, 0x56, 0xb4,
+    0xd2, 0x24, 0x0f, 0xea, 0xa1, 0xf5, 0xaa, 0x29, 0xf2, 0x5f, 0x4c, 0x9f, 0x3b, 0x69, 0x48, 0x36,
+    0x8a, 0x9a, 0x36, 0x07, 0x44, 0x3d, 0x63, 0x76, 0x60, 0x63, 0x7d, 0x28, 0xa0, 0x0d, 0x82, 0xda,
 ];
 
 // ── Checkpoints ──────────────────────────────────────────────────────────────
@@ -91,21 +104,20 @@ pub const TESTNET_GENESIS_HASH: [u8; 32] = [
 /// an alternative chain from genesis. Any chain that disagrees with a checkpoint
 /// at or below the checkpoint height is rejected immediately.
 pub const TESTNET_CHECKPOINT_LIST: &[(u64, &str)] = &[
-    // ── 2026-06-04 POST-WIPE: list intentionally empty ──
-    // The previous 280 entries (h=50 → h=14000) anchored block
-    // hashes from the pre-2026-06-04 chain. After the testnet
-    // was wiped to genesis on 2026-06-04 (see
-    // docs/operations/stress-tests/2026-06-04-testnet-cascade-recovery.md)
-    // those hashes no longer correspond to any block — they
-    // were causing every fresh-chain block at h=50 to be
-    // rejected with `Hardcoded checkpoint mismatch at height 50`.
+    // ── 2026-06-04 POST-WIPE: the previous 280 entries (h=50 → h=14000)
+    // anchored the pre-wipe chain and were cleared after the 2026-06-04 wipe to
+    // genesis (see docs/operations/stress-tests/2026-06-04-testnet-cascade-recovery.md);
+    // leaving them caused `Hardcoded checkpoint mismatch at height 50` on the
+    // fresh chain. The list was then empty, which meant a syncing node had to
+    // RandomX-verify EVERY block from genesis — a slow IBD ("takes a long time
+    // to clone the blockchain", reported 2026-10-02).
     //
-    // Re-populate once the new chain has soaked stably above
-    // h=20k for >72h on the current binary. Until then, the
-    // chain runs without hardcoded-checkpoint anchoring
-    // (acceptable on testnet pre-mainnet — long-range-attack
-    // protection is via cumulative work + MESS, not yet via
-    // hardcoded anchors).
+    // 2026-10-02: re-seeded with a single recent anchor so a fresh node
+    // assume-valids below it and only verifies the last few hundred blocks.
+    // Height 10000 was 600+ blocks deep on the stable post-wipe chain (tip
+    // ~10686); the hash was read from the live seed and cross-checked against
+    // block 10001's prev_hash. Append further anchors as the chain advances.
+    (10000, "ac4e49146c2c6a4607cf61d67c361c7b746d27b608d7afedd94f87c716c6d882"),
 ];
 
 pub fn highest_checkpoint_height() -> u64 {
@@ -133,13 +145,17 @@ pub fn verify_hardcoded_checkpoint(height: u64, hash: &Hash) -> Option<bool> {
 }
 
 // ── Emission ─────────────────────────────────────────────────────────────────
-
-pub mod emission {
-    pub const INITIAL_REWARD: u64 = 50_000_000_000;
-    pub const TAIL_EMISSION: u64 = 600_000_000;
-    pub const TAIL_EMISSION_HEIGHT: u64 = 2_000_000;
-    pub const ANNUAL_DECAY: u64 = 8500;
-}
+//
+// AUDIT (2026-10-03): removed the `pub mod emission { ... }` block that lived
+// here. It was dead code (zero references repo-wide — grep
+// `testnet::emission::*` yields nothing) and carried a 1000× value drift:
+// `TAIL_EMISSION` declared 600_000_000 while the authoritative
+// `constants::TAIL_EMISSION` is 600_000_000_000 (0.6 CYNC). The live emission
+// curve reads `crate::constants` (see src/emission/curve.rs). This completes the
+// same removal made to `mainnet.rs` on 2026-07-02, deferred here then only
+// because this file is `critical_files.lock`-protected. Per-network emission
+// overrides, if ever needed, belong in `constants.rs` — the single source of
+// truth its per-network parameters already are.
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -186,19 +202,28 @@ pub fn testnet_genesis() -> Block {
     // Bumping the timestamp by 1 second changes the genesis hash and
     // therefore the RandomX key, avoiding the bad key.
     // L-7: +1 workaround for randomx_rs Argon2d KVM hang. File upstream bug.
-    // RESET 2026-04-21: New genesis for public testnet launch.
+    // RESET 2026-09-04: New genesis for public testnet launch.
     // Previous timestamp 1772784001 produced chains that got contaminated
     // during infrastructure updates. Fresh start with current timestamp.
-    let timestamp = 1776818628;
-    let genesis_message = b"CoinCync Public Testnet - April 2026 - Trust the Math";
+    //
+    // The genesis timestamp MUST be near the chain's actual start. A stale one
+    // defeats the difficulty calibration above: ASERT anchors its window at
+    // genesis for the first DIFFICULTY_LONG_WINDOW blocks, so if the first real
+    // block is mined long after the genesis timestamp, that huge apparent gap
+    // makes the chain look catastrophically slow and crashes difficulty to the
+    // floor for ~144 blocks before recovering. The prior 1776818628 (Apr 21) was
+    // 135 days stale by the Sept restart and did exactly that. See
+    // docs/design/difficulty-oscillation-analysis.md §7.
+    let timestamp = 1788480000; // 2026-09-04 testnet reset
+    let genesis_message = b"CoinCync Public Testnet - September 2026 - Trust the Math";
     let coinbase_tx = create_genesis_coinbase(genesis_message);
 
     let params = NetworkType::Testnet.params();
     let header = BlockHeader {
         network_magic: params.magic,
         version: 1,
-        height: 0,
-        timestamp,
+        height: crate::primitives::Height::new(0),
+        timestamp: crate::primitives::Timestamp::from_secs(timestamp),
         prev_hash: Hash::zero(),
         tx_root: crate::primitives::merkle_root(&[coinbase_tx.hash()]),
         anchor: Hash::zero(),
@@ -241,7 +266,7 @@ fn create_genesis_coinbase(message: &[u8]) -> Transaction {
 }
 
 pub fn verify_genesis(block: &Block) -> bool {
-    block.header.height == 0
+    block.header.height.as_u64() == 0
         && block.header.prev_hash.is_zero()
         && !block.transactions.is_empty()
         && block.transactions[0].tx_type == TxType::Coinbase
@@ -297,7 +322,7 @@ mod tests {
     #[test]
     fn test_genesis_creation() {
         let g = testnet_genesis();
-        assert_eq!(g.header.height, 0);
+        assert_eq!(g.header.height.as_u64(), 0);
         assert!(verify_genesis(&g));
     }
 
@@ -328,14 +353,14 @@ mod tests {
         // The previous 280 entries (h=50 → h=14000) anchored block hashes
         // from the pre-wipe chain and no longer correspond to any block.
         //
-        // The assertion accepts either: (a) the current intentionally-empty
-        // state (highest == 0), or (b) a re-populated list at >= 14000,
-        // which is what the bar was set to during the 2026-06-03 refresh.
-        // When the chain soaks above h=20k for >72h and we re-populate,
-        // drop the `h == 0` branch and tighten back to `>= 14000` (or higher).
+        // 2026-10-02: the list was re-seeded with a recent anchor (h=10000) to
+        // speed IBD — a fresh node assume-valids below it instead of
+        // RandomX-verifying every block from genesis. The chain tip (~10686) is
+        // below the old 14000 bar, so the floor is 10000 for now; raise it as
+        // deeper anchors are added. The list must never regress to empty.
         let h = highest_checkpoint_height();
-        assert!(h == 0 || h >= 14000,
-            "checkpoint list regressed: highest is {} (expected 0 for intentionally-empty post-wipe, or >= 14000 once re-populated)", h);
+        assert!(h >= 10000,
+            "checkpoint list regressed: highest is {} (expected >= 10000 since the 2026-10-02 re-seed)", h);
         // List must be strictly monotonic in height — accidental duplicates
         // or out-of-order entries break the long-range-attack defence.
         let heights: Vec<u64> = TESTNET_CHECKPOINT_LIST.iter().map(|(h, _)| *h).collect();

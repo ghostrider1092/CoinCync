@@ -26,6 +26,61 @@
 //! - BIP 156: https://github.com/bitcoin/bips/blob/master/bip-0156.mediawiki
 //! - Paper: "Dandelion++: Lightweight Cryptocurrency Networking with Formal
 //!   Anonymity Guarantees" (ACM SIGMETRICS 2018)
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `rotate_epoch`** — INVARIANT: stem/fluff mode and the 2 relay peers
+//!   are chosen once per epoch via `OsRng`, never `ThreadRng`, so the choice
+//!   cannot be predicted from observed process state.
+//!   THREAT: a predictable relay/mode selection lets an observer fingerprint
+//!   which peer a node picked as its stem relay, deanonymizing tx origin.
+//!   TESTS: `test_epoch_rotation`, `test_epoch_rotation_clears_inbound_map`.
+//! - **§2 `relay_index_for_inbound`** — INVARIANT: an inbound peer is mapped
+//!   deterministically to the same relay index for the life of the epoch,
+//!   load-balanced across the two relays at first assignment.
+//!   THREAT: inconsistent per-inbound routing would let an attacker replay
+//!   the same tx from multiple inbound edges to map the stem graph.
+//!   TESTS: `test_per_inbound_edge_routing`.
+//! - **§3 `add_local_tx` / `add_received_tx`** — INVARIANT: a locally-created
+//!   tx always enters stem phase; a stem tx that loops back to a node already
+//!   holding it is immediately fluffed; an already-fluffed tx is ignored, not
+//!   re-inserted into the stempool.
+//!   THREAT: a stem loop or duplicate re-entry either black-holes a tx
+//!   forever or creates a re-broadcast amplification loop.
+//!   TESTS: `test_local_tx_enters_stempool`, `test_stem_loop_detection`,
+//!   `test_fluff_epoch_immediately_fluffs`,
+//!   `add_received_tx_already_fluffed_returns_ignore`.
+//! - **§4 `random_embargo` / `random_forward_time`** — INVARIANT: embargo and
+//!   forward delays are drawn from an exponential (memoryless) distribution
+//!   via `OsRng`, matching Monero's `CRYPTONOTE_DANDELIONPP_FLUSH_AVERAGE`.
+//!   THREAT (H16-FIX): a fixed forwarding cadence gives every stem-forwarded
+//!   tx the same timing signature, deanonymizing the origin node.
+//!   TESTS: `test_embargo_timeout_fluffs`,
+//!   `forward_delay_holds_tx_until_forward_after_when_target_exists`.
+//! - **§5 `tick` (embargo fail-safe / no-relay fail-safe)** — INVARIANT: a
+//!   stem tx whose embargo deadline passes without diffusion confirmation is
+//!   fluffed as a fail-safe; the random forward delay is applied only when a
+//!   real stem target exists, never when falling back to immediate fluff.
+//!   THREAT: an embargo that never expires lets a censoring stem path
+//!   silently drop a transaction forever (A7-8 forward-delay regression).
+//!   TESTS: `test_embargo_timeout_fluffs`,
+//!   `test_no_relay_peers_falls_back_to_fluff`,
+//!   `forward_delay_skipped_when_no_stem_target`.
+//! - **§6 `enforce_stempool_limit`** — INVARIANT: at capacity, eviction
+//!   prefers the oldest PEER-SOURCED entry over LOCAL entries; local entries
+//!   are only evicted once no peer-sourced entry remains.
+//!   THREAT (P5-D2): pure oldest-first eviction let an attacker flood the
+//!   stempool with fresh fake txs and evict the node's own (older) local
+//!   txs first, silently killing the user's own transactions.
+//!   TESTS: `test_stempool_limit_enforced`.
+//! - **§7 `has_adequate_privacy`** — INVARIANT: privacy is reported adequate
+//!   only at `outbound_peers.len() >= MIN_PEERS_FOR_PRIVACY` (3), a strict
+//!   `>=` gate.
+//!   THREAT: operating Dandelion++ with too few outbound peers collapses the
+//!   quasi-4-regular graph, making stem-path tracing tractable.
+//!   TESTS: `has_adequate_privacy_requires_min_outbound_peers`.
 
 use crate::constants::{
     DANDELION_EMBARGO_MAX_SECS, DANDELION_EMBARGO_MEAN_SECS, DANDELION_EPOCH_BASE_SECS,
@@ -858,5 +913,139 @@ mod tests {
         // Rotating epoch should clear the inbound relay map
         router.rotate_epoch(100 + DANDELION_EPOCH_BASE_SECS + DANDELION_EPOCH_JITTER_SECS + 1);
         assert!(router.epoch.inbound_map.is_empty());
+    }
+
+    /// A tx we have already fluffed (diffusion-broadcast) must be IGNORED when
+    /// it comes back via stem relay — returning `Ignore` prevents a
+    /// re-broadcast amplification loop and must NOT re-insert it into the
+    /// stempool.
+    #[test]
+    fn add_received_tx_already_fluffed_returns_ignore() {
+        let mut router = DandelionRouter::new();
+        router.set_outbound_peers(vec![make_peer_id(1), make_peer_id(2), make_peer_id(3)]);
+        router.epoch.is_fluff_epoch = false;
+        router.epoch.started_at = 100;
+        router.epoch.duration = 600;
+        router.epoch.relay_peers = [Some(make_peer_id(1)), Some(make_peer_id(2))];
+
+        let tx = make_test_tx(7);
+        let hash = tx.hash();
+        // Pretend we already fluffed this tx earlier.
+        router.fluffed.insert(hash, 100);
+
+        let action = router.add_received_tx(tx, make_peer_id(10), 101);
+        assert!(
+            matches!(action, StemAction::Ignore),
+            "already-fluffed tx must return Ignore (no re-broadcast amplification)"
+        );
+        assert!(
+            !router.stempool.contains_key(&hash),
+            "already-fluffed tx must not re-enter the stempool"
+        );
+    }
+
+    /// `has_adequate_privacy` is a strict `>= MIN_PEERS_FOR_PRIVACY` (3) gate on
+    /// the outbound peer count.
+    #[test]
+    fn has_adequate_privacy_requires_min_outbound_peers() {
+        let mut router = DandelionRouter::new();
+        assert!(!router.has_adequate_privacy(), "zero peers is inadequate");
+
+        router.set_outbound_peers(vec![make_peer_id(1), make_peer_id(2)]);
+        assert!(
+            !router.has_adequate_privacy(),
+            "2 peers is below MIN_PEERS_FOR_PRIVACY (3)"
+        );
+
+        router.set_outbound_peers(vec![make_peer_id(1), make_peer_id(2), make_peer_id(3)]);
+        assert!(
+            router.has_adequate_privacy(),
+            "3 peers meets the privacy threshold"
+        );
+    }
+
+    /// Phase A7-8: the random stem-forward delay is applied ONLY when a real
+    /// stem target exists. With a relay peer present, a tick before
+    /// `forward_after` must hold the tx (no premature forward); a tick at/after
+    /// `forward_after` forwards it to the mapped relay.
+    #[test]
+    fn forward_delay_holds_tx_until_forward_after_when_target_exists() {
+        let mut router = DandelionRouter::new();
+        router.set_outbound_peers(vec![make_peer_id(1), make_peer_id(2), make_peer_id(3)]);
+        router.epoch.is_fluff_epoch = false;
+        router.epoch.started_at = 100;
+        router.epoch.duration = 600;
+        router.epoch.relay_peers = [Some(make_peer_id(1)), Some(make_peer_id(2))];
+        router.epoch.own_relay_idx = 0;
+
+        let tx = make_test_tx(3);
+        let hash = tx.hash();
+        router.stempool.insert(
+            hash,
+            StemEntry {
+                tx,
+                added_at: 100,
+                embargo_deadline: 10_000,
+                source: None,
+                forwarded: false,
+                forward_after: 200, // in the future relative to the first tick
+            },
+        );
+
+        // Before forward_after, with a real stem target: the delay holds the tx.
+        let actions = router.tick(150);
+        assert!(
+            actions.stem_relay.is_empty(),
+            "forward delay must hold the tx while a stem target exists"
+        );
+        assert!(actions.fluff.is_empty());
+        let entry = router.stempool.get(&hash).expect("tx still stem-pending");
+        assert!(
+            !entry.forwarded,
+            "tx must remain un-forwarded until forward_after"
+        );
+
+        // At forward_after, it is forwarded to the mapped relay peer.
+        let actions2 = router.tick(200);
+        assert_eq!(actions2.stem_relay.len(), 1, "delay elapsed → forward now");
+        assert_eq!(actions2.stem_relay[0].0, hash);
+        assert_eq!(actions2.stem_relay[0].2, make_peer_id(1));
+    }
+
+    /// The mirror of the above: when there is NO relay target the forward delay
+    /// must be skipped entirely and the tx fluffed immediately as a fail-safe —
+    /// waiting for the delay would add latency with zero privacy benefit.
+    #[test]
+    fn forward_delay_skipped_when_no_stem_target() {
+        let mut router = DandelionRouter::new();
+        // No outbound peers → no relay peers this epoch.
+        router.epoch.is_fluff_epoch = false;
+        router.epoch.started_at = 100;
+        router.epoch.duration = 600;
+        router.epoch.relay_peers = [None, None];
+        router.epoch.own_relay_idx = 0;
+
+        let tx = make_test_tx(4);
+        let hash = tx.hash();
+        router.stempool.insert(
+            hash,
+            StemEntry {
+                tx,
+                added_at: 100,
+                embargo_deadline: 10_000,
+                source: None,
+                forwarded: false,
+                forward_after: 10_000, // far future — must NOT delay the fail-safe
+            },
+        );
+
+        let actions = router.tick(150);
+        assert_eq!(
+            actions.fluff.len(),
+            1,
+            "no relay target → fluff immediately, ignoring the forward delay"
+        );
+        assert!(actions.stem_relay.is_empty());
+        assert!(!router.stempool.contains_key(&hash));
     }
 }

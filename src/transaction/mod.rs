@@ -9,6 +9,7 @@
 mod builder;
 pub mod payment_id;
 pub mod recovery;
+pub mod signer;
 mod types;
 mod validator;
 
@@ -19,5 +20,6 @@ pub use builder::{
     TransactionBuilder,
 };
 pub use recovery::{validate_recovery_extra, RecoveryMeta};
+pub use signer::{ClsagSignRequest, OneTimeKeyRef, SoftwareSigner, TxSigner};
 pub use types::{RingMemberRef, SigningInputView, Transaction, TxInput, TxOutput, TxType};
 pub use validator::validate_transaction;

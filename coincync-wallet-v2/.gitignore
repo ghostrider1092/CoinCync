@@ -1,6 +1,10 @@
 # Build outputs
 /src-tauri/target/
-/src-tauri/Cargo.lock
+# NOTE: src-tauri/Cargo.lock is intentionally COMMITTED (it is a binary app,
+# not a library) for reproducible builds — do not re-ignore it.
+
+# Tauri v2 generated schemas/permissions — regenerated on every build.
+/src-tauri/gen/
 
 # Dependencies (will be installed by npm install)
 /node_modules/

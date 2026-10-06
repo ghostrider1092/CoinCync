@@ -3,7 +3,8 @@
 # release binaries in `./out/` from the current git checkout.
 #
 # Usage:
-#   ./scripts/build-in-docker.sh                  # default
+#   ./scripts/build-in-docker.sh                  # default (MAINNET consensus)
+#   ./scripts/build-in-docker.sh --testnet        # TESTNET consensus binaries
 #   ./scripts/build-in-docker.sh --rust 1.83.0    # pin a different Rust
 #   ./scripts/build-in-docker.sh --tag my-tag     # name the image
 #
@@ -25,14 +26,16 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_VERSION="1.88.0"
 IMAGE_TAG="coincync-build:HEAD"
 OUT_DIR="$REPO_ROOT/out"
+BUILD_TESTNET=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --rust)   RUST_VERSION="$2"; shift 2 ;;
-    --tag)    IMAGE_TAG="$2"; shift 2 ;;
-    --out)    OUT_DIR="$2"; shift 2 ;;
+    --rust)    RUST_VERSION="$2"; shift 2 ;;
+    --tag)     IMAGE_TAG="$2"; shift 2 ;;
+    --out)     OUT_DIR="$2"; shift 2 ;;
+    --testnet) BUILD_TESTNET="1"; shift 1 ;;
     -h|--help)
-      sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *)
       echo "ERROR: unknown arg: $1" >&2
@@ -52,6 +55,7 @@ echo "    repo:     $REPO_ROOT"
 echo "    Rust:     $RUST_VERSION"
 echo "    image:    $IMAGE_TAG"
 echo "    out:      $OUT_DIR"
+echo "    network:  $([ -n "$BUILD_TESTNET" ] && echo 'TESTNET (--features testnet)' || echo 'mainnet (default features)')"
 echo ""
 
 # Warn (but don't fail) on dirty tree — the Dockerfile also warns.
@@ -67,6 +71,7 @@ mkdir -p "$OUT_DIR"
 echo "==> docker build"
 docker build \
   --build-arg "RUST_VERSION=$RUST_VERSION" \
+  --build-arg "BUILD_TESTNET=$BUILD_TESTNET" \
   -f docker/builder.Dockerfile \
   -t "$IMAGE_TAG" \
   .

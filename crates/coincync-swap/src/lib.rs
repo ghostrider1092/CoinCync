@@ -9,12 +9,15 @@
 //! DLEQ binding, the BTC HTLC/CSV path, the Noise/Tor transport, and the
 //! full state machine), with ~350 passing tests (`--features strict-dleq`)
 //! and ~97% coverage. It is nonetheless **deliberately gated OFF** for this
-//! release: `is_implemented()` returns `false` and the wallet's swap
-//! commands sit behind `#[cfg(feature = "cyncswap")]`. Per the 2026-05-20
-//! staged-mainnet decision, cyncswap ships as **v1.1 after a dedicated
-//! audit**, not with the v1.0/2.0 base chain. Do not flip the gate without
-//! that audit — the `is_implemented() == false` return is the safety valve,
-//! not a statement that the code is missing.
+//! release: `is_implemented()` returns `false`. Swap is reachable only via this
+//! crate's own standalone `cyncswap` binary — the main `coincync` wallet has
+//! **no `coincync-swap` dependency and no swap subcommand**, so there is no
+//! wallet↔swap integration in the base build. (The `#[cfg(feature = "cyncswap")]`
+//! gate exists in the *desktop wallet* `coincync-wallet-v2`, not in the core
+//! wallet CLI.) Per the 2026-05-20 staged-mainnet decision, cyncswap ships as
+//! **v1.1 after a dedicated audit**, not with the v1.0/2.0 base chain. Do not
+//! flip the gate without that audit — the `is_implemented() == false` return is
+//! the safety valve, not a statement that the code is missing.
 //!
 //! ## Protocol reference
 //!

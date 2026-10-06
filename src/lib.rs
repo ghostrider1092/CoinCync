@@ -11,11 +11,36 @@
 // as `error[E0275]: overflow evaluating the requirement`; the compiler
 // itself suggests this fix. Remove once tari_bulletproofs_plus 0.5+
 // is adopted (blocked on utoipa-swagger-ui 9.0.2 compat).
-#![recursion_limit = "1024"]
+//
+// Bumped 1024 -> 8192: enabling the bulletproofs/halo2-heavy sketch features
+// (`sketch-lelantus-spark`, `sketch-gk-proof`, and combinations) re-triggers the
+// same `&'v Simd: Add` overflow at a deeper type-recursion depth. 8192 covers
+// every current feature combination; it is a compile-time-only limit with no
+// runtime or consensus effect.
+#![recursion_limit = "8192"]
 #![doc = "CoinCync 1.0 — compliant privacy cryptocurrency with CPU-only proof of work."]
 
+// CoinCync's proof of work is RandomX-only by design: the non-`randomx` PoW
+// path in src/consensus/pow.rs deliberately returns an error at runtime, so a
+// node built without `randomx` can neither mine nor validate PoW. A no-`randomx`
+// build also cannot even compile — it re-triggers the known tari_bulletproofs_plus
+// 0.4 SIMD trait overflow (`error[E0275]: overflow evaluating for<'v> &'v Simd:
+// Add`; see the recursion_limit note below and rust-toolchain). Fail fast here
+// with an actionable message instead of that cryptic dependency error. Every
+// supported build enables `randomx` (it is part of `default`, `testnet`, and
+// `mainnet`).
+#[cfg(not(feature = "randomx"))]
+compile_error!(
+    "CoinCync must be built with the `randomx` feature (included in the default, \
+     `testnet`, and `mainnet` features). Proof of work is RandomX-only: a build \
+     without it cannot mine or validate PoW and does not compile. Build with, \
+     e.g., `cargo build --release --features testnet`."
+);
+
 // ── Foundation ──────────────────────────────────────────────
+pub mod clock;
 pub mod constants;
+pub mod diagnostics;
 pub mod error;
 
 // Kani proof harnesses for top-level helpers in constants.rs.
@@ -23,13 +48,19 @@ pub mod error;
 pub mod build_info;
 pub mod config;
 pub mod helpers;
+/// Boot-time self-preflight guards (compiled-network vs runtime `--network`,
+/// data-dir network marker). Fail-fast, no consensus impact. See
+/// `docs/design/self-preflight-boot-guard.md`.
+pub mod preflight;
 #[cfg(kani)]
 mod kani_proofs;
 pub mod prelude;
 
 // ── Primitives + types ──────────────────────────────────────
 pub mod decoy;
+pub mod flight_recorder;
 pub mod primitives;
+pub mod rng;
 pub mod transaction;
 
 // ── Consensus + emission ────────────────────────────────────
@@ -40,6 +71,13 @@ pub mod emission;
 pub mod chain;
 pub mod mempool;
 pub mod metrics;
+/// Network-adjusted time (audit M-4) for the future-block timestamp cap, with
+/// clock-poisoning defenses (per-netgroup dedup, sample-after-validate,
+/// out-of-range→0). See `src/net_time.rs`.
+pub mod net_time;
+/// Portable, versioned chain-vitals health schema (`get_vitals`). Observability
+/// only, no consensus impact. See `docs/design/chain-vitals-schema.md`.
+pub mod vitals;
 
 // ── Crypto + wallet ─────────────────────────────────────────
 pub mod crypto;
@@ -47,6 +85,7 @@ pub mod wallet;
 
 // ── Storage ─────────────────────────────────────────────────
 pub mod db;
+pub mod release;
 pub mod snapshot;
 pub mod storage;
 
@@ -73,6 +112,8 @@ pub mod tick_adapter;
 // coincync-tick sidecar. Phase 1: forager in observe mode (scores peers on
 // public block/tip signals; sends nothing). See docs/architecture/colony.md.
 pub mod colony;
+pub mod compliance; // auditor-facing disclosure packages (compliant-privacy use case)
+pub mod security; // chain-wide "security detail" pattern: guards + scan over attack surfaces
 
 // ── Network genesis definitions ─────────────────────────────
 pub mod mainnet;

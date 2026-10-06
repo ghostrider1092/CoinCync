@@ -2,46 +2,47 @@
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
-    "devPath": "../web",
-    "distDir": "../web",
-    "withGlobalTauri": true
+    "frontendDist": "../web"
   },
-  "package": {
-    "productName": "CoinCync Wallet v2",
-    "version": "1.0.12"
+  "bundle": {
+    "active": true,
+    "category": "Finance",
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "CoinCync privacy wallet v2 — Apple-aesthetic redesign.",
+    "longDescription": "CoinCync Wallet v2 — Apple-aesthetic redesign of the official desktop client. Bundles the node, wallet CLI, miner, and atomic-swap CLI so no separate downloads are needed.",
+    "resources": [
+      "resources/binaries/*"
+    ]
   },
-  "tauri": {
-    "allowlist": {
-      "all": false,
-      "shell": { "all": false, "open": true },
-      "notification": { "all": true },
-      "process": { "relaunch": true }
-    },
-    "bundle": {
-      "active": true,
-      "category": "Finance",
-      "identifier": "network.coincync.wallet.v2",
-      "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-      "shortDescription": "CoinCync privacy wallet v2 — Apple-aesthetic redesign.",
-      "longDescription": "CoinCync Wallet v2 — Apple-aesthetic redesign of the official desktop client. Bundles the node, wallet CLI, miner, and atomic-swap CLI so no separate downloads are needed.",
-      "resources": ["resources/binaries/*"],
-      "targets": "all"
-    },
+  "productName": "CoinCync Wallet v2",
+  "mainBinaryName": "CoinCync Wallet v2",
+  "version": "1.0.12",
+  "identifier": "network.coincync.wallet.v2",
+  "plugins": {},
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "fullscreen": false,
+        "resizable": true,
+        "title": "CoinCync",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1024,
+        "minHeight": 720,
+        "center": true,
+        "useHttpsScheme": true
+      }
+    ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* https://explorer.coincync.network https://api.github.com https://api.coincync.network; img-src 'self' data: blob: https://explorer.coincync.network; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
-    },
-    "updater": {
-      "active": false
-    },
-    "windows": [{
-      "fullscreen": false,
-      "resizable": true,
-      "title": "CoinCync",
-      "width": 1280,
-      "height": 820,
-      "minWidth": 1024,
-      "minHeight": 720,
-      "center": true
-    }]
+      "csp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost 'self' http://127.0.0.1:* http://localhost:* https://explorer.coincync.network https://api.github.com https://api.coincync.network; img-src 'self' data: blob: https://explorer.coincync.network; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    }
   }
 }

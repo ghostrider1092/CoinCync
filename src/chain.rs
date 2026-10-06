@@ -1,6 +1,155 @@
 //! # Blockchain State Machine
 //!
 //! Core blockchain state management.
+//!
+//! ## Audit map
+//! This file is the audit-critical (non-consensus) state machine: block connect,
+//! fork choice, reorg execution, rollback, load/rebuild, genesis. Each `§` below
+//! names the code element(s), the INVARIANT it guarantees, the THREAT/incident it
+//! defends, and the real TESTS that prove it (or the KNOWN gap). `§N` tags on the
+//! banner comments below point back here. (Renders in `cargo doc`.)
+//!
+//! - **§1 `add_block` extend path** (`commit_block_atomic` call, supply/burn
+//!   `checked_add`) — INVARIANT: on the extend branch the four consensus trees
+//!   (output_index, height_index, state, tx_index) move together via
+//!   `Database::commit_block_atomic`; in-memory tip never lands ahead of a failed
+//!   disk commit (commit failure PANICS rather than diverging). Supply/burn use
+//!   `checked_add` + panic (symmetry with the reorg-rollback `checked_sub`).
+//!   THREAT: torn write leaving height index ahead of state → post-crash
+//!   double-spend / inflation. TESTS: `total_supply_is_conserved_per_block`,
+//!   `total_supply_accumulator_is_u128_and_survives_the_old_u64_ceiling`,
+//!   `add_block_duplicate_in_memory_cache_returns_already_known`,
+//!   `add_block_duplicate_in_db_not_cache_returns_already_known`,
+//!   `commit_block_atomic_writes_all_four_trees_together` (DB-unit).
+//! - **§2 RACE-R7 tip-moved recheck** (`inner.tip.hash != tip_hash` on the extend
+//!   path) — INVARIANT: if the tip advanced between the read and the apply, the
+//!   extend is abandoned and the block falls through to the fork path, never
+//!   double-applied to a stale tip. THREAT: concurrent-writer TOCTOU that applies
+//!   the same block twice / onto the wrong parent. TESTS: (gap — no test drives a
+//!   concurrent tip move through the RACE-R7 branch).
+//! - **§3 Fork choice** (`calculate_fork_cumulative_work`, hash-lex tiebreak) —
+//!   INVARIANT: genesis contributes a fixed base of 1 (not `dft(genesis)`) so an
+//!   equal-work fork is never spuriously heavier; strictly-greater work switches,
+//!   exactly-equal work breaks deterministically by lexicographic tip hash
+//!   (`fork_tip < current_tip` wins) — network-deterministic, no timestamp
+//!   tiebreak. THREAT: selfish-miner / equivocation split from a nondeterministic
+//!   or timestamp-gameable tiebreak. TESTS:
+//!   `total_difficulty_recompute_and_fork_walk_agree_on_genesis_base`,
+//!   `calculate_fork_cumulative_work_parent_not_found_returns_partial`,
+//!   `calculate_fork_cumulative_work_cycle_breaks_at_max_steps`,
+//!   `two_node_partition_heals_to_heavier_chain`,
+//!   `equivocating_miner_does_not_split_honest_nodes` (direct add_block tiebreak
+//!   assertion is a gap).
+//! - **§4 Fork walk helpers** (`find_fork_point`, `collect_fork_chain`,
+//!   `recompute_total_difficulty`) — INVARIANT: fork walks bound their steps and
+//!   return `None`/partial on a cycle or missing parent (never loop forever);
+//!   `recompute_total_difficulty` = `1 + Σ dft(1..=h)` and agrees with the fork
+//!   walk. THREAT: crafted prev_hash cycle → hang / corruption-driven acceptance.
+//!   TESTS: `find_fork_point_returns_common_ancestor_and_genesis`,
+//!   `find_fork_point_detects_cycle_returns_none`,
+//!   `find_fork_point_missing_parent_returns_none`,
+//!   `collect_fork_chain_returns_ascending_and_stops_at_fork_point`,
+//!   `recompute_total_difficulty_missing_mid_range_returns_none`.
+//! - **§5 Reorg execution + `apply_reorg_atomic`** (disconnect loop, re-apply
+//!   loop, `Database::apply_reorg_atomic`) — INVARIANT: the whole switch (output
+//!   removals/adds, height sets/removals, state, tx add/remove) commits atomically
+//!   or not at all; losing-fork work never leaks into `total_difficulty`;
+//!   orphaned non-coinbase txs are returned for mempool restore. THREAT: partial
+//!   reorg commit → hybrid tip / inflation. TESTS:
+//!   `total_difficulty_is_reorg_history_independent`,
+//!   `reorg_does_not_drop_a_re_mined_output_index_entry` (DB-unit),
+//!   `reorg_preserves_oldest_wins_for_non_removed_shared_address` (DB-unit).
+//!   GAP (P0): an ACCEPTED reorg re-applying REAL non-coinbase txs is untested —
+//!   only the *rejected* double-spend reorg is covered (§6).
+//! - **§6 C1 fork-vs-active-UTXO validation + double-spend defense** (contextual
+//!   validation flag; REORG-TIP-VALIDATE recheck) — INVARIANT: a fork sharing a
+//!   real non-coinbase tx / double-spent key image with the active branch is
+//!   rejected; tip unchanged, key image stays unspent, supply unchanged. THREAT:
+//!   reorg-driven double-spend / inflation. TESTS:
+//!   `reorg_tip_double_spend_is_rejected`,
+//!   `ring_size_availability_is_reorg_history_invariant` (storage-level).
+//! - **§7 H3 failed-reorg rollback (path A / path B)** (`reorg_error`,
+//!   `rolled_back` gate) — INVARIANT: when a fork block fails mid-reorg, rollback
+//!   restores pre-reorg tip/stats/UTXO/output_index exactly. H3 FIX: path-A
+//!   removal is now bounded by the highest fork height so a failed reorg no longer
+//!   leaves stale `height_to_hash` entries above the restored tip; path A and
+//!   path B are mutually exclusive (`!rolled_back` fires path B only when path A
+//!   did not, e.g. a triggering-block difficulty recheck failure). THREAT: stale
+//!   height→hash mapping after a rejected reorg → later reads resolve a ghost
+//!   block. TESTS: (gap — the path-A/path-B rollback and the H3 stale-height fix
+//!   have no chain-level regression test).
+//! - **§8 `rollback_to_height`** (finality floor, cache→DB disconnect fallback,
+//!   orphaned-tx return) — INVARIANT: refuses to roll back below the persisted
+//!   `last_checkpoint` (FINALITY VIOLATION → `Err`, no mutation); disconnects
+//!   DB-only blocks past the ~200-block cache window via DB fallback; unwinds
+//!   supply/burn through the same disconnect site as connect (symmetric);
+//!   `target >= height` is a no-op. THREAT: deep rollback past finality; silent
+//!   under-disconnect when the body is only on disk. TESTS:
+//!   `rollback_to_height_rejects_target_below_last_checkpoint`,
+//!   `rollback_to_height_disconnects_db_only_blocks_past_the_cache`,
+//!   `rollback_to_height_unwinds_total_burned_through_the_real_disconnect_site`,
+//!   `rollback_to_height_returns_non_coinbase_txs_as_orphaned`,
+//!   `tier5_rollback_to_current_height_is_noop`,
+//!   `tier5_rollback_beyond_genesis_handled`,
+//!   `total_burned_apply_disconnect_is_symmetric_and_reorg_correct`.
+//! - **§9 Reorg disconnect loop is CACHE-ONLY** (no DB fallback, unlike §8) —
+//!   INVARIANT (intended): every orphaned block on the losing branch is
+//!   disconnected. KNOWN RISK: the reorg disconnect loop reads bodies from the
+//!   in-memory cache only; a reorg whose `fork_point` sits just inside the
+//!   ~200-block cache edge could silently under-disconnect (supply / UTXO /
+//!   phase-2 stores under-counted) where `rollback_to_height` would not. THREAT:
+//!   latent inflation / stuck-spent key image near the cache boundary. TESTS:
+//!   (gap — latent under-disconnect at the cache edge is untested; flagged risk).
+//! - **§10 Supply/burn `checked_sub`/`checked_add` underflow panics + STATS
+//!   INVARIANT floor** — INVARIANT: every supply/burn move uses checked
+//!   arithmetic and PANICS (halts) on under/overflow rather than silently
+//!   clamping — a clamp would mask corruption/inflation; `total_supply` is `u128`
+//!   (survives the old `u64` ~18.4M-CYNC ceiling). L2: `total_burned` and the
+//!   block/tx counters move in lockstep with `total_supply` (`checked_sub`
+//!   None → logs `STATS INVARIANT VIOLATION` and floors, not panic, for the
+//!   telemetry counters). THREAT: silent underflow → phantom supply / inflation
+//!   (ring-size determinism, 1d27d3c8). TESTS:
+//!   `total_supply_accumulator_is_u128_and_survives_the_old_u64_ceiling`,
+//!   `total_burned_apply_disconnect_is_symmetric_and_reorg_correct`,
+//!   `block_fee_burn_matches_validator_burn_split` (the four disconnect-side
+//!   underflow-panic sites themselves are an untested gap).
+//! - **§11 `load_from_database` / `rebuild_utxo_set`** — INVARIANT: a load either
+//!   yields a fully-consistent chain or errors — never a half-state mistaken for
+//!   fresh; genesis/tip/height/network are cross-checked and the UTXO set +
+//!   block/tx counters are reconstructed (not reset to 0) on reopen. THREAT: a
+//!   drifted/partial DB booted as canonical → fork from the network. TESTS:
+//!   `load_from_database_distinguishes_fresh_and_loaded_state`,
+//!   `load_from_database_rejects_blocks_without_chain_state`,
+//!   `load_from_database_rejects_missing_tip_block`,
+//!   `load_from_database_rejects_wrong_network_genesis`,
+//!   `load_from_database_rejects_missing_genesis_height_entry`,
+//!   `load_from_database_rejects_state_height_mismatch_with_tip_block`,
+//!   `db_reopen_reconstructs_identical_state` (rebuild L8 counter reconstruction
+//!   is a gap).
+//! - **§12 `init_genesis` / `verify_tip_integrity`** — INVARIANT: genesis hash
+//!   must equal the expected network genesis (mismatch → `Err`); on init supply =
+//!   `reward(0)`, burned = 0, and genesis+height+state are persisted;
+//!   `verify_tip_integrity` reloads from DB when the in-memory tip disagrees with
+//!   `state.tip_hash`. THREAT: wrong-network / forged genesis silently adopted.
+//!   TESTS: `test_genesis_block`, `tier5_genesis_supply_matches_emission`
+//!   (verify_tip_integrity mismatch-reload branch is a gap).
+//! - **§13 `is_spent` (fail-closed) + `max_reorg_depth`** — INVARIANT: `is_spent`
+//!   returns the in-memory hit, then the DB fallback, and on a DB *error* returns
+//!   `true` (fail-CLOSED) — a lookup failure must never let a key image be treated
+//!   as spendable; `max_reorg_depth` uses the runtime network, not the compile
+//!   feature. THREAT: DB error opening a double-spend window; feature/runtime
+//!   network mismatch loosening the reorg cap. TESTS:
+//!   `is_spent_no_db_false_and_in_memory_hit_true`, `is_spent_db_fallback_true`,
+//!   `f31_blockchain_max_reorg_depth_uses_runtime_network` (the DB-error
+//!   fail-closed→true branch is an untested gap).
+//! - **§14 Phase-2 checkpoint/rewind** (`checkpoint_phase2_stores`,
+//!   `rewind_phase2_stores`; shielded / spark / MW-kernel roots) — INVARIANT: the
+//!   three phase-2 stores checkpoint and rewind together in lockstep with block
+//!   connect/disconnect; a rewind past an empty checkpoint stack hits the loud
+//!   error branch rather than silently desyncing. THREAT: phase-2 root divergence
+//!   across a reorg → shielded/MW state inconsistent with the transparent chain.
+//!   TESTS: `phase2_stores_rewind_together_through_helpers` (rewind-past-restart
+//!   loud-error branch is a gap).
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -18,202 +167,24 @@ use crate::primitives::{Hash, KeyImage};
 use crate::storage::UtxoSet;
 use crate::transaction::Transaction;
 
-/// Auto-checkpoint interval: record a checkpoint every N blocks
-/// Checkpoint interval: every 5 blocks (~10 minutes at 120s block time).
-/// C-5 FIX: Auto-checkpoint interval. Was 5 (10 minutes at 120s blocks) which
-/// caused permanent chain splits on network partitions > 10 minutes.
-/// Set to 144 (~5 hours) — absorbs realistic partitions while still protecting
-/// against long-range reorg attacks. The local constant was removed to prevent
-/// shadowing the global `constants::CHECKPOINT_INTERVAL`.
-///
-/// Uses the global constant from constants.rs instead of a local shadow.
-// Previously: const CHECKPOINT_INTERVAL: u64 = 5;  // REMOVED — see C-5 fix
+// Auto-checkpoint cadence is the global `constants::CHECKPOINT_INTERVAL`
+// (144 blocks, ~5h). The local shadow was removed (C-5 fix) to prevent drift
+// and the permanent chain splits the old 5-block/~10-minute interval caused on
+// longer partitions. See that constant.
 
-/// Returns the max reorg depth for a given network.
-/// Absolute maximum reorg depth. Beyond this, reorg is rejected outright.
-/// This is the final safety net — hard finality.
-pub fn max_reorg_depth_for(network: NetworkType) -> u64 {
-    match network {
-        NetworkType::Testnet | NetworkType::Regtest => 1000,
-        NetworkType::Mainnet => 100,
-    }
-}
-
-/// Returns the absolute maximum reorg depth for the current network.
-///
-/// SECURITY (2026-07-05 audit F31 — SEV-A): The previous implementation
-/// used `#[cfg(feature = "testnet")]` (compile-time) to select 1000 vs
-/// 100. But **network selection is a runtime decision** — the `network:
-/// NetworkType` field on `Blockchain` is set from the `--network` CLI
-/// flag / config, not from the build's feature flags. Result: a binary
-/// built without `--features testnet` would use the 100-block mainnet
-/// hard-finality cap EVEN WHEN CONFIGURED TO RUN ON TESTNET. That
-/// misconfiguration contributed to the 2026-07-04 partition where the
-/// fleet was running on testnet but hitting the 100-block cap that
-/// belongs to mainnet — the ideal testnet cap is 1000, deliberately
-/// higher so testnet can survive stress-test deep reorgs like the
-/// 628-block one randomx-2 delivered.
-///
-/// Post-fix: the free-function version is deprecated in favor of
-/// `max_reorg_depth_for(NetworkType)` which is unambiguous. This
-/// wrapper still exists (and defaults to the safer Testnet=1000
-/// interpretation) so any pre-audit caller compiles, but new code
-/// should ALWAYS pass the actual network explicitly.
-///
-/// See `project_hard_finality_partition_2026_07_04.md` in the memory
-/// index for the incident this closes.
-#[deprecated(
-    since = "1.0.11",
-    note = "Uses compile-time feature flags for what should be a runtime \
-            decision. Callers with access to a `Blockchain` should use \
-            `blockchain.max_reorg_depth()` (method); free-function callers \
-            should use `max_reorg_depth_for(network)` explicitly."
-)]
-pub fn max_reorg_depth() -> u64 {
-    // Fall back to the safer testnet interpretation (1000) rather than
-    // the pre-fix cfg-based mix. Callers who need the actual value MUST
-    // migrate to the network-taking variant.
-    max_reorg_depth_for(NetworkType::Testnet)
-}
-
-// ═══ HYBRID REORG DEFENSE (H-16 FIX) ═══════════════════════════════════════
-//
-// Three-tier defense against deep chain reorganizations:
-//
-// Tier 1 (depth ≤ 10): Unconditional acceptance if fork has more work.
-//   Normal network jitter, race conditions, brief connectivity issues.
-//   Standard Nakamoto longest-chain rule applies.
-//
-// Tier 2 (depth 11-100): MESS-style exponential cost multiplier.
-//   Fork must demonstrate SIGNIFICANTLY more cumulative work to be accepted.
-//   Required work multiplier = 2^((depth - 10) / 20)
-//   At depth 30: fork needs 2x honest chain's work
-//   At depth 50: fork needs 4x
-//   At depth 70: fork needs 8x
-//   At depth 90: fork needs 16x
-//   This makes rental-hashrate attacks economically infeasible at depth.
-//
-// Tier 3 (depth > 100): Hard reject. Absolute finality.
-//   No amount of work can reorg past this depth.
-//   Combined with rolling checkpoints for defense in depth.
-//
-// Historical precedent:
-//   - ETC 2019: 100+ block reorg, $1.1M double-spend
-//   - Bitcoin Gold 2018: deep reorg, $18M stolen
-//   - Horizen 2018: deep reorg, $550K stolen
-//   All were low-hashrate PoW chains without progressive reorg resistance.
-//
-// Reference: Ethereum Classic MESS (EIP-ECIP-1100)
-
-/// The depth below which reorgs are unconditionally accepted (standard Nakamoto rule).
-pub const REORG_UNCONDITIONAL_DEPTH: u64 = 10;
-
-/// The exponent divisor for MESS-style cost scaling.
-/// Work multiplier = 2^((depth - REORG_UNCONDITIONAL_DEPTH) / MESS_EXPONENT_DIVISOR)
-/// Higher divisor = gentler curve. 20 means doubling every 20 blocks above threshold.
-pub const MESS_EXPONENT_DIVISOR: u64 = 20;
-
-/// Tier-2 MESS is disabled below this tip height. During chain bootstrap every
-/// box that boots independently can mine its own h=1 at floor difficulty, and
-/// the work-multiplier defense would permanently lock those parallel forks in
-/// place because none of them can ever satisfy 2^x of the others. Matches the
-/// shape of the ring-size bootstrap relaxation (`BOOTSTRAP_MIN_RING_SIZE`): a
-/// young chain has too little cumulative work for MESS to be meaningful, and
-/// the per-DB checkpoint plus Tier-3 hard cap still bound how far an attacker
-/// can reach.
-pub const BOOTSTRAP_MESS_HEIGHT: u64 = 1000;
-
-/// Evaluate whether a reorg at `depth` with `fork_work` cumulative work should
-/// be accepted given `honest_work` on the current chain. `current_height` is the
-/// caller's current tip; below `BOOTSTRAP_MESS_HEIGHT` we skip Tier-2 MESS.
-///
-/// `max_depth` is the network-specific hard-finality cap. Callers who have a
-/// `Blockchain` should use `blockchain.max_reorg_depth()`; callers without
-/// should compute `max_reorg_depth_for(network)` from the runtime network.
-///
-/// SECURITY (2026-07-05 audit F31 — SEV-A): The pre-fix signature omitted
-/// `max_depth` and internally called `max_reorg_depth()` which used
-/// compile-time cfg feature flags. Runtime network vs compile-time features
-/// could diverge (see doc-comment on `max_reorg_depth`). The 2026-07-04
-/// partition trap was exacerbated by this: fleet binary compiled without
-/// `--features testnet` used max=100 (mainnet) even though runtime network
-/// was testnet — testnet is supposed to allow 1000-deep reorgs so it can
-/// survive the exact 628-block reorg that got trapped.
-///
-/// Returns `Ok(())` if the reorg is acceptable, `Err(reason)` if rejected.
-pub fn evaluate_reorg_acceptability(
-    depth: u64,
-    fork_work: u128,
-    honest_work: u128,
-    current_height: u64,
-    max_depth: u64,
-) -> std::result::Result<(), String> {
-    // Tier 3: Hard reject beyond absolute max depth
-    if depth > max_depth {
-        return Err(format!(
-            "Reorg depth {} exceeds absolute maximum {} (hard finality)",
-            depth, max_depth
-        ));
-    }
-
-    // Tier 1: Unconditional acceptance for shallow reorgs.
-    //
-    // Accepts EQUAL work (`>=`), not only strictly-greater. The sole caller
-    // (add_block's take_fork) reaches here for an equal-work fork ONLY when the
-    // fork's tip hash is strictly SMALLER than the current tip — the
-    // deterministic hash-lex tiebreak (see the take_fork comment). That gate
-    // makes an equal-work reorg monotonic: a node only ever moves toward a
-    // smaller tip hash, so every honest node converges to the same tie-winning
-    // chain regardless of block arrival order (the point of the
-    // network-deterministic tiebreak). Deep equal-work reorgs are still rejected
-    // by the MESS tier below (only shallow ties resolve by hash).
-    if depth <= REORG_UNCONDITIONAL_DEPTH {
-        if fork_work >= honest_work {
-            return Ok(());
-        } else {
-            return Err(format!(
-                "Fork at depth {} has less work ({} < {})",
-                depth, fork_work, honest_work
-            ));
-        }
-    }
-
-    // Bootstrap phase: skip Tier-2 MESS, fall back to plain longest-chain.
-    // Equal work (`>=`) is accepted for the same monotonic hash-tiebreak reason
-    // as Tier 1 above.
-    if current_height < BOOTSTRAP_MESS_HEIGHT {
-        if fork_work >= honest_work {
-            return Ok(());
-        } else {
-            return Err(format!(
-                "Fork at depth {} has less work ({} < {}) (bootstrap phase, MESS disabled)",
-                depth, fork_work, honest_work
-            ));
-        }
-    }
-
-    // Tier 2: MESS — exponential cost multiplier
-    // Required: fork_work > honest_work * 2^((depth - 10) / 20)
-    let exponent = (depth - REORG_UNCONDITIONAL_DEPTH) / MESS_EXPONENT_DIVISOR;
-    // Cap exponent to prevent overflow (2^40 is already absurdly high)
-    let capped_exponent = exponent.min(40);
-    let multiplier: u128 = 1u128 << capped_exponent;
-
-    let required_work = honest_work.saturating_mul(multiplier);
-
-    if fork_work > required_work {
-        tracing::warn!(
-            "MESS: Accepting deep reorg at depth {} (fork_work {} > required {} = honest {} * 2^{})",
-            depth, fork_work, required_work, honest_work, capped_exponent
-        );
-        Ok(())
-    } else {
-        Err(format!(
-            "MESS rejection: depth {} requires {}x work (2^{}). Fork has {} but needs {} (honest={})",
-            depth, multiplier, capped_exponent, fork_work, required_work, honest_work
-        ))
-    }
-}
+// -- Reorg / finality POLICY -------------------------------------------------
+// The pure reorg-acceptance policy -- the depth caps and the MESS
+// work-multiplier decision -- now lives in `crate::consensus::finality`, its
+// natural module home. It is re-exported here so `crate::chain::{...}` remains
+// a valid import path for existing callers and tests; behavior and the public
+// API are unchanged. Chain MUTATION (block connect/disconnect, UTXO/state
+// application, reorg execution) stays in this file.
+pub use crate::consensus::finality::{
+    evaluate_reorg_acceptability, max_reorg_depth_for, BOOTSTRAP_MESS_HEIGHT,
+    MESS_EXPONENT_DIVISOR, REORG_UNCONDITIONAL_DEPTH,
+};
+#[allow(deprecated)]
+pub use crate::consensus::finality::max_reorg_depth;
 
 /// Shared blockchain type for concurrent access
 pub type SharedBlockchain = Arc<Blockchain>;
@@ -382,8 +353,57 @@ impl BlockchainInner {
     }
 }
 
+/// Read-only query getters live in a child module (issue #108). As a descendant
+/// of `chain`, it can read `Blockchain`'s private fields; nothing there takes
+/// `apply_lock` or mutates, so lock scope is unchanged.
+mod queries;
+
+/// Fork-choice + difficulty-window calculation helpers (issue #108). Read-only
+/// `&self` helpers, `pub(super)` so `add_block`/`load` (in this module) and the
+/// tests can call them; none take `apply_lock`, so lock scope is unchanged.
+mod fork_calc;
+
+/// Database load / genesis init / recovery (issue #108). Construction-time only,
+/// never on the live apply path; each takes its own `inner.write()` guard
+/// verbatim and none takes `apply_lock`, so lock scope is unchanged.
+mod recovery;
+
+/// Chain-event ring-buffer methods (issue #108). record_event/get_events; no
+/// apply_lock, so lock scope is unchanged.
+mod events;
+
+/// Node-backed [`ChainView`](crate::compliance::ChainView) for the compliant-
+/// privacy use case. Read-only; resolves disclosure output refs + key-image
+/// spentness against real chain state so auditors can anchor-verify packages.
+mod compliance_view;
+pub use compliance_view::NodeChainView;
+/// Block-application helpers (issue #108). First `add_block` decomposition
+/// slice: the pre-application classifier (`classify_incoming`). Pure reads +
+/// the orphan-event record; called under `apply_lock` by `add_block` exactly
+/// where the inline checks ran, so lock scope is unchanged.
+mod apply;
+
 /// Blockchain state machine with interior mutability
 pub struct Blockchain {
+    /// Coarse serialization lock for the ENTIRE block-application operation
+    /// (`add_block` / `rollback_to_height` / `restore_state`).
+    ///
+    /// This is NOT the data lock — `inner` still guards the structures. Its sole
+    /// job is to make the whole read→decide→mutate→persist sequence atomic
+    /// against OTHER writers: `add_block` is a series of separate `inner.write()`
+    /// critical sections with reads, DB I/O, validation, and (on reorg) a
+    /// lock-released `collect_fork_chain` in between; without this, two ingest
+    /// paths (P2P `BlockReceived`, RPC `submit_block`, the internal miner) can
+    /// interleave across those gaps (reorg-vs-extend, reorg-vs-reorg), corrupting
+    /// the UTXO set / `total_supply` / `height_to_hash`. The `state_updates`
+    /// counter below does NOT serialize — it only signals the mempool.
+    ///
+    /// LOCK ORDER: always acquire `apply_lock` BEFORE `inner`, never the reverse.
+    /// REENTRANCY: `parking_lot::Mutex` is NOT reentrant. ONLY the public write
+    /// entry points take it (`add_block`, `rollback_to_height`, `restore_state`).
+    /// `process_block` delegates to `add_block` and MUST NOT take it; no internal
+    /// helper may take it. Violating either invariant self-deadlocks.
+    apply_lock: parking_lot::Mutex<()>,
     /// Internal mutable state protected by RwLock
     inner: RwLock<BlockchainInner>,
     /// Monotonic marker for canonical-state changes observed by mempool admission.
@@ -413,11 +433,32 @@ pub struct Blockchain {
     // ── Phase 2 privacy stores ──────────────────────────────────────
     // Wrapped in Option — None when Phase 2 is not active.
     // Returns [0u8; 32] roots and no-ops when None.
+    /// LEGACY (one-pool consolidation) — superseded by the `spark_pool_store`
+    /// field (`SparkPoolStore`). Native pre-FFI sketch store; retained gated,
+    /// never instantiated in production. See `storage::spark`.
     pub spark_store: Option<Arc<crate::storage::SparkStore>>,
+    /// LEGACY (one-pool consolidation) — superseded by the `spark_pool_store`
+    /// field. Halo2/native-GK note store (ZK circuit never built); retained
+    /// gated as a differential oracle pending the libspark audit. See
+    /// `storage::shielded`.
     pub shielded_store: Option<Arc<crate::storage::ShieldedStore>>,
     pub kernel_store: Option<Arc<crate::storage::KernelStore>>,
+    /// The libspark-FFI-aligned Spark pool store (coins by outpoint + VRF-tag
+    /// spent-set). A fourth Phase-2 store, gated + inert: it participates in the
+    /// reorg lock-step when initialized, but is not yet FED from block data —
+    /// that awaits the libspark-TxType-into-blocks format (see
+    /// `docs/design/cip-triptych-ki-binding.md`). Feature-gated so default
+    /// builds are byte-identical to a build without it.
+    #[cfg(feature = "sketch-gk-proof")]
+    pub spark_pool_store: Option<Arc<crate::storage::spark_pool::SparkPoolStore>>,
     pub cut_through:
         Option<Arc<parking_lot::Mutex<crate::crypto::mw_cutthrough::CutThroughEngine>>>,
+
+    /// The security console's incident log — the durable(ish) audit trail of
+    /// every guard/scan alert across subsystems. Always present (the security
+    /// framework is not gated); populated as details sweep. An operator RPC
+    /// reads it. See `src/security/`.
+    pub security_log: Arc<crate::security::IncidentLog>,
 
     /// CIP-009.D rolling soft-finality adapter — see
     /// `src/consensus/rolling_finality.rs`. `None` (or feature off)
@@ -464,6 +505,7 @@ impl Blockchain {
     /// Create new blockchain with explicit network type
     pub fn new_with_network(network: NetworkType) -> Self {
         Blockchain {
+            apply_lock: parking_lot::Mutex::new(()),
             inner: RwLock::new(BlockchainInner {
                 blocks: HashMap::new(),
                 height_to_hash: HashMap::new(),
@@ -490,7 +532,16 @@ impl Blockchain {
             spark_store: None,
             shielded_store: None,
             kernel_store: None,
+            // Sketch-gk builds instantiate the canonical Spark pool store so the
+            // shielded verify/apply path and reorg lock-step run end-to-end
+            // (in-memory here; the persistent node uses `with_database`). Gated
+            // OFF in production, so default builds stay byte-identical.
+            #[cfg(feature = "sketch-gk-proof")]
+            spark_pool_store: Some(Arc::new(
+                crate::storage::spark_pool::SparkPoolStore::new(),
+            )),
             cut_through: None,
+            security_log: Arc::new(crate::security::IncidentLog::default()),
             // CIP-009.D rolling finality: dormant until the operator
             // wires an adapter and `ROLLING_FINALITY_ENFORCE_HEIGHT`
             // is reached.
@@ -501,7 +552,17 @@ impl Blockchain {
 
     /// Create blockchain with database and network type
     pub fn with_database(db: Arc<Database>, network: NetworkType) -> Self {
+        // Open the persistent Spark pool store BEFORE `db` is moved into the
+        // struct. Gated `sketch-gk-proof`; a consensus store that cannot open is
+        // a hard fault (halt) rather than a silent None.
+        #[cfg(feature = "sketch-gk-proof")]
+        let spark_pool_store = Some(Arc::new(
+            crate::storage::spark_pool::SparkPoolStore::open_with_db(&db).unwrap_or_else(|e| {
+                panic!("failed to open SparkPoolStore (sketch-gk-proof build): {e}")
+            }),
+        ));
         Blockchain {
+            apply_lock: parking_lot::Mutex::new(()),
             inner: RwLock::new(BlockchainInner {
                 blocks: HashMap::new(),
                 height_to_hash: HashMap::new(),
@@ -532,7 +593,12 @@ impl Blockchain {
             spark_store: None,
             shielded_store: None,
             kernel_store: None,
+            // Persistent Spark pool store (opened above from `db`), gated
+            // `sketch-gk-proof`; None in production builds.
+            #[cfg(feature = "sketch-gk-proof")]
+            spark_pool_store,
             cut_through: None,
+            security_log: Arc::new(crate::security::IncidentLog::default()),
             // CIP-009.D rolling finality: dormant until the operator
             // wires an adapter and `ROLLING_FINALITY_ENFORCE_HEIGHT`
             // is reached.
@@ -621,50 +687,453 @@ impl Blockchain {
     /// release. Also gated on "all three stores initialized" because
     /// during the v1.0 ship → Phase 2 activation window some stores
     /// will be `None`; that's expected, not a bug.
-    fn checkpoint_phase2_stores(&self, height: u64) {
+    /// Apply the block's shielded (Spark) transactions to the `ShieldedStore`:
+    /// serial-tag double-spend guard + accumulator append (see
+    /// `consensus::shielded::apply_shielded_payload`). Inert while the store is
+    /// `None` (default) — shielded is gated off in validation, so this is a
+    /// no-op in production today. The store was checkpointed by
+    /// `checkpoint_phase2_stores` before this block's apply, so a reorg rewinds
+    /// these mutations in lock-step.
+    ///
+    /// PRE-ACTIVATION TODO (2c): the serial-tag double-spend must ALSO be
+    /// checked in validation (contextual, against the store) so an invalid block
+    /// is rejected pre-apply, mirroring the transparent key-image check. Here a
+    /// fault mid-apply can only mean validation admitted an invalid block, so we
+    /// HALT (panic) to preserve on-disk state — consistent with the
+    /// supply-accumulator corruption arms in `add_block`.
+    fn apply_shielded_txs(&self, transactions: &[Transaction], height: u64) {
+        let store = match self.shielded_store {
+            Some(ref s) => s,
+            None => return,
+        };
+        for (idx, tx) in transactions.iter().enumerate() {
+            if !tx.is_shielded() {
+                continue;
+            }
+            let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "CONSENSUS FAULT: shielded tx {} at height {} has an undecodable \
+                         payload post-validation: {}. Halting to preserve on-disk state.",
+                        idx, height, e
+                    )
+                });
+            crate::consensus::shielded::apply_shielded_payload(store, &payload, height, idx as u32)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "CONSENSUS FAULT: shielded apply failed for tx {} at height {}: {}. \
+                         Serial-tag double-spend should have been rejected in validation. \
+                         Halting to preserve on-disk state.",
+                        idx, height, e
+                    )
+                });
+        }
+    }
+
+    /// Collect the initialized Phase-2 stores as the unified `Phase2Store`
+    /// seam, in the canonical order (shielded, spark, kernel). Stores still
+    /// `None` during the v1.0 → Phase-2 activation window are simply absent.
+    fn phase2_stores(&self) -> Vec<&dyn crate::storage::Phase2Store> {
+        let mut v: Vec<&dyn crate::storage::Phase2Store> = Vec::with_capacity(3);
         if let Some(ref s) = self.shielded_store {
-            s.checkpoint_at_height(height);
+            v.push(s.as_ref());
         }
         if let Some(ref s) = self.spark_store {
-            s.checkpoint_at_height(height);
+            v.push(s.as_ref());
         }
         if let Some(ref s) = self.kernel_store {
-            s.checkpoint_at_height(height);
+            v.push(s.as_ref());
+        }
+        // The libspark-aligned pool store (gated) is a fourth Phase-2 store: it
+        // checkpoints/rewinds in lock-step with the others when initialized.
+        #[cfg(feature = "sketch-gk-proof")]
+        if let Some(ref s) = self.spark_pool_store {
+            v.push(s.as_ref());
+        }
+        v
+    }
+
+    /// The anchored shielded (Spark) cover set for a REMOTE wallet: `(outpoint,
+    /// coin, serial_context, height)` per coin, in the canonical order a spend
+    /// proof anchored at `(cover_set_id, anchor_height)` is built and verified
+    /// against. Read-only. Empty when the pool store is absent or holds no coins
+    /// at/under `anchor_height`. Serves the data a wallet needs to identify its
+    /// owned coin and build a shielded spend without holding the pool itself.
+    #[cfg(feature = "sketch-gk-proof")]
+    pub fn spark_pool_cover_entries(
+        &self,
+        cover_set_id: u64,
+        anchor_height: u64,
+    ) -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>, u64)> {
+        self.spark_pool_store
+            .as_ref()
+            .map(|s| s.cover_entries_at(cover_set_id, anchor_height))
+            .unwrap_or_default()
+    }
+
+    /// The unified operator security sweep: run every initialized detail —
+    /// Phase-2 lock-step (always) and the shielded-pool detail (gated + present)
+    /// — under one `SecurityCommand` and return the report. **Pure** (does not
+    /// record): a read-only console query calls this without polluting the
+    /// incident log; a caller that wants an audit trail records the result
+    /// itself. `height` is the current chain height.
+    pub fn security_sweep(&self, height: u64) -> crate::security::SecurityReport {
+        use crate::security::{SecurityCommand, SecurityDetail};
+        let phase2 = self.phase2_stores();
+        let lockstep = crate::storage::phase2::Phase2LockstepDetail::new(&phase2, height);
+
+        #[cfg(feature = "sketch-gk-proof")]
+        if let Some(store) = &self.spark_pool_store {
+            let pool =
+                crate::storage::pool_security::PoolSecurityDetail::new(store.as_ref(), height);
+            let details: [&dyn SecurityDetail; 2] = [&lockstep, &pool];
+            return SecurityCommand::sweep_all(&details);
         }
 
-        // Cross-store invariant — only meaningful when all three are
-        // initialized (Phase 2 activated). The shielded store's
-        // checkpoint may have been skipped if the BridgeTree declined
-        // it (non-monotonic height; warned in storage::shielded), in
-        // which case our cross-store count check would fail — but
-        // that's exactly the bug class this assertion is meant to
-        // surface, so we don't suppress it.
-        #[cfg(debug_assertions)]
-        if let (Some(sh), Some(sp), Some(kr)) =
-            (&self.shielded_store, &self.spark_store, &self.kernel_store)
+        let details: [&dyn SecurityDetail; 1] = [&lockstep];
+        SecurityCommand::sweep_all(&details)
+    }
+
+    /// The Phase-2 **root-integrity** detail's report: for each accumulator
+    /// store that can independently recompute its root (kernel, spark), compare
+    /// the maintained root against a fresh recompute from its retained contents
+    /// and flag any drift (operational/Critical — pages, never halts). This is
+    /// the content-corruption counterpart to the lock-step check in
+    /// [`security_sweep`](Self::security_sweep), which only compares
+    /// checkpoint-stack depths.
+    ///
+    /// Kept SEPARATE from `security_sweep` because the recompute is O(Σ
+    /// contents): it is safe for an operator/audit RPC but MUST NOT run on the
+    /// per-block hot path. Lock-free (reads the `Arc` store fields, not `inner`),
+    /// so it does not deadlock against block-apply. Pure (no incident-log write).
+    pub fn phase2_root_integrity(&self) -> crate::security::SecurityReport {
+        use crate::security::SecurityDetail;
+        let phase2 = self.phase2_stores();
+        crate::storage::phase2::Phase2RootIntegrityDetail::new(&phase2).sweep()
+    }
+
+    /// The UTXO-set security detail's report. Kept SEPARATE from
+    /// [`security_sweep`](Self::security_sweep) because it acquires the `inner`
+    /// read lock: it is safe to call from a path that does NOT already hold
+    /// `inner` (e.g. an operator RPC), but MUST NOT be called from block-apply,
+    /// which holds the `inner` write lock (parking_lot RwLock is not reentrant —
+    /// re-locking would deadlock). Pure (no incident-log write).
+    pub fn utxo_security(&self) -> crate::security::SecurityReport {
+        use crate::security::{SecurityCommand, SecurityDetail};
+        let inner = self.inner.read();
+        let utxo = crate::storage::UtxoSecurityDetail::new(&inner.utxos);
+        let details: [&dyn SecurityDetail; 1] = [&utxo];
+        SecurityCommand::sweep_all(&details)
+    }
+
+    /// The supply-integrity detail's report (inflation surface): the deepest
+    /// value invariant — `total_burned ≤ total_supply` (consensus-critical), an
+    /// over-cap operational warning, and a schedule reconciliation
+    /// (`total_supply == Σ reward(0..=tip)`, operational/Critical, never a halt)
+    /// that catches accounting drift from the deterministic emission schedule.
+    /// Snapshots the supply counters + tip height under the `inner` read lock,
+    /// so — like [`utxo_security`](Self::utxo_security) — it is safe from a path
+    /// that does NOT already hold `inner`, never from block-apply. Pure (no
+    /// incident-log write).
+    pub fn supply_security(&self) -> crate::security::SecurityReport {
+        use crate::security::SecurityDetail;
+        let (total_supply, total_burned, tip_height) = {
+            let inner = self.inner.read();
+            (inner.stats.total_supply, inner.stats.total_burned, inner.stats.height)
+        };
+        // `with_tip` adds the schedule reconciliation: recompute the
+        // deterministic emission sum at the tip and flag any drift from the
+        // recorded gross `total_supply` (operational, never a halt). Off the
+        // block-apply hot path — this method is called by the audit RPC /
+        // periodic sweep, not while `inner` is held for a block connect.
+        crate::security::supply::SupplySecurityDetail::with_tip(
+            total_supply,
+            total_burned,
+            tip_height,
+        )
+        .sweep()
+    }
+
+    /// Verify every shielded tx's spend proofs against the live accumulator —
+    /// membership (bucket anon-set) + nullifier binding + spend message. This is
+    /// the store-aware verification the stateless `check_shielded_tx` cannot do;
+    /// it runs pre-apply, alongside `check_block_shielded_double_spends`. Gated
+    /// `sketch-gk-proof`: NEVER compiled into a production node (where shielded
+    /// txs are rejected at validation and activation is `u64::MAX`), so it is
+    /// only exercised in gated regtest. Value conservation (balance + range) is a
+    /// separate proof still to be added before any activation.
+    #[cfg(feature = "sketch-gk-proof")]
+    fn verify_block_shielded_spends(
+        store: &crate::storage::ShieldedStore,
+        transactions: &[Transaction],
+    ) -> Result<()> {
+        for tx in transactions {
+            if !tx.is_shielded() {
+                continue;
+            }
+            let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
+            crate::consensus::shielded_pipeline::gk::verify_shielded_payload(
+                store,
+                &payload,
+                tx.fee.as_atomic(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// v2 (libspark) store-aware spend verification — the pre-apply
+    /// block-rejection check for `SparkPayload` v2 shielded txs (see
+    /// `docs/design/cip-spark-block-format.md`). Skips v1 (native) shielded txs.
+    /// Verifies each v2 spend against the live `SparkPoolStore` via
+    /// `verify_solvency` (membership + tag-binding + range/balance + `T ∉
+    /// spent-set`) and guards against a duplicate tag within the block. Gated on
+    /// both `sketch-gk-proof` (the pool/payload types) and `libspark-ffi` (the
+    /// real backend) — the only config where the libspark pool exists; inert and
+    /// fail-closed otherwise. Returns `Err(reason)` to reject the block.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    fn verify_block_spark_v2(
+        &self,
+        transactions: &[Transaction],
+    ) -> std::result::Result<(), String> {
+        let store = match &self.spark_pool_store {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let backend = spark_connector::ffi::LibsparkBackend;
+        let mut seen_tags: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        // Simulate the pool value across the block to reject (pre-apply) any
+        // block that would unshield more than the pool holds — prevention of
+        // inflation across the veil, before any state is mutated.
+        let mut simulated_pool = store.pool_value();
+        for (idx, tx) in transactions.iter().enumerate() {
+            if !tx.is_shielded() {
+                continue;
+            }
+            let payload = match crate::consensus::spark_payload::SparkPayload::decode(&tx.extra) {
+                Ok(p) => p,
+                Err(_) => continue, // not a v2 payload (native v1 handled elsewhere)
+            };
+            // Transparent↔shielded value bridge: the tx's public value_balance
+            // must be backed by its transparent commitments (no cross-veil
+            // inflation). The shielded side's own conservation is proven by the
+            // libspark bundle in verify_spark_payload below.
+            let pseudo_outputs: Vec<[u8; 32]> =
+                tx.inputs.iter().map(|i| i.pseudo_output_commitment).collect();
+            let output_commitments: Vec<[u8; 32]> =
+                tx.outputs.iter().map(|o| o.commitment).collect();
+            crate::consensus::spark_payload::verify_transparent_shielded_balance(
+                &pseudo_outputs,
+                &output_commitments,
+                tx.fee.as_atomic(),
+                payload.value_balance,
+            )
+            .map_err(|e| format!("spark v2 tx {idx}: value bridge: {e}"))?;
+            // Cumulative pool-value check (prevention): reject before apply if
+            // this tx would unshield more than the pool holds.
+            simulated_pool -= payload.value_balance as i128;
+            if simulated_pool < 0 {
+                return Err(format!(
+                    "spark v2 tx {idx}: pool underflow — unshields more than the shielded pool holds"
+                ));
+            }
+            // No UNAUTHENTICATED coin entry: coins enter the pool ONLY via an
+            // authenticated mint bundle (per-coin value proof) or a spend's own
+            // outputs — never via bare `payload.outputs`, which would inject
+            // coins with no value proof. Reject any bare-output payload.
+            if !payload.outputs.is_empty() {
+                return Err(format!(
+                    "spark v2 tx {idx}: unauthenticated coin entry — bare outputs without a mint bundle"
+                ));
+            }
+            // A shield-in (value ENTERING the pool, value_balance < 0) MUST carry
+            // an authenticated mint bundle proving each minted coin's value;
+            // otherwise value could be shielded in with no coin-level proof.
+            if payload.value_balance < 0 && payload.mint.is_none() {
+                return Err(format!(
+                    "spark v2 tx {idx}: shield-in requires an authenticated mint bundle"
+                ));
+            }
+            // Authenticated shield-in: the minted coins' total value proof must
+            // equal the value entering the pool (−value_balance). Together with
+            // the bridge above this fully conserves value across the veil.
+            if let Some(mint) = &payload.mint {
+                crate::consensus::spark_payload::verify_mint_shield_in(mint, payload.value_balance)
+                    .map_err(|e| format!("spark v2 tx {idx}: mint: {e}"))?;
+            }
+            let tags = crate::consensus::spark_payload::verify_spark_payload(
+                store.as_ref(),
+                &backend,
+                &payload,
+                tx.fee.as_atomic(),
+            )
+            .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
+            for t in &tags {
+                if !seen_tags.insert(t.0.clone()) {
+                    return Err(format!("spark v2 tx {idx}: duplicate linking tag within block"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply verified `SparkPayload` v2 txs to the `SparkPoolStore`: `add_coin`
+    /// per minted coin (keyed by its deterministic outpoint), `mark_tag_spent`
+    /// per spend tag — in lock-step with the Phase-2 checkpoint already taken.
+    /// Re-verifies to obtain the tags (validation ran the same check pre-apply,
+    /// so a fault here is a consensus fault → halt, matching `apply_shielded_txs`).
+    /// Gated on both features; inert when the pool store is `None`.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    fn apply_spark_v2_txs(&self, transactions: &[Transaction], height: u64) {
+        let store = match &self.spark_pool_store {
+            Some(s) => s,
+            None => return,
+        };
+        let backend = spark_connector::ffi::LibsparkBackend;
+        for (idx, tx) in transactions.iter().enumerate() {
+            if !tx.is_shielded() {
+                continue;
+            }
+            let payload = match crate::consensus::spark_payload::SparkPayload::decode(&tx.extra) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let tags = crate::consensus::spark_payload::verify_spark_payload(
+                store.as_ref(),
+                &backend,
+                &payload,
+                tx.fee.as_atomic(),
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "CONSENSUS FAULT: spark v2 verify failed at apply (tx {idx}, h{height}): {e}. \
+                     Validation should have rejected. Halting to preserve on-disk state."
+                )
+            });
+            let input_outpoints: Vec<Vec<u8>> = tx
+                .inputs
+                .iter()
+                .map(|i| borsh::to_vec(&i.key_image).unwrap_or_default())
+                .collect();
+            let output_contexts: Vec<Vec<u8>> = (0..payload.outputs.len())
+                .map(|vout| {
+                    let op = crate::consensus::spark_payload::derive_outpoint(
+                        &input_outpoints,
+                        vout as u32,
+                    );
+                    spark_connector::ffi::serial_context(&op)
+                        .expect("serial_context derivation is infallible for a valid outpoint")
+                })
+                .collect();
+            crate::consensus::spark_payload::apply_spark_payload(
+                store.as_ref(),
+                &payload,
+                &input_outpoints,
+                &output_contexts,
+                &tags,
+                height,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "CONSENSUS FAULT: spark v2 apply failed (tx {idx}, h{height}): {e}. Halting."
+                )
+            });
+
+            // Authenticated shield-in: feed the mint bundle's coins into the
+            // pool. The value proof was checked at verify (verify_mint_shield_in);
+            // re-verify here to extract the coins, then add each keyed by its
+            // deterministic outpoint. All coins in a mint share the tx-level
+            // serial context.
+            if let Some(mint) = &payload.mint {
+                let (_total, coins) = spark_connector::ffi::verify_mint_bundle(mint)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "CONSENSUS FAULT: spark v2 mint bundle failed at apply (tx {idx}, \
+                             h{height}). Validation should have rejected. Halting."
+                        )
+                    });
+                let mint_ctx = spark_connector::ffi::serial_context(
+                    &crate::consensus::spark_payload::derive_outpoint(&input_outpoints, 0),
+                )
+                .expect("serial_context derivation is infallible");
+                for (i, coin) in coins.iter().enumerate() {
+                    let op = crate::consensus::spark_payload::derive_outpoint(
+                        &input_outpoints,
+                        i as u32,
+                    );
+                    if store.add_coin(op, coin.clone(), mint_ctx.clone(), height).is_none() {
+                        panic!(
+                            "CONSENSUS FAULT: duplicate mint coin outpoint (tx {idx}, h{height}). \
+                             Halting."
+                        );
+                    }
+                }
+            }
+
+            // Spend outputs: feed the spend's change/payment coins into the pool,
+            // keyed by a per-coin id (robust to pure-shielded txs) with the
+            // recoverable serial context = serialize(spend tags). Symmetric with
+            // the mint feed. A coin already present (idempotent reorg re-apply)
+            // is skipped, not a fault.
+            if let Some(sb) = &payload.spend {
+                if let Some((out_coins, out_ctx)) =
+                    spark_connector::ffi::spend_outputs(&sb.bundle)
+                {
+                    for coin in &out_coins {
+                        let key = blake3::hash(&coin.0).as_bytes().to_vec();
+                        let _ = store.add_coin(key, coin.clone(), out_ctx.clone(), height);
+                    }
+                }
+            }
+
+            // Move this tx's value across the veil in the pool total (shield-in
+            // grows it, unshield shrinks it). A negative result is impossible —
+            // verify_block_spark_v2 pre-checked cumulative balance — so an Err
+            // here is a consensus fault → halt (preserve on-disk state).
+            store.apply_value_balance(payload.value_balance).unwrap_or_else(|e| {
+                panic!(
+                    "CONSENSUS FAULT: spark v2 pool-value apply failed (tx {idx}, h{height}): {e}. \
+                     Validation should have rejected. Halting."
+                )
+            });
+        }
+
+        // Secret Service, post-apply: run the pool's O(1) consensus guard over
+        // the just-mutated state. A tripped invariant means the apply produced a
+        // state an honest node can never reach — HALT to preserve on-disk state
+        // (defense-in-depth, mirroring the R-61 persistence halts). Operational
+        // anomalies never reach here (they page, they don't halt).
         {
-            let (n_sh, n_sp, n_kr) = (
-                sh.checkpoint_count(),
-                sp.checkpoint_count(),
-                kr.checkpoint_count(),
-            );
-            if !(n_sh == n_sp && n_sp == n_kr) {
-                debug_assert_eq!(
-                    (n_sh, n_sp, n_kr),
-                    (n_sh, n_sh, n_sh),
-                    "Phase-2 stores diverged at height {}: shielded={} spark={} kernel={} \
-                     — the three stores were checkpointed in lock-step but their stack \
-                     lengths disagree, meaning one of them silently skipped (likely a \
-                     BridgeTree-declined checkpoint or a code path that bypassed \
-                     checkpoint_phase2_stores). A reorg from this state would unwind \
-                     the stores unevenly.",
-                    height,
-                    n_sh,
-                    n_sp,
-                    n_kr
+            // Unified post-apply sweep (pool + Phase-2 lock-step). Record every
+            // alert to the console's incident log + tracing so the operator sees
+            // them, then halt only on a consensus-critical.
+            let report = self.security_sweep(height);
+            self.security_log.record_report(height, &report);
+            if report.has_consensus_halt() {
+                let codes: Vec<&str> = report.criticals().map(|a| a.code).collect();
+                panic!(
+                    "CONSENSUS FAULT: security guard tripped after apply at h{height}: \
+                     {codes:?}. Halting to preserve on-disk state."
                 );
             }
         }
+    }
+
+    fn checkpoint_phase2_stores(&self, height: u64) {
+        // One shared driver checkpoints every initialized store in lock-step and
+        // returns the cross-store agreement status. The invariant stays a
+        // `debug_assert!` (dead in release): in production the only way it can
+        // fire is a programming bug — a store silently no-op'ing its checkpoint
+        // (e.g. a BridgeTree-declined non-monotonic height, warned in
+        // storage::shielded) or a new store added without going through this
+        // driver. Catching it at the moment of divergence keeps the bug class
+        // shallow. Empty/single-store windows (pre-activation) agree trivially.
+        let stores = self.phase2_stores();
+        let status = crate::storage::phase2::checkpoint_all(&stores, height);
+        #[cfg(debug_assertions)]
+        if let Err(diagnostic) = status {
+            debug_assert!(false, "{diagnostic}");
+        }
+        let _ = status;
     }
 
     /// Rewind every initialized Phase-2 store by one checkpoint — i.e.
@@ -674,18 +1143,49 @@ impl Blockchain {
     /// reports it could not roll back (an empty checkpoint stack —
     /// e.g. a rewind attempted past a node restart).
     fn rewind_phase2_stores(&self, height: u64) {
-        for (name, outcome) in [
-            ("shielded", self.shielded_store.as_ref().map(|s| s.rewind())),
-            ("spark", self.spark_store.as_ref().map(|s| s.rewind())),
-            ("kernel", self.kernel_store.as_ref().map(|s| s.rewind())),
-        ] {
-            if outcome == Some(false) {
-                tracing::warn!(
-                    "{}_store.rewind() returned false at h={} — store could not \
-                     be rolled back; tree/UTXO state may be inconsistent",
-                    name,
-                    height
-                );
+        // `rewind()` returns false ONLY when the in-memory checkpoint stack is
+        // empty (see the store impls). That has two very different meanings we
+        // must NOT conflate:
+        //   * the store is EMPTY (no Phase-2 data) — nothing to roll back. This
+        //     is the normal case today: shielded/spark/MW are dormant, so every
+        //     reorg used to spam a scary "state may be inconsistent" warning
+        //     (once per store per disconnected block) for a completely benign
+        //     no-op. Demote to debug.
+        //   * the store is NON-EMPTY but the checkpoint stack is gone (e.g. a
+        //     reorg reaching past a node restart — the stack is in-memory and
+        //     not yet restart-durable). Then a disconnected block's Phase-2
+        //     state is stranded above the new tip: a genuine inconsistency.
+        //     Make it a loud, unmistakable error that names the blocker.
+        //
+        // The full fix (restart-durable rewind checkpoints for the three
+        // Phase-2 stores) is a prerequisite for activating shielded/spark/MW —
+        // tracked as the phase-2-reorg-rewind mainnet blocker. Until then the
+        // stores stay dormant and this only ever hits the benign branch.
+        use crate::storage::RewindOutcome;
+        let stores = self.phase2_stores();
+        for (name, outcome) in crate::storage::phase2::rewind_all(&stores) {
+            match outcome {
+                // Rolled back cleanly — nothing to report.
+                RewindOutcome::RolledBack => {}
+                RewindOutcome::EmptyNoop => {
+                    tracing::debug!(
+                        "{}_store.rewind() at h={}: empty store, nothing to roll back",
+                        name,
+                        height
+                    );
+                }
+                RewindOutcome::Stranded { remaining } => {
+                    // Coded diagnostic (merged from main): stable code + invariant +
+                    // enforcing location + fix pointer; `coincync-diag explain CYNC-STOR-001`.
+                    tracing::error!(
+                        "
+{}",
+                        crate::diagnostics::Report::new(crate::diagnostics::CYNC_STOR_001)
+                            .at(format!("height {height}, {name} store"))
+                            .expected("0 elements after rewind")
+                            .got(format!("{remaining} element(s) stranded above the new tip"))
+                    );
+                }
             }
         }
     }
@@ -716,473 +1216,9 @@ impl Blockchain {
             .unwrap_or_default()
     }
 
-    /// Initialize genesis block
-    pub fn init_genesis(&self) -> Result<Hash> {
-        let _state_update = self.begin_state_update();
-        let genesis = create_genesis_block_for(self.network);
-        let hash = genesis.hash();
-
-        // SECURITY: Verify genesis hash matches the hardcoded constant.
-        // This catches accidental genesis block changes that would cause chain forks.
-        let expected = self.expected_genesis_hash();
-        if hash != expected {
-            return Err(Error::InvalidState(format!(
-                "Genesis hash mismatch! Computed {} but expected {}. \
-                 The genesis block definition may have been altered.",
-                hash.to_hex(),
-                expected.to_hex()
-            )));
-        }
-
-        {
-            let mut inner = self.inner.write();
-            inner.blocks.insert(hash, genesis.clone());
-            inner.height_to_hash.insert(0, hash);
-            inner.genesis_hash = Some(hash);
-
-            inner.tip = ChainTip {
-                hash,
-                height: 0,
-                difficulty: 1,
-                timestamp: genesis.header.timestamp,
-            };
-
-            inner.stats.height = 0;
-            inner.stats.total_blocks = 1;
-            inner.stats.total_transactions = genesis.transactions.len() as u64;
-            inner.stats.tip_hash = hash;
-            inner.stats.total_supply = calculate_block_reward(0).as_atomic() as u128;
-            // Genesis carries no fees (height 0 is below FEE_DISTRIBUTION_HEIGHT
-            // and has no non-coinbase txs), so the burn accumulator starts at 0.
-            inner.stats.total_burned = 0;
-
-            // SECURITY (CC-001): Apply genesis block transactions to UTXO set
-            let batch = UtxoSet::batch_from_block(0, &genesis.transactions);
-            inner.utxos.apply_batch(batch);
-        }
-
-        // Persist output index for genesis block
-        self.persist_output_index(&genesis.transactions, 0);
-
-        // Save to database if available
-        if let Some(ref db) = self.db {
-            db.blocks.insert(&genesis)?;
-            db.blocks.set_height_hash(0, &hash)?;
-            db.state.set_genesis_hash(&hash)?;
-            let state = ChainStateData {
-                tip_hash: hash,
-                height: 0,
-                total_difficulty: 1,
-                total_supply: calculate_block_reward(0).as_atomic() as u128,
-                total_burned: 0,
-                last_checkpoint: 0,
-            };
-            db.state.save_state(&state)?;
-
-            // Record genesis as the first checkpoint
-            let _ = db.state.add_checkpoint(0, &hash);
-        }
-
-        tracing::info!("Genesis block initialized: {}", hash.to_hex());
-        Ok(hash)
-    }
-
-    fn expected_genesis_hash(&self) -> Hash {
-        match self.network {
-            NetworkType::Testnet | NetworkType::Regtest => crate::testnet::expected_genesis_hash(),
-            NetworkType::Mainnet => crate::mainnet::expected_genesis_hash(),
-        }
-    }
-
-    /// Verify chain tip integrity after recovering from a poisoned lock.
-    /// Compares in-memory tip hash against the database to detect corruption.
-    /// Can also be called periodically from the maintenance loop as a health check.
-    pub fn verify_tip_integrity(&self) -> Result<()> {
-        if let Some(ref db) = self.db {
-            if let Some(state) = db.state.get_state()? {
-                let inner = self.inner.read();
-                if inner.tip.hash != state.tip_hash && inner.tip.height > 0 {
-                    tracing::error!(
-                        "TIP INTEGRITY MISMATCH: in-memory tip {} (height {}) != DB tip {} (height {}). \
-                         Reloading from database.",
-                        inner.tip.hash.to_hex()[..16].to_string(),
-                        inner.tip.height,
-                        state.tip_hash.to_hex()[..16].to_string(),
-                        state.height,
-                    );
-                    drop(inner);
-                    return self.load_from_database();
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Load chain state from database
-    pub fn load_from_database(&self) -> Result<()> {
-        self.load_from_database_with_outcome().map(|_| ())
-    }
-
-    /// Genesis initialization requires an explicit fresh-database result.
-    pub fn load_from_database_with_outcome(&self) -> Result<ChainLoadOutcome> {
-        let _state_update = self.begin_state_update();
-        if let Some(ref db) = self.db {
-            let state = match db.state.get_state()? {
-                Some(state) => state,
-                None if !db.blocks.has_any_chain_data() => return Ok(ChainLoadOutcome::Fresh),
-                None => {
-                    return Err(Error::DatabaseError(
-                        "persisted block data exists without chain state; refusing to initialize genesis"
-                            .into(),
-                    ));
-                }
-            };
-
-            let actual_genesis = db.blocks.get_hash_by_height(0)?.ok_or_else(|| {
-                Error::DatabaseError(
-                    "chain state exists but the block height index has no genesis entry".into(),
-                )
-            })?;
-            let expected_genesis = self.expected_genesis_hash();
-            if actual_genesis != expected_genesis {
-                return Err(Error::DatabaseError(format!(
-                    "database genesis {} does not match the expected {} genesis {}",
-                    actual_genesis, self.network, expected_genesis,
-                )));
-            }
-
-            return match db.blocks.get(&state.tip_hash)? {
-                Some(tip_block) => {
-                    if tip_block.header.height != state.height {
-                        return Err(Error::DatabaseError(format!(
-                            "chain state height {} does not match tip block height {}",
-                            state.height, tip_block.header.height,
-                        )));
-                    }
-                    let difficulty = calculate_difficulty_from_target(&tip_block.header.target);
-                    {
-                        let mut inner = self.inner.write();
-                        inner.tip = ChainTip {
-                            hash: state.tip_hash,
-                            height: state.height,
-                            difficulty,
-                            timestamp: tip_block.header.timestamp,
-                        };
-                        inner.stats.height = state.height;
-                        inner.stats.total_supply = state.total_supply;
-                        // Load the persisted burn accumulator alongside supply.
-                        // ChainStateData.total_burned is `u64` on disk; the
-                        // in-memory accumulator is `u128` for parity with
-                        // total_supply — widen on load.
-                        inner.stats.total_burned = state.total_burned as u128;
-                        inner.stats.tip_hash = state.tip_hash;
-                        inner.stats.total_difficulty = state.total_difficulty;
-                        // Sync stats.difficulty with the loaded tip. Without this,
-                        // stats.difficulty stays at ChainStats::default() (= 0) until
-                        // a new block lands via the main-chain add path (chain.rs:1490).
-                        // The RPC `get_info` "difficulty" field reads from
-                        // stats.difficulty (src/rpc/server.rs:511), so the bug surfaces
-                        // as `"difficulty":"0"` in get_info after every node restart
-                        // until the first non-fork block arrives. Observed on the
-                        // testnet api box 2026-06-01 after the fleet upgrade.
-                        inner.stats.difficulty = difficulty;
-                    }
-                    tracing::info!(
-                        "Loaded chain state: height={}, tip={}",
-                        state.height,
-                        state.tip_hash.to_hex()
-                    );
-
-                    // Self-heal total_difficulty from the active chain.
-                    //
-                    // The stored value can drift from the deterministic
-                    // `1 + Σ dft(1..=height)` when the node has taken the
-                    // (pre-fix) reorg path, which accumulated against a
-                    // `dft(genesis)` base or stored a partial fork walk. A
-                    // drifted value makes this node advertise a `ChainWorkMessage`
-                    // that disagrees with peers on the SAME tip's work, which
-                    // false-positives their `work_behind` veto and locks their
-                    // (follower) miners out. Recompute the canonical value and
-                    // overwrite in memory; the corrected value persists on the
-                    // next block commit. If any block is missing we keep the
-                    // stored value rather than store a wrong partial.
-                    if let Some(recomputed) = self.recompute_total_difficulty(state.height) {
-                        let mut inner = self.inner.write();
-                        if inner.stats.total_difficulty != recomputed {
-                            tracing::warn!(
-                                "total_difficulty self-heal on load: stored={} recomputed={} delta={} \
-                                 — converging to the deterministic 1 + Σ dft(1..=height)",
-                                inner.stats.total_difficulty,
-                                recomputed,
-                                (recomputed as i128) - (inner.stats.total_difficulty as i128),
-                            );
-                            inner.stats.total_difficulty = recomputed;
-                        }
-                    }
-
-                    // Rebuild UTXO set from stored blocks so that key image
-                    // checks and decoy selection work immediately after restart.
-                    self.rebuild_utxo_set(state.height)?;
-
-                    // Rebuild tx index if empty (migration for existing chains)
-                    if let Some(ref db) = self.db {
-                        if db.tx_index_is_empty() && state.height > 0 {
-                            tracing::info!("Building tx index for {} blocks...", state.height + 1);
-                            let start = std::time::Instant::now();
-                            let mut indexed = 0u64;
-                            let mut failed = 0u64;
-                            for h in 0..=state.height {
-                                if let Some(block) = self.get_block_by_height(h) {
-                                    for (idx, tx) in block.transactions.iter().enumerate() {
-                                        if let Err(e) =
-                                            db.index_tx(tx.hash().as_bytes(), h, idx as u32)
-                                        {
-                                            failed += 1;
-                                            // Log per-failure at DEBUG to avoid log
-                                            // spam during a corrupt-DB rebuild, but
-                                            // a non-zero `failed` count at the end
-                                            // surfaces the issue at WARN.
-                                            tracing::debug!(
-                                                target: "chain::tx_index_rebuild",
-                                                "index_tx failed at h={} idx={}: {}",
-                                                h, idx, e
-                                            );
-                                        } else {
-                                            indexed += 1;
-                                        }
-                                    }
-                                }
-                            }
-                            if failed > 0 {
-                                tracing::warn!(
-                                    "Tx index rebuild: {} indexed, {} FAILED in {:.2}s. \
-                                     Failed lookups will return None until next rebuild.",
-                                    indexed,
-                                    failed,
-                                    start.elapsed().as_secs_f64()
-                                );
-                            } else {
-                                tracing::info!(
-                                    "Tx index built: {} txs in {:.2}s",
-                                    indexed,
-                                    start.elapsed().as_secs_f64()
-                                );
-                            }
-                        }
-                    }
-
-                    // Verify tip integrity after loading (catches poisoned lock corruption)
-                    self.verify_tip_integrity()?;
-
-                    Ok(ChainLoadOutcome::Loaded)
-                }
-                None => Err(Error::DatabaseError(format!(
-                    "chain state references missing tip block {} at height {}",
-                    state.tip_hash, state.height,
-                ))),
-            };
-        }
-        Ok(ChainLoadOutcome::Fresh)
-    }
-
-    /// Rebuild in-memory UTXO set by replaying all blocks from the database.
-    ///
-    /// Called on startup after loading chain state to ensure the UTXO set
-    /// (key images, outputs, height index) is fully populated. Without this,
-    /// `validate_transaction()` would miss pre-restart key images, allowing
-    /// double-spends during the window before re-sync completes.
-    fn rebuild_utxo_set(&self, tip_height: u64) -> Result<()> {
-        let db = match self.db.as_ref() {
-            Some(db) => db,
-            None => return Ok(()),
-        };
-
-        tracing::info!("Rebuilding UTXO set from {} blocks...", tip_height + 1);
-        let start = std::time::Instant::now();
-
-        let mut inner = self.inner.write();
-        inner.utxos = UtxoSet::new();
-        // Wire up on-disk fallback for output_index cache misses
-        if let Some(ref db) = self.db {
-            inner.utxos.set_database(Arc::clone(db));
-        }
-
-        // Also rebuild in-memory block caches for recent blocks (needed by
-        // get_difficulty_blocks, find_fork_point, etc.)
-        let cache_depth = 200u64;
-        let cache_start = tip_height.saturating_sub(cache_depth);
-
-        let mut prev_hash = Hash::zero(); // genesis prev_hash
-        // Reconstruct the block/tx counters from the actual persisted chain.
-        // ChainStateData does NOT persist total_blocks/total_transactions, so
-        // without this they reload as 0 and undercount forever after a restart
-        // (same "stats field not reconstructed on load" class as the difficulty=0
-        // fix above; surfaced by the L8 db-reopen determinism test 2026-08-18).
-        let mut blocks_applied: u64 = 0;
-        let mut txs_applied: u64 = 0;
-        for height in 0..=tip_height {
-            match db.blocks.get_by_height(height) {
-                Ok(Some(block)) => {
-                    // Verify chain link integrity
-                    if height > 0 && block.header.prev_hash != prev_hash {
-                        tracing::error!(
-                            "CHAIN CORRUPTION at height {}: prev_hash {} != expected {}. \
-                             Truncating chain to height {}.",
-                            height,
-                            block.header.prev_hash.to_hex()[..16].to_string(),
-                            prev_hash.to_hex()[..16].to_string(),
-                            height - 1
-                        );
-                        // Fix: truncate the tip to the last good height.
-                        //
-                        // 2026-06-03 bug fix: previously the tip-restore branch
-                        // only ran if `height_to_hash.get(&good_height)`
-                        // returned Some — but that in-memory map is populated
-                        // only for blocks in the cache window (last ~200
-                        // heights, see line ~803-806). For corruption detected
-                        // at any height BELOW the cache window, the lookup
-                        // returned None and `inner.tip` was never reset. The
-                        // node would restart looking healthy (stats.height
-                        // dropped to good_height, but tip.height stayed at the
-                        // state-claimed pre-corruption value), then reject
-                        // every subsequent new block with "invalid height:
-                        // expected <state_tip+1>, got <good_height+1>", and
-                        // the chain would be stuck until manual intervention.
-                        //
-                        // `prev_hash` already holds the hash of the previous
-                        // good block (set at line ~796-797 each iteration), so
-                        // use it directly — no cache dependency. stats.height,
-                        // tip.height, and tip.hash now ALWAYS move together.
-                        let good_height = height - 1;
-                        let good_hash = prev_hash;
-                        inner.stats.height = good_height;
-                        inner.tip.height = good_height;
-                        inner.tip.hash = good_hash;
-                        inner.stats.tip_hash = good_hash;
-                        // Remove broken height entries from DB
-                        for h in height..=tip_height {
-                            let _ = db.blocks.remove_height_hash(h);
-                        }
-                        // Save corrected state
-                        let last_checkpoint = db
-                            .state
-                            .get_state()
-                            .ok()
-                            .flatten()
-                            .map(|s| s.last_checkpoint)
-                            .unwrap_or(0);
-                        let state = crate::db::ChainStateData {
-                            tip_hash: inner.stats.tip_hash,
-                            height: good_height,
-                            total_difficulty: inner.stats.total_difficulty,
-                            total_supply: inner.stats.total_supply,
-                            total_burned: inner.stats.total_burned as u64,
-                            last_checkpoint,
-                        };
-                        if let Err(e) = db.state.save_state(&state) {
-                            // Surfacing this previously-silent error closes the
-                            // audit finding "let _ = save_state drops critical
-                            // persistence error." If save_state fails after a
-                            // truncation, the on-disk tip will be ahead of the
-                            // in-memory truncated state — on restart the chain
-                            // re-loads the stale tip, masking the truncation.
-                            // We can't abort here (we're mid-truncation, the
-                            // in-memory state is correct), but at least the
-                            // operator gets a CRITICAL log line. Reference:
-                            // Bitcoin Core reports comparable post-flush
-                            // failures through `FatalError()` (validation.h:104
-                            // in the master read this session; the previous
-                            // `AbortNode()` identifier was renamed).
-                            tracing::error!(
-                                target: "chain::persistence",
-                                "CRITICAL: save_state failed after truncation to height {} ({}). \
-                                 Restart will reload stale on-disk tip. Manual operator \
-                                 intervention required.",
-                                good_height, e
-                            );
-                        }
-                        tracing::warn!(
-                            "Chain truncated to height {}. Node will re-sync missing blocks.",
-                            good_height
-                        );
-                        break;
-                    }
-
-                    let hash = block.hash();
-                    prev_hash = hash;
-
-                    let batch = UtxoSet::batch_from_block(height, &block.transactions);
-                    inner.utxos.apply_batch(batch);
-
-                    // Count this successfully-applied block toward the
-                    // reconstructed counters (the truncation path `break`s above,
-                    // so post-corruption blocks are correctly excluded).
-                    blocks_applied += 1;
-                    txs_applied += block.transactions.len() as u64;
-
-                    // Cache recent blocks in memory for fast access
-                    if height >= cache_start {
-                        inner.height_to_hash.insert(height, hash);
-                        inner.blocks.insert(hash, block);
-                    }
-
-                    if height > 0 && height % 10000 == 0 {
-                        tracing::info!(
-                            "  UTXO rebuild: {}/{} blocks processed",
-                            height,
-                            tip_height
-                        );
-                    }
-                }
-                Ok(None) => {
-                    tracing::warn!("Block at height {} missing during UTXO rebuild", height);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to read block at height {}: {}", height, e);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Reconstruct the counters ChainStateData does not persist, so RPC
-        // get_info / explorer totals are correct immediately after a restart
-        // instead of resetting to 0 (L8 db-reopen finding, 2026-08-18).
-        inner.stats.total_blocks = blocks_applied;
-        inner.stats.total_transactions = txs_applied;
-
-        // Migration: if the persistent output_index sled tree is empty but we
-        // have blocks, bulk-insert from the in-memory output_index that was
-        // populated during the replay above.
-        if let Some(ref db) = self.db {
-            if db.output_index.is_empty() && tip_height > 0 {
-                tracing::info!("Migrating output index to persistent storage...");
-                let mut migrated = 0u64;
-                for (stealth, entry) in inner.utxos.output_index_iter() {
-                    if let Err(e) = db.output_index.insert(stealth, entry) {
-                        tracing::error!("Failed to migrate output index entry: {}", e);
-                    } else {
-                        migrated += 1;
-                    }
-                }
-                tracing::info!("Migrated {} output index entries to sled", migrated);
-            }
-        }
-
-        // Evict old output_index entries to bound memory (~1000 blocks in RAM).
-        // Older entries fall back to the on-disk OutputIndexDb.
-        inner.utxos.evict_old_outputs(tip_height, 1000);
-
-        let elapsed = start.elapsed();
-        tracing::info!(
-            "UTXO set rebuilt: {} outputs, {} spent key images, {} blocks in {:.2}s",
-            inner.utxos.output_count(),
-            inner.utxos.total_outputs_ever(),
-            tip_height + 1,
-            elapsed.as_secs_f64()
-        );
-
-        Ok(())
-    }
+    // init_genesis / expected_genesis_hash / verify_tip_integrity /
+    // load_from_database(_with_outcome) / rebuild_utxo_set moved to
+    // chain::recovery (issue #108).
 
     /// Persist output index entries for a block's transactions to sled.
     ///
@@ -1222,30 +1258,8 @@ impl Blockchain {
         }
     }
 
-    /// Get current height
-    pub fn height(&self) -> u64 {
-        self.inner.read().tip.height
-    }
-
-    /// Get current tip
-    pub fn tip(&self) -> ChainTip {
-        self.inner.read().tip.clone()
-    }
-
-    /// Look up a transaction's block height and index via the tx_index.
-    pub fn get_tx_location(&self, tx_hash: &[u8]) -> Option<(u64, u32)> {
-        self.db.as_ref().and_then(|db| db.get_tx_location(tx_hash))
-    }
-
-    /// Get tip hash
-    pub fn tip_hash(&self) -> Hash {
-        self.inner.read().tip.hash
-    }
-
-    /// Get the number of available (unspent) outputs in the UTXO set
-    pub fn available_output_count(&self) -> usize {
-        self.inner.read().utxos.output_count()
-    }
+    // height / tip / utxo_count / get_tx_location / tip_hash /
+    // available_output_count moved to `chain::queries` (issue #108).
 
     pub fn decoy_distribution_snapshot(&self) -> DecoyDistributionSnapshot {
         let inner = self.inner.read();
@@ -1310,279 +1324,16 @@ impl Blockchain {
         })
     }
 
-    /// Validate a transaction against the current UTXO set
-    /// Used by the miner to pre-validate mempool txs before including in blocks.
-    pub fn validate_transaction(&self, tx: &Transaction) -> Result<()> {
-        let inner = self.inner.read();
-        crate::consensus::validate_transaction_for_network(
-            tx,
-            &inner.utxos,
-            inner.tip.height + 1,
-            self.network,
-        )
-    }
-
-    /// Get current difficulty
-    pub fn difficulty(&self) -> u128 {
-        self.inner.read().tip.difficulty
-    }
-
-    /// Get next difficulty (placeholder)
-    pub fn next_difficulty(&self) -> u128 {
-        self.inner.read().tip.difficulty
-    }
-
-    /// Compute the exact target hash for the next block using ASERT difficulty adjustment.
-    /// This is the authoritative target that the validator will enforce.
-    pub fn next_target(&self) -> Hash {
-        let height = self.height() + 1;
-        let diff_blocks = self.get_difficulty_blocks(height);
-        if diff_blocks.len() >= 2 {
-            calculate_difficulty(&diff_blocks, height)
-        } else if diff_blocks.len() == 1 {
-            // Only genesis exists: maintain genesis difficulty until ASERT has enough data
-            diff_blocks[0].target
-        } else {
-            max_target()
-        }
-    }
-
-    /// Check if chain is synced (updated by P2P layer via set_sync_info).
-    ///
-    /// Three conditions, any one of which is sufficient:
-    ///   1. The P2P layer flagged us synced explicitly.
-    ///   2. We're at or above the highest peer-advertised height.
-    ///   3. We're within 2 blocks of that target AND the tip itself is
-    ///      recent (younger than 3× the target block time = 6 min).
-    ///
-    /// Condition 3 covers the steady-state case where a peer announces
-    /// a new block (bumping `peer_target_height` by 1) a beat before
-    /// we've ingested it. Without this, a chain producing blocks at the
-    /// target rate is reported as "syncing" forever — which is what
-    /// users of the explorer kept reporting as "the chain stalled".
-    /// A fresh tip + tiny overshoot is the textbook "essentially synced"
-    /// state; reporting it as such matches user reality.
-    pub fn is_synced(&self) -> bool {
-        // Firework Phase 2 (I6): a peer advertising a verifiably-heavier
-        // chain vetoes "synced" regardless of block height — this is what
-        // stops a node on a higher-block/lower-work fork from reporting
-        // synced (and its miner from mining). Inert for height-only peers
-        // (no CAP_CHAINWORK), and cleared by the sync layer's anti-wedge
-        // machinery (expire/ban/prune) once an unsubstantiated claim is
-        // dropped, so it can never wedge us permanently.
-        if self.work_behind.load(std::sync::atomic::Ordering::Relaxed) {
-            return false;
-        }
-        let flag = self.synced.load(std::sync::atomic::Ordering::Relaxed);
-        if flag {
-            return true;
-        }
-        let h = self.height();
-        if h == 0 {
-            return false;
-        }
-        let target = self
-            .peer_target_height
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if h >= target {
-            return true;
-        }
-        // Tolerance for in-flight peer advertisements: ≤2 blocks behind
-        // the peer-advertised target, AND tip is fresh enough that the
-        // chain is clearly producing blocks (not actually stalled).
-        if target.saturating_sub(h) <= 2 {
-            let tip_timestamp = self.inner.read().tip.timestamp;
-            if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                let now_secs = d.as_secs();
-                let age = now_secs.saturating_sub(tip_timestamp);
-                // 3× testnet target block time. Same threshold is fine
-                // for mainnet (also 120s target).
-                const FRESH_TIP_SECS: u64 = 3 * crate::constants::TARGET_BLOCK_TIME;
-                if age <= FRESH_TIP_SECS {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Get chain statistics
-    pub fn stats(&self) -> ChainStats {
-        self.inner.read().stats.clone()
-    }
-
-    /// Get block by hash
-    /// Median-Time-Past of the 11 blocks preceding `prev_hash` ON ITS OWN
-    /// CHAIN — walking the actual parent lineage via `prev_hash`, not the
-    /// active chain by height. Returns `None` if fewer than 11 ancestors are
-    /// reachable (caller then skips the MTP rule, matching the historical
-    /// genesis-window behaviour).
-    ///
-    /// REORG-CORRECTNESS (R-1): validating a competing-fork block against the
-    /// active chain's timestamps at those heights wrongly rejected valid
-    /// heavier forks whose near-fork blocks predated the active chain's MTP —
-    /// and banned the honest peer serving them (InvalidBlockPoW). For a
-    /// main-chain block the parent lineage IS the by-height ancestry, so this
-    /// is behaviour-identical on the common path. `get_block` resolves both
-    /// in-memory side-chain blocks and DB-backed ancestors.
-    fn median_time_past_of_lineage(&self, prev_hash: Hash) -> Option<u64> {
-        let mut timestamps: Vec<u64> = Vec::with_capacity(crate::constants::MTP_WINDOW);
-        let mut cursor = prev_hash;
-        for _ in 0..crate::constants::MTP_WINDOW {
-            match self.get_block(&cursor) {
-                Some(ancestor) => {
-                    timestamps.push(ancestor.header.timestamp);
-                    cursor = ancestor.header.prev_hash;
-                }
-                None => break,
-            }
-        }
-        if timestamps.len() >= crate::constants::MTP_WINDOW {
-            timestamps.sort_unstable();
-            Some(timestamps[timestamps.len() / 2])
-        } else {
-            None
-        }
-    }
-
-    pub fn get_block(&self, hash: &Hash) -> Option<Block> {
-        // Try in-memory first
-        {
-            let inner = self.inner.read();
-            if let Some(block) = inner.blocks.get(hash) {
-                return Some(block.clone());
-            }
-        }
-        // Try database
-        if let Some(ref db) = self.db {
-            if let Ok(Some(block)) = db.blocks.get(hash) {
-                return Some(block);
-            }
-        }
-        None
-    }
-
-    /// Get block hash by height
-    pub fn get_block_hash(&self, height: u64) -> Option<Hash> {
-        // Try in-memory first
-        {
-            let inner = self.inner.read();
-            if let Some(hash) = inner.height_to_hash.get(&height) {
-                return Some(*hash);
-            }
-        }
-        // Try database
-        if let Some(ref db) = self.db {
-            if let Ok(Some(hash)) = db.blocks.get_hash_by_height(height) {
-                return Some(hash);
-            }
-        }
-        None
-    }
-
-    /// Get block by height
-    pub fn get_block_by_height(&self, height: u64) -> Option<Block> {
-        if let Some(hash) = self.get_block_hash(height) {
-            return self.get_block(&hash);
-        }
-        None
-    }
-
-    /// Count blocks in `[window_start, window_end)` whose coinbase signals
-    /// the given BIP-9 deployment bit.
-    ///
-    /// Provides the `signal_count_fn` callback that `ForkSignaler::state()`
-    /// (see `src/consensus/fork_signal.rs`) consumes. Walks the main-chain
-    /// blocks in the half-open range, inspects each block's coinbase
-    /// transaction's `extra` field, decodes the trailing 4 bytes as
-    /// `SignalBits` (via `fork_signal::decode_signal_bits`), and counts the
-    /// blocks where the queried bit is set.
-    ///
-    /// ## Backward compatibility
-    ///
-    /// Blocks mined by a pre-CIP-012 rig binary have an 8-byte coinbase
-    /// `extra` (height only, no trailing signal bytes). `decode_signal_bits`
-    /// returns `SignalBits(0)` for those, so they contribute 0 to the count
-    /// — same as a v1.0.12-aware rig that didn't pass `--signal-v1012`.
-    /// New miners that DO opt in produce 12-byte extras with the bit set,
-    /// and contribute 1 to the count.
-    ///
-    /// ## Performance
-    ///
-    /// `get_block_by_height` is amortized O(1): two `HashMap` lookups in
-    /// the in-memory cache (`blocks` + `height_to_hash`) for blocks within
-    /// the cache window, with a sled-disk fallback for older blocks. The
-    /// signal-window scan is 2016 blocks, which fits well within the
-    /// in-memory cache for any block within `2 × MAX_BLOCK_CACHE` of the
-    /// tip — i.e., the entire BIP-9 window is almost certainly hot. If
-    /// every block in the window were uncached (worst case during a deep
-    /// reorg-replay), each lookup adds ~one sled `get()` of <1 ms, capping
-    /// the full scan at ~2 seconds — still acceptable for a once-per-block
-    /// invocation, but worth noting that the "O(1) per lookup" claim
-    /// assumes hot cache.
-    ///
-    /// No memoization yet; if profiling shows this on a hot path, the
-    /// per-window count is trivially memoizable since it only changes by
-    /// ±1 when a new block lands (or a reorg unwinds + replays). A
-    /// single read-lock-held-across-the-whole-scan variant would also
-    /// shave ~300 µs vs the current per-block acquire pattern. Both
-    /// optimizations are YAGNI right now — BIP-9 query is one-per-block
-    /// at most, dwarfed by the RandomX + Bulletproof costs of validation.
-    ///
-    /// ## Missing-block handling
-    ///
-    /// A height that maps to no block (gap in the chain, e.g. during
-    /// reorg-rollback) is skipped without error — counts as 0 contribution.
-    /// A block whose coinbase is missing (impossible by construction, but
-    /// defensive) is similarly skipped. The point of the BIP-9 state
-    /// machine is to be robust against partial state; an aggressive panic
-    /// here would convert a transient DB-gap into a node halt.
-    ///
-    /// ## Prior art
-    ///
-    /// - **Bitcoin Core `AbstractThresholdConditionChecker::GetStateStatisticsFor`**
-    ///   at versionbits.cpp:119 in the master read this session does the
-    ///   equivalent count by walking `CBlockIndex` pointers. The prior
-    ///   comment misattributed the method to `ThresholdConditionCache`
-    ///   (which is a `std::map` typedef at versionbits.h:33, not the
-    ///   owner of the method).
-    /// - Other BIP-9-derived chains (Bitcoin Cash / Litecoin / Dogecoin)
-    ///   inherit the walk-block-index-counting shape; specific per-fork
-    ///   identifiers UNVERIFIED this session.
-    pub fn count_signaling_blocks_in_window(
-        &self,
-        window_start: u64,
-        window_end: u64,
-        bit: u32,
-    ) -> u64 {
-        use crate::consensus::fork_signal::decode_signal_bits;
-
-        // Early-out on degenerate/inverted ranges. saturating_sub guards
-        // against the (window_end < window_start) case — a caller bug
-        // that shouldn't happen but won't underflow a u64 if it does.
-        // Inlined into the check (no variable) per review feedback —
-        // the value isn't used elsewhere.
-        if window_end.saturating_sub(window_start) == 0 {
-            return 0;
-        }
-
-        let mut count: u64 = 0;
-        for h in window_start..window_end {
-            let Some(block) = self.get_block_by_height(h) else {
-                continue; // gap; contributes 0
-            };
-            let Some(coinbase) = block.coinbase() else {
-                continue; // structurally impossible; defensive
-            };
-            if decode_signal_bits(&coinbase.extra).signals(bit) {
-                count = count.saturating_add(1);
-            }
-        }
-        count
-    }
+    // validate_transaction / difficulty / next_difficulty / expected_next_target /
+    // next_target / is_synced / stats / median_time_past_of_lineage / get_block /
+    // get_block_hash / get_block_by_height / count_signaling_blocks_in_window moved
+    // to chain::queries (issue #108).
 
     /// Restore state from database
     pub fn restore_state(&self, height: u64, tip_hash: Hash, total_difficulty: u128) -> Result<()> {
+        // Coarse writer lock — serialize against add_block / rollback_to_height
+        // (see `apply_lock` doc). No reentrancy: does not call an apply_lock taker.
+        let _apply = self.apply_lock.lock();
         let _state_update = self.begin_state_update();
         {
             let mut inner = self.inner.write();
@@ -1602,6 +1353,10 @@ impl Blockchain {
     /// Returns the list of non-coinbase transactions from disconnected blocks
     /// (for mempool restoration).
     pub fn rollback_to_height(&self, target_height: u64) -> Result<Vec<Transaction>> {
+        // Coarse writer lock — serialize this multi-section mutation against
+        // add_block / restore_state (see `apply_lock` doc). Does not call back
+        // into any apply_lock taker, so no reentrancy.
+        let _apply = self.apply_lock.lock();
         let _state_update = self.begin_state_update();
         let current_height = self.height();
         if target_height >= current_height {
@@ -1611,7 +1366,17 @@ impl Blockchain {
         // FINALITY: Refuse to rollback past a checkpoint.
         // Checkpoints are final — no amount of hashpower can undo them.
         if let Some(ref db) = self.db {
-            if let Ok(Some(state)) = db.state.get_state() {
+            let state_res = db.state.get_state();
+            if let Err(ref e) = state_res {
+                // Don't let a DB read error silently disable the finality-rollback
+                // guard — surface it loudly. (Hardcoded checkpoints and the
+                // fork-point finality floor still apply independently.)
+                tracing::error!(
+                    "finality guard: chain-state read failed while checking rollback to {}: {}",
+                    target_height, e
+                );
+            }
+            if let Ok(Some(state)) = state_res {
                 if target_height < state.last_checkpoint {
                     tracing::error!(
                         "FINALITY VIOLATION: attempted rollback to {} but checkpoint at {} is final",
@@ -1639,10 +1404,41 @@ impl Blockchain {
 
             // Disconnect blocks in reverse height order
             for h in (target_height + 1..=current_height).rev() {
-                let orphan_hash = inner.height_to_hash.get(&h).copied();
+                let orphan_hash = inner.height_to_hash.get(&h).copied().or_else(|| {
+                    self.db
+                        .as_ref()
+                        .and_then(|db| db.blocks.get_hash_by_height(h).ok().flatten())
+                });
                 if let Some(oh) = orphan_hash {
-                    let orphan_txs = inner.blocks.get(&oh).map(|b| b.transactions.clone());
-                    if let Some(txs) = orphan_txs {
+                    // Resolve the block body from the in-memory cache, falling back
+                    // to the DB. Deep rollbacks (this function's whole purpose)
+                    // routinely target heights below the ~200-block cache window; if
+                    // the body is DB-only, the original cache-only lookup returned
+                    // None and skipped ALL of the disconnect below (UTXO / supply /
+                    // burn / total_difficulty / phase-2) while the tip still moved
+                    // down — over-counting persisted state. Mirror the tip cascade.
+                    let orphan_block = inner.blocks.get(&oh).cloned().or_else(|| {
+                        self.db
+                            .as_ref()
+                            .and_then(|db| db.blocks.get(&oh).ok().flatten())
+                    });
+                    let orphan_block = match orphan_block {
+                        Some(b) => b,
+                        None => {
+                            // Body missing from cache AND DB: cannot revert this
+                            // block's state safely. Fail loudly instead of silently
+                            // under-disconnecting (which corrupts supply/work) —
+                            // consistent with the halt-on-corruption arms below.
+                            return Err(Error::InvalidState(format!(
+                                "rollback_to_height: block {} at height {} missing from \
+                                 cache AND DB; cannot revert its state — resync required",
+                                oh.to_hex(),
+                                h
+                            )));
+                        }
+                    };
+                    let txs = orphan_block.transactions.clone();
+                    {
                         let disconnect_batch = UtxoSet::batch_disconnect_block(&txs);
                         inner.utxos.apply_batch(disconnect_batch);
                         // Phase 2 store rewind (site 2: rollback_to_height
@@ -1664,12 +1460,7 @@ impl Blockchain {
                         // `oh` (its txs were just read above), so its fee-burn is
                         // well-defined. Computed before the stat mutations so the
                         // immutable borrow of `inner.blocks` is released first.
-                        let fee_burn = block_fee_burn(
-                            inner
-                                .blocks
-                                .get(&oh)
-                                .expect("disconnected block is in cache; its txs were just read"),
-                        );
+                        let fee_burn = block_fee_burn(self.network, &orphan_block);
                         // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                         //
                         // AUDIT (2026-07-02): third site of the self-defeating supply-
@@ -1716,6 +1507,32 @@ impl Blockchain {
                                     fee_burn, inner.stats.total_burned
                                 )
                             });
+                        // F3 (audit fix): decrement cumulative work per disconnected
+                        // block, mirroring the connect path's `total_difficulty +=
+                        // difficulty`. Without this, rollback_to_height persists the
+                        // pre-rollback (inflated) total_difficulty against a lower tip,
+                        // so this node would advertise more work than one that reached
+                        // the same tip linearly — a false `work_behind` veto / wrong
+                        // fork choice. saturating_sub: work never drops below the base.
+                        let disc_difficulty =
+                            calculate_difficulty_from_target(&orphan_block.header.target);
+                        inner.stats.total_difficulty =
+                            inner.stats.total_difficulty.saturating_sub(disc_difficulty);
+                        // Telemetry parity with the connect path (which does
+                        // `total_blocks += 1` and `total_transactions += txs.len()`):
+                        // a reorg/rollback MUST unwind these too, or a node that
+                        // reorged reports inflated block/tx totals versus a node that
+                        // built the identical tip linearly — breaking apply/disconnect
+                        // symmetry (caught by the real-PoW e2e
+                        // `apply_disconnect_symmetry_and_supply_conservation`). Not
+                        // consensus-critical (fork choice uses total_difficulty, above,
+                        // which IS unwound), but a correctness bug in reported stats.
+                        // saturating_sub: telemetry never underflows below zero.
+                        inner.stats.total_blocks = inner.stats.total_blocks.saturating_sub(1);
+                        inner.stats.total_transactions = inner
+                            .stats
+                            .total_transactions
+                            .saturating_sub(txs.len() as u64);
                     }
                 }
                 inner.height_to_hash.remove(&h);
@@ -1760,7 +1577,7 @@ impl Blockchain {
                         hash: new_tip_hash,
                         height: target_height,
                         difficulty: calculate_difficulty_from_target(&tip_block.header.target),
-                        timestamp: tip_block.header.timestamp,
+                        timestamp: tip_block.header.timestamp.as_secs(),
                     };
                 } else {
                     inner.tip.hash = new_tip_hash;
@@ -1837,92 +1654,118 @@ impl Blockchain {
         Ok(all_orphaned_txs)
     }
 
-    /// Record a chain event in the ring buffer (bounded, lock-free for readers).
-    fn record_event(
-        &self,
-        event_type: ChainEventType,
-        height: u64,
-        hash: &Hash,
-        details: serde_json::Value,
-    ) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let event = ChainEvent {
-            event_type,
-            height,
-            hash: hash.to_hex(),
-            timestamp: now,
-            details,
-        };
-        let mut inner = self.inner.write();
-        if inner.events.len() >= MAX_CHAIN_EVENTS {
-            inner.events.pop_front();
-        }
-        inner.events.push_back(event);
-    }
-
-    /// Get recent chain events (for explorer).
-    pub fn get_events(&self, limit: usize) -> Vec<ChainEvent> {
-        let inner = self.inner.read();
-        let limit = limit.min(inner.events.len());
-        inner.events.iter().rev().take(limit).cloned().collect()
-    }
+    // record_event / get_events moved to chain::events (issue #108).
 
     /// Process/add block to chain
     pub fn process_block(&self, block: Block) -> Result<BlockStatus> {
         self.add_block(block)
     }
 
+    /// TEST-ONLY: seed a linear main chain of `n_blocks` empty blocks on top of
+    /// the current tip (genesis), writing them straight to the block store +
+    /// height index and advancing the tip WITHOUT consensus validation (no PoW,
+    /// no signatures). For load/perf tests that need a mature chain height — e.g.
+    /// exercising `get_difficulty_health`'s 144-block window scan — without
+    /// minutes of real RandomX mining. Timestamps are spaced `block_time` apart
+    /// and a fixed target gives a constant, non-degenerate difficulty.
+    ///
+    /// Gated behind `test`/`test-utilities`; never compiled into a release node.
+    #[cfg(any(test, feature = "test-utilities"))]
+    pub fn seed_linear_chain_for_testing(&self, n_blocks: u64, block_time: u64) {
+        use crate::consensus::header::BlockHeader;
+        use crate::primitives::PublicKey;
+
+        // Target ~2^-16 of max ⇒ difficulty ≈ 65_536 (finite, positive).
+        let mut tb = [0xffu8; 32];
+        tb[0] = 0;
+        tb[1] = 0;
+        let target = Hash::from_bytes(tb);
+
+        let mut inner = self.inner.write();
+        let magic = self.network.magic_bytes();
+        let base_ts = inner.tip.timestamp;
+        let start_height = inner.tip.height + 1;
+        let mut prev_hash = inner.tip.hash;
+        let mut last_hash = prev_hash;
+
+        for h in start_height..(start_height + n_blocks) {
+            let header = BlockHeader {
+                network_magic: magic,
+                version: 1,
+                height: crate::primitives::Height::new(h),
+                timestamp: crate::primitives::Timestamp::from_secs(base_ts + (h - start_height + 1) * block_time),
+                prev_hash,
+                tx_root: Hash::zero(),
+                anchor: Hash::zero(),
+                algorithm: 0,
+                nonce: 0,
+                target,
+                miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+                supply_commitment: [0u8; 32],
+                checkpoint_vote: None,
+                spark_set_root: [0u8; 32],
+                mw_kernel_root: [0u8; 32],
+            };
+            let block = Block::new(header, Vec::new());
+            let hash = block.hash();
+            if let Some(ref db) = self.db {
+                let _ = db.blocks.insert(&block);
+                let _ = db.blocks.set_height_hash(h, &hash);
+            }
+            inner.height_to_hash.insert(h, hash);
+            prev_hash = hash;
+            last_hash = hash;
+        }
+
+        let final_height = start_height + n_blocks - 1;
+        inner.tip = ChainTip {
+            hash: last_hash,
+            height: final_height,
+            difficulty: calculate_difficulty_from_target(&target),
+            timestamp: base_ts + n_blocks * block_time,
+        };
+        inner.stats.height = final_height;
+        inner.stats.tip_hash = last_hash;
+        inner.stats.total_blocks = final_height + 1;
+    }
+
     /// Add block to chain
     pub fn add_block(&self, block: Block) -> Result<BlockStatus> {
+        // Serialize the ENTIRE block-application operation against other writers
+        // (see `apply_lock` doc). Held for the whole read→decide→mutate→persist
+        // sequence — no other add_block/rollback/restore can interleave across
+        // the fine-grained `inner` sections or the lock-released fork walk.
+        // `process_block` delegates here and must NOT take this lock.
+        let _apply = self.apply_lock.lock();
         let _state_update = self.begin_state_update();
         let hash = block.hash();
 
-        // Check if already known
-        {
-            let inner = self.inner.read();
-            if inner.blocks.contains_key(&hash) {
-                return Ok(BlockStatus::AlreadyKnown);
-            }
-        }
-        if let Some(ref db) = self.db {
-            if db.blocks.contains(&hash)? {
-                return Ok(BlockStatus::AlreadyKnown);
-            }
-        }
-
-        // Check parent exists
+        // Cheap pre-checks (already-known / orphan) + parent resolution, run
+        // under apply_lock exactly where the inline checks used to (issue #108,
+        // see chain/apply.rs::classify_incoming — no lock-lifetime change).
+        let parent = match self.classify_incoming(&block, &hash)? {
+            apply::IncomingClass::AlreadyKnown => return Ok(BlockStatus::AlreadyKnown),
+            apply::IncomingClass::Orphan => return Ok(BlockStatus::Orphan),
+            apply::IncomingClass::Proceed { parent } => parent,
+        };
         let parent_hash = block.header.prev_hash;
-        let parent = self.get_block(&parent_hash);
-
-        if parent.is_none() && block.header.height > 0 {
-            self.record_event(
-                ChainEventType::OrphanReceived,
-                block.header.height,
-                &hash,
-                serde_json::json!({}),
-            );
-            return Ok(BlockStatus::Orphan);
-        }
 
         // Validate block height
-        let expected_height = if block.header.height == 0 {
+        let expected_height = if block.header.height.as_u64() == 0 {
             0
         } else {
-            parent.as_ref().map(|p| p.header.height + 1).unwrap_or(0)
+            parent.as_ref().map(|p| p.header.height.as_u64() + 1).unwrap_or(0)
         };
 
-        if block.header.height != expected_height {
+        if block.header.height.as_u64() != expected_height {
             return Ok(BlockStatus::Invalid(format!(
                 "Invalid height: expected {}, got {}",
-                expected_height, block.header.height
+                expected_height, block.header.height.as_u64()
             )));
         }
 
         let tip_hash = self.tip_hash();
-        let is_main_chain = parent_hash == tip_hash || block.header.height == 0;
+        let is_main_chain = parent_hash == tip_hash || block.header.height.as_u64() == 0;
 
         // SECURITY: Enforce hardcoded checkpoints (below).
         //
@@ -1948,16 +1791,16 @@ impl Blockchain {
         // Also check hardcoded checkpoints for the active runtime network.
         let hardcoded_checkpoint_match = match self.network {
             crate::config::NetworkType::Mainnet => {
-                crate::mainnet::verify_checkpoint(block.header.height, &hash)
+                crate::mainnet::verify_checkpoint(block.header.height.as_u64(), &hash)
             }
             crate::config::NetworkType::Testnet | crate::config::NetworkType::Regtest => {
-                crate::testnet::verify_checkpoint(block.header.height, &hash)
+                crate::testnet::verify_checkpoint(block.header.height.as_u64(), &hash)
             }
         };
         if let Some(false) = hardcoded_checkpoint_match {
             return Ok(BlockStatus::Invalid(format!(
                 "Hardcoded checkpoint mismatch at height {}",
-                block.header.height,
+                block.header.height.as_u64(),
             )));
         }
 
@@ -1980,12 +1823,25 @@ impl Blockchain {
                         None
                     }
                 });
-            let validation = crate::consensus::validate_block_with_checkpoint_for_network(
+            // C1 FIX: a COMPETING FORK block (parent != active tip) is validated
+            // against `inner.utxos`, which is the ACTIVE chain's UTXO set -- the
+            // wrong snapshot for that block. The active-UTXO-relative checks
+            // (key-image double-spend, duplicate-stealth-vs-chain, ring-member
+            // existence, available-count ring size) would false-reject an
+            // ordinary natural fork that shares a mempool tx with the active
+            // branch, the block would never be stored, and the honest peer
+            // serving it banned -- leaving the node unable to ever reorg onto a
+            // heavier branch (permanent partition). For fork blocks we therefore
+            // defer those checks (`contextual = false`); the reorg loop re-runs
+            // FULL validation against the rewound fork-point UTXO set before the
+            // fork can win. PoW and all context-free/crypto checks still run here.
+            let validation = crate::consensus::validate_block_ctx(
                 &block,
                 parent.as_ref(),
                 &inner.utxos,
                 cp,
                 self.network,
+                is_main_chain,
             )
             .map_err(|e| Error::InvalidState(format!("Block validation error: {}", e)))?;
             if !validation.valid {
@@ -1994,11 +1850,46 @@ impl Blockchain {
                 drop(inner);
                 self.record_event(
                     ChainEventType::BlockRejected,
-                    block.header.height,
+                    block.header.height.as_u64(),
                     &hash,
                     serde_json::json!({"reason": &errors}),
                 );
                 return Ok(BlockStatus::Invalid(errors));
+            }
+
+            // #supply-commitment: for a TIP-EXTENDING block the active-tip stats
+            // (`inner.stats`) ARE the parent's cumulative supply, so validate the
+            // block's commitment against the post-apply totals here — BEFORE any
+            // mutation, so a mismatch rejects cleanly. Gated OFF today
+            // (enforce_height = u64::MAX) → no-op. A competing FORK block is NOT
+            // checked here (inner.stats is the active tip, not its parent); it is
+            // validated at the reorg apply site where the rewound stats equal its
+            // parent's cumulative supply.
+            if is_main_chain {
+                let post_emitted = inner.stats.total_supply.saturating_add(
+                    calculate_block_reward(block.header.height.as_u64()).as_atomic() as u128,
+                );
+                let post_burned = inner
+                    .stats
+                    .total_burned
+                    .saturating_add(block_fee_burn(self.network, &block));
+                if let Err(e) = check_supply_commitment(
+                    self.network.supply_commitment_enforce_height(),
+                    block.header.height.as_u64(),
+                    &block.header.supply_commitment,
+                    post_emitted,
+                    post_burned,
+                ) {
+                    tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], e);
+                    drop(inner);
+                    self.record_event(
+                        ChainEventType::BlockRejected,
+                        block.header.height.as_u64(),
+                        &hash,
+                        serde_json::json!({"reason": &e}),
+                    );
+                    return Ok(BlockStatus::Invalid(e));
+                }
             }
         }
 
@@ -2017,12 +1908,12 @@ impl Blockchain {
         // self-isolation of a drifted node. For a main-chain block the parent
         // lineage IS the by-height ancestry, so this is behaviour-identical
         // on the common path. Mirrors the fork-aware difficulty window below.
-        if block.header.height >= 11 {
+        if block.header.height.as_u64() >= 11 {
             if let Some(mtp) = self.median_time_past_of_lineage(block.header.prev_hash) {
-                if block.header.timestamp <= mtp {
+                if block.header.timestamp.as_secs() <= mtp {
                     return Ok(BlockStatus::Invalid(format!(
                         "Block timestamp {} is not greater than median-time-past {} (median of last 11 blocks on its own chain)",
-                        block.header.timestamp, mtp
+                        block.header.timestamp.as_secs(), mtp
                     )));
                 }
             }
@@ -2035,79 +1926,22 @@ impl Blockchain {
         // from constructing a fork with trivially easy targets (the old code used
         // main-chain history for ALL blocks, which could produce wrong expectations
         // for fork blocks OR allow fork blocks to bypass proper difficulty validation).
-        if block.header.height >= 1 {
+        if block.header.height.as_u64() >= 1 {
             let difficulty_blocks = if is_main_chain {
-                self.get_difficulty_blocks(block.header.height)
+                self.get_difficulty_blocks(block.header.height.as_u64())
             } else {
-                // SECURITY (C20-FIX): Build fork-aware difficulty window.
-                // Walk the fork chain backwards to find the fork point, then mix
-                // main-chain blocks (below fork) with fork blocks (above fork).
-                let inner = self.inner.read();
-                let window = 144u64; // DIFFICULTY_LONG_WINDOW
-                let start = block.header.height.saturating_sub(window);
-
-                // Trace fork chain backwards to find fork point and collect fork blocks
-                let mut fork_chain: Vec<(u64, u64, Hash)> = Vec::new(); // (height, timestamp, target)
-                let mut cursor_hash = block.header.prev_hash;
-                let mut fork_point = 0u64;
-
-                loop {
-                    // Check if this hash is on the main chain
-                    if let Some(blk) = inner.blocks.get(&cursor_hash) {
-                        let h = blk.header.height;
-                        // If this block's height has a main-chain mapping that matches,
-                        // we've found the fork point
-                        if let Some(main_hash) = inner.height_to_hash.get(&h) {
-                            if *main_hash == cursor_hash {
-                                fork_point = h;
-                                break;
-                            }
-                        }
-                        // This is a fork block — add it to our fork chain
-                        fork_chain.push((h, blk.header.timestamp, blk.header.target));
-                        if h == 0 {
-                            break;
-                        }
-                        cursor_hash = blk.header.prev_hash;
-                    } else {
-                        // Parent not found — can't validate, use main chain as fallback
-                        break;
-                    }
-                }
-                fork_chain.reverse(); // oldest first
-
-                // Build mixed difficulty window
-                let mut diff_blocks = Vec::new();
-                for h in start..block.header.height {
-                    if h <= fork_point {
-                        // Below fork point: use main-chain blocks
-                        if let Some(hash) = inner.height_to_hash.get(&h) {
-                            if let Some(b) = inner.blocks.get(hash) {
-                                diff_blocks.push(DifficultyBlock {
-                                    height: h,
-                                    timestamp: b.header.timestamp,
-                                    target: b.header.target,
-                                });
-                            }
-                        }
-                    } else {
-                        // Above fork point: use fork blocks
-                        let offset = (h - fork_point - 1) as usize;
-                        if let Some(&(fh, ts, tgt)) = fork_chain.get(offset) {
-                            diff_blocks.push(DifficultyBlock {
-                                height: fh,
-                                timestamp: ts,
-                                target: tgt,
-                            });
-                        }
-                    }
-                }
-                drop(inner);
-                diff_blocks
+                // DB-sourced fork window — deterministic across all nodes
+                // (fix for chain.rs:2056; replaces the volatile in-memory-cache
+                // walk that made two nodes compute different windows/targets for
+                // the same fork block → consensus split).
+                self.fork_difficulty_window(block.header.prev_hash, block.header.height.as_u64())
             };
 
-            if difficulty_blocks.len() >= 2 {
-                let expected_target = calculate_difficulty(&difficulty_blocks, block.header.height);
+            // `test-fast-pow` (INSECURE test feature) skips the ASERT target
+            // match so the instant-mining harness can use a trivial target.
+            if difficulty_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
+                let expected_target =
+                    self.expected_next_target(&difficulty_blocks, block.header.height.as_u64());
                 if block.header.target != expected_target {
                     return Ok(BlockStatus::Invalid(format!(
                         "Difficulty target mismatch: expected {}, got {}",
@@ -2146,7 +1980,7 @@ impl Blockchain {
                 // is stale — the block is now a fork, not a main-chain extension.
                 // We do NOT update height_to_hash or DB height index, since the block
                 // lost the race. It falls through to the fork-evaluation path below.
-                if inner.tip.hash != tip_hash && block.header.height > 0 {
+                if inner.tip.hash != tip_hash && block.header.height.as_u64() > 0 {
                     tracing::warn!(
                         "Tip changed during block processing (was {}, now {}), re-evaluating block {}",
                         tip_hash.to_hex()[..8].to_string(),
@@ -2156,14 +1990,14 @@ impl Blockchain {
                     true
                 } else {
                     // Race check passed — safe to apply as main chain.
-                    inner.height_to_hash.insert(block.header.height, hash);
+                    inner.height_to_hash.insert(block.header.height.as_u64(), hash);
                     inner.tip = ChainTip {
                         hash,
-                        height: block.header.height,
+                        height: block.header.height.as_u64(),
                         difficulty,
-                        timestamp: block.header.timestamp,
+                        timestamp: block.header.timestamp.as_secs(),
                     };
-                    inner.stats.height = block.header.height;
+                    inner.stats.height = block.header.height.as_u64();
                     inner.stats.total_blocks += 1;
                     inner.stats.total_transactions += block.transactions.len() as u64;
                     inner.stats.difficulty = difficulty;
@@ -2175,7 +2009,7 @@ impl Blockchain {
                     // here (total_burned is tracked separately). So total_supply
                     // == sum of the deterministic emission schedule, which is
                     // exactly what get_supply_info exposes as verifiable.
-                    let emission = calculate_block_reward(block.header.height);
+                    let emission = calculate_block_reward(block.header.height.as_u64());
                     // AUDIT (2026-07-01): checked_add + panic for symmetry with the
                     // reorg-rollback path's checked_sub + panic (fixed same day).
                     // saturating_add silently clamps at u64::MAX; if emission ever
@@ -2202,7 +2036,7 @@ impl Blockchain {
                     inner.stats.total_burned = inner
                         .stats
                         .total_burned
-                        .checked_add(block_fee_burn(&block))
+                        .checked_add(block_fee_burn(self.network, &block))
                         .unwrap_or_else(|| {
                             panic!(
                                 "CONSENSUS CORRUPTION: total_burned overflow on block \
@@ -2213,18 +2047,60 @@ impl Blockchain {
                         });
 
                     // ── Phase 2 store reorg checkpoint (site 1: clean tip-extend) ──
+                    // Shielded (Spark) contextual double-spend check: reject the
+                    // block BEFORE any mutation if a shielded serial tag is
+                    // already spent on-chain or duplicated within the block —
+                    // the pre-apply guard mirroring the transparent key-image
+                    // check. Inert while the store is None (gated off).
+                    if let Some(ref sstore) = self.shielded_store {
+                        if let Err(e) = crate::consensus::shielded::check_block_shielded_double_spends(
+                            &block.transactions,
+                            |t| sstore.is_nullifier_spent(t),
+                        ) {
+                            let reason = format!("shielded double-spend: {}", e);
+                            tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
+                            return Ok(BlockStatus::Invalid(reason));
+                        }
+                        // Gated store-aware spend-proof verification (membership +
+                        // nullifier + message). Only compiled under sketch-gk-proof.
+                        #[cfg(feature = "sketch-gk-proof")]
+                        if let Err(e) =
+                            Self::verify_block_shielded_spends(sstore, &block.transactions)
+                        {
+                            let reason = format!("shielded spend proof invalid: {}", e);
+                            tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
+                            return Ok(BlockStatus::Invalid(reason));
+                        }
+                    }
+                    // Gated store-aware verification for libspark v2 shielded txs
+                    // (SparkPayload) against the SparkPoolStore. Inert unless both
+                    // features are on and the pool store is initialized.
+                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                    if let Err(reason) = self.verify_block_spark_v2(&block.transactions) {
+                        tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
+                        return Ok(BlockStatus::Invalid(reason));
+                    }
+
                     // CIP-009.D Interp-B contract: checkpoint each Phase-2
                     // store BEFORE this block's state is applied, so a later
                     // reorg `rewind` rolls them back to exactly this
                     // pre-block boundary. Inert while the stores are None.
-                    self.checkpoint_phase2_stores(block.header.height);
+                    self.checkpoint_phase2_stores(block.header.height.as_u64());
 
                     // SECURITY (CC-001): Apply block's UTXO mutations to track spent/unspent
-                    let batch = UtxoSet::batch_from_block(block.header.height, &block.transactions);
+                    let batch = UtxoSet::batch_from_block(block.header.height.as_u64(), &block.transactions);
                     inner.utxos.apply_batch(batch);
 
+                    // Shielded (Spark) apply: serial-tag double-spend + accumulator
+                    // append into the ShieldedStore (inert while None / gated off).
+                    self.apply_shielded_txs(&block.transactions, block.header.height.as_u64());
+                    // Feed the libspark v2 pool (add_coin per mint, mark_tag_spent
+                    // per spend). Inert unless both features + the pool store.
+                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                    self.apply_spark_v2_txs(&block.transactions, block.header.height.as_u64());
+
                     // Bound memory: evict output_index entries older than 1000 blocks
-                    inner.utxos.evict_old_outputs(block.header.height, 1000);
+                    inner.utxos.evict_old_outputs(block.header.height.as_u64(), 1000);
 
                     // SECURITY: Evict old blocks from in-memory cache to prevent
                     // unbounded RAM growth. Older blocks fall back to database lookup.
@@ -2239,8 +2115,33 @@ impl Blockchain {
                 // The block is stored but not applied. The fork path will check
                 // cumulative work and perform a reorg if this block's chain is heavier.
             } else {
-                // Post-lock work: persist to database, record checkpoints.
-                self.persist_output_index(&block.transactions, block.header.height);
+                // Post-lock work: build the atomic-commit batch, then commit it
+                // ONCE below (crash-consistent). Replaces the former separate,
+                // non-transactional persist_output_index + per-tx index_tx +
+                // set_height_hash + save_state writes — a crash between any two
+                // of those left disk internally inconsistent (db/blocks.rs:227,
+                // output_index.rs:130). See Database::commit_block_atomic.
+                let mut output_additions: Vec<([u8; 32], Vec<u8>)> = Vec::new();
+                let mut tx_index_adds: Vec<([u8; 32], u64, u32)> = Vec::new();
+                for (tx_idx, tx) in block.transactions.iter().enumerate() {
+                    let is_coinbase = tx.is_coinbase();
+                    for output in &tx.outputs {
+                        let entry = OutputIndexEntry {
+                            commitment: output.commitment,
+                            height: block.header.height.as_u64(),
+                            is_coinbase,
+                            lock_height: output.lock_height,
+                        };
+                        let bytes = crate::db::serialize(&entry).map_err(|e| {
+                            Error::Internal(format!(
+                                "serialize OutputIndexEntry failed at height {}: {}",
+                                block.header.height.as_u64(), e
+                            ))
+                        })?;
+                        output_additions.push((*output.stealth_address.as_bytes(), bytes));
+                    }
+                    tx_index_adds.push((*tx.hash().as_bytes(), block.header.height.as_u64(), tx_idx as u32));
+                }
 
                 // Index transactions for O(1) lookup by hash.
                 //
@@ -2263,20 +2164,8 @@ impl Blockchain {
                 // session) but it's the block-hash→pindex lookup, not
                 // the tx→block writer. Reference kept qualitative rather
                 // than perpetuate a mis-named identifier.
-                if let Some(ref db) = self.db {
-                    for (idx, tx) in block.transactions.iter().enumerate() {
-                        if let Err(e) =
-                            db.index_tx(tx.hash().as_bytes(), block.header.height, idx as u32)
-                        {
-                            tracing::warn!(
-                                target: "chain::tx_index",
-                                "tx_index insert failed for tx {} at height {}: {} \
-                                 (block accepted; explorer/wallet may miss this tx by hash)",
-                                hex::encode(tx.hash().as_bytes()), block.header.height, e
-                            );
-                        }
-                    }
-                }
+                // (tx-index is now written inside commit_block_atomic below,
+                // as part of the single crash-consistent transaction.)
 
                 // Update database height index (only after race check passes).
                 //
@@ -2290,42 +2179,30 @@ impl Blockchain {
                 // cleanly, and on restart the node re-syncs this single block from
                 // peers rather than running with in-memory ahead of disk.
                 if let Some(ref db) = self.db {
-                    db.blocks
-                        .set_height_hash(block.header.height, &hash)
-                        .unwrap_or_else(|e| {
-                            panic!(
-                                "CONSENSUS PERSISTENCE FAILURE: could not write the height \
-                                 index for block {} at height {}: {}. The in-memory tip has \
-                                 already advanced to this block; halting to preserve on-disk \
-                                 state (SIGTERM handler flushes RocksDB cleanly). Restart \
-                                 re-syncs this block from peers.",
-                                hash.to_hex(),
-                                block.header.height,
-                                e
-                            )
-                        });
+                    // (height→hash is now written inside commit_block_atomic
+                    // below, atomically with output-index, state, and tx-index.)
 
                     // Auto-record checkpoint every CHECKPOINT_INTERVAL blocks
                     let mut last_checkpoint_height = 0u64;
-                    if block.header.height > 0
-                        && block.header.height % crate::constants::CHECKPOINT_INTERVAL == 0
+                    if block.header.height.as_u64() > 0
+                        && block.header.height.as_u64() % crate::constants::CHECKPOINT_INTERVAL == 0
                     {
-                        if let Err(e) = db.state.add_checkpoint(block.header.height, &hash) {
+                        if let Err(e) = db.state.add_checkpoint(block.header.height.as_u64(), &hash) {
                             tracing::error!(
                                 "Failed to record checkpoint at height {}: {}",
-                                block.header.height,
+                                block.header.height.as_u64(),
                                 e
                             );
                         } else {
-                            last_checkpoint_height = block.header.height;
+                            last_checkpoint_height = block.header.height.as_u64();
                             tracing::info!(
                                 "Auto-checkpoint recorded: height={}, hash={}",
-                                block.header.height,
+                                block.header.height.as_u64(),
                                 hash.to_hex()[..16].to_string()
                             );
                             self.record_event(
                                 ChainEventType::CheckpointRecorded,
-                                block.header.height,
+                                block.header.height.as_u64(),
                                 &hash,
                                 serde_json::json!({}),
                             );
@@ -2334,7 +2211,16 @@ impl Blockchain {
 
                     // Compute last_checkpoint from DB if we didn't just set one
                     if last_checkpoint_height == 0 {
-                        if let Ok(Some(prev_state)) = db.state.get_state() {
+                        let prev_res = db.state.get_state();
+                        if let Err(ref e) = prev_res {
+                            // A DB read error here silently leaves last_checkpoint
+                            // at 0 (weaker tracking); log rather than swallow.
+                            tracing::warn!(
+                                "checkpoint tracking: chain-state read failed at height {}, leaving last_checkpoint=0: {}",
+                                block.header.height.as_u64(), e
+                            );
+                        }
+                        if let Ok(Some(prev_state)) = prev_res {
                             last_checkpoint_height = prev_state.last_checkpoint;
                         }
                     }
@@ -2342,20 +2228,45 @@ impl Blockchain {
                     let stats = self.stats();
                     let state = ChainStateData {
                         tip_hash: hash,
-                        height: block.header.height,
+                        height: block.header.height.as_u64(),
                         total_difficulty: stats.total_difficulty,
                         total_supply: stats.total_supply,
                         total_burned: stats.total_burned as u64,
                         last_checkpoint: last_checkpoint_height,
                     };
-                    db.state.save_state(&state).unwrap_or_else(|e| {
+                    let state_bytes = crate::db::serialize(&state).unwrap_or_else(|e| {
                         panic!(
-                            "CONSENSUS PERSISTENCE FAILURE: could not persist chain state at \
-                             height {} (tip {}): {}. In-memory supply/difficulty/tip have already \
+                            "CONSENSUS PERSISTENCE FAILURE: could not serialize chain state at \
+                             height {} (tip {}): {}. In-memory tip already advanced; halting.",
+                            block.header.height.as_u64(),
+                            hash.to_hex(),
+                            e
+                        )
+                    });
+                    // ── ONE crash-consistent transaction ──
+                    // Commits output-index + height→hash + chain-state + tx-index
+                    // together (Database::commit_block_atomic), replacing the four
+                    // former separate writes so a crash can never leave the height
+                    // index / output index / tx index / state disagreeing.
+                    // Same halt-on-error model as the previous save_state: a
+                    // returned Err would mean in-memory is ahead of disk, so we
+                    // panic to let the SIGTERM flush + restart re-sync this one
+                    // block from peers. (Rollback-instead-of-halt is a separable,
+                    // reviewer-gated enhancement.)
+                    db.commit_block_atomic(
+                        &output_additions,
+                        (block.header.height.as_u64(), *hash.as_bytes()),
+                        &tx_index_adds,
+                        &state_bytes,
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "CONSENSUS PERSISTENCE FAILURE: commit_block_atomic failed at height \
+                             {} (tip {}): {}. In-memory supply/difficulty/tip have already \
                              advanced; halting to preserve on-disk state (SIGTERM handler flushes \
                              RocksDB cleanly) so restart re-derives consistently rather than \
                              running with in-memory ahead of disk.",
-                            block.header.height,
+                            block.header.height.as_u64(),
                             hash.to_hex(),
                             e
                         )
@@ -2373,12 +2284,12 @@ impl Blockchain {
                 // pruning.
                 if let Some(ref ct) = self.cut_through {
                     let mut engine = ct.lock();
-                    let prunable = engine.process(block.header.height);
+                    let prunable = engine.process(block.header.height.as_u64());
                     if !prunable.is_empty() {
                         tracing::debug!(
                             "MW cut-through: {} commitments prunable at height {}",
                             prunable.len(),
-                            block.header.height
+                            block.header.height.as_u64()
                         );
                     }
                 }
@@ -2392,7 +2303,7 @@ impl Blockchain {
                 // is `None` or the feature is off.
                 #[cfg(feature = "rolling-finality")]
                 if let Some(ref rf) = self.rolling_finality {
-                    if block.header.height >= crate::constants::ROLLING_FINALITY_ENABLE_HEIGHT {
+                    if block.header.height.as_u64() >= self.network.rolling_finality_enable_height() {
                         // CIP-009.D attestations live in the coinbase
                         // transaction's `extra` field. Pre-activation
                         // miners typically have no coinbase or an empty
@@ -2404,7 +2315,28 @@ impl Blockchain {
                             .first()
                             .filter(|tx| tx.is_coinbase())
                             .map_or(&[][..], |tx| &tx.extra);
-                        let _ = rf.on_accepted_block(block.header.height, coinbase_extra);
+                        // The tracker's soft-final state is updated inside
+                        // on_accepted_block regardless of the returned outcome; we
+                        // only need to surface the diagnostic variants (previously
+                        // dropped with `let _ =`) rather than silently ignore a
+                        // malformed/rejected attestation during the ENABLE phase.
+                        use crate::consensus::rolling_finality::OnBlockOutcome;
+                        match rf.on_accepted_block(block.header.height.as_u64(), coinbase_extra) {
+                            OnBlockOutcome::Malformed(e) => tracing::warn!(
+                                "finality: malformed CIP-009.D attestation in block {}: {:?}",
+                                block.header.height.as_u64(), e
+                            ),
+                            OnBlockOutcome::Rejected(e) => tracing::warn!(
+                                "finality: attestation rejected in block {}: {:?}",
+                                block.header.height.as_u64(), e
+                            ),
+                            OnBlockOutcome::NewlyFinalized { height, .. } => tracing::info!(
+                                "finality: soft-final height advanced to {} (via block {})",
+                                height, block.header.height.as_u64()
+                            ),
+                            // NoAttestation (normal in ENABLE) / Recorded: nothing to surface.
+                            OnBlockOutcome::NoAttestation | OnBlockOutcome::Recorded => {}
+                        }
                     }
                 }
 
@@ -2422,7 +2354,7 @@ impl Blockchain {
                 let stats_snapshot = inner_stats_for_log(&self.inner);
                 tracing::info!(
                     target: "chain::commit",
-                    height = block.header.height,
+                    height = block.header.height.as_u64(),
                     block_hash = %hash.to_hex(),
                     difficulty = difficulty,
                     total_difficulty = stats_snapshot.0,
@@ -2433,7 +2365,7 @@ impl Blockchain {
 
                 self.record_event(
                     ChainEventType::BlockAccepted,
-                    block.header.height,
+                    block.header.height.as_u64(),
                     &hash,
                     serde_json::json!({
                         "tx_count": block.transactions.len(),
@@ -2447,7 +2379,7 @@ impl Blockchain {
                 // instead of stalling the pipeline for the build. No-op away
                 // from a boundary; idempotent.
                 #[cfg(feature = "randomx")]
-                crate::consensus::prewarm_next_epoch_if_near(block.header.height);
+                crate::consensus::prewarm_next_epoch_if_near(block.header.height.as_u64());
 
                 return Ok(BlockStatus::Accepted);
             }
@@ -2519,7 +2451,7 @@ impl Blockchain {
                 // SECURITY (H-16 FIX): Hybrid reorg defense — three tiers.
                 // Tier 1 (≤10): unconditional. Tier 2 (11-100): MESS exponential cost.
                 // Tier 3 (>100): hard reject.
-                let reorg_depth = block.header.height.saturating_sub(fork_point);
+                let reorg_depth = block.header.height.as_u64().saturating_sub(fork_point);
                 // F31 SEV-A fix: pass the RUNTIME network's max reorg depth,
                 // not the compile-time-feature-derived value. See
                 // Blockchain::max_reorg_depth doc-comment for the 2026-07-04
@@ -2548,7 +2480,7 @@ impl Blockchain {
                 // is `None` or the feature is off.
                 #[cfg(feature = "rolling-finality")]
                 if let Some(ref rf) = self.rolling_finality {
-                    if block.header.height >= crate::constants::ROLLING_FINALITY_ENFORCE_HEIGHT
+                    if block.header.height.as_u64() >= self.network.rolling_finality_enforce_height()
                         && rf.would_reorg_violate_finality(fork_point)
                     {
                         let soft_final = rf.current_soft_final_height().unwrap_or(0);
@@ -2601,25 +2533,41 @@ impl Blockchain {
                 // recorded for assume-valid IBD and telemetry; it just no longer
                 // gates consensus.
                 {
+                    // audit H-3: a rolling finality floor that ALWAYS leaves a
+                    // full CHECKPOINT_INTERVAL window reorg-able. The previous
+                    // `tip - (tip % interval)` made the floor the last boundary,
+                    // so the max reorg depth was `tip % interval` — as low as
+                    // ZERO when the tip sat exactly on a boundary — permanently
+                    // rejecting a routine shallow reorg that happened to cross a
+                    // boundary and stranding the node on the minority branch.
+                    // Base the floor a full interval below the tip instead; the
+                    // 3-tier MESS gate above remains the primary depth policy.
                     let tip_height = self.inner.read().tip.height;
                     let interval = crate::constants::CHECKPOINT_INTERVAL;
-                    let finality_floor = tip_height - (tip_height % interval);
+                    let finality_floor = tip_height.saturating_sub(interval);
                     if finality_floor > 0 && fork_point < finality_floor {
+                        let depth = block.header.height.as_u64().saturating_sub(fork_point);
                         tracing::error!(
-                            "Rejecting reorg: fork point {} is before finality floor at height {}",
+                            "Rejecting reorg: fork point {} is before finality floor {} (depth {})",
                             fork_point,
-                            finality_floor
+                            finality_floor,
+                            depth
                         );
-                        return Ok(BlockStatus::Invalid(format!(
-                            "Reorg rejected: fork point {} is before checkpoint at height {}",
-                            fork_point, finality_floor
-                        )));
+                        // Return ReorgTooDeep (NOT BlockStatus::Invalid) so the
+                        // honest peer serving the heavier chain is not banned —
+                        // this is a "too deep for our finality rule" outcome,
+                        // identical in spirit to the MESS hard cap above, which
+                        // also returns this (audit H-3 / P2P Finding 4).
+                        return Err(Error::ReorgTooDeep {
+                            depth,
+                            max: interval,
+                        });
                     }
                 }
 
                 tracing::warn!(
                     "Fork at height {} has more work ({} > {}), performing reorg (depth: {})",
-                    block.header.height,
+                    block.header.height.as_u64(),
                     fork_cumulative,
                     current_total_difficulty,
                     reorg_depth
@@ -2674,6 +2622,7 @@ impl Blockchain {
                                 // in the cache under `oh`; compute its fee-burn
                                 // before mutating stats to release the borrow.
                                 let fee_burn = block_fee_burn(
+                                    self.network,
                                     inner.blocks.get(&oh).expect(
                                         "disconnected block is in cache; its txs were just read",
                                     ),
@@ -2799,19 +2748,31 @@ impl Blockchain {
                         // against fork-chain history. We build DifficultyBlock entries
                         // from main-chain blocks below the fork point, plus already-
                         // validated fork blocks above the fork point.
-                        if fork_block.header.height >= 1 {
+                        if fork_block.header.height.as_u64() >= 1 {
                             let window = 144u64;
-                            let start = fork_block.header.height.saturating_sub(window);
+                            let start = fork_block.header.height.as_u64().saturating_sub(window);
                             let mut diff_blocks = Vec::new();
 
-                            for h in start..fork_block.header.height {
+                            for h in start..fork_block.header.height.as_u64() {
                                 if h <= fork_point {
                                     // Below fork point: use main-chain blocks
-                                    if let Some(hash) = inner.height_to_hash.get(&h) {
+                                    if let Some(ref db) = self.db {
+                                        // DB-sourced (deterministic across nodes). Heights
+                                        // <= fork_point are stable during a reorg (it only
+                                        // mutates heights above fork_point). Falls back to the
+                                        // held in-memory guard only in no-DB test mode.
+                                        if let Ok(Some(b)) = db.blocks.get_by_height(h) {
+                                            diff_blocks.push(DifficultyBlock {
+                                                height: h,
+                                                timestamp: b.header.timestamp.as_secs(),
+                                                target: b.header.target,
+                                            });
+                                        }
+                                    } else if let Some(hash) = inner.height_to_hash.get(&h) {
                                         if let Some(b) = inner.blocks.get(hash) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
-                                                timestamp: b.header.timestamp,
+                                                timestamp: b.header.timestamp.as_secs(),
                                                 target: b.header.target,
                                             });
                                         }
@@ -2822,26 +2783,26 @@ impl Blockchain {
                                     if offset < fork_idx {
                                         let fb = &fork_blocks[offset];
                                         diff_blocks.push(DifficultyBlock {
-                                            height: fb.header.height,
-                                            timestamp: fb.header.timestamp,
+                                            height: fb.header.height.as_u64(),
+                                            timestamp: fb.header.timestamp.as_secs(),
                                             target: fb.header.target,
                                         });
                                     }
                                 }
                             }
 
-                            if diff_blocks.len() >= 2 {
-                                let expected_target =
-                                    calculate_difficulty(&diff_blocks, fork_block.header.height);
+                            if diff_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
+                                let expected_target = self
+                                    .expected_next_target(&diff_blocks, fork_block.header.height.as_u64());
                                 if fork_block.header.target != expected_target {
                                     tracing::warn!(
                                         "Fork block {} at height {} has wrong difficulty target",
                                         fork_block.hash().to_hex(),
-                                        fork_block.header.height
+                                        fork_block.header.height.as_u64()
                                     );
                                     reorg_error = Some(format!(
                                         "Fork block difficulty mismatch at height {}: expected {}, got {}",
-                                        fork_block.header.height,
+                                        fork_block.header.height.as_u64(),
                                         expected_target.to_hex()[..16].to_string(),
                                         fork_block.header.target.to_hex()[..16].to_string(),
                                     ));
@@ -2850,10 +2811,86 @@ impl Blockchain {
                             }
                         }
 
+                        // Shielded (Spark) contextual double-spend check for this
+                        // fork block, pre-apply — mirrors the main path. Checked
+                        // against the store as progressively mutated by earlier
+                        // fork blocks in this same reorg, so a tag spent by an
+                        // earlier fork block is caught here. On failure, abandon
+                        // the reorg gracefully (no panic). Inert while None.
+                        if let Some(ref sstore) = self.shielded_store {
+                            if let Err(e) =
+                                crate::consensus::shielded::check_block_shielded_double_spends(
+                                    &fork_block.transactions,
+                                    |t| sstore.is_nullifier_spent(t),
+                                )
+                            {
+                                reorg_error = Some(format!(
+                                    "shielded double-spend in fork block at height {}: {}",
+                                    fork_block.header.height, e
+                                ));
+                                break;
+                            }
+                            // Gated store-aware spend-proof verification, mirroring
+                            // the main path. Only compiled under sketch-gk-proof.
+                            #[cfg(feature = "sketch-gk-proof")]
+                            if let Err(e) =
+                                Self::verify_block_shielded_spends(sstore, &fork_block.transactions)
+                            {
+                                reorg_error = Some(format!(
+                                    "shielded spend proof invalid in fork block at height {}: {}",
+                                    fork_block.header.height, e
+                                ));
+                                break;
+                            }
+                        }
+                        // Gated libspark v2 store-aware verification, mirroring
+                        // the main path.
+                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                        if let Err(reason) = self.verify_block_spark_v2(&fork_block.transactions) {
+                            reorg_error = Some(format!(
+                                "spark v2 spend invalid in fork block at height {}: {}",
+                                fork_block.header.height, reason
+                            ));
+                            break;
+                        }
+                        // #supply-commitment: validate this fork block's
+                        // commitment against its POST-apply cumulative supply
+                        // BEFORE applying it. inner.stats here is this block's
+                        // PARENT cumulative (the fork point, or the prior fork
+                        // block already applied earlier in this loop), so
+                        // post_emitted/post_burned are its resulting totals. On
+                        // mismatch, abort the reorg via the same reorg_error +
+                        // break path any invalid fork block uses — no partial
+                        // mutation for this block. Gated OFF today.
+                        {
+                            let post_emitted = inner.stats.total_supply.saturating_add(
+                                calculate_block_reward(fork_block.header.height.as_u64()).as_atomic() as u128,
+                            );
+                            let post_burned = inner
+                                .stats
+                                .total_burned
+                                .saturating_add(block_fee_burn(self.network, fork_block));
+                            if let Err(e) = check_supply_commitment(
+                                self.network.supply_commitment_enforce_height(),
+                                fork_block.header.height.as_u64(),
+                                &fork_block.header.supply_commitment,
+                                post_emitted,
+                                post_burned,
+                            ) {
+                                tracing::warn!(
+                                    "Fork block {} rejected during reorg: {}",
+                                    fork_block.hash().to_hex(),
+                                    e
+                                );
+                                reorg_error = Some(format!("Invalid fork block: {}", e));
+                                break;
+                            }
+                        }
+
                         let fork_hash = fork_block.hash();
                         inner
                             .height_to_hash
-                            .insert(fork_block.header.height, fork_hash);
+                            .insert(fork_block.header.height.as_u64(), fork_hash);
 
                         // Phase 2 store reorg checkpoint (site 4: reorg
                         // connect of fork blocks). Checkpoint each store
@@ -2867,19 +2904,31 @@ impl Blockchain {
                         // The site-5a rollback guard keys on height_to_hash,
                         // so a mapped block must always own one checkpoint.
                         // Inert while stores are None.
-                        self.checkpoint_phase2_stores(fork_block.header.height);
+                        self.checkpoint_phase2_stores(fork_block.header.height.as_u64());
 
                         // Defer canonical DB mappings until the final atomic
                         // reorg commit, after every fork block has validated.
                         // Apply fork block's UTXO mutations
                         let batch = UtxoSet::batch_from_block(
-                            fork_block.header.height,
+                            fork_block.header.height.as_u64(),
                             &fork_block.transactions,
                         );
                         inner.utxos.apply_batch(batch);
+                        // Shielded (Spark) apply for the adopted fork block
+                        // (inert while None / gated off).
+                        self.apply_shielded_txs(
+                            &fork_block.transactions,
+                            fork_block.header.height.as_u64(),
+                        );
+                        // Feed the libspark v2 pool for the adopted fork block.
+                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                        self.apply_spark_v2_txs(
+                            &fork_block.transactions,
+                            fork_block.header.height.as_u64(),
+                        );
 
                         // Add this fork block's emission to supply
-                        let emission = calculate_block_reward(fork_block.header.height);
+                        let emission = calculate_block_reward(fork_block.header.height.as_u64());
                         // AUDIT (2026-07-01): checked_add + panic for symmetry with the
                         // reorg-rollback path's checked_sub + panic (fixed same day).
                         // saturating_add silently clamps at u64::MAX; if emission ever
@@ -2907,7 +2956,7 @@ impl Blockchain {
                         inner.stats.total_burned = inner
                             .stats
                             .total_burned
-                            .checked_add(block_fee_burn(fork_block))
+                            .checked_add(block_fee_burn(self.network, fork_block))
                             .unwrap_or_else(|| {
                                 panic!(
                                     "CONSENSUS CORRUPTION: total_burned overflow on reorg \
@@ -2960,6 +3009,33 @@ impl Blockchain {
                         }
                     }
 
+                    // #supply-commitment: also validate the reorg TIP's
+                    // commitment. All fork blocks are applied, so inner.stats is
+                    // the tip's parent cumulative supply. On mismatch, set
+                    // reorg_error so the unconditional rollback below undoes the
+                    // partially-applied reorg — the same cleanup fork-block and
+                    // tip-validation failures use. Gated OFF today. Guarded on
+                    // `reorg_error.is_none()` so a prior failure's message wins.
+                    if reorg_error.is_none() {
+                        let post_emitted = inner.stats.total_supply.saturating_add(
+                            calculate_block_reward(block.header.height.as_u64()).as_atomic() as u128,
+                        );
+                        let post_burned = inner
+                            .stats
+                            .total_burned
+                            .saturating_add(block_fee_burn(self.network, &block));
+                        if let Err(e) = check_supply_commitment(
+                            self.network.supply_commitment_enforce_height(),
+                            block.header.height.as_u64(),
+                            &block.header.supply_commitment,
+                            post_emitted,
+                            post_burned,
+                        ) {
+                            tracing::warn!("Reorg tip block {} rejected: {}", hash.to_hex(), e);
+                            reorg_error = Some(format!("Invalid reorg tip block: {}", e));
+                        }
+                    }
+
                     // Tracks whether the path-A rollback below actually ran, so the
                     // triggering-block difficulty rollback (path B) can be gated on
                     // it instead of on `inner.tip.hash != pre_reorg_tip.hash` — see
@@ -2982,7 +3058,7 @@ impl Blockchain {
                         for fork_block in fork_blocks.iter().rev() {
                             if inner
                                 .height_to_hash
-                                .get(&fork_block.header.height)
+                                .get(&fork_block.header.height.as_u64())
                                 .map_or(false, |h| *h == fork_block.hash())
                             {
                                 let disconnect =
@@ -2993,12 +3069,12 @@ impl Blockchain {
                                 // blocks). Pairs with the site-4 checkpoint
                                 // taken when each fork block was connected
                                 // just above. Inert while stores are None.
-                                self.rewind_phase2_stores(fork_block.header.height);
+                                self.rewind_phase2_stores(fork_block.header.height.as_u64());
                                 // Subtract the emission we added for this fork block
-                                let emission = calculate_block_reward(fork_block.header.height);
+                                let emission = calculate_block_reward(fork_block.header.height.as_u64());
                                 // Burn accumulator, in lockstep with the supply
                                 // subtract below (undoing this fork block's add).
-                                let fee_burn = block_fee_burn(fork_block);
+                                let fee_burn = block_fee_burn(self.network, fork_block);
                                 // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                                 //
                                 // AUDIT (2026-07-01): the previous error arm zeroed the supply
@@ -3059,9 +3135,26 @@ impl Blockchain {
                             }
                         }
 
-                        // Remove fork block height mappings above fork point
-                        for h in (fork_point + 1..=inner.tip.height.max(pre_reorg_tip.height)).rev()
-                        {
+                        // Remove fork block height mappings above fork point.
+                        //
+                        // H3: `inner.tip` has NOT been advanced yet (that happens
+                        // after a successful reorg), so `inner.tip.height ==
+                        // pre_reorg_tip.height` here — bounding the removal by it
+                        // leaves the mappings of any fork block applied at a
+                        // height ABOVE the old tip in place. RPC/sync would then
+                        // report an unapplied fork block as canonical, and a
+                        // follow-up block parented on it could commit a chain
+                        // with an unapplied gap. Bound the removal by the highest
+                        // fork height instead (removing a height that was never
+                        // inserted is a harmless no-op), so every partially
+                        // applied fork mapping is cleaned up.
+                        let highest_fork_height = fork_blocks
+                            .iter()
+                            .map(|b| b.header.height.as_u64())
+                            .max()
+                            .unwrap_or(pre_reorg_tip.height);
+                        let removal_top = pre_reorg_tip.height.max(highest_fork_height);
+                        for h in (fork_point + 1..=removal_top).rev() {
                             inner.height_to_hash.remove(&h);
                         }
 
@@ -3078,9 +3171,19 @@ impl Blockchain {
                                 // restored pre-reorg chain). Inert while
                                 // stores are None.
                                 self.checkpoint_phase2_stores(*h);
-                                let batch =
-                                    UtxoSet::batch_from_block(*h, &orphan_block.transactions);
+                                let txs = orphan_block.transactions.clone();
+                                let batch = UtxoSet::batch_from_block(*h, &txs);
                                 inner.utxos.apply_batch(batch);
+                                // F1 (audit fix): the disconnect above removed these
+                                // outputs from the ON-DISK output_index too (R-68,
+                                // immediate write in remove_output). Re-applying only
+                                // in memory leaves disk permanently missing them, so
+                                // after they age out of the ~1000-block cache, ring-
+                                // member validation using one as a decoy fails on this
+                                // node but succeeds on nodes that never did this failed
+                                // reorg -> mempool/consensus partition. Restore the disk
+                                // rows so the rollback is symmetric on disk as well.
+                                self.persist_output_index(&txs, *h);
                             }
                         }
 
@@ -3093,18 +3196,30 @@ impl Blockchain {
                     // Only continue if fork blocks validated successfully
                     if reorg_error.is_none() {
                         // SECURITY (A6-REORG-DIFFICULTY): Also validate triggering block's difficulty
-                        if block.header.height >= 1 {
+                        if block.header.height.as_u64() >= 1 {
                             let window = 144u64;
-                            let start = block.header.height.saturating_sub(window);
+                            let start = block.header.height.as_u64().saturating_sub(window);
                             let mut diff_blocks = Vec::new();
 
-                            for h in start..block.header.height {
+                            for h in start..block.header.height.as_u64() {
                                 if h <= fork_point {
-                                    if let Some(hash) = inner.height_to_hash.get(&h) {
+                                    if let Some(ref db) = self.db {
+                                        // DB-sourced (deterministic across nodes). Heights
+                                        // <= fork_point are stable during a reorg (it only
+                                        // mutates heights above fork_point). Falls back to the
+                                        // held in-memory guard only in no-DB test mode.
+                                        if let Ok(Some(b)) = db.blocks.get_by_height(h) {
+                                            diff_blocks.push(DifficultyBlock {
+                                                height: h,
+                                                timestamp: b.header.timestamp.as_secs(),
+                                                target: b.header.target,
+                                            });
+                                        }
+                                    } else if let Some(hash) = inner.height_to_hash.get(&h) {
                                         if let Some(b) = inner.blocks.get(hash) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
-                                                timestamp: b.header.timestamp,
+                                                timestamp: b.header.timestamp.as_secs(),
                                                 target: b.header.target,
                                             });
                                         }
@@ -3114,25 +3229,25 @@ impl Blockchain {
                                     if offset < fork_blocks.len() {
                                         let fb = &fork_blocks[offset];
                                         diff_blocks.push(DifficultyBlock {
-                                            height: fb.header.height,
-                                            timestamp: fb.header.timestamp,
+                                            height: fb.header.height.as_u64(),
+                                            timestamp: fb.header.timestamp.as_secs(),
                                             target: fb.header.target,
                                         });
                                     }
                                 }
                             }
 
-                            if diff_blocks.len() >= 2 {
+                            if diff_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
                                 let expected_target =
-                                    calculate_difficulty(&diff_blocks, block.header.height);
+                                    self.expected_next_target(&diff_blocks, block.header.height.as_u64());
                                 if block.header.target != expected_target {
                                     tracing::warn!(
                                         "Reorg tip block {} at height {} has wrong difficulty target",
-                                        hash.to_hex(), block.header.height
+                                        hash.to_hex(), block.header.height.as_u64()
                                     );
                                     reorg_error = Some(format!(
                                         "Reorg tip difficulty mismatch at height {}: expected {}, got {}",
-                                        block.header.height,
+                                        block.header.height.as_u64(),
                                         expected_target.to_hex()[..16].to_string(),
                                         block.header.target.to_hex()[..16].to_string(),
                                     ));
@@ -3171,11 +3286,11 @@ impl Blockchain {
                             // every fork block was checkpointed at site 4
                             // and every one is rewound here, unguarded).
                             // Inert while stores are None.
-                            self.rewind_phase2_stores(fork_block.header.height);
-                            let emission = calculate_block_reward(fork_block.header.height);
+                            self.rewind_phase2_stores(fork_block.header.height.as_u64());
+                            let emission = calculate_block_reward(fork_block.header.height.as_u64());
                             // Burn accumulator, in lockstep with the supply
                             // subtract below (undoing this fork block's add).
-                            let fee_burn = block_fee_burn(fork_block);
+                            let fee_burn = block_fee_burn(self.network, fork_block);
                             // C-4/H-11 FIX: checked_sub instead of saturating_sub — underflow = corruption.
                             //
                             // AUDIT (2026-07-02): fourth (and final located) site of
@@ -3219,7 +3334,7 @@ impl Blockchain {
 
                         // Remove fork block height mappings
                         for h in
-                            (fork_point + 1..=pre_reorg_tip.height.max(block.header.height)).rev()
+                            (fork_point + 1..=pre_reorg_tip.height.max(block.header.height.as_u64())).rev()
                         {
                             inner.height_to_hash.remove(&h);
                         }
@@ -3234,9 +3349,13 @@ impl Blockchain {
                                 // site 6a but for the triggering-block-failed
                                 // rollback path). Inert while stores are None.
                                 self.checkpoint_phase2_stores(*h);
-                                let batch =
-                                    UtxoSet::batch_from_block(*h, &orphan_block.transactions);
+                                let txs = orphan_block.transactions.clone();
+                                let batch = UtxoSet::batch_from_block(*h, &txs);
                                 inner.utxos.apply_batch(batch);
+                                // F1 (audit fix): restore the ON-DISK output_index the
+                                // disconnect removed (R-68), so a failed reorg is
+                                // symmetric on disk — see the path-A note above.
+                                self.persist_output_index(&txs, *h);
                             }
                         }
 
@@ -3245,9 +3364,18 @@ impl Blockchain {
                     }
 
                     if reorg_error.is_none() {
+                        // F2 (audit fix): checkpoint the Phase-2 stores BEFORE the tip
+                        // block's UTXO mutations, matching every other apply site
+                        // (clean-extend, fork-block loop, both rollback paths). The
+                        // triggering tip is excluded from collect_fork_chain and only
+                        // applied here, so without this the Phase-2 checkpoint stack
+                        // ends one short per reorg and a later disconnect through this
+                        // tip rewinds the wrong boundary (mainnet blocker once the
+                        // shielded/spark/kernel stores activate; inert while None).
+                        self.checkpoint_phase2_stores(block.header.height.as_u64());
                         // Apply the new tip block (the triggering block)
                         let tip_batch =
-                            UtxoSet::batch_from_block(block.header.height, &block.transactions);
+                            UtxoSet::batch_from_block(block.header.height.as_u64(), &block.transactions);
                         inner.utxos.apply_batch(tip_batch);
 
                         // Add triggering block's emission to supply.
@@ -3264,7 +3392,7 @@ impl Blockchain {
                         // 2 SEV-A subtract sites on this file. Both categories
                         // are now uniform. Grep-verified: 0 remaining
                         // `total_supply.saturating_add` in this file.
-                        let tip_emission = calculate_block_reward(block.header.height);
+                        let tip_emission = calculate_block_reward(block.header.height.as_u64());
                         inner.stats.total_supply = inner
                             .stats
                             .total_supply
@@ -3283,7 +3411,7 @@ impl Blockchain {
                         inner.stats.total_burned = inner
                             .stats
                             .total_burned
-                            .checked_add(block_fee_burn(&block))
+                            .checked_add(block_fee_burn(self.network, &block))
                             .unwrap_or_else(|| {
                                 panic!(
                                     "CONSENSUS CORRUPTION: total_burned overflow on reorg tip \
@@ -3296,11 +3424,11 @@ impl Blockchain {
                         // Update tip to the new fork head
                         inner.tip = ChainTip {
                             hash,
-                            height: block.header.height,
+                            height: block.header.height.as_u64(),
                             difficulty: fork_difficulty,
-                            timestamp: block.header.timestamp,
+                            timestamp: block.header.timestamp.as_secs(),
                         };
-                        inner.stats.height = block.header.height;
+                        inner.stats.height = block.header.height.as_u64();
                         inner.stats.difficulty = fork_difficulty;
                         inner.stats.tip_hash = hash;
                         inner.stats.total_difficulty = fork_cumulative;
@@ -3389,7 +3517,7 @@ impl Blockchain {
                                 }
                             };
 
-                        inner.height_to_hash.insert(block.header.height, hash);
+                        inner.height_to_hash.insert(block.header.height.as_u64(), hash);
                     }
                 }
 
@@ -3449,8 +3577,8 @@ impl Blockchain {
                             |b: &crate::consensus::Block,
                              oi: &mut Vec<([u8; 32], Vec<u8>)>,
                              hs: &mut Vec<(u64, [u8; 32])>,
-                             ti: &mut Vec<([u8; 32], u64, u32)>| {
-                                let h = b.header.height;
+                             ti: &mut Vec<([u8; 32], u64, u32)>| -> Result<()> {
+                                let h = b.header.height.as_u64();
                                 hs.push((h, *b.hash().as_bytes()));
                                 for (idx, tx) in b.transactions.iter().enumerate() {
                                     let is_coinbase = tx.is_coinbase();
@@ -3461,12 +3589,17 @@ impl Blockchain {
                                             is_coinbase,
                                             lock_height: output.lock_height,
                                         };
-                                        if let Ok(data) = crate::db::serialize(&entry) {
-                                            oi.push((*output.stealth_address.as_bytes(), data));
-                                        }
+                                        let data = crate::db::serialize(&entry).map_err(|e| {
+                                            Error::Internal(format!(
+                                                "serialize OutputIndexEntry failed at height {}: {}",
+                                                h, e
+                                            ))
+                                        })?;
+                                        oi.push((*output.stealth_address.as_bytes(), data));
                                     }
                                     ti.push((*tx.hash().as_bytes(), h, idx as u32));
                                 }
+                                Ok(())
                             };
 
                         for fork_block in &fork_blocks {
@@ -3475,17 +3608,17 @@ impl Blockchain {
                                 &mut oi_additions,
                                 &mut height_sets,
                                 &mut ti_adds,
-                            );
+                            )?;
                         }
                         collect_block_outputs(
                             &block,
                             &mut oi_additions,
                             &mut height_sets,
                             &mut ti_adds,
-                        );
+                        )?;
 
                         // 3. Compute stale heights to remove (above new tip)
-                        let new_tip_height = block.header.height;
+                        let new_tip_height = block.header.height.as_u64();
                         let height_removals: Vec<u64> = if new_tip_height < pre_reorg_tip.height {
                             (new_tip_height + 1..=pre_reorg_tip.height).collect()
                         } else {
@@ -3542,10 +3675,10 @@ impl Blockchain {
                         for fork_block in &fork_blocks {
                             self.persist_output_index(
                                 &fork_block.transactions,
-                                fork_block.header.height,
+                                fork_block.header.height.as_u64(),
                             );
                         }
-                        self.persist_output_index(&block.transactions, block.header.height);
+                        self.persist_output_index(&block.transactions, block.header.height.as_u64());
                     }
                     Ok(())
                 })(); // R-34: close the write-guard scope before handling errors
@@ -3559,7 +3692,7 @@ impl Blockchain {
                          Halting so restart reloads that durable state instead of serving a \
                          divergent tip.",
                         hash.to_hex(),
-                        block.header.height,
+                        block.header.height.as_u64(),
                         error
                     );
                 }
@@ -3568,9 +3701,9 @@ impl Blockchain {
                 let stats_snapshot = inner_stats_for_log(&self.inner);
                 tracing::warn!(
                     target: "chain::commit",
-                    height = block.header.height,
+                    height = block.header.height.as_u64(),
                     block_hash = %hash.to_hex(),
-                    reorg_depth = block.header.height.saturating_sub(fork_point),
+                    reorg_depth = block.header.height.as_u64().saturating_sub(fork_point),
                     total_difficulty = stats_snapshot.0,
                     tip = %hash.to_hex(),
                     supply_atomic = %stats_snapshot.1,
@@ -3588,7 +3721,7 @@ impl Blockchain {
 
                 self.record_event(
                     ChainEventType::Reorg,
-                    block.header.height,
+                    block.header.height.as_u64(),
                     &hash,
                     serde_json::json!({
                         "reorg_depth": reorg_depth,
@@ -3596,19 +3729,22 @@ impl Blockchain {
                     }),
                 );
 
+                // Enterprise metrics: count the reorg and record its depth.
+                crate::metrics::record_reorg(reorg_depth as u64);
+
                 Ok(BlockStatus::AcceptedReorg { orphaned_txs })
             } else {
                 // Fork has less work - store but don't switch
                 tracing::warn!(
                     "Block {} at height {} is a fork (less work: {} <= {})",
                     hash.to_hex()[..16].to_string(),
-                    block.header.height,
+                    block.header.height.as_u64(),
                     fork_cumulative,
                     current_total_difficulty
                 );
                 self.record_event(
                     ChainEventType::ForkDetected,
-                    block.header.height,
+                    block.header.height.as_u64(),
                     &hash,
                     serde_json::json!({
                         "fork_difficulty": fork_cumulative,
@@ -3620,83 +3756,19 @@ impl Blockchain {
     }
 
     /// Get recent blocks as DifficultyBlock entries for ASERT calculation
-    pub fn get_difficulty_blocks(&self, up_to_height: u64) -> Vec<DifficultyBlock> {
-        let window = 144u64; // DIFFICULTY_LONG_WINDOW
-        let start = up_to_height.saturating_sub(window);
-        let inner = self.inner.read();
-        let mut blocks = Vec::new();
-        for h in start..up_to_height {
-            if let Some(hash) = inner.height_to_hash.get(&h) {
-                if let Some(block) = inner.blocks.get(hash) {
-                    blocks.push(DifficultyBlock {
-                        height: h,
-                        timestamp: block.header.timestamp,
-                        target: block.header.target,
-                    });
-                }
-            }
-        }
-        blocks
-    }
+    /// A main-chain block's `DifficultyBlock`, sourced from DURABLE storage so
+    /// the difficulty window is identical on every node. Reading the volatile,
+    /// height-evicted in-memory cache (MAX_BLOCK_CACHE) is what made difficulty
+    /// validation nondeterministic (chain.rs:2056/2810 — a cold-cache node built
+    /// a truncated window and computed a different expected target than a
+    /// hot-cache node, a consensus split). The DB path takes no `inner` lock;
+    /// the cache fallback is reached ONLY in no-DB in-memory test mode (where
+    /// callers do not hold the lock).
+    // main_chain_diff_block / fork_difficulty_window moved to chain::fork_calc
+    // (issue #108).
 
-    /// Check if a key image has been spent
-    ///
-    /// Returns true if the key image exists in the spent key images set,
-    /// meaning the associated output has already been spent.
-    ///
-    /// SECURITY (A6-DUAL-UTXO): Check the in-memory UTXO set first, since it
-    /// is always kept up-to-date by add_block(). The persistent DB may not be
-    /// synchronized. Falls back to DB only if in-memory set has no key images
-    /// tracked (fresh startup edge case).
-    pub fn is_spent(&self, key_image: &KeyImage) -> bool {
-        // Primary: check in-memory UTXO set (always up-to-date)
-        let inner = self.inner.read();
-        if inner.utxos.output_count() > 0 || inner.utxos.contains_key_image(key_image) {
-            return inner.utxos.contains_key_image(key_image);
-        }
-        drop(inner);
-
-        // Fallback: check persistent DB (for fresh startup before UTXO rebuild)
-        if let Some(ref db) = self.db {
-            match db.utxos.is_spent(key_image) {
-                Ok(spent) => spent,
-                Err(e) => {
-                    tracing::error!("Failed to check key image: {}", e);
-                    // SECURITY: Fail closed - treat DB errors as "spent" to prevent
-                    // double-spend attacks when database is unavailable
-                    true
-                }
-            }
-        } else {
-            false
-        }
-    }
-
-    /// Get target height (for sync progress, updated by P2P layer)
-    pub fn target_height(&self) -> u64 {
-        let peer_target = self
-            .peer_target_height
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if peer_target > 0 {
-            peer_target
-        } else {
-            self.height()
-        }
-    }
-
-    /// Raw peer-advertised target height (0 = no peer height info yet).
-    ///
-    /// Unlike [`Chain::target_height`], this does NOT fall back to the local
-    /// height when no peer info is available. Callers detecting fork
-    /// divergence must distinguish "no peer height reported yet" (0) from
-    /// "peers agree we're at the tip". Used by the miner's fork-divergence
-    /// gate (2026-07-08 runaway-fork incident): a local tip running far
-    /// ahead of every peer's advertised height means our blocks aren't
-    /// being adopted — we're mining a worthless private fork.
-    pub fn peer_advertised_height(&self) -> u64 {
-        self.peer_target_height
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
+    // get_difficulty_blocks / is_spent / target_height / peer_advertised_height
+    // moved to chain::queries (issue #108).
 
     /// Update sync info from P2P layer
     pub fn set_sync_info(&self, synced: bool, target_height: u64) {
@@ -3719,62 +3791,12 @@ impl Blockchain {
     /// Called from `add_block` whenever a peer-sourced block is accepted so
     /// phantom-stall detection can measure the gap since the last real arrival.
     pub fn record_block_received(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = crate::clock::unix_now(); // E1: single-source clock
         self.last_block_received_at
             .store(now, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// FIX #17: single source of truth for tip staleness. Previously
-    /// `AutoHeal::last_tip_change`, `IronConsensus::last_advance`, and the
-    /// phantom-stall timer all tracked this independently and disagreed with
-    /// each other — three stall detectors firing at different times with
-    /// conflicting recovery actions. This method exposes the shared
-    /// `last_block_received_at` atomic so all three can read from the same
-    /// timestamp. Returns `None` if we've never received a block from a peer
-    /// since startup (in which case the caller should use its own clock).
-    pub fn secs_since_last_block(&self) -> Option<u64> {
-        let last = self
-            .last_block_received_at
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if last == 0 {
-            return None;
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Some(now.saturating_sub(last))
-    }
-
-    /// Returns true when the node is in a phantom-advertisement stall:
-    ///   - `synced == false` (miner IBD gate is blocking)
-    ///   - `target_height == local_height + 1` (only one block behind)
-    ///   - no peer block has arrived in the last `stall_secs` seconds
-    ///
-    /// In that state the "missing" block does not exist yet — it needs to be
-    /// mined locally, not fetched. The miner uses this to relax the IBD gate.
-    pub fn is_phantom_stall(&self, stall_secs: u64) -> bool {
-        use std::sync::atomic::Ordering::Relaxed;
-        if self.synced.load(Relaxed) {
-            return false;
-        }
-        let local_h = self.height();
-        let target_h = self.peer_target_height.load(Relaxed);
-        if target_h != local_h + 1 {
-            return false;
-        }
-        let last = self.last_block_received_at.load(Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // If `last` is 0 we have never accepted a peer block since startup;
-        // treat that as "long ago" so a phantom detected at boot still fires.
-        now.saturating_sub(last) >= stall_secs
-    }
+    // secs_since_last_block / is_phantom_stall moved to chain::queries (issue #108).
 
     /// Clear the phantom target — reset `synced=true` and align target_height
     /// with local_height so the miner IBD gate unblocks. If a real peer has
@@ -3788,224 +3810,10 @@ impl Blockchain {
         tracing::info!("Phantom target cleared — synced=true h={}", h);
     }
 
-    // ─── Asset policy helpers ─────────────────────────────────────────────
+    // export_checkpoints moved to chain::queries (issue #108).
 
-    /// Look up a registered asset policy by ID.  Returns `None` if the asset
-    /// has not been issued on this chain (or no database is attached).
-    /// Export all recorded checkpoints (hardcoded + auto-recorded from DB).
-    pub fn export_checkpoints(&self) -> Vec<(u64, Hash)> {
-        let mut checkpoints: Vec<(u64, Hash)> = crate::testnet::testnet_checkpoints()
-            .into_iter()
-            .map(|cp| (cp.height, cp.hash))
-            .collect();
-
-        if let Some(ref db) = self.db {
-            if let Ok(db_checkpoints) = db.state.get_checkpoints() {
-                for (height, hash) in db_checkpoints {
-                    if !checkpoints.iter().any(|(h, _)| *h == height) {
-                        checkpoints.push((height, hash));
-                    }
-                }
-            }
-        }
-
-        checkpoints.sort_by_key(|(h, _)| *h);
-        checkpoints
-    }
-
-    /// Calculate cumulative work for a fork chain ending at the given block.
-    ///
-    /// Walks backwards from the block through its parents, summing difficulty
-    /// until reaching the genesis block or a block not in our storage.
-    ///
-    /// SECURITY: bounded by `block.header.height + 1` (max walk = genesis →
-    /// block, plus the starting block itself). A corrupt DB with a cycle
-    /// in `prev_hash` would otherwise loop forever consuming CPU. Matching
-    /// the visited-set pattern in `find_fork_point` (lines 2533+) would
-    /// also catch cycles but costs an allocation; the height-derived cap
-    /// is allocation-free and serves the same purpose because the walk
-    /// can only legitimately visit at most `block.height` distinct heights.
-    fn calculate_fork_cumulative_work(&self, block: &Block) -> u128 {
-        let mut total_work = calculate_difficulty_from_target(&block.header.target);
-        let mut current_hash = block.header.prev_hash;
-        // +1 covers the starting block; +100 absorbs height-key off-by-one
-        // edge cases and is still vanishingly cheap if exercised.
-        let max_steps = block.header.height.saturating_add(100);
-        let mut steps: u64 = 0;
-
-        loop {
-            steps = steps.saturating_add(1);
-            if steps > max_steps {
-                tracing::error!(
-                    "calculate_fork_cumulative_work walked {} steps from block height {} \
-                     without reaching genesis — possible prev_hash cycle in DB. Returning \
-                     partial work; caller's IronConsensus classifier will reject the fork.",
-                    steps,
-                    block.header.height
-                );
-                break;
-            }
-            if let Some(parent) = self.get_block(&current_hash) {
-                // Genesis contributes the fixed base `1`, NOT its
-                // `dft(genesis_target)`. This matches the extend path, which
-                // starts from `total_difficulty = 1` at construction
-                // (chain.rs genesis init) and does `+= dft(block)` for each
-                // block height ≥ 1. Adding `dft(genesis)` here instead made
-                // this from-scratch fork walk exceed the incrementally
-                // accumulated `current total_difficulty` by
-                // `dft(genesis) - 1`, so an EQUAL-work fork looked heavier and
-                // triggered a spurious reorg — and every reorg then latched
-                // the higher base into the stored value, producing the
-                // fleet-wide `total_difficulty` divergence (nodes on the
-                // identical tip disagreeing on cumulative work) that
-                // false-positived the `work_behind` veto and locked follower
-                // miners out. See recompute_total_difficulty for the canonical
-                // definition this must agree with.
-                if parent.header.height == 0 {
-                    total_work = total_work.saturating_add(1);
-                    break; // Reached genesis
-                }
-                let prev_work = total_work;
-                total_work = total_work
-                    .saturating_add(calculate_difficulty_from_target(&parent.header.target));
-                // SECURITY (H-7): Detect u128 saturation during deep reorgs.
-                // saturating_add silently caps at u128::MAX, which could cause
-                // incorrect chain selection if both forks saturate.
-                if total_work == u128::MAX && prev_work != u128::MAX {
-                    tracing::warn!(
-                        "Cumulative work saturated at u128::MAX during fork calculation at height {}",
-                        parent.header.height
-                    );
-                }
-                current_hash = parent.header.prev_hash;
-            } else {
-                break; // Parent not found
-            }
-        }
-
-        total_work
-    }
-
-    /// Deterministically recompute cumulative chain work for the active chain
-    /// `[0, height]` as `1 + Σ dft(block_h.target)` for `h in 1..=height`.
-    ///
-    /// This is the SINGLE canonical definition of `total_difficulty`, and it
-    /// agrees by construction with:
-    ///   - the extend path (`total_difficulty += dft(block)` from a genesis
-    ///     base of `1`), and
-    ///   - the reorg path (`calculate_fork_cumulative_work`, which now also
-    ///     uses the genesis base `1`).
-    ///
-    /// Called once on load (`load_from_database`) so that a node whose stored
-    /// value drifted — via the pre-fix reorg path that used a `dft(genesis)`
-    /// base, or a partial fork walk — SELF-HEALS to the deterministic value on
-    /// restart. Because `total_difficulty` is advertised to peers in
-    /// `ChainWorkMessage` (feeding the `work_behind` heavier-chain veto),
-    /// converging every node's value is what stops the veto from
-    /// false-positiving followers whose only "sin" was computing the same
-    /// tip's work correctly.
-    ///
-    /// Returns `None` if any block in `[1, height]` is missing from storage
-    /// (caller keeps the existing value rather than storing a wrong partial).
-    ///
-    /// Cost: O(height) DB reads, once per process start. Fine at testnet
-    /// scale (~12k blocks, sub-second). A mainnet-scale chain would want a
-    /// periodically-checkpointed cumulative value instead of a full walk.
-    fn recompute_total_difficulty(&self, height: u64) -> Option<u128> {
-        let mut total: u128 = 1; // genesis base (matches genesis init + fork walk)
-        for h in 1..=height {
-            let block = self.get_block_by_height(h)?;
-            total = total.saturating_add(calculate_difficulty_from_target(&block.header.target));
-        }
-        Some(total)
-    }
-
-    /// Find the common ancestor (fork point) between the current main chain
-    /// and a fork block.
-    ///
-    /// Returns `Some(height)` for a real common ancestor (including the
-    /// legitimate "fork point is genesis" case → `Some(0)`).
-    ///
-    /// Returns `None` when DB corruption is detected:
-    /// - Cycle in `prev_hash` chain (the walk would loop forever
-    ///   without the visited-set guard).
-    /// - A `prev_hash` references a block that isn't in storage.
-    ///
-    /// The caller (chain reorganization in [`Self::add_block`]) MUST
-    /// treat `None` as a corruption-class rejection — not as "fork
-    /// point is genesis". Previously this function returned `0` for
-    /// both genesis and corruption, which masked corruption as a
-    /// legitimate deep-reorg attempt: `evaluate_reorg_acceptability`
-    /// then rejected it as "ReorgTooDeep" with a misleading
-    /// diagnostic. Audit-prep fix 2026-05-23.
-    fn find_fork_point(&self, fork_block: &Block) -> Option<u64> {
-        let mut current_hash = fork_block.header.prev_hash;
-        let mut visited = std::collections::HashSet::new();
-
-        loop {
-            if !visited.insert(current_hash) {
-                tracing::error!(
-                    "DB corruption: cycle detected during fork-point search; \
-                     starting from fork_block height={} hash={}",
-                    fork_block.header.height,
-                    fork_block.hash().to_hex(),
-                );
-                return None;
-            }
-            if let Some(parent) = self.get_block(&current_hash) {
-                let height = parent.header.height;
-                if let Some(main_hash) = self.get_block_hash(height) {
-                    if main_hash == current_hash {
-                        return Some(height);
-                    }
-                }
-                if height == 0 {
-                    return Some(0);
-                }
-                current_hash = parent.header.prev_hash;
-            } else {
-                tracing::error!(
-                    "DB corruption: prev_hash {} not in storage during fork-point search; \
-                     fork_block height={}",
-                    current_hash.to_hex(),
-                    fork_block.header.height,
-                );
-                return None;
-            }
-        }
-    }
-
-    /// Collect the fork chain from fork_point+1 to the given block (exclusive).
-    /// Returns blocks in ascending height order.
-    fn collect_fork_chain(&self, fork_tip: &Block, fork_point: u64) -> Vec<Block> {
-        let mut chain = Vec::new();
-        let mut current_hash = fork_tip.header.prev_hash;
-        let mut visited = std::collections::HashSet::new();
-
-        // Walk back from fork tip to fork point, collecting blocks.
-        // SECURITY: Track visited hashes to detect cycles and prevent infinite loops.
-        loop {
-            if !visited.insert(current_hash) {
-                tracing::error!(
-                    "Cycle detected in fork chain at hash {}",
-                    current_hash.to_hex()
-                );
-                break;
-            }
-            if let Some(block) = self.get_block(&current_hash) {
-                if block.header.height <= fork_point {
-                    break;
-                }
-                current_hash = block.header.prev_hash;
-                chain.push(block.clone());
-            } else {
-                break;
-            }
-        }
-
-        chain.reverse(); // Return in ascending order
-        chain
-    }
+    // calculate_fork_cumulative_work / recompute_total_difficulty /
+    // find_fork_point / collect_fork_chain moved to chain::fork_calc (issue #108).
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -4037,16 +3845,7 @@ impl Blockchain {
         StateUpdate { chain: self }
     }
 
-    /// Return the current generation only while canonical chain state is stable.
-    pub fn stable_generation(&self) -> Option<u64> {
-        use std::sync::atomic::Ordering;
-
-        if self.state_updates_in_progress.load(Ordering::Acquire) != 0 {
-            return None;
-        }
-        let generation = self.state_generation.load(Ordering::Acquire);
-        (self.state_updates_in_progress.load(Ordering::Acquire) == 0).then_some(generation)
-    }
+    // stable_generation moved to chain::queries (issue #108).
 
     /// Async wrapper around [`Blockchain::add_block`]. Runs full block
     /// validation + DB write on `tokio::task::spawn_blocking`.
@@ -4128,6 +3927,45 @@ fn calculate_difficulty_from_target(target: &Hash) -> u128 {
     u128::MAX / target_value
 }
 
+/// #supply-commitment: validate a block's `supply_commitment` header field
+/// against the cumulative supply the block LEAVES behind (post-apply).
+///
+/// `post_emitted` / `post_burned` are the running cumulative totals AFTER this
+/// block's coinbase emission and fee burns are applied — i.e. the PARENT's
+/// cumulative supply plus this block's delta. At every point this is called,
+/// the caller holds the parent's cumulative supply (the active-tip stats for a
+/// tip-extending block, or the reorg-apply stats for a fork block), so no
+/// per-height storage is needed.
+///
+/// GATED: below `enforce_height` the header field is expected to stay `[0u8;32]`
+/// and is NOT read, so pre-fork chains are unaffected and the whole rule is a
+/// no-op until an activation height is cleared (today `u64::MAX` everywhere).
+/// Uses the `u128`-exact consensus commitment (the u64 audit helper overflows
+/// past ~18.4M CYNC).
+fn check_supply_commitment(
+    enforce_height: u64,
+    height: u64,
+    header_commitment: &[u8; 32],
+    post_emitted: u128,
+    post_burned: u128,
+) -> std::result::Result<(), String> {
+    if height < enforce_height {
+        return Ok(());
+    }
+    let expected = crate::emission::supply::supply_commitment_consensus(
+        post_emitted,
+        post_burned,
+        crate::constants::MAX_SUPPLY.saturating_sub(post_emitted),
+    );
+    if header_commitment != &expected {
+        return Err(format!(
+            "supply_commitment mismatch at height {height}: header does not match \
+             the post-apply cumulative supply (emitted={post_emitted}, burned={post_burned})"
+        ));
+    }
+    Ok(())
+}
+
 /// Total fees BURNED by `block`, in atomic units.
 ///
 /// Computed EXACTLY as the consensus validator computes the coinbase burn (see
@@ -4148,7 +3986,7 @@ fn calculate_difficulty_from_target(target: &Hash) -> u128 {
 ///     `congested = congestion_pct >= CONGESTION_THRESHOLD` — the same
 ///     `size = block.size()` the validator uses.
 ///   * burn = `distribute_fee(total_fees, congested).burned`.
-fn block_fee_burn(block: &Block) -> u128 {
+pub(crate) fn block_fee_burn(network: crate::config::NetworkType, block: &Block) -> u128 {
     let total_fees: crate::primitives::Amount = block
         .transactions
         .iter()
@@ -4157,9 +3995,9 @@ fn block_fee_burn(block: &Block) -> u128 {
         .sum();
 
     // Below activation, or no fees: nothing burned — miner claims all fees.
-    if block.height() < crate::constants::FEE_DISTRIBUTION_HEIGHT
-        || total_fees.as_atomic() == 0
-    {
+    // Runtime-network hardening: resolve the activation height from the runtime
+    // network so burn accounting matches the validator (which does the same).
+    if block.height() < network.fee_distribution_height() || total_fees.as_atomic() == 0 {
         return 0;
     }
 
@@ -4212,7 +4050,7 @@ mod generation_tests {
 }
 
 // =============================================================================
-// Genesis Block
+// §12  Genesis Block
 // =============================================================================
 
 /// Create the genesis block for a specific network (runtime selection).
@@ -4235,12 +4073,21 @@ pub fn create_genesis_block() -> Block {
 mod tests {
     use super::*;
 
+    // Runtime-network hardening: `block_fee_burn` now resolves the activation
+    // height from the network. These tests use `crate::constants::FEE_DISTRIBUTION_HEIGHT`
+    // (the compiled const) as their boundary, so pass the compiled network —
+    // pinned equal to that const by the drift guard in constants.rs.
+    #[cfg(feature = "testnet")]
+    const TEST_NET: crate::config::NetworkType = crate::config::NetworkType::Testnet;
+    #[cfg(not(feature = "testnet"))]
+    const TEST_NET: crate::config::NetworkType = crate::config::NetworkType::Mainnet;
+
     fn state_for_genesis(block: &Block) -> ChainStateData {
         ChainStateData {
             tip_hash: block.hash(),
-            height: block.header.height,
+            height: block.header.height.as_u64(),
             total_difficulty: 1,
-            total_supply: u128::from(calculate_block_reward(block.header.height).as_atomic()),
+            total_supply: u128::from(calculate_block_reward(block.header.height.as_u64()).as_atomic()),
             total_burned: 0,
             last_checkpoint: 0,
         }
@@ -4282,7 +4129,7 @@ mod tests {
     #[test]
     fn test_genesis_block() {
         let genesis = create_genesis_block();
-        assert_eq!(genesis.header.height, 0);
+        assert_eq!(genesis.header.height.as_u64(), 0);
         assert_eq!(genesis.header.prev_hash, Hash::zero());
         assert!(!genesis.transactions.is_empty());
     }
@@ -4293,6 +4140,27 @@ mod tests {
         let genesis_hash = chain.init_genesis().unwrap();
         assert_eq!(chain.height(), 0);
         assert_eq!(chain.tip().hash, genesis_hash);
+    }
+
+    #[test]
+    fn boot_integrity_check_passes_on_genesis_and_seeded_chains() {
+        // Fresh genesis chain: canary passes (height 0 path).
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        assert!(chain.boot_integrity_check().is_ok());
+
+        // A DB-backed seeded chain at height > 0: tip retrievable + height index
+        // agrees with the tip, so the canary passes.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let seeded = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        seeded.init_genesis().unwrap();
+        seeded.seed_linear_chain_for_testing(50, 120);
+        assert_eq!(seeded.height(), 50);
+        assert!(
+            seeded.boot_integrity_check().is_ok(),
+            "seeded height-50 chain must pass the integrity canary"
+        );
     }
 
     #[test]
@@ -4311,6 +4179,100 @@ mod tests {
         assert_eq!(
             reloaded.load_from_database_with_outcome().unwrap(),
             ChainLoadOutcome::Loaded
+        );
+    }
+
+    /// #108 (failure boundary): a failed block application must leave chain state
+    /// byte-for-behavior unchanged. A block whose parent is unknown is rejected
+    /// (Orphan) before any state mutation, so tip, height, cumulative work, block
+    /// count and the UTXO set must all be exactly as they were.
+    #[test]
+    fn failed_block_application_leaves_chain_state_unchanged_108() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        chain.init_genesis().unwrap();
+
+        let tip_before = chain.tip().hash;
+        let height_before = chain.height();
+        let stats_before = chain.stats();
+        let utxo_before = chain.utxo_count();
+
+        // Unknown parent → rejected without touching state.
+        let orphan = walk_block(5, Hash::from_bytes([0xAB; 32]), 99);
+        let status = chain.add_block(orphan).unwrap();
+        assert!(
+            matches!(status, BlockStatus::Orphan | BlockStatus::Invalid(_)),
+            "a bad-parent block must be rejected (Orphan/Invalid), got {status:?}"
+        );
+
+        assert_eq!(chain.tip().hash, tip_before, "tip moved after a failed apply");
+        assert_eq!(chain.height(), height_before, "height moved after a failed apply");
+        assert_eq!(
+            chain.stats().total_difficulty,
+            stats_before.total_difficulty,
+            "total_difficulty moved after a failed apply"
+        );
+        assert_eq!(
+            chain.stats().total_blocks,
+            stats_before.total_blocks,
+            "total_blocks moved after a failed apply"
+        );
+        assert_eq!(chain.utxo_count(), utxo_before, "utxo set changed after a failed apply");
+    }
+
+    /// #108 (reopen): reopening the database restores the expected chain. After
+    /// genesis init, a fresh `Blockchain` over the SAME db must load (not fresh)
+    /// and report the identical tip, height, cumulative work, supply and UTXO
+    /// count via its public getters — i.e. the recovery path (load_from_database
+    /// + rebuild_utxo_set + recompute_total_difficulty + tip restore, now in
+    /// chain::recovery) reconstructs state faithfully.
+    #[test]
+    fn reopening_database_restores_expected_chain_108() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        assert_eq!(
+            chain.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Fresh
+        );
+        chain.init_genesis().unwrap();
+        let tip = chain.tip().hash;
+        let height = chain.height();
+        let supply = chain.stats().total_supply;
+        let total_blocks = chain.stats().total_blocks;
+        let utxos = chain.utxo_count();
+
+        // A freshly initialised node must already carry the canonical genesis
+        // cumulative-work base — identical to what a restart reports below (this
+        // pins the init_genesis total_difficulty fix).
+        assert_eq!(
+            chain.stats().total_difficulty,
+            1,
+            "fresh genesis chain must carry the canonical total_difficulty base"
+        );
+
+        // Reopen over the same DB — must Load and restore the expected chain.
+        let reloaded = Blockchain::with_database(db, NetworkType::Testnet);
+        assert_eq!(
+            reloaded.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Loaded
+        );
+        assert_eq!(reloaded.tip().hash, tip, "tip not restored on reopen");
+        assert_eq!(reloaded.height(), height, "height not restored on reopen");
+        assert_eq!(reloaded.stats().total_supply, supply, "supply not restored on reopen");
+        assert_eq!(
+            reloaded.stats().total_blocks,
+            total_blocks,
+            "block count not restored on reopen"
+        );
+        assert_eq!(reloaded.utxo_count(), utxos, "utxo set not restored on reopen");
+        // Fresh-init and reloaded now agree on the canonical genesis base.
+        assert_eq!(
+            reloaded.stats().total_difficulty,
+            1,
+            "reopened genesis chain must carry the canonical total_difficulty base"
         );
     }
 
@@ -4402,7 +4364,7 @@ mod tests {
         let mut tip_block = genesis.clone();
         for h in 1..=3u64 {
             let mut b = genesis.clone();
-            b.header.height = h;
+            b.header.height = crate::primitives::Height::new(h);
             b.header.prev_hash = prev;
             b.header.nonce = 1000 + h; // distinct hashes
             let hash = b.hash();
@@ -4455,9 +4417,9 @@ mod tests {
 
         let mk = |prev: Hash, height: u64, ts: u64, nonce: u64| -> Block {
             let mut b = genesis.clone();
-            b.header.height = height;
+            b.header.height = crate::primitives::Height::new(height);
             b.header.prev_hash = prev;
-            b.header.timestamp = ts;
+            b.header.timestamp = crate::primitives::Timestamp::from_secs(ts);
             b.header.nonce = nonce;
             b
         };
@@ -4513,89 +4475,6 @@ mod tests {
             mtp_active > mtp,
             "the two lineages must yield different MTPs — proving lineage-awareness"
         );
-    }
-
-    #[test]
-    fn test_reorg_acceptability_shallow_accepts_equal_or_more_work() {
-        // Shallow reorgs accept EQUAL-or-more work. The sole caller (take_fork)
-        // only reaches here for an equal-work fork when its tip hash wins the
-        // deterministic hash-lex tiebreak, so accepting equal work is the
-        // monotonic, network-deterministic convergence rule (all honest nodes
-        // pick the same tie-winner). Strictly-less work is still rejected.
-        let h = BOOTSTRAP_MESS_HEIGHT + 1; // post-bootstrap, full rules apply
-        let max = max_reorg_depth_for(NetworkType::Testnet);
-        assert!(evaluate_reorg_acceptability(3, 101, 100, h, max).is_ok());
-        assert!(evaluate_reorg_acceptability(3, 100, 100, h, max).is_ok()); // equal — hash-tiebreak
-        assert!(evaluate_reorg_acceptability(3, 99, 100, h, max).is_err()); // strictly less
-    }
-
-    #[test]
-    fn test_reorg_acceptability_mess_multiplier() {
-        // At depth 50, exponent = (50-10)/20 = 2 => required multiplier 4x.
-        let h = BOOTSTRAP_MESS_HEIGHT + 1; // post-bootstrap
-        let max = max_reorg_depth_for(NetworkType::Testnet);
-        let err = evaluate_reorg_acceptability(50, 399, 100, h, max).unwrap_err();
-        assert!(err.contains("requires 4x work"));
-        assert!(evaluate_reorg_acceptability(50, 401, 100, h, max).is_ok());
-    }
-
-    #[test]
-    fn test_reorg_acceptability_hard_depth_cap() {
-        // F31: use the network-taking form so this test doesn't rely on the
-        // deprecated compile-time free function. Verify both networks so the
-        // caps are pinned by tests to their intended values.
-        let testnet_max = max_reorg_depth_for(NetworkType::Testnet);
-        let mainnet_max = max_reorg_depth_for(NetworkType::Mainnet);
-        assert_eq!(testnet_max, 1000, "testnet hard-finality cap must be 1000");
-        assert_eq!(mainnet_max, 100, "mainnet hard-finality cap must be 100");
-
-        let err_testnet = evaluate_reorg_acceptability(
-            testnet_max + 1,
-            u128::MAX,
-            1,
-            BOOTSTRAP_MESS_HEIGHT + 1,
-            testnet_max,
-        )
-        .unwrap_err();
-        assert!(err_testnet.contains("exceeds absolute maximum"));
-        assert!(
-            err_testnet.contains("1000"),
-            "testnet error must cite testnet cap"
-        );
-
-        let err_mainnet = evaluate_reorg_acceptability(
-            mainnet_max + 1,
-            u128::MAX,
-            1,
-            BOOTSTRAP_MESS_HEIGHT + 1,
-            mainnet_max,
-        )
-        .unwrap_err();
-        assert!(err_mainnet.contains("exceeds absolute maximum"));
-        assert!(
-            err_mainnet.contains("100"),
-            "mainnet error must cite mainnet cap"
-        );
-    }
-
-    #[test]
-    fn test_reorg_acceptability_bootstrap_bypass() {
-        // Below BOOTSTRAP_MESS_HEIGHT, Tier-2 MESS is skipped and only the
-        // longest-chain rule applies even at deep reorg depths. This is the
-        // launch convergence fix: a young fleet whose nodes diverge at low
-        // heights must be able to converge once one chain pulls ahead.
-        let bootstrap_h = BOOTSTRAP_MESS_HEIGHT / 2;
-        let max = max_reorg_depth_for(NetworkType::Testnet);
-        // Depth 50 with only slightly-more work: rejected post-bootstrap,
-        // accepted during bootstrap.
-        assert!(evaluate_reorg_acceptability(50, 101, 100, bootstrap_h, max).is_ok());
-        // Equal work is accepted during bootstrap too (same monotonic
-        // hash-tiebreak reason as Tier 1); strictly-less work still loses.
-        assert!(evaluate_reorg_acceptability(50, 100, 100, bootstrap_h, max).is_ok());
-        let err = evaluate_reorg_acceptability(50, 99, 100, bootstrap_h, max).unwrap_err();
-        assert!(err.contains("bootstrap phase"));
-        // Tier-3 hard cap still enforced during bootstrap.
-        assert!(evaluate_reorg_acceptability(max + 1, u128::MAX, 1, bootstrap_h, max).is_err());
     }
 
     #[test]
@@ -4768,6 +4647,514 @@ mod tests {
         assert_eq!(roots(&chain), genesis_roots);
     }
 
+    /// Increment #1 of the shielded-activation arc: the node constructor
+    /// instantiates the canonical Spark pool store (previously hard-`None`, so
+    /// the whole shielded verify/apply path no-op'd on a real node), it is
+    /// reorg-wired via the Phase-2 checkpoint driver, and it is persistent.
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn node_instantiates_persistent_reorg_wired_spark_pool_store() {
+        use crate::db::Database;
+        use spark_connector::CoinBytes;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Regtest);
+        let store = chain
+            .spark_pool_store
+            .clone()
+            .expect("a sketch-gk-proof node must instantiate the Spark pool store");
+
+        // Reorg-wired: the chain's Phase-2 checkpoint driver advances it in
+        // lock-step (a no-op before, when the store was None).
+        let cp_before = store.checkpoint_count();
+        chain.checkpoint_phase2_stores(1);
+        assert_eq!(
+            store.checkpoint_count(),
+            cp_before + 1,
+            "the node's pool store must checkpoint in Phase-2 lock-step"
+        );
+
+        // Persistent: a coin added through the node's store survives a fresh
+        // node opened on the same database (open_with_db replay).
+        assert!(
+            store
+                .add_coin(b"outpoint-1".to_vec(), CoinBytes(vec![7u8; 40]), b"ctx".to_vec(), 1)
+                .is_some(),
+            "coin must be added"
+        );
+        assert_eq!(store.coin_count(), 1);
+        drop(store);
+        drop(chain);
+
+        let reopened = Blockchain::with_database(Arc::clone(&db), NetworkType::Regtest);
+        let reopened_store = reopened
+            .spark_pool_store
+            .clone()
+            .expect("reopened node must instantiate the store");
+        assert_eq!(
+            reopened_store.coin_count(),
+            1,
+            "the persisted coin must survive a node reopen (persistence wired)"
+        );
+    }
+
+    /// Integration of the COMPLETE shielded spend path through the chain's
+    /// store-aware verifier (`verify_block_shielded_spends` → `verify_shielded_payload`):
+    /// a full payload (bound spend + range + mint-binding + balance) over a minted
+    /// anon-set verifies, and tampering the outputs is rejected.
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn shielded_spend_path_verifies_end_to_end_and_rejects_tampered_outputs() {
+        use crate::consensus::shielded::{
+            ShieldedInput, ShieldedOutput, ShieldedPayload, SHIELDED_PAYLOAD_VERSION,
+        };
+        use crate::consensus::shielded_pipeline::{shielded_tx_message, StoreAnonSetResolver};
+        use crate::crypto::groth_kohlweiss::{
+            bound_coin_commitment, prove_mint_binding, prove_spend_bound,
+        };
+        use crate::crypto::spark_balance::{prove_balance, value_commitment};
+        use crate::crypto::spark_range::prove_value_range;
+        use crate::crypto::PeerPoint;
+        use crate::storage::shielded::NoteCommitmentEntry;
+        use crate::storage::ShieldedStore;
+        use crate::transaction::{Transaction, TxType};
+        use curve25519_dalek::scalar::Scalar;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let store = ShieldedStore::new();
+        let vals = [5u64, 3, 11, 2];
+        let sers: Vec<Scalar> = (0..4).map(|_| Scalar::random(&mut rng)).collect();
+        let blinds: Vec<Scalar> = (0..4).map(|_| Scalar::random(&mut rng)).collect();
+        for i in 0..4 {
+            store.append_commitment(NoteCommitmentEntry {
+                commitment: bound_coin_commitment(vals[i], &sers[i], &blinds[i]).compress().to_bytes(),
+                height: 1,
+                tx_index: 0,
+                position: 0,
+            });
+        }
+        let fee = 2u64;
+        let ob = Scalar::random(&mut rng);
+        let (s_out, r_out) = (Scalar::random(&mut rng), Scalar::random(&mut rng));
+        let outputs = vec![ShieldedOutput {
+            note_commitment: bound_coin_commitment(6, &s_out, &r_out).compress().to_bytes(),
+            value_commitment: value_commitment(6, &ob).compress().to_bytes(),
+            range_proof: prove_value_range(6, &ob, &mut rng).unwrap().encode(),
+            mint_binding: prove_mint_binding(6, &s_out, &r_out, &ob, &mut rng).encode(),
+        }];
+        let message = shielded_tx_message(fee, 0, &outputs);
+        let coins: Vec<_> = StoreAnonSetResolver::new(&store)
+            .resolve_bucket(0)
+            .unwrap()
+            .commitments
+            .iter()
+            .map(|c| PeerPoint::decode_non_identity(*c).unwrap().into_point())
+            .collect();
+        let (vb0, vb1) = (Scalar::random(&mut rng), Scalar::random(&mut rng));
+        let mut mk = |l: usize, vb: &Scalar, rng: &mut ChaCha20Rng| {
+            let sp = prove_spend_bound(&coins, l, vals[l], &sers[l], &blinds[l], vb, &message, rng)
+                .unwrap();
+            ShieldedInput {
+                bucket_index: 0,
+                nullifier: sp.nullifier(),
+                spend_proof: sp.encode(),
+                range_proof: prove_value_range(vals[l], vb, rng).unwrap().encode(),
+            }
+        };
+        let inputs = vec![mk(0, &vb0, &mut rng), mk(1, &vb1, &mut rng)];
+        let bal = prove_balance(&[5, 3], &[vb0, vb1], &[6], &[ob], fee, &message, &mut rng).unwrap();
+        let payload = ShieldedPayload {
+            version: SHIELDED_PAYLOAD_VERSION,
+            inputs,
+            outputs,
+            value_balance: 0,
+            balance_proof: bal.encode(),
+        };
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(fee),
+            range_proof: vec![],
+            extra: payload.encode(),
+        };
+
+        // The chain's store-aware verifier accepts the complete tx.
+        assert!(Blockchain::verify_block_shielded_spends(&store, std::slice::from_ref(&tx)).is_ok());
+
+        // Tampering an output commitment breaks the tx message binding → rejected.
+        let mut bad_tx = tx.clone();
+        let mut bad = ShieldedPayload::decode(&bad_tx.extra).unwrap();
+        bad.outputs[0].note_commitment = [8u8; 32];
+        bad_tx.extra = bad.encode();
+        assert!(
+            Blockchain::verify_block_shielded_spends(&store, std::slice::from_ref(&bad_tx)).is_err(),
+            "tampered output must be rejected"
+        );
+    }
+
+    /// Drive a REAL `TxType::Shielded` transaction (extra = a builder-produced
+    /// libspark v2 `SparkPayload`) through the chain's actual consensus hooks —
+    /// `apply_spark_v2_txs` (the mint FEED) and `verify_block_spark_v2` (the
+    /// pre-apply unspent check) — on a `Blockchain` with the pool store
+    /// initialized. This exercises the wiring on real block data. It calls the
+    /// hooks directly rather than full `add_block`, because activating shielded
+    /// in the validation gauntlet (lowering `SHIELDED_TX_ACTIVATION_HEIGHT`,
+    /// editing hash-locked `validation.rs`) would activate UNAUDITED crypto and
+    /// is deferred until external audit per cip-spark-block-format.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn spark_v2_chain_hooks_feed_and_verify_a_real_shielded_tx() {
+        use crate::consensus::spark_payload::build::{build_mint_payload, build_spend_payload};
+        use crate::consensus::spark_payload::derive_outpoint;
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxType};
+        use spark_connector::ffi::cover_set_size;
+        use std::sync::Arc;
+
+        // A chain with the libspark pool store initialized.
+        let mut chain = Blockchain::new();
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+
+        let mk_shielded_tx = |extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![], // pure-shielded: outpoints derive from vout alone
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+
+        let seed = b"chain-hook-seed";
+        let n = cover_set_size().unwrap();
+        let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
+        // Mint payload built against an EMPTY transparent input set (matches the
+        // tx's empty inputs, so the hook re-derives identical outpoints). The
+        // builder sets value_balance = -(Σ values) (shield-in).
+        let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
+        let mint_tx = mk_shielded_tx(mint_payload.encode());
+
+        // The mint FEED hook: applies the v2 payload → pool gains N coins.
+        chain.apply_spark_v2_txs(std::slice::from_ref(&mint_tx), 1);
+        assert_eq!(store.coin_count(), n, "mint tx fed the pool via the chain hook");
+
+        // Build a spend of the coin at vout 2 over the anchored cover set.
+        let owned_op = derive_outpoint(&[], 2);
+        let spend_payload = build_spend_payload(seed, store.as_ref(), &owned_op, 3_000, 0, 1).unwrap();
+        let spend_tx = mk_shielded_tx(spend_payload.encode());
+
+        // Pre-apply verify hook: accepts the unspent spend.
+        assert!(
+            chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_ok(),
+            "chain verify hook accepts the unspent spend"
+        );
+        // Apply hook: marks the tag spent AND feeds the spend's output coin(s)
+        // back into the pool (symmetric with the mint feed).
+        let coins_before_spend = store.coin_count();
+        chain.apply_spark_v2_txs(std::slice::from_ref(&spend_tx), 2);
+        assert!(
+            store.coin_count() > coins_before_spend,
+            "spend output coin(s) fed into the pool"
+        );
+        // Now the same spend is rejected by the verify hook (tag no longer unspent).
+        assert!(
+            chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_err(),
+            "chain verify hook rejects the now-spent spend (double-spend guard)"
+        );
+    }
+
+    /// IN-BLOCK shielded-consensus SOAK. Drives mint → spend → double-spend →
+    /// reorg cycles through the real chain block hooks (verify_block_spark_v2 →
+    /// apply_spark_v2_txs, with checkpoint/rewind) using real libspark proofs,
+    /// continuously for `SHIELDED_SOAK_SECS` (default 20s burst). After every op
+    /// it asserts the pool invariants (pool_value >= 0, no consensus halt) and
+    /// that adversarial txs (double-spend) are rejected; a reorg must roll the
+    /// pool back to empty. Panics with the reproducing seed on any anomaly. This
+    /// is the in-block counterpart to the crypto-stack soak — run it before any
+    /// activation (see docs/design/cip-shielded-txtype.md).
+    ///
+    /// Run the full soak: `SHIELDED_SOAK_SECS=86400 cargo test --release
+    /// --features "testnet sketch-gk-proof libspark-ffi" soak_shielded_in_block
+    /// -- --ignored --nocapture` (needs SPARK_OPENSSL_DIR).
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    #[ignore = "soak: drive with SHIELDED_SOAK_SECS"]
+    fn soak_shielded_in_block_consensus() {
+        use crate::consensus::spark_payload::build::{
+            build_mint_payload, build_spend_payload, build_transfer_payload,
+        };
+        use crate::consensus::spark_payload::derive_outpoint;
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxType};
+        use spark_connector::ffi::{
+            address_from_seed, cover_set_size, spend_outputs, LibsparkBackend,
+        };
+        use spark_connector::SparkBackend;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let secs: u64 = std::env::var("SHIELDED_SOAK_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
+        let seed0: u64 = std::env::var("SHIELDED_SOAK_SEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0xC0FFEE_1234);
+        let deadline = Instant::now() + Duration::from_secs(secs);
+
+        let mut chain = Blockchain::new();
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+        let n = cover_set_size().expect("cover set size");
+        assert!(n >= 2, "soak needs a cover set of at least 2 coins");
+        // A fixed second wallet: transfer recipient, distinct from the per-cycle
+        // sender seed. Its address is stable across cycles.
+        let recipient_b = b"soak-recipient-B";
+        let addr_b = address_from_seed(recipient_b).expect("recipient B address");
+
+        let mk = |extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+
+        let mut s = seed0;
+        let mut rand = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            s >> 33
+        };
+        let mut cycles: u64 = 0;
+
+        macro_rules! anomaly {
+            ($ctx:expr) => {
+                panic!(
+                    "SHIELDED SOAK ANOMALY [{}] seed={} cycle={} pool_value={}",
+                    $ctx,
+                    seed0,
+                    cycles,
+                    store.pool_value()
+                )
+            };
+        }
+        // Sweep at the cycle's tip height (2: mint at h1, spend outputs at h2),
+        // so the pool guard's coin/tag-height checks see a consistent tip.
+        macro_rules! invariants {
+            () => {{
+                if store.pool_value() < 0 {
+                    anomaly!("pool_value_negative");
+                }
+                if chain.security_sweep(2).has_consensus_halt() {
+                    anomaly!("security_consensus_halt");
+                }
+            }};
+        }
+
+        while Instant::now() < deadline {
+            cycles += 1;
+            let wseed = format!("soak-{seed0}-{cycles}");
+
+            // ── MINT a fresh cover set (shield-in) at height 1 ───────────────
+            let values: Vec<u64> = (0..n as u64).map(|i| 1_000 + (rand() % 9_000) + i).collect();
+            let (mint_payload, _) = build_mint_payload(wseed.as_bytes(), &values, &[])
+                .unwrap_or_else(|| anomaly!("build_mint"));
+            let mint_tx = mk(mint_payload.encode());
+            // The mint feed is APPLIED directly: a shield-in's value bridge needs
+            // transparent backing inputs (Σ pseudo == V·H), which a pure-shielded
+            // soak tx has none of — the mint bundle's own per-coin value proof is
+            // covered by the unit tests + the FFI mint-bundle soak. This soak
+            // stresses the mint→spend→reorg STATE machine + the spend verify.
+            chain.checkpoint_phase2_stores(1);
+            chain.apply_spark_v2_txs(std::slice::from_ref(&mint_tx), 1);
+            if store.coin_count() != n {
+                anomaly!("mint_coin_count");
+            }
+            invariants!();
+
+            // One checkpoint at h2 covers BOTH the transfer and the self-spend
+            // below; the reorg (rewind 2, then 1) rolls both back to empty.
+            chain.checkpoint_phase2_stores(2);
+
+            // Two DISTINCT owned coins: one transferred to B, one self-spent.
+            // Distinct so the self-spend never re-spends the transfer's input
+            // (which would be a spurious double-spend).
+            let xfer_vout = (rand() as u32) % (n as u32);
+            let spend_vout = (xfer_vout + 1 + (rand() as u32) % (n as u32 - 1)) % (n as u32);
+
+            // ── TRANSFER a coin to wallet B; B must recover it, sender must not ─
+            let xfer_op = derive_outpoint(&[], xfer_vout);
+            let xfer_payload =
+                build_transfer_payload(wseed.as_bytes(), store.as_ref(), &xfer_op, 100, 0, 1, &addr_b)
+                    .unwrap_or_else(|| anomaly!("build_transfer"));
+            let xfer_tx = mk(xfer_payload.encode());
+            if chain.verify_block_spark_v2(std::slice::from_ref(&xfer_tx)).is_err() {
+                anomaly!("valid_transfer_rejected");
+            }
+            let before_xfer = store.coin_count();
+            chain.apply_spark_v2_txs(std::slice::from_ref(&xfer_tx), 2);
+            if store.coin_count() <= before_xfer {
+                anomaly!("transfer_output_not_fed");
+            }
+            {
+                let sb = xfer_payload
+                    .spend
+                    .as_ref()
+                    .unwrap_or_else(|| anomaly!("transfer_no_spend"));
+                let (out_coins, out_ctx) =
+                    spend_outputs(&sb.bundle).unwrap_or_else(|| anomaly!("transfer_spend_outputs"));
+                let backend = LibsparkBackend;
+                let recipient_recovers = out_coins
+                    .iter()
+                    .any(|c| matches!(backend.identify(recipient_b, c, &out_ctx), Ok(Some(_))));
+                if !recipient_recovers {
+                    anomaly!("recipient_cannot_recover_transfer");
+                }
+                let sender_recovers = out_coins
+                    .iter()
+                    .any(|c| matches!(backend.identify(wseed.as_bytes(), c, &out_ctx), Ok(Some(_))));
+                if sender_recovers {
+                    anomaly!("sender_recovered_transfer_output");
+                }
+            }
+            invariants!();
+
+            // ── SPEND a different owned coin (self-spend, change back to self) ─
+            let owned_op = derive_outpoint(&[], spend_vout);
+            let spend_payload = build_spend_payload(wseed.as_bytes(), store.as_ref(), &owned_op, 100, 0, 1)
+                .unwrap_or_else(|| anomaly!("build_spend"));
+            let spend_tx = mk(spend_payload.encode());
+            if chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_err() {
+                anomaly!("valid_spend_rejected");
+            }
+            let before = store.coin_count();
+            chain.apply_spark_v2_txs(std::slice::from_ref(&spend_tx), 2);
+            if store.coin_count() <= before {
+                anomaly!("spend_output_not_fed");
+            }
+            invariants!();
+
+            // ── ADVERSARIAL: the same spend is now a double-spend → REJECT ────
+            if chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_ok() {
+                anomaly!("double_spend_accepted");
+            }
+
+            // ── REORG: disconnect the spend then the mint → pool back to empty ─
+            chain.rewind_phase2_stores(2);
+            chain.rewind_phase2_stores(1);
+            if store.coin_count() != 0 || store.pool_value() != 0 {
+                anomaly!("reorg_did_not_restore_empty");
+            }
+            invariants!();
+        }
+
+        eprintln!(
+            "SHIELDED SOAK OK: {cycles} mint/transfer/spend/reorg cycles in {secs}s, seed={seed0}"
+        );
+        assert!(cycles > 0, "soak ran zero cycles");
+    }
+
+    /// The verify hook rejects UNAUTHENTICATED coin entry: a shielded payload
+    /// carrying bare `outputs` coins with no mint bundle (no per-coin value
+    /// proof) must be rejected before any state changes.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn spark_v2_rejects_unauthenticated_coin_entry() {
+        use crate::consensus::spark_payload::{SparkPayload, SPARK_PAYLOAD_VERSION};
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxType};
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new();
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let mk = |extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+
+        // Bare output coin with no mint bundle = unauthenticated coin entry.
+        // value_balance = 0 so the transparent value bridge (empty commitments)
+        // passes and execution reaches the coin-entry guard.
+        let bare = SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![vec![7u8; 40]],
+            spend: None,
+            value_balance: 0,
+        };
+        let err = chain
+            .verify_block_spark_v2(std::slice::from_ref(&mk(bare.encode())))
+            .unwrap_err();
+        assert!(err.contains("unauthenticated coin entry"), "got: {err}");
+    }
+
+    /// An AUTHENTICATED shield-in: a `TxType::Shielded` tx whose payload carries
+    /// a libspark mint bundle is fed into the pool by the apply hook, with each
+    /// minted coin added by its deterministic outpoint. Exercises the payload
+    /// carriage of `SparkPayload::mint` end-to-end through `apply_spark_v2_txs`.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn spark_v2_authenticated_mint_bundle_feeds_pool() {
+        use crate::consensus::spark_payload::{derive_outpoint, SparkPayload, SPARK_PAYLOAD_VERSION};
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxType};
+        use spark_connector::ffi::{build_mint_bundle, serial_context};
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new();
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+
+        // Build an authenticated mint bundle bound to the tx-level context the
+        // apply hook derives (empty transparent inputs → derive_outpoint(&[], 0)).
+        let seed = b"authenticated-mint-seed";
+        let values = [1_000u64, 2_000, 3_000];
+        let mint_ctx = serial_context(&derive_outpoint(&[], 0)).unwrap();
+        let bundle = build_mint_bundle(seed, &values, &mint_ctx).unwrap();
+
+        let payload = SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: Some(bundle),
+            outputs: vec![],
+            spend: None,
+            value_balance: -(values.iter().sum::<u64>() as i64),
+        };
+        let mint_tx = Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: payload.encode(),
+        };
+
+        // The apply hook feeds the pool with the authenticated coins.
+        chain.apply_spark_v2_txs(std::slice::from_ref(&mint_tx), 1);
+        assert_eq!(
+            store.coin_count(),
+            values.len(),
+            "authenticated mint bundle fed all coins into the pool"
+        );
+    }
+
     // ─── count_signaling_blocks_in_window — BIP-9 helper ───────────────────
 
     /// Empty range returns 0. Cheap smoke test ensuring the early-out path
@@ -4896,7 +5283,7 @@ mod tests {
             b.transactions[0].is_coinbase(),
             "genesis first tx must be the coinbase"
         );
-        b.header.height = height;
+        b.header.height = crate::primitives::Height::new(height);
         b.header.nonce = nonce;
         let mut txs = vec![b.transactions[0].clone()];
         for &f in fees {
@@ -4904,6 +5291,88 @@ mod tests {
         }
         b.transactions = txs;
         b
+    }
+
+    // ── #supply-commitment: commitment enforcement (helper) ─────────────
+    // Exercise the enforcement LOGIC with an EXPLICIT finite enforce_height, so
+    // the accept / reject / gated-off paths are all covered even though every
+    // network ships gated OFF (enforce_height = u64::MAX).
+
+    #[test]
+    fn check_supply_commitment_below_enforce_height_is_noop() {
+        // Below the enforce height the header field is not read — even all-ones
+        // garbage is accepted, so pre-fork chains are unaffected.
+        let garbage = [0xABu8; 32];
+        assert!(super::check_supply_commitment(100, 99, &garbage, 1_000, 10).is_ok());
+        assert!(super::check_supply_commitment(100, 0, &[0u8; 32], 0, 0).is_ok());
+    }
+
+    #[test]
+    fn check_supply_commitment_accepts_matching_commitment() {
+        let (emitted, burned) = (7_000_000u128, 1_234u128);
+        let expected = crate::emission::supply::supply_commitment_consensus(
+            emitted,
+            burned,
+            crate::constants::MAX_SUPPLY.saturating_sub(emitted),
+        );
+        // At and after the enforce height, a header matching the post-apply
+        // totals is accepted.
+        assert!(super::check_supply_commitment(100, 100, &expected, emitted, burned).is_ok());
+        assert!(super::check_supply_commitment(100, 500, &expected, emitted, burned).is_ok());
+    }
+
+    #[test]
+    fn check_supply_commitment_rejects_tampered_commitment() {
+        let (emitted, burned) = (7_000_000u128, 1_234u128);
+        let good = crate::emission::supply::supply_commitment_consensus(
+            emitted,
+            burned,
+            crate::constants::MAX_SUPPLY.saturating_sub(emitted),
+        );
+        // A one-bit-flipped commitment is rejected at the enforce height.
+        let mut bad = good;
+        bad[0] ^= 0x01;
+        assert!(super::check_supply_commitment(100, 100, &bad, emitted, burned).is_err());
+        // The anti-lie guarantee: a header carrying the commitment for `emitted`
+        // is rejected when the block actually emitted one more unit.
+        assert!(super::check_supply_commitment(100, 100, &good, emitted + 1, burned).is_err());
+    }
+
+    #[test]
+    fn producer_commitment_matches_validator_check() {
+        // The producer (block_builder) and the validator (add_block) MUST agree,
+        // or honest blocks self-reject. Both compute post = parent + (emission,
+        // burn) and hash it with supply_commitment_consensus; both take `burn`
+        // from the SAME block_fee_burn. This test drives that exact path with a
+        // finite enforce height (production ships gated OFF) and asserts the
+        // validator accepts the producer's commitment and rejects a tamper.
+        let parent_emitted: u128 = 5_000_000;
+        let parent_burned: u128 = 999;
+        let height = 200u64;
+        let blk = burn_test_block(height, 7, &[100, 250]);
+        // burn EXACTLY as both producer and validator compute it.
+        let burn = super::block_fee_burn(TEST_NET, &blk);
+        let emission = crate::emission::calculate_block_reward(height).as_atomic() as u128;
+        let post_emitted = parent_emitted + emission;
+        let post_burned = parent_burned + burn;
+        // Producer side: what block_builder writes into the header.
+        let produced = crate::emission::supply::supply_commitment_consensus(
+            post_emitted,
+            post_burned,
+            crate::constants::MAX_SUPPLY.saturating_sub(post_emitted),
+        );
+        // Validator accepts it (enforce_height = 0 here so the check runs).
+        assert!(
+            super::check_supply_commitment(0, height, &produced, post_emitted, post_burned).is_ok(),
+            "validator must accept the producer's commitment — else honest blocks self-reject"
+        );
+        // A tampered commitment is rejected.
+        let mut bad = produced;
+        bad[0] ^= 0xFF;
+        assert!(
+            super::check_supply_commitment(0, height, &bad, post_emitted, post_burned).is_err(),
+            "validator must reject a tampered commitment"
+        );
     }
 
     #[test]
@@ -4921,18 +5390,18 @@ mod tests {
         )
         .burned
         .as_atomic() as u128;
-        assert_eq!(block_fee_burn(&b), expected);
+        assert_eq!(block_fee_burn(TEST_NET, &b), expected);
         // Concrete: 3_000_000 fees × 30% normal burn = 900_000.
-        assert_eq!(block_fee_burn(&b), 900_000);
+        assert_eq!(block_fee_burn(TEST_NET, &b), 900_000);
 
         // Zero fees → nothing burned.
-        assert_eq!(block_fee_burn(&burn_test_block(act + 10, 2, &[])), 0);
-        assert_eq!(block_fee_burn(&burn_test_block(act + 10, 3, &[0])), 0);
+        assert_eq!(block_fee_burn(TEST_NET, &burn_test_block(act + 10, 2, &[])), 0);
+        assert_eq!(block_fee_burn(TEST_NET, &burn_test_block(act + 10, 3, &[0])), 0);
 
         // Below the activation height miners claim all fees, nothing burned
         // (only reachable when activation > 0 — the testnet feature).
         if act > 0 {
-            assert_eq!(block_fee_burn(&burn_test_block(act - 1, 4, &fees)), 0);
+            assert_eq!(block_fee_burn(TEST_NET, &burn_test_block(act - 1, 4, &fees)), 0);
         }
     }
 
@@ -4947,12 +5416,12 @@ mod tests {
         let b2 = burn_test_block(act + 2, 22, &[1_000_000]);
         let b3 = burn_test_block(act + 3, 23, &[4_000_000]);
 
-        let sum = |bs: &[&Block]| -> u128 { bs.iter().map(|b| block_fee_burn(b)).sum() };
+        let sum = |bs: &[&Block]| -> u128 { bs.iter().map(|b| block_fee_burn(TEST_NET, b)).sum() };
 
         // Apply A the way every connect site does: += block_fee_burn.
         let mut stats = ChainStats::default();
         for blk in [&a1, &a2] {
-            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(blk)).unwrap();
+            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(TEST_NET, blk)).unwrap();
         }
         assert_eq!(stats.total_burned, sum(&[&a1, &a2]));
         assert!(stats.total_burned > 0, "chain A must burn something");
@@ -4960,14 +5429,14 @@ mod tests {
         // Reorg: disconnect A in reverse order, then apply B — the exact
         // -=/+= pattern wired at the reorg disconnect/apply sites.
         for blk in [&a2, &a1] {
-            stats.total_burned = stats.total_burned.checked_sub(block_fee_burn(blk)).unwrap();
+            stats.total_burned = stats.total_burned.checked_sub(block_fee_burn(TEST_NET, blk)).unwrap();
         }
         assert_eq!(
             stats.total_burned, 0,
             "apply-then-disconnect must return to the pre-apply value (+=/-= symmetry)"
         );
         for blk in [&b1, &b2, &b3] {
-            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(blk)).unwrap();
+            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(TEST_NET, blk)).unwrap();
         }
         // Reorg-correct: total_burned == Σ burn over the NEW canonical chain,
         // NOT path-dependent on the disconnected A branch.
@@ -4984,15 +5453,20 @@ mod tests {
         // to genesis and assert total_burned returns to 0.
         let chain = Blockchain::new();
         chain.init_genesis().unwrap();
-        let act = crate::constants::FEE_DISTRIBUTION_HEIGHT;
+        // Use the CHAIN's runtime network for both the activation height and the
+        // burn computation: block_fee_burn now follows the chain's network, so
+        // the test must too (else it diverges under a feature set where the
+        // compiled network differs from the chain's runtime network).
+        let net = chain.network();
+        let act = net.fee_distribution_height();
         let h1 = act.max(1);
         let h2 = h1 + 1;
         let genesis_hash = chain.tip_hash();
 
         let b1 = burn_test_block(h1, 31, &[3_000_000]);
         let b2 = burn_test_block(h2, 32, &[5_000_000]);
-        let burn1 = block_fee_burn(&b1);
-        let burn2 = block_fee_burn(&b2);
+        let burn1 = block_fee_burn(net, &b1);
+        let burn2 = block_fee_burn(net, &b2);
         assert!(burn1 > 0 && burn2 > 0, "staged blocks must burn fees");
 
         {
@@ -5023,5 +5497,541 @@ mod tests {
             chain.stats().total_burned, 0,
             "disconnecting every fee-carrying block returns total_burned to 0"
         );
+    }
+
+    /// Regression for the apply/disconnect-symmetry bug the real-PoW e2e
+    /// `apply_disconnect_symmetry_and_supply_conservation` caught:
+    /// `rollback_to_height` unwound supply/burn/total_difficulty but NOT the
+    /// `total_blocks` / `total_transactions` telemetry counters, so a reorged
+    /// node reported inflated totals versus a linearly-built node on the same
+    /// tip. Fast staged version of that invariant.
+    #[test]
+    fn rollback_to_height_unwinds_total_blocks_and_transactions() {
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        let net = chain.network();
+        let act = net.fee_distribution_height();
+        let h1 = act.max(1);
+        let h2 = h1 + 1;
+        let genesis_hash = chain.tip_hash();
+        let base_blocks = chain.stats().total_blocks;
+        let base_txs = chain.stats().total_transactions;
+
+        let b1 = burn_test_block(h1, 41, &[1_000_000]);
+        let b2 = burn_test_block(h2, 42, &[2_000_000, 3_000_000]);
+        let added_txs = (b1.transactions.len() + b2.transactions.len()) as u64;
+        let burn1 = block_fee_burn(net, &b1);
+        let burn2 = block_fee_burn(net, &b2);
+
+        {
+            let mut inner = chain.inner.write();
+            let h1h = b1.hash();
+            let h2h = b2.hash();
+            inner.blocks.insert(h1h, b1.clone());
+            inner.blocks.insert(h2h, b2.clone());
+            inner.height_to_hash.insert(h1, h1h);
+            inner.height_to_hash.insert(h2, h2h);
+            inner.tip.hash = h2h;
+            inner.tip.height = h2;
+            inner.stats.height = h2;
+            inner.stats.tip_hash = h2h;
+            inner.stats.total_supply = u64::MAX as u128; // headroom for emission subtract
+            inner.stats.total_burned = burn1 + burn2; // headroom for burn subtract
+            // Advance the block/tx counters exactly as the connect path would.
+            inner.stats.total_blocks = base_blocks + 2;
+            inner.stats.total_transactions = base_txs + added_txs;
+        }
+
+        chain.rollback_to_height(0).expect("rollback to genesis");
+        assert_eq!(chain.tip_hash(), genesis_hash, "tip back at genesis");
+        assert_eq!(
+            chain.stats().total_blocks,
+            base_blocks,
+            "total_blocks must unwind to the pre-staging base after a full rollback"
+        );
+        assert_eq!(
+            chain.stats().total_transactions,
+            base_txs,
+            "total_transactions must unwind to the pre-staging base after a full rollback"
+        );
+    }
+
+    #[test]
+    fn rollback_to_height_disconnects_db_only_blocks_past_the_cache() {
+        // Regression (junbyjun1238, PR #48): deep rollbacks target heights below
+        // the ~200-block in-memory cache window, so the blocks being disconnected
+        // live only in the DB. Their UTXO / supply / burn / total_difficulty must
+        // still be reverted. Stage two fee-carrying blocks in the DB ONLY (never
+        // the in-memory cache — the cache-evicted condition), advance the
+        // accumulators as the connect path would, then roll back to genesis.
+        // Before the fix the cache-only lookup skipped these blocks entirely,
+        // leaving state over-counted while the tip still moved down; now the
+        // disconnect loop falls back to the DB.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        let genesis_hash = chain.init_genesis().unwrap();
+
+        // Resolve activation + burn from the chain's runtime network (Testnet
+        // here), matching what the chain's disconnect path uses.
+        let net = chain.network();
+        let act = net.fee_distribution_height();
+        let h1 = act.max(1);
+        let h2 = h1 + 1;
+        let b1 = burn_test_block(h1, 31, &[3_000_000]);
+        let b2 = burn_test_block(h2, 32, &[5_000_000]);
+        let burn1 = block_fee_burn(net, &b1);
+        let burn2 = block_fee_burn(net, &b2);
+        let diff1 = calculate_difficulty_from_target(&b1.header.target);
+        let diff2 = calculate_difficulty_from_target(&b2.header.target);
+        assert!(burn1 > 0 && burn2 > 0, "staged blocks must burn fees");
+
+        // DB-ONLY: bodies + height index into the DB; deliberately NOT into
+        // inner.blocks / inner.height_to_hash (simulating cache eviction).
+        db.blocks.insert(&b1).unwrap();
+        db.blocks.insert(&b2).unwrap();
+        db.blocks.set_height_hash(h1, &b1.hash()).unwrap();
+        db.blocks.set_height_hash(h2, &b2.hash()).unwrap();
+
+        let base_supply;
+        let base_diff;
+        {
+            let mut inner = chain.inner.write();
+            base_supply = inner.stats.total_supply;
+            base_diff = inner.stats.total_difficulty;
+            inner.tip.hash = b2.hash();
+            inner.tip.height = h2;
+            inner.stats.height = h2;
+            inner.stats.tip_hash = b2.hash();
+            inner.stats.total_supply = base_supply
+                + calculate_block_reward(h1).as_atomic() as u128
+                + calculate_block_reward(h2).as_atomic() as u128;
+            inner.stats.total_burned += burn1 + burn2;
+            inner.stats.total_difficulty = base_diff + diff1 + diff2;
+        }
+        let burned_before = chain.stats().total_burned;
+
+        chain
+            .rollback_to_height(0)
+            .expect("deep rollback to genesis (DB-only blocks)");
+
+        assert_eq!(chain.tip_hash(), genesis_hash, "tip back at genesis");
+        assert_eq!(
+            chain.stats().total_supply,
+            base_supply,
+            "supply reverted through the DB-fallback disconnect"
+        );
+        assert_eq!(
+            chain.stats().total_burned,
+            burned_before - burn1 - burn2,
+            "burn reverted through the DB-fallback disconnect"
+        );
+        assert_eq!(
+            chain.stats().total_difficulty,
+            base_diff,
+            "total_difficulty reverted through the DB-fallback disconnect"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // State-machine gap tests (audit test-plan docs/audit/test-plan/
+    // chain-storage.md). These cover the add_block / fork-choice / rollback /
+    // load / helper branches that are exercisable WITHOUT real PoW mining:
+    // graph-walk helpers (find_fork_point, collect_fork_chain,
+    // calculate_fork_cumulative_work, recompute_total_difficulty), the
+    // AlreadyKnown cache/DB branches, load_from_database error branches, the
+    // rollback finality floor + orphaned-tx return, and is_spent branches.
+    //
+    // The PoW-gated items (accepted reorg re-applying real txs, chain-level
+    // ReorgTooDeep / AcceptedFork / tiebreak) live in
+    // tests/chain_statemachine.rs, marked #[ignore] like the reorg e2e harness.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Clone the genesis block and rewrite only the header identity fields
+    /// (height / prev_hash / nonce) to fabricate a distinct block for the pure
+    /// prev_hash-walk helpers. The body is the real genesis coinbase, which is
+    /// irrelevant to find_fork_point / collect_fork_chain /
+    /// calculate_fork_cumulative_work (they only read header + storage links).
+    fn walk_block(height: u64, prev_hash: Hash, nonce: u64) -> Block {
+        let mut b = create_genesis_block();
+        b.header.height = crate::primitives::Height::new(height);
+        b.header.prev_hash = prev_hash;
+        b.header.nonce = nonce;
+        b
+    }
+
+    #[test]
+    fn add_block_duplicate_in_memory_cache_returns_already_known() {
+        // add_block's first check is the in-memory cache: a hash already present
+        // short-circuits to AlreadyKnown before any parent/validation work.
+        let chain = Blockchain::new();
+        let b = walk_block(5, Hash::from_bytes([0x07; 32]), 42);
+        let h = b.hash();
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(h, b.clone());
+        }
+        assert!(matches!(
+            chain.add_block(b).unwrap(),
+            BlockStatus::AlreadyKnown
+        ));
+    }
+
+    #[test]
+    fn add_block_duplicate_in_db_not_cache_returns_already_known() {
+        // Second AlreadyKnown branch: block absent from the in-memory cache but
+        // present in the DB (db.blocks.contains) — the post-restart replay case.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        let b = walk_block(5, Hash::from_bytes([0x07; 32]), 43);
+        db.blocks.insert(&b).unwrap();
+        // Deliberately NOT inserted into the in-memory cache.
+        assert!(matches!(
+            chain.add_block(b).unwrap(),
+            BlockStatus::AlreadyKnown
+        ));
+    }
+
+    #[test]
+    fn find_fork_point_returns_common_ancestor_and_genesis() {
+        let chain = Blockchain::new();
+        let genesis_hash = chain.init_genesis().unwrap();
+
+        // Main chain m1(h1), m2(h2).
+        let m1 = walk_block(1, genesis_hash, 101);
+        let m2 = walk_block(2, m1.hash(), 102);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(m1.hash(), m1.clone());
+            inner.height_to_hash.insert(1, m1.hash());
+            inner.blocks.insert(m2.hash(), m2.clone());
+            inner.height_to_hash.insert(2, m2.hash());
+        }
+
+        // A competing fork block at height 2 off m1 → common ancestor is m1 (1).
+        let f2 = walk_block(2, m1.hash(), 202);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(f2.hash(), f2.clone());
+        }
+        assert_eq!(chain.find_fork_point(&f2), Some(1));
+
+        // A fork block at height 1 off genesis → fork point is genesis (0).
+        let f1 = walk_block(1, genesis_hash, 201);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(f1.hash(), f1.clone());
+        }
+        assert_eq!(chain.find_fork_point(&f1), Some(0));
+    }
+
+    #[test]
+    fn find_fork_point_detects_cycle_returns_none() {
+        // A prev_hash cycle (corruption) must be reported as None, not masked as
+        // a genesis fork point. Blocks are stored under arbitrary map keys so the
+        // links form a genuine cycle the visited-set guard must catch.
+        let chain = Blockchain::new();
+        let key_a = Hash::from_bytes([0xA1; 32]);
+        let key_b = Hash::from_bytes([0xB2; 32]);
+        let block_a = walk_block(5, key_b, 1); // prev → key_b
+        let block_b = walk_block(4, key_a, 2); // prev → key_a  (cycle)
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(key_a, block_a);
+            inner.blocks.insert(key_b, block_b);
+        }
+        let fork = walk_block(6, key_a, 3); // enters the cycle at key_a
+        assert_eq!(chain.find_fork_point(&fork), None);
+    }
+
+    #[test]
+    fn find_fork_point_missing_parent_returns_none() {
+        // prev_hash references a block that is not in storage → None (corruption),
+        // not a silent genesis fork point.
+        let chain = Blockchain::new();
+        let fork = walk_block(3, Hash::from_bytes([0xCC; 32]), 9);
+        assert_eq!(chain.find_fork_point(&fork), None);
+    }
+
+    #[test]
+    fn collect_fork_chain_returns_ascending_and_stops_at_fork_point() {
+        let chain = Blockchain::new();
+        let genesis_hash = chain.init_genesis().unwrap();
+        let m1 = walk_block(1, genesis_hash, 11);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(m1.hash(), m1.clone());
+            inner.height_to_hash.insert(1, m1.hash());
+        }
+        let f2 = walk_block(2, m1.hash(), 22);
+        let f3 = walk_block(3, f2.hash(), 33);
+        let f4 = walk_block(4, f3.hash(), 44);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(f2.hash(), f2.clone());
+            inner.blocks.insert(f3.hash(), f3.clone());
+            inner.blocks.insert(f4.hash(), f4.clone());
+        }
+        // Collect from fork tip f4 down to fork_point=1. Returns ascending order,
+        // excluding both the tip (f4) and the fork point.
+        let collected = chain.collect_fork_chain(&f4, 1);
+        let heights: Vec<u64> = collected.iter().map(|b| b.header.height.as_u64()).collect();
+        assert_eq!(heights, vec![2, 3]);
+
+        // Missing parent link → the walk breaks immediately, returning empty.
+        let orphan_tip = walk_block(9, Hash::from_bytes([0xEE; 32]), 99);
+        assert!(chain.collect_fork_chain(&orphan_tip, 1).is_empty());
+    }
+
+    #[test]
+    fn calculate_fork_cumulative_work_parent_not_found_returns_partial() {
+        // The walk breaks when a parent is absent, returning only the starting
+        // block's own work (the genesis base +1 is never added).
+        let chain = Blockchain::new();
+        let b = walk_block(3, Hash::from_bytes([0xAB; 32]), 7);
+        let expected = calculate_difficulty_from_target(&b.header.target);
+        assert_eq!(chain.calculate_fork_cumulative_work(&b), expected);
+    }
+
+    #[test]
+    fn calculate_fork_cumulative_work_cycle_breaks_at_max_steps() {
+        // A prev_hash cycle must terminate via the max_steps guard rather than
+        // hang, returning accumulated partial work.
+        let chain = Blockchain::new();
+        let key_a = Hash::from_bytes([0x5A; 32]);
+        let key_b = Hash::from_bytes([0x5B; 32]);
+        let a = walk_block(1, key_b, 1); // height 1 → never treated as genesis
+        let b = walk_block(1, key_a, 2);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(key_a, a);
+            inner.blocks.insert(key_b, b);
+        }
+        let start = walk_block(1, key_a, 3);
+        let work = chain.calculate_fork_cumulative_work(&start);
+        assert!(
+            work >= calculate_difficulty_from_target(&start.header.target),
+            "cycle walk terminates and returns accumulated partial work"
+        );
+    }
+
+    #[test]
+    fn recompute_total_difficulty_missing_mid_range_returns_none() {
+        // A gap anywhere in [1, height] yields None so the caller keeps the
+        // stored value instead of persisting a wrong partial sum.
+        let chain = Blockchain::new();
+        let genesis_hash = chain.init_genesis().unwrap();
+        let m1 = walk_block(1, genesis_hash, 71);
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(m1.hash(), m1.clone());
+            inner.height_to_hash.insert(1, m1.hash());
+        }
+        assert_eq!(
+            chain.recompute_total_difficulty(1),
+            Some(1 + calculate_difficulty_from_target(&m1.header.target)),
+        );
+        // Height 2 absent → None.
+        assert_eq!(chain.recompute_total_difficulty(2), None);
+    }
+
+    #[test]
+    fn is_spent_no_db_false_and_in_memory_hit_true() {
+        let chain = Blockchain::new(); // db = None
+        let ki = KeyImage::from_bytes([0x11; 32]);
+        assert!(!chain.is_spent(&ki), "empty set, no DB → not spent");
+        {
+            let mut inner = chain.inner.write();
+            inner.utxos.mark_key_image_spent(ki);
+        }
+        assert!(chain.is_spent(&ki), "in-memory marked key image → spent");
+    }
+
+    #[test]
+    fn is_spent_db_fallback_true() {
+        // Empty in-memory set (output_count 0, key image absent) falls through to
+        // the persistent DB lookup — the fresh-startup-before-rebuild path.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        let ki = KeyImage::from_bytes([0x22; 32]);
+        db.utxos.mark_key_image(&ki).unwrap();
+        assert!(chain.is_spent(&ki), "DB-marked key image found via fallback");
+    }
+
+    #[test]
+    fn node_chain_view_anchors_outputs_and_reports_spentness() {
+        use crate::compliance::ChainView; // trait must be in scope for its methods
+                                          // NodeChainView is the auditor seam for the compliant-privacy use case:
+                                          // it resolves a disclosure output ref against real chain state and
+                                          // answers key-image spentness.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+
+        let height = 1u64;
+        let block = burn_test_block(height, 77, &[1_000_000]);
+        // Cache the block so get_block_by_height resolves it in-memory, and index
+        // its tx so get_tx_location finds the (height, index) location.
+        let (tx_idx, tx) = block
+            .transactions
+            .iter()
+            .enumerate()
+            .find(|(_, t)| !t.outputs.is_empty())
+            .map(|(i, t)| (i as u32, t.clone()))
+            .expect("a tx with at least one output");
+        {
+            let mut inner = chain.inner.write();
+            inner.blocks.insert(block.hash(), block.clone());
+            inner.height_to_hash.insert(height, block.hash());
+        }
+        db.index_tx(tx.hash().as_bytes(), height, tx_idx).unwrap();
+
+        let view = NodeChainView::new(&chain);
+
+        // Known output → anchors to its on-chain commitment, stealth, height.
+        let oref = crate::crypto::DisclosureOutputRef { tx_hash: tx.hash(), output_index: 0 };
+        let anchor = view.anchor(&oref).unwrap().expect("output should anchor");
+        assert_eq!(anchor.commitment, tx.outputs[0].commitment);
+        assert_eq!(anchor.stealth_address, *tx.outputs[0].stealth_address.as_bytes());
+        assert_eq!(anchor.block_height, height);
+
+        // Unknown tx → no anchor.
+        let unknown =
+            crate::crypto::DisclosureOutputRef { tx_hash: Hash::from_bytes([0xAB; 32]), output_index: 0 };
+        assert!(view.anchor(&unknown).unwrap().is_none());
+        // Out-of-range output index on a known tx → no anchor.
+        let bad_idx = crate::crypto::DisclosureOutputRef { tx_hash: tx.hash(), output_index: 250 };
+        assert!(view.anchor(&bad_idx).unwrap().is_none());
+
+        // Key-image spentness tracks the real spent set. The disclosure suite's
+        // KeyImage is a curve point, so derive a valid one and mark its
+        // byte-equal on-chain twin (`primitives::KeyImage`) spent.
+        let secret = crate::crypto::SecretScalar::random(&mut rand::rngs::OsRng);
+        let curve_ki = crate::crypto::KeyImage::from_secret(&secret);
+        assert!(!view.key_image_spent(&curve_ki).unwrap());
+        {
+            let mut inner = chain.inner.write();
+            inner
+                .utxos
+                .mark_key_image_spent(KeyImage::from_bytes(curve_ki.to_bytes()));
+        }
+        assert!(view.key_image_spent(&curve_ki).unwrap());
+    }
+
+    #[test]
+    fn load_from_database_rejects_missing_genesis_height_entry() {
+        // Chain state present but the height index has no genesis (height-0)
+        // entry → Err("no genesis entry"), never a spurious Fresh.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        db.blocks.insert(&genesis).unwrap();
+        db.state.save_state(&state_for_genesis(&genesis)).unwrap();
+        // Deliberately NO set_height_hash(0, ..).
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(
+            error.contains("no genesis entry"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn load_from_database_rejects_state_height_mismatch_with_tip_block() {
+        // state.tip_hash resolves to a real block, but state.height disagrees
+        // with that block's header height → Err (guards against a truncated /
+        // corrupt state record silently loading at the wrong height).
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+        let state = ChainStateData {
+            tip_hash: genesis_hash, // resolves to the genesis block (height 0)
+            height: 5,              // …but state claims height 5
+            ..state_for_genesis(&genesis)
+        };
+        db.state.save_state(&state).unwrap();
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(
+            error.contains("does not match tip block height"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rollback_to_height_rejects_target_below_last_checkpoint() {
+        // FINALITY: rollback below the persisted last_checkpoint is refused with
+        // Err(InvalidState) and mutates nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        let genesis = crate::testnet::testnet_genesis();
+        let state = ChainStateData {
+            last_checkpoint: 5,
+            ..state_for_genesis(&genesis)
+        };
+        db.state.save_state(&state).unwrap();
+        // Pretend the live tip sits at height 10.
+        {
+            let mut inner = chain.inner.write();
+            inner.tip.height = 10;
+            inner.stats.height = 10;
+        }
+        let err = chain.rollback_to_height(3).unwrap_err();
+        assert!(matches!(err, Error::InvalidState(_)), "got {err:?}");
+        assert!(err.to_string().contains("finality"), "{err}");
+        assert_eq!(chain.height(), 10, "finality rejection must not mutate the tip");
+    }
+
+    #[test]
+    fn rollback_to_height_returns_non_coinbase_txs_as_orphaned() {
+        // Disconnecting blocks with real non-coinbase txs must return exactly
+        // those txs (for mempool restoration) and never the coinbases.
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        let genesis_hash = chain.tip_hash();
+
+        let b1 = burn_test_block(1, 51, &[1_000_000]);
+        let b2 = burn_test_block(2, 52, &[2_000_000]);
+        let want: Vec<Hash> = [&b1, &b2]
+            .iter()
+            .flat_map(|b| {
+                b.transactions
+                    .iter()
+                    .filter(|t| !t.is_coinbase())
+                    .map(|t| t.hash())
+            })
+            .collect();
+        assert_eq!(want.len(), 2, "each staged block carries one non-coinbase tx");
+
+        {
+            let mut inner = chain.inner.write();
+            for (h, b) in [(1u64, &b1), (2u64, &b2)] {
+                inner.blocks.insert(b.hash(), b.clone());
+                inner.height_to_hash.insert(h, b.hash());
+            }
+            inner.tip.hash = b2.hash();
+            inner.tip.height = 2;
+            inner.stats.height = 2;
+            inner.stats.tip_hash = b2.hash();
+            // Ample headroom so the emission/burn checked_subs never underflow
+            // regardless of the compiled fee-distribution activation height.
+            inner.stats.total_supply = u64::MAX as u128;
+            inner.stats.total_burned = u64::MAX as u128;
+        }
+
+        let orphaned = chain.rollback_to_height(0).unwrap();
+        assert_eq!(orphaned.len(), 2);
+        assert!(orphaned.iter().all(|t| !t.is_coinbase()), "no coinbase returned");
+        let got: Vec<Hash> = orphaned.iter().map(|t| t.hash()).collect();
+        for w in &want {
+            assert!(got.contains(w), "missing an orphaned non-coinbase tx");
+        }
+        assert_eq!(chain.tip_hash(), genesis_hash, "tip reset to genesis");
     }
 }

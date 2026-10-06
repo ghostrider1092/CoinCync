@@ -35,6 +35,34 @@
 //! below: `integration_status()` now names the real implementation
 //! file, explicitly states the distributed variant is NOT
 //! implemented, and drops the fragile line reference.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 module scope (design-only)** — INVARIANT: this module is DESIGN-ONLY; no
+//!   production code path routes through it, and the practical threshold CLSAG that
+//!   ships is the Reconstruct-Sign-Zeroize path in `crate::wallet::multisig::clsag_sign_multisig`.
+//!   THREAT: mistaking this design scaffold for a shipped distributed-signing feature,
+//!   over-trusting an unimplemented protocol.
+//!   TESTS: `integration_status_names_actual_implementation`.
+//! - **§2 `integration_status`** — INVARIANT: the status string is truthful — it names each
+//!   subsystem's real location, marks the fully-distributed variant `NOT IMPLEMENTED`, and
+//!   points at `wallet/multisig.rs::clsag_sign_multisig`, never claiming the distributed
+//!   variant is `COMPLETE` (R-27 fix).
+//!   THREAT: R-27 — an over-stated \"COMPLETE\" status misleads an auditor into believing
+//!   distributed threshold signing is shipped and reviewed when it is not.
+//!   TESTS: `integration_status_names_actual_implementation`.
+//! - **§3 `ClsagThresholdParams`** — INVARIANT: a `#[allow(dead_code)]` design-only type that
+//!   documents the coordinator's data flow at the type level; nothing in the shipped code
+//!   constructs or consumes it.
+//!   THREAT: treating the design scaffold as a live parameter path for distributed signing.
+//!   TESTS: (gap — dead-code design type, no runtime behavior to exercise).
+//! - **§4 `_protocol_documentation`** — INVARIANT: a zero-body stub that carries the
+//!   fully-distributed CLSAG-FROST math for `cargo doc`; explicitly NOT IMPLEMENTED and not
+//!   pinned to a fragile source line (the prior note mis-cited a `clsag.rs` line).
+//!   THREAT: a v2 implementer building from stale or incorrect math preserved here.
+//!   TESTS: (gap — empty doc stub, no executable behavior).
 
 /// **Design-only.** Parameters the coordinator WOULD compute and share
 /// with FROST signers in the fully-distributed CLSAG variant. Unused

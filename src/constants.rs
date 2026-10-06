@@ -28,8 +28,17 @@ compile_error!(
 // Bill of Rights X:  No transaction censorship. No address blocking.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Protocol version
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Protocol version.
+///
+/// Bumped 2 -> 3 for the 2026-09 testnet redeploy (anchor-binding reset): old
+/// v2 nodes on the dead pre-reset chain hardcode this seed as their bootstrap
+/// and keep dialing it. Rejecting v2 at the handshake (see
+/// MIN_SUPPORTED_PROTOCOL_VERSION) locks them out at the wire level so they
+/// cannot pollute peer_count or fool `is_synced` into stalling the miner —
+/// letting the new testnet run with P2P open to the public. This touches
+/// neither block validity, the address format, nor the genesis, so it is a
+/// network-compat gate only, not a consensus change.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Target block time in seconds (2 minutes — mountain curve).
 pub const TARGET_BLOCK_TIME: u64 = 120;
@@ -393,6 +402,64 @@ pub const SEQ_PAD_ITERATIONS: u32 = 1;
 /// Must be coordinated across all nodes. Set to a future height agreed by governance.
 pub const V2_TX_ACTIVATION_HEIGHT: u64 = 50_000; // ~69 days at 120s blocks
 
+/// Activation height for shielded (Lelantus-Spark) transactions
+/// (`TxType::Shielded`). Below this height a shielded tx is REJECTED by
+/// consensus (fail-closed). `u64::MAX` = permanently disabled: the wire type
+/// and its validation/apply dispatch exist, but no shielded tx can ever be
+/// accepted until this is set to a real governance-agreed future height AND the
+/// real Spark verifier + accumulator-apply path are wired and audited.
+///
+/// SECURITY: setting this to a finite height is a consensus-breaking wire hard
+/// fork (borsh discriminant 3). It stays `u64::MAX` until the shielded path is
+/// complete, verified, and coordinated. See docs/design/cip-shielded-txtype.md.
+pub const SHIELDED_TX_ACTIVATION_HEIGHT: u64 = u64::MAX;
+
+/// Shielded activation height on **regtest only** — a finite height so the full
+/// shielded verify/apply path (SparkPayload v2 → `verify_block_spark_v2` →
+/// `apply_spark_v2_txs`) can be exercised end-to-end through the real `add_block`
+/// gauntlet in a controlled local regtest, toward the pre-audit 24h soak.
+///
+/// SECURITY: this NEVER affects testnet or mainnet — see
+/// [`shielded_activation_height`], which returns `SHIELDED_TX_ACTIVATION_HEIGHT`
+/// (`u64::MAX`, permanently disabled) for every non-regtest network. Regtest has
+/// no economic value and its genesis is ephemeral, so activating there is safe
+/// and is the only way to soak the shielded consensus path before audit.
+pub const SHIELDED_REGTEST_ACTIVATION_HEIGHT: u64 = 100;
+
+/// Network-scoped shielded activation height. **Regtest** activates at
+/// [`SHIELDED_REGTEST_ACTIVATION_HEIGHT`]; **testnet and mainnet stay
+/// `u64::MAX`** (permanently disabled) until the shielded path is externally
+/// audited and a governance-agreed height is set. This is the ONLY place the
+/// regtest override lives — production networks are unconditionally gated off.
+pub const fn shielded_activation_height(network: crate::config::NetworkType) -> u64 {
+    match network {
+        crate::config::NetworkType::Regtest => {
+            // Regtest activates ONLY in a shielded-feature build (the soak build).
+            // A default/production build keeps regtest at `u64::MAX` too, so it is
+            // byte-identical with shielded off on every network.
+            #[cfg(feature = "sketch-gk-proof")]
+            {
+                SHIELDED_REGTEST_ACTIVATION_HEIGHT
+            }
+            #[cfg(not(feature = "sketch-gk-proof"))]
+            {
+                SHIELDED_TX_ACTIVATION_HEIGHT
+            }
+        }
+        // Testnet + mainnet: permanently disabled until audit.
+        crate::config::NetworkType::Testnet | crate::config::NetworkType::Mainnet => {
+            SHIELDED_TX_ACTIVATION_HEIGHT
+        }
+    }
+}
+
+/// Whether shielded transactions are active for `network` at `height`
+/// (fail-closed: only once a real activation height is set and reached). On
+/// testnet/mainnet this is always `false` (activation height is `u64::MAX`).
+pub const fn shielded_tx_active_at_height(network: crate::config::NetworkType, height: u64) -> bool {
+    height >= shielded_activation_height(network)
+}
+
 pub fn block_version_at_height(height: u64) -> u8 {
     if height >= V2_TX_ACTIVATION_HEIGHT {
         2
@@ -400,6 +467,20 @@ pub fn block_version_at_height(height: u64) -> u8 {
         1
     }
 }
+
+/// Highest block-header `version` this software recognizes. It is the maximum
+/// value `block_version_at_height` can ever return across all heights.
+///
+/// H1 (chain-brick defense): the header version has a lower bound
+/// (`check_header_version_min`) and a no-downgrade rule (`check_header_vs_prev`
+/// rejects `version < prev.version`), but WITHOUT an upper bound a single block
+/// declaring an arbitrarily high version (e.g. 255) ratchets the monotonic
+/// version floor above what any honest miner produces (`block_version_at_height`
+/// caps at 2). Every subsequent honest block then fails the no-downgrade rule
+/// and block production is permanently bricked. Rejecting `version >
+/// MAX_BLOCK_VERSION` closes that. Bump this in lockstep with any future block
+/// version added to `block_version_at_height` (a coordinated hard fork).
+pub const MAX_BLOCK_VERSION: u8 = 2;
 
 // =============================================================================
 // Algorithm Selection
@@ -537,11 +618,15 @@ pub const CONGESTION_THRESHOLD: u64 = 80;
 // Protocol Version Support
 // =============================================================================
 
-/// Minimum supported protocol version
-pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
+/// Minimum supported protocol version.
+///
+/// Raised 1 -> 3 for the 2026-09 testnet reset so the handshake rejects the
+/// dead pre-reset network's v1/v2 nodes (see PROTOCOL_VERSION). A fresh
+/// network needs no backward compatibility with the retired chain.
+pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 3;
 
 /// Maximum supported protocol version
-pub const MAX_SUPPORTED_PROTOCOL_VERSION: u32 = 2;
+pub const MAX_SUPPORTED_PROTOCOL_VERSION: u32 = 3;
 
 /// Check if protocol version is supported
 pub fn is_protocol_version_supported(version: u32) -> bool {
@@ -649,6 +734,39 @@ pub const FEE_DISTRIBUTION_HEIGHT: u64 = 525;
 #[cfg(not(feature = "testnet"))]
 pub const FEE_DISTRIBUTION_HEIGHT: u64 = 0;
 
+// ── Drift guard (runtime-network hardening) ──────────────────────────────────
+// Consensus-critical call sites now resolve these activation heights from the
+// *runtime* network via `NetworkType::*_height()` (see src/config.rs) so a
+// node and miner built with different features can't silently fork. These
+// compile-time consts remain only as the compiled-network convenience; the
+// asserts below pin each to the runtime resolver's value for the compiled
+// network, so the two definitions can never drift out of sync.
+/// Height at which `supply_commitment` production/enforcement activates.
+/// Mirror of `NetworkType::supply_commitment_enforce_height()` — the drift-guards
+/// below pin them equal, matching the other activation heights. GATED OFF
+/// (`u64::MAX`) on every network until audit-gate clearance (a finite value here
+/// is a coordinated hard fork).
+pub const SUPPLY_COMMITMENT_ENFORCE_HEIGHT: u64 = u64::MAX;
+
+#[cfg(feature = "testnet")]
+const _: () = {
+    use crate::config::NetworkType::Testnet as N;
+    assert!(FEE_DISTRIBUTION_HEIGHT == N.fee_distribution_height());
+    assert!(MIN_OUTPUT_AGE_HARDFORK_HEIGHT == N.min_output_age_hardfork_height());
+    assert!(ROLLING_FINALITY_ENABLE_HEIGHT == N.rolling_finality_enable_height());
+    assert!(ROLLING_FINALITY_ENFORCE_HEIGHT == N.rolling_finality_enforce_height());
+    assert!(SUPPLY_COMMITMENT_ENFORCE_HEIGHT == N.supply_commitment_enforce_height());
+};
+#[cfg(not(feature = "testnet"))]
+const _: () = {
+    use crate::config::NetworkType::Mainnet as N;
+    assert!(FEE_DISTRIBUTION_HEIGHT == N.fee_distribution_height());
+    assert!(MIN_OUTPUT_AGE_HARDFORK_HEIGHT == N.min_output_age_hardfork_height());
+    assert!(ROLLING_FINALITY_ENABLE_HEIGHT == N.rolling_finality_enable_height());
+    assert!(ROLLING_FINALITY_ENFORCE_HEIGHT == N.rolling_finality_enforce_height());
+    assert!(SUPPLY_COMMITMENT_ENFORCE_HEIGHT == N.supply_commitment_enforce_height());
+};
+
 // =============================================================================
 // Ring Size by Height
 // =============================================================================
@@ -705,31 +823,29 @@ pub fn effective_ring_size(height: u64, available_outputs: usize) -> usize {
 //   - Empty table is acceptable. The validator treats "no checkpoint
 //     for this height" as "allow any consistent block." Initial
 //     deployments and freshly-genesised chains run with empty tables.
-//   - Per-network. Mainnet and testnet ship separate tables, gated
-//     by the `testnet` feature, so a testnet rebuild doesn't lock
-//     mainnet at a testnet hash.
+//   - Per-network. Mainnet and testnet resolve separate sets (the runtime
+//     network selects which canonical function to call), so a testnet rebuild
+//     doesn't lock mainnet at a testnet hash.
 //
-// Format: const slice of `(height, raw_hash_bytes)` tuples. MUST be
-// sorted ascending by height; the lookup is a binary search. The
-// build-time test `test_checkpoints_are_sorted` enforces ordering.
+// Shape: `(height, raw_hash_bytes)` tuples ordered by height (genesis first).
 
-/// Mainnet consensus checkpoints. Pre-launch: empty.
-/// Populated post-launch via the release process; each release ships
-/// with checkpoints up to ~2 weeks before the release date.
-#[cfg(not(feature = "testnet"))]
-pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = &[
-    // (height, block_hash_bytes)
-    // Empty as of 2026-05-08; populate at first post-launch release.
-];
-
-/// Testnet consensus checkpoints. Empty as of 2026-05-08. Testnet
-/// generally won't carry checkpoints (the chain resets between test
-/// cycles), but the table exists so the validator code path is
-/// exercised on the same data shape mainnet will use.
-#[cfg(feature = "testnet")]
-pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = &[
-    // (height, block_hash_bytes)
-];
+// SINGLE SOURCE OF TRUTH (issue #173): the per-network checkpoint set is NOT a
+// constant here. It lives in the canonical functions `mainnet::mainnet_checkpoints()`
+// and `testnet::testnet_checkpoints()` (genesis + the per-network hardcoded list,
+// e.g. `testnet::TESTNET_CHECKPOINT_LIST`). Everything resolves from there via
+// `NetworkType::consensus_checkpoints()` or `expected_checkpoint_hash()` below.
+//
+// Removed: the `MAINNET_CONSENSUS_CHECKPOINTS` / `TESTNET_CONSENSUS_CHECKPOINTS`
+// constants and the `CONSENSUS_CHECKPOINTS` alias. They were a SECOND, always-empty
+// table that only the consensus fingerprint and `expected_checkpoint_hash` read, so
+// a populated testnet list (e.g. the h=10000 anchor) was enforced by `chain.rs` but
+// silently invisible to the fingerprint, the `validation.rs` checkpoint path, and
+// light-wallet auth. Keeping one source of truth prevents that split.
+//
+// To add a checkpoint: edit the canonical list — for testnet,
+// `testnet::TESTNET_CHECKPOINT_LIST`; for mainnet, `mainnet::mainnet_checkpoints()`.
+// Pick a height ~2 weeks behind the tip at release time. See
+// `docs/operations/CHECKPOINT_PROCEDURE.md`.
 
 /// Look up the expected block hash at a given height, if a checkpoint
 /// exists for it. Returns None when:
@@ -740,13 +856,20 @@ pub const CONSENSUS_CHECKPOINTS: &[(u64, [u8; 32])] = &[
 /// block at this height" — checkpoints are an ADDITIONAL constraint
 /// on top of normal consensus, not a replacement.
 ///
-/// Implementation: binary search since the table is sorted by height.
-/// O(log n) where n is the checkpoint count (expected: dozens).
-pub fn expected_checkpoint_hash(height: u64) -> Option<&'static [u8; 32]> {
-    CONSENSUS_CHECKPOINTS
-        .binary_search_by_key(&height, |&(h, _)| h)
-        .ok()
-        .map(|idx| &CONSENSUS_CHECKPOINTS[idx].1)
+/// Resolves from the single canonical source via
+/// [`NetworkType::consensus_checkpoints`](crate::config::NetworkType::consensus_checkpoints),
+/// so validation, the fingerprint, and this lookup can never disagree (#173).
+/// Returns an owned hash (the set is built at runtime, not a `&'static` table).
+/// Linear scan over a small set (expected: dozens).
+pub fn expected_checkpoint_hash(
+    network: crate::config::NetworkType,
+    height: u64,
+) -> Option<[u8; 32]> {
+    network
+        .consensus_checkpoints()
+        .into_iter()
+        .find(|&(h, _)| h == height)
+        .map(|(_, hash)| hash)
 }
 
 // =============================================================================
@@ -815,19 +938,24 @@ pub const ROLLING_FINALITY_ENFORCE_HEIGHT: u64 = 50_000;
 ///   3. Validator/wallet code uses `is_activated(name, h)` to gate
 ///      the new rule.
 ///   4. Document in the corresponding CIP.
-fn activation_height(name: &str) -> Option<u64> {
-    // Per CIP-007 Mode A: the testnet vs mainnet activation heights
-    // can differ. We pick at compile time via the `testnet` feature.
-    #[cfg(feature = "testnet")]
-    let entries: &[(&str, u64)] = &[
+fn activation_height(network: crate::config::NetworkType, name: &str) -> Option<u64> {
+    use crate::config::NetworkType;
+    // Per CIP-007 Mode A: testnet vs mainnet activation heights can differ.
+    // Runtime-network hardening: resolve the table from the RUNTIME network so a
+    // binary built for one network but run as another (or a mismatched
+    // node/miner pair) gates activations consistently. Regtest reuses testnet.
+    let testnet_entries: &[(&str, u64)] = &[
         // Format: (activation_name, testnet_height)
         // Empty as of 2026-05-08 — first activation queued: ring_bump_v2.
     ];
-    #[cfg(not(feature = "testnet"))]
-    let entries: &[(&str, u64)] = &[
+    let mainnet_entries: &[(&str, u64)] = &[
         // Format: (activation_name, mainnet_height)
         // Empty as of 2026-05-08.
     ];
+    let entries = match network {
+        NetworkType::Mainnet => mainnet_entries,
+        NetworkType::Testnet | NetworkType::Regtest => testnet_entries,
+    };
     entries.iter().find(|(n, _)| *n == name).map(|(_, h)| *h)
 }
 
@@ -838,8 +966,8 @@ fn activation_height(name: &str) -> Option<u64> {
 /// means "this rule never activates," which is the correct
 /// fail-safe for a forward-compat code path that hasn't been
 /// scheduled yet).
-pub fn is_activated(name: &str, height: u64) -> bool {
-    match activation_height(name) {
+pub fn is_activated(network: crate::config::NetworkType, name: &str, height: u64) -> bool {
+    match activation_height(network, name) {
         Some(activation_h) => height >= activation_h,
         None => false,
     }
@@ -1216,9 +1344,42 @@ pub const STRICT_RING_MEMBER_HEIGHT: u64 = 100;
 mod tests {
     use super::*;
 
+    // Runtime-network hardening: activation/checkpoint lookups take the network.
+    // NET is the compiled network, so `NET.consensus_checkpoints()` is the set
+    // this binary actually enforces.
+    #[cfg(feature = "testnet")]
+    const NET: crate::config::NetworkType = crate::config::NetworkType::Testnet;
+    #[cfg(not(feature = "testnet"))]
+    const NET: crate::config::NetworkType = crate::config::NetworkType::Mainnet;
+
     #[test]
     fn test_supply_cap_is_100m() {
         assert_eq!(TOTAL_SUPPLY_TARGET, 100_000_000);
+    }
+
+    #[test]
+    fn shielded_activation_is_network_scoped_production_permanently_off() {
+        use crate::config::NetworkType::{Mainnet, Regtest, Testnet};
+        // SAFETY INVARIANT: testnet + mainnet are permanently disabled — the
+        // activation height is u64::MAX and NO height activates shielded there.
+        assert_eq!(shielded_activation_height(Testnet), u64::MAX);
+        assert_eq!(shielded_activation_height(Mainnet), u64::MAX);
+        assert!(!shielded_tx_active_at_height(Testnet, u64::MAX - 1));
+        assert!(!shielded_tx_active_at_height(Mainnet, 1_000_000_000));
+
+        // Regtest activates ONLY in a shielded-feature build (the soak build);
+        // a default build keeps it disabled too.
+        #[cfg(feature = "sketch-gk-proof")]
+        {
+            assert_eq!(shielded_activation_height(Regtest), SHIELDED_REGTEST_ACTIVATION_HEIGHT);
+            assert!(!shielded_tx_active_at_height(Regtest, SHIELDED_REGTEST_ACTIVATION_HEIGHT - 1));
+            assert!(shielded_tx_active_at_height(Regtest, SHIELDED_REGTEST_ACTIVATION_HEIGHT));
+        }
+        #[cfg(not(feature = "sketch-gk-proof"))]
+        {
+            assert_eq!(shielded_activation_height(Regtest), u64::MAX);
+            assert!(!shielded_tx_active_at_height(Regtest, 1_000_000_000));
+        }
     }
 
     #[test]
@@ -1349,7 +1510,7 @@ mod tests {
             "any-random-string",
         ] {
             assert!(
-                activation_height(name).is_none(),
+                activation_height(NET, name).is_none(),
                 "CIP-007 activation '{}' is registered — staged-mainnet plan says \
                  NO activations ship in v1.0. Either remove the entry, or remove \
                  this test in the same PR that schedules it (deliberate two-place \
@@ -1361,7 +1522,7 @@ mod tests {
         // And every height returns false for any name.
         for h in [0u64, 1, 100, 1_000_000, u64::MAX / 2] {
             assert!(
-                !is_activated("any-name", h),
+                !is_activated(NET, "any-name", h),
                 "is_activated MUST return false for unregistered names at every \
                  height — the fail-safe semantics CIP-007 depends on"
             );
@@ -1386,49 +1547,53 @@ mod tests {
         assert_eq!(effective_ring_size(5, 20), BOOTSTRAP_MIN_RING_SIZE);
     }
 
-    /// CIP-009 Path B invariant: the consensus-checkpoint table must
-    /// be sorted ascending by height. The `expected_checkpoint_hash`
-    /// lookup uses `binary_search_by_key` which returns garbage on
-    /// unsorted input. A sort-violation in the table is a silent
-    /// consensus bug; this test makes it loud at build time.
+    /// CIP-009 Path B invariant: the resolved consensus-checkpoint set must be
+    /// ordered ascending by height and begin with genesis (height 0). Checked
+    /// for BOTH networks so the single resolver (#173) is validated regardless
+    /// of the compiled feature set.
     #[test]
     fn test_consensus_checkpoints_are_sorted_ascending() {
-        let table = CONSENSUS_CHECKPOINTS;
-        for window in table.windows(2) {
-            let (h_prev, _) = window[0];
-            let (h_next, _) = window[1];
-            assert!(
-                h_prev < h_next,
-                "CONSENSUS_CHECKPOINTS must be sorted ascending by height; \
-                 found {} before {}",
-                h_prev,
-                h_next
+        for net in [
+            crate::config::NetworkType::Mainnet,
+            crate::config::NetworkType::Testnet,
+        ] {
+            let table = net.consensus_checkpoints();
+            assert_eq!(
+                table.first().map(|&(h, _)| h),
+                Some(0),
+                "{net:?} checkpoint set must start with genesis (height 0)"
             );
+            for window in table.windows(2) {
+                assert!(
+                    window[0].0 < window[1].0,
+                    "{net:?} checkpoints must be sorted ascending by height; \
+                     found {} before {}",
+                    window[0].0,
+                    window[1].0
+                );
+            }
         }
     }
 
-    /// CIP-009 Path B safety: `expected_checkpoint_hash` returns None
-    /// at heights with no checkpoint, Some at heights that have one.
-    /// Test exercises both paths even when the production table is
-    /// empty, by building a synthetic table at test scope. Confirms
-    /// the binary-search dispatch is wired correctly regardless of
-    /// real-table content.
+    /// CIP-009 Path B safety + #173: `expected_checkpoint_hash` returns Some at
+    /// every checkpoint height (always at least genesis) and None elsewhere, and
+    /// it resolves from the SAME set `consensus_checkpoints()` feeds the
+    /// fingerprint — so the two can never disagree.
     #[test]
     fn test_expected_checkpoint_hash_lookup() {
-        // The production table can be empty (pre-launch); confirm
-        // empty-table behavior: every lookup returns None.
-        if CONSENSUS_CHECKPOINTS.is_empty() {
-            assert!(expected_checkpoint_hash(0).is_none());
-            assert!(expected_checkpoint_hash(1).is_none());
-            assert!(expected_checkpoint_hash(1_000_000).is_none());
-        } else {
-            // If checkpoints exist, the first must be findable.
-            let (first_h, _) = CONSENSUS_CHECKPOINTS[0];
-            assert!(expected_checkpoint_hash(first_h).is_some());
-            // A height NOT in the table must return None.
-            // Pick a height that's clearly between or after entries.
-            let last_h = CONSENSUS_CHECKPOINTS[CONSENSUS_CHECKPOINTS.len() - 1].0;
-            assert!(expected_checkpoint_hash(last_h + 1_000_000).is_none());
+        let table = NET.consensus_checkpoints();
+        // Genesis is always a checkpoint, so height 0 is always findable.
+        assert!(
+            expected_checkpoint_hash(NET, 0).is_some(),
+            "genesis (height 0) must always be a checkpoint"
+        );
+        // A height far above the last checkpoint has none.
+        let last_h = table.last().map(|&(h, _)| h).unwrap_or(0);
+        assert!(expected_checkpoint_hash(NET, last_h + 1_000_000).is_none());
+        // The lookup agrees with the resolved set at every checkpoint height
+        // (the anti-split guard for #173).
+        for &(h, hash) in &table {
+            assert_eq!(expected_checkpoint_hash(NET, h), Some(hash));
         }
     }
 }

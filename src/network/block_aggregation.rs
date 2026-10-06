@@ -55,6 +55,49 @@
 //! preserving the type signatures here.
 //!
 //! [cip]: ../../docs/cip/CIP-003-cut-through-and-aggregation.md
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `AggregateKernel`** — INVARIANT: the struct's fields are exactly the
+//!   sum of every per-kernel excess point, signature component, and fee.
+//!   THREAT: a mis-summed field would silently desynchronize the aggregate
+//!   from its constituent kernels.
+//!   TESTS: `aggregate_sums_fees`.
+//! - **§2 `BlockAggregator::aggregate` (point/signature decoding)** — INVARIANT:
+//!   every kernel's excess point and 64-byte `R || s` signature must decode as
+//!   canonical curve/scalar values or the whole aggregation is rejected.
+//!   THREAT: a malformed kernel silently ignored would let bad kernels into a
+//!   sealed block's aggregate.
+//!   TESTS: `aggregate_rejects_malformed_signature`.
+//! - **§3 `BlockAggregator::aggregate` (fee overflow guard)** — INVARIANT: the
+//!   fee sum uses `checked_add` and errors rather than wraps.
+//!   THREAT: silent `u64` wraparound would under-report the aggregate fee.
+//!   TESTS: (gap — no test drives `fee_sum` to overflow).
+//! - **§4 `BlockAggregator::aggregate` (order independence)** — INVARIANT: the
+//!   aggregate is a commutative fold; any permutation of the input kernel set
+//!   yields an identical `AggregateKernel`.
+//!   THREAT: order-dependence would make the aggregate depend on relay/mempool
+//!   ordering rather than kernel content, breaking cross-node consensus.
+//!   TESTS: `aggregate_is_order_independent`.
+//! - **§5 `BlockAggregator::aggregate` (empty set)** — INVARIANT: aggregating
+//!   zero kernels yields the identity point, zeroed signature, and zero fee.
+//!   THREAT: a non-identity result for an empty block would corrupt the
+//!   block-scoped verification equation.
+//!   TESTS: `aggregate_of_empty_set_is_identity`.
+//! - **§6 `BlockAggregator::verify` (Schnorr equation)** — INVARIANT:
+//!   `verify` returns `true` only when `s*G == R + c*X` holds for the
+//!   aggregate excess, nonce, and response.
+//!   THREAT: a bypassable check would let an unsigned/forged aggregate kernel
+//!   pass block validation.
+//!   TESTS: `aggregate_round_trip_verifies`.
+//! - **§7 `BlockAggregator::verify` (message binding)** — INVARIANT: the
+//!   challenge `c` binds the verification to the specific block-scoped
+//!   message; a signature valid for one message must not verify for another.
+//!   THREAT: missing message binding would let an aggregate signed for one
+//!   block be replayed against a different block.
+//!   TESTS: `verify_rejects_wrong_message`.
 
 use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT as G,

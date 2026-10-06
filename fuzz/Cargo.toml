@@ -10,6 +10,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 borsh = "1"
+# `#[derive(Arbitrary)]` for structured fuzz inputs (e.g. fuzz_clsag). Version
+# tracks libfuzzer-sys 0.4's arbitrary 1.x.
+arbitrary = { version = "1", features = ["derive"] }
 
 # Deep-shim deps for fuzz_rpc_body — drives the FULL request pipeline
 # through `Router::oneshot` so the body extractor + Json<> extractor

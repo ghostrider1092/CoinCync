@@ -1,6 +1,42 @@
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `TxAbsenceCache` keying by `(PeerId, Hash)`** — INVARIANT: absence
+//!   is scoped per reporting peer, never globally by hash alone.
+//!   THREAT: N-1 — an unauthenticated `NotFound` from one malicious peer
+//!   would otherwise suppress relay of a targeted transaction from ALL
+//!   honest peers for the TTL window (indefinitely refreshable), a targeted
+//!   mempool-censorship primitive.
+//!   TESTS: `absence_is_scoped_per_peer`.
+//! - **§2 `mark_absent`/`is_known_absent`** — INVARIANT: an entry is reported
+//!   absent only while within its TTL from insertion, and only for the exact
+//!   `(peer, hash)` pair recorded.
+//!   THREAT: a stale or cross-hash "absent" result would cause the node to
+//!   either wrongly skip re-requesting an available transaction or spam
+//!   redundant requests.
+//!   TESTS: `marks_and_reports_absent_transactions`.
+//! - **§3 hard-cap eviction in `mark_absent`** — INVARIANT: once `max_size`
+//!   is reached, a prune is attempted first and, if still at capacity, the
+//!   single oldest entry is evicted to admit the new one — the cache never
+//!   grows past `max_size`.
+//!   THREAT: unbounded growth (e.g. an attacker cycling many distinct hashes
+//!   per peer) exhausting memory.
+//!   TESTS: `evicts_oldest_entry_at_the_hard_cap`.
+//! - **§4 `prune`** — INVARIANT: `prune` removes exactly the entries whose
+//!   TTL has elapsed and returns the count removed; live entries are
+//!   untouched.
+//!   THREAT: a prune that removed live entries would defeat §1's per-peer
+//!   scoping (nothing left to consult); a prune that never removes anything
+//!   would defeat §3's memory bound between hard-cap hits.
+//!   TESTS: `prune_removes_exactly_the_ttl_expired_entries` drives `prune`
+//!   directly by advancing the virtual monotonic clock (E1) past the TTL — no
+//!   real sleep — so the elapsed-TTL path is covered deterministically.
 
+use std::collections::HashMap;
+use std::time::Duration;
+
+use crate::clock::{mono_now, MonoInstant};
 use crate::network::peer::PeerId;
 use crate::primitives::Hash;
 
@@ -21,7 +57,7 @@ const DEFAULT_MAX_SIZE: usize = 10_000;
 /// us, while we still fetch X from any honest peer that advertises it. This
 /// also matches the stated intent — "a peer recently said they don't have".
 pub struct TxAbsenceCache {
-    inner: HashMap<(PeerId, Hash), Instant>,
+    inner: HashMap<(PeerId, Hash), MonoInstant>,
     ttl: Duration,
     max_size: usize,
 }
@@ -50,7 +86,7 @@ impl TxAbsenceCache {
             }
         }
 
-        self.inner.insert((peer, hash), Instant::now());
+        self.inner.insert((peer, hash), mono_now());
     }
 
     pub fn is_known_absent(&self, peer: &PeerId, hash: &Hash) -> bool {
@@ -139,5 +175,34 @@ mod tests {
         let mut bytes = [0; 32];
         bytes[..4].copy_from_slice(&counter.to_be_bytes());
         Hash::from_bytes(bytes)
+    }
+
+    #[test]
+    fn prune_removes_exactly_the_ttl_expired_entries() {
+        // §4 coverage: drive `prune` through real elapsed-TTL by advancing the
+        // VIRTUAL monotonic clock (E1) — deterministic, no sleep. A live entry
+        // added after the advance must survive; the expired one must go.
+        let _clock = crate::clock::override_scope(1_000_000); // resets mono to 0
+        let mut cache = TxAbsenceCache::new();
+        let p = peer(5);
+        let old = Hash::from_bytes([1; 32]);
+
+        cache.mark_absent(p, old); // inserted at mono t=0
+        assert!(cache.is_known_absent(&p, &old));
+
+        // Advance virtual elapsed-time past the 60s TTL, then add a fresh entry.
+        crate::clock::advance_sim_mono(DEFAULT_TTL + Duration::from_secs(1));
+        let fresh = Hash::from_bytes([2; 32]);
+        cache.mark_absent(p, fresh); // inserted "now", still live
+
+        // The old entry is now TTL-expired; is_known_absent reflects it.
+        assert!(!cache.is_known_absent(&p, &old));
+        assert!(cache.is_known_absent(&p, &fresh));
+
+        // prune removes exactly the one expired entry and reports the count.
+        let removed = cache.prune();
+        assert_eq!(removed, 1, "prune should remove exactly the expired entry");
+        assert_eq!(cache.len(), 1);
+        assert!(cache.is_known_absent(&p, &fresh), "live entry must survive prune");
     }
 }

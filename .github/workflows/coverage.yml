@@ -1,0 +1,101 @@
+name: Coverage
+
+# Measures line coverage over the library / unit-test surface with
+# cargo-llvm-cov (LLVM source-based coverage) and enforces a floor so
+# coverage can only ratchet upward, never regress silently.
+#
+# Rationale: the repo already has a large adversarial/integration suite
+# (see integration-tests.yml) but nothing measured *how much* of the
+# consensus-critical library it actually exercises, and nothing failed a
+# PR that dropped coverage. This workflow closes that gap.
+#
+# The floor (COVERAGE_MIN) is a ratchet, not a target: raise it whenever
+# real coverage climbs comfortably above it. It is deliberately measured
+# over `--lib` (the coincync library crate) where the consensus, crypto,
+# mempool, and storage logic lives; integration tests still gate behavior
+# separately in integration-tests.yml.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: 1
+  # Ratchet floor for library line coverage (percent). Raise as coverage
+  # improves; never lower without an explicit, reviewed justification.
+  COVERAGE_MIN: "60"
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: llvm-cov (lib)
+    runs-on: ubuntu-22.04
+    # Instrumented builds + the full lib/unit suite run slower than a plain
+    # test pass; give generous margin like integration-tests.yml does.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage-v1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libssl-dev pkg-config
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Measure coverage (lib + unit tests)
+        # LCOV for tooling/artifacts; --summary-only for the gate step below.
+        run: |
+          cargo llvm-cov --release --features "randomx testnet" --lib \
+            --lcov --output-path lcov.info
+          cargo llvm-cov --release --features "randomx testnet" --lib \
+            --summary-only | tee coverage-summary.txt
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: |
+            lcov.info
+            coverage-summary.txt
+
+      - name: Enforce coverage floor
+        run: |
+          # Parse the TOTAL line-coverage percentage from the summary.
+          # cargo-llvm-cov --summary-only emits a table whose "TOTAL" row's
+          # final percentage column is line coverage.
+          pct=$(grep -E '^TOTAL' coverage-summary.txt | grep -oE '[0-9]+\.[0-9]+%' | tail -1 | tr -d '%')
+          if [ -z "$pct" ]; then
+            echo "Could not parse coverage percentage from summary:" >&2
+            cat coverage-summary.txt >&2
+            exit 1
+          fi
+          echo "Library line coverage: ${pct}% (floor: ${COVERAGE_MIN}%)"
+          # Float-safe comparison via awk.
+          if awk -v p="$pct" -v m="$COVERAGE_MIN" 'BEGIN { exit !(p < m) }'; then
+            echo "::error::Coverage ${pct}% is below the required floor of ${COVERAGE_MIN}%."
+            exit 1
+          fi
+          echo "Coverage floor satisfied."

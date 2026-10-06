@@ -2,9 +2,46 @@
 //!
 //! "The privacy coin you can audit"
 //! Verify supply, fees, and ring quality without seeing private data.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `SupplyState::apply_block`** — INVARIANT: `circulating() == total_minted − total_burned`,
+//!   tracked in `u128` so supply above `u64::MAX` is preserved, and `apply_block`
+//!   accumulates mint/burn with `checked_add` so totals never silently wrap.
+//!   THREAT: an overflow wrap or lossy accumulation quietly inflating circulating supply.
+//!   TESTS: `test_supply_state`, `test_multi_block_accumulation`,
+//!   `test_supply_state_preserves_values_above_u64_max`.
+//! - **§2 `SupplyCommitment`** — INVARIANT: `supply_commitment` is a domain-separated
+//!   hash bound to `total_minted` and `total_burned`, recomputed on every `apply_block`.
+//!   THREAT: tampered supply figures circulating without a matching commitment.
+//!   TESTS: (gap — commitment field is exercised only indirectly; no dedicated assertion).
+//! - **§3 `SupplySnapshot::from_state`** — INVARIANT: `from_state` yields a snapshot whose
+//!   circulating/minted/burned mirror the source state and whose `proof_hash` is the
+//!   domain-separated checksum — a self-consistent checksum, not an authenticated proof (issue #252).
+//!   THREAT: a consumer mistaking the snapshot for chain-authenticated supply evidence.
+//!   TESTS: `test_supply_proof`.
+//! - **§4 `SupplySnapshot::verify`** — INVARIANT (AUDIT 2026-07-01, issue #252):
+//!   `verify() == true` implies `circulating == total_minted − total_burned` AND `proof_hash`
+//!   recomputes, so the derived `circulating` field cannot diverge from the hashed fields.
+//!   THREAT: an attacker shipping a snapshot with an arbitrary `circulating` value that still passes the hash.
+//!   TESTS: `test_supply_proof`, `test_supply_proof_tamper`, `test_supply_proof_circulating_tamper_rejected`.
+//! - **§5 `audit_block`** — INVARIANT: `supply_after.circulating()` must equal
+//!   `supply_before.circulating() + emission − burn%` with tolerance exactly 0, and a height
+//!   mismatch is recorded as a separate issue from `supply_valid`.
+//!   THREAT: hidden supply inflation or a wrong-height block passing the audit as valid.
+//!   TESTS: `test_block_audit_accepts_circulating_supply_above_u64_max`.
+//! - **§6 `SupplyAuditResult`** — INVARIANT: `BlockAudit::is_valid()` (aliased as
+//!   `SupplyAuditResult`) is true only when supply, fees, and emission all pass and the issues
+//!   list is empty. THREAT: a block carrying recorded issues being treated as audited-clean.
+//!   TESTS: `test_block_audit_accepts_circulating_supply_above_u64_max`.
+//! - **§7 `BlockSupplyDelta::new`** — INVARIANT (R-32 site 3/3, AUDIT 2026-07-02): `net_change` is
+//!   computed as `emission − burned` in `i128` then clamped into `i64`, and any clamp is logged
+//!   so corruption is visible. THREAT: a silent `i64` clamp masking upstream input corruption of emission/burn.
+//!   TESTS: (gap — the clamp/log path has no dedicated regression test).
 
 use crate::constants::{FEE_BURN_CONGESTED_PERCENT, FEE_BURN_NORMAL_PERCENT};
-use crate::crypto::PedersenCommitment;
 use crate::primitives::{hash_domain, Amount, Hash};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -235,40 +272,15 @@ impl SupplySnapshot {
     }
 }
 
-#[allow(dead_code)]
-pub fn verify_commitment_balance(
-    input_commitments: &[PedersenCommitment],
-    output_commitments: &[PedersenCommitment],
-    fee: Amount,
-) -> bool {
-    use crate::crypto::BlindingFactor;
-    use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
-    use curve25519_dalek::traits::Identity;
-
-    if input_commitments.is_empty() {
-        return false;
-    }
-    let mut input_sum = RistrettoPoint::identity();
-    for c in input_commitments {
-        match CompressedRistretto(c.to_bytes()).decompress() {
-            Some(p) => input_sum += p,
-            None => return false,
-        }
-    }
-    let mut output_sum = RistrettoPoint::identity();
-    for c in output_commitments {
-        match CompressedRistretto(c.to_bytes()).decompress() {
-            Some(p) => output_sum += p,
-            None => return false,
-        }
-    }
-    let fee_commitment = PedersenCommitment::commit(fee.as_atomic(), &BlindingFactor::zero());
-    let fee_point = match CompressedRistretto(fee_commitment.to_bytes()).decompress() {
-        Some(p) => p,
-        None => return false,
-    };
-    input_sum == output_sum + fee_point
-}
+// REMOVED (audit crypto-H2): `verify_commitment_balance` was dead code
+// (`#[allow(dead_code)]`, zero callers) AND RingCT-incorrect — it summed raw
+// INPUT commitments, but in RingCT the spent input's commitment is hidden and
+// the balance equation is over the per-input PSEUDO-OUTPUT commitments. The real,
+// enforced no-inflation check is `consensus::validation::verify_balance_proof`
+// (wired at `check_tx_balance_proof`), which uses pseudo-outputs correctly and is
+// covered by `balance_proof_accepts_balanced_and_rejects_inflation` plus the
+// identity/non-curve/empty rejection tests. Keeping a second, misleadingly-named
+// "balance" function here risked an auditor mistaking it for the enforced guard.
 
 pub type SupplyCommitment = SupplyState;
 pub type SupplyAuditResult = BlockAudit;

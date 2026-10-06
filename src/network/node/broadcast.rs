@@ -1,3 +1,55 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `send_to_peer`** — INVARIANT: the returned bool exactly reflects
+//!   delivery outcome — `true` only on a successful enqueue, `false` for a
+//!   missing or closed peer channel, never a false positive.
+//!   THREAT: a caller trusting a false "sent" result would believe a message
+//!   reached a peer it never did (silent message loss).
+//!   TESTS: `send_to_peer_returns_true_when_send_succeeds`,
+//!   `send_to_peer_returns_false_when_peer_missing`,
+//!   `send_to_peer_returns_false_when_channel_closed`.
+//! - **§2 `send_to_peer` lock-free await on backpressure** — INVARIANT: the
+//!   DashMap shard guard is dropped before awaiting channel capacity, so a
+//!   parked send never blocks unrelated map inserts/removes.
+//!   THREAT: holding a shard lock across a bounded-channel `.await` would let
+//!   one congested peer stall inserts for every other peer sharing that shard.
+//!   TESTS: `send_to_peer_does_not_block_dashmap_insert_on_full_channel`.
+//! - **§3 `send_to`** — INVARIANT: a missing peer is a silent no-op (`Ok(())`)
+//!   while a closed channel surfaces as `Error::ConnectionFailed`, matching
+//!   callers that need to distinguish "gone" from "never existed".
+//!   THREAT: mis-signaling closed-vs-missing would cause callers to retry a
+//!   dead peer forever or silently swallow a real disconnect.
+//!   TESTS: `send_to_preserves_missing_and_closed_peer_contracts`.
+//! - **§4 `broadcast_raw` no-await-under-iterator + partial delivery** —
+//!   INVARIANT: no `.await` occurs while a DashMap iterator/entry guard is
+//!   live, and one full/slow peer channel never blocks delivery to any other
+//!   peer in the same broadcast pass.
+//!   THREAT: a single congested peer stalling propagation to the whole mesh
+//!   (the historical "sync-stall" class of bug this function's comments
+//!   reference).
+//!   TESTS: `full_peer_queue_does_not_block_other_broadcast_delivery`.
+//! - **§5 `broadcast_raw` chronic-stall ban (`STALL_THRESHOLD`)** —
+//!   INVARIANT: a peer whose send queue is full on `STALL_THRESHOLD`
+//!   consecutive broadcasts is banned rather than retried forever.
+//!   THREAT: an unresponsive or malicious peer permanently occupying a
+//!   connection slot while contributing nothing to propagation.
+//!   TESTS: (gap — no test drives `consecutive_full` to `STALL_THRESHOLD`
+//!   and asserts the resulting `ban_peer` call).
+//! - **§6 `announce_chain_work`** — INVARIANT: the ChainWork advertisement is
+//!   sent only to peers whose capability bitset actually has `CAP_CHAINWORK`.
+//!   THREAT: broadcasting to non-capable peers wastes bandwidth and can
+//!   confuse peers that don't understand the message type.
+//!   TESTS: (gap — no test exercises the capability filter in this file).
+//! - **§7 `queue_transaction`** — INVARIANT: a locally-originated transaction
+//!   always enters the Dandelion++ stem phase (`add_local_tx`) rather than
+//!   being flooded directly, preserving sender-anonymity intent.
+//!   THREAT: skipping stem routing for local txs would deanonymize the
+//!   broadcasting node as the transaction's origin.
+//!   TESTS: `local_tx_enters_stempool` (network_security.rs; exercises the
+//!   same `DandelionRouter::add_local_tx` this function calls).
+
 use std::sync::atomic::Ordering;
 
 use dashmap::DashMap;
@@ -235,7 +287,12 @@ pub(super) async fn send_to_peer(
     data: Vec<u8>,
 ) -> bool {
     match peer_sender(senders, peer_id) {
-        Some(sender) => sender.send(data).await.is_ok(),
+        // C2: NON-BLOCKING. `send_to_peer` is called by the single shared message
+        // processor; a `.send().await` here blocks that processor whenever ONE
+        // peer's bounded queue is full (a peer that stopped reading), freezing all
+        // P2P handling. `try_send` instead reports a full queue as a failed send
+        // (peers can re-request); the peer's write arm drops it via WRITE_TIMEOUT.
+        Some(sender) => sender.try_send(data).is_ok(),
         None => false,
     }
 }
@@ -390,5 +447,35 @@ mod tests {
                 .load(Ordering::Relaxed),
             1
         );
+    }
+
+    // C2 regression: `send_to_peer` is called by the single shared message
+    // processor, so it must NEVER block on one peer -- a full per-peer queue
+    // (a peer that stopped reading) must be a fast failed-send, not an await.
+    #[tokio::test]
+    async fn send_to_peer_does_not_block_when_queue_is_full() {
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let peer: PeerId = [7u8; 32];
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(1); // rx kept, never drained
+        senders.insert(peer, tx);
+
+        // First send fills the single slot.
+        assert!(send_to_peer(&senders, &peer, vec![1]).await);
+
+        // A second send would block a `.send().await`; `try_send` returns false
+        // immediately. Bound it with a timeout to PROVE it doesn't hang.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            send_to_peer(&senders, &peer, vec![2]),
+        )
+        .await;
+        assert_eq!(
+            res,
+            Ok(false),
+            "send_to_peer must return false (not block) when the peer queue is full"
+        );
+
+        // Unknown peer -> false, no panic.
+        assert!(!send_to_peer(&senders, &[9u8; 32], vec![3]).await);
     }
 }

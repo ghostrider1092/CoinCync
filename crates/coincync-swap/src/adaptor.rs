@@ -536,7 +536,8 @@ pub fn create_pre_sig_bip340(
     const MAX_RETRIES: u32 = 8;
     let (nonce, _r_plus_t) = (0..MAX_RETRIES)
         .find_map(|counter| {
-            let n = match derive_bip340_nonce(aux_rand, msg, &signer_x, counter) {
+            let n = match derive_bip340_nonce(&d_even, aux_rand, msg, &signer_x, adaptor_pt, counter)
+            {
                 Ok(n) => n,
                 Err(_) => return None,
             };
@@ -580,36 +581,81 @@ pub fn create_pre_sig_bip340(
     ))
 }
 
-/// Deterministic nonce derivation for [`create_pre_sig_bip340`].
+/// Deterministic nonce derivation for [`create_pre_sig_bip340`], BIP-340
+/// synthetic-nonce form extended to bind the adaptor point.
 ///
-/// Tagged SHA-256 over `(aux_rand, msg, X_even, counter)`. NOT the
-/// canonical BIP-340-aux derivation (that hashes the secret key
-/// directly, which makes nonce reuse across `aux_rand` choices
-/// impossible). This variant lets us iterate `counter` to find an
-/// even-y `R + T` without re-rolling `aux_rand` on every miss; the
-/// counter is mixed into a domain-separated tag so it can't be
-/// confused with any other CoinCync hash output.
+/// `k = H_nonce( (d_even XOR H_aux(aux_rand)) || X_even || T || msg || counter )`
+///
+/// SECURITY (crypto-cluster #1, 2026-08-30). The previous form hashed only
+/// `(aux_rand, msg, X_even, counter)` — it bound the message and pubkey (so the
+/// "reuse aux_rand across different messages ⇒ same k" attack never applied),
+/// but it did NOT bind the secret key or the adaptor point:
+///
+/// - **Secret key now bound (BIP-340 masking `d ⊕ H_aux(aux_rand)`).** Nonce
+///   secrecy no longer depends on `aux_rand` entropy: even with a reused, zero,
+///   or predictable `aux_rand`, `k` stays secret because `d_even` is in the
+///   preimage. Previously a weak/predictable `aux_rand` could expose `k` (hence
+///   the key) from a single signature.
+/// - **Adaptor point `T` now bound.** A pre-signature and a plain signature
+///   under the same key and message can no longer share a nonce.
+///
+/// The `counter` still lets us retry for an even-y `R + T` without re-rolling
+/// inputs; it is domain-separated so it cannot collide with any other CoinCync
+/// hash output. `d_even` is the even-lifted secret the caller already computed,
+/// matching BIP-340's use of `d'` (the private key negated to the even-y form).
+///
+/// GATED / UNREVIEWED-CRYPTO: CoinCync domain tags, not yet validated against a
+/// reference by a cryptographer (see
+/// `docs/audit/2026-08-30-crypto-cluster-expert-briefing.md`, item #1). The swap
+/// crate is not linked into the node binary; do not enable swaps on mainnet
+/// until that review returns YES with a reference test vector.
 fn derive_bip340_nonce(
+    d_even: &SecretKey,
     aux_rand: &[u8; 32],
     msg: &[u8; 32],
     x_even: &XOnlyPublicKey,
+    adaptor_pt: &PublicKey,
     counter: u32,
 ) -> Result<SecretKey> {
-    // Domain-separation tag, hashed twice in BIP-340 style.
-    let tag_hash: [u8; 32] = {
+    // BIP-340 aux masking: aux_tag = H("…/Aux-v2", aux_rand), then t = d ⊕ aux_tag.
+    let aux_seed: [u8; 32] = {
         let mut h = Sha256::new();
-        h.update(b"CoinCync/SwapAdaptor/Nonce-v1");
+        h.update(b"CoinCync/SwapAdaptor/Aux-v2");
         h.finalize().into()
     };
+    let aux_tag: [u8; 32] = {
+        let mut h = Sha256::new();
+        h.update(aux_seed);
+        h.update(aux_seed);
+        h.update(aux_rand);
+        h.finalize().into()
+    };
+    let mut t = d_even.secret_bytes();
+    for (tb, ab) in t.iter_mut().zip(aux_tag.iter()) {
+        *tb ^= ab;
+    }
 
+    // k = H_nonce(t || X_even || T || msg || counter), tag hashed twice.
+    let nonce_seed: [u8; 32] = {
+        let mut h = Sha256::new();
+        h.update(b"CoinCync/SwapAdaptor/Nonce-v2");
+        h.finalize().into()
+    };
     let mut h = Sha256::new();
-    h.update(tag_hash);
-    h.update(tag_hash);
-    h.update(aux_rand);
-    h.update(msg);
+    h.update(nonce_seed);
+    h.update(nonce_seed);
+    h.update(t);
     h.update(x_even.serialize());
+    h.update(adaptor_pt.serialize());
+    h.update(msg);
     h.update(counter.to_be_bytes());
     let bytes: [u8; 32] = h.finalize().into();
+
+    // Best-effort wipe of the secret-derived mask (the crate has no zeroize
+    // dep; SecretKey itself zeroizes on drop — this only clears our XOR copy).
+    for b in t.iter_mut() {
+        *b = 0;
+    }
 
     SecretKey::from_slice(&bytes)
         .map_err(|_| Error::Verification("derived nonce out of secp256k1 scalar range"))
@@ -1352,6 +1398,41 @@ mod tests {
             create_pre_sig(&seckey, &msg, &adaptor_pt, &nonce).expect("create_pre_sig");
         verify_pre_sig(&pre_sig, &signer_x, &adaptor_pt, &msg)
             .expect("verify_pre_sig should accept a freshly-created pre-sig");
+    }
+
+    #[test]
+    fn nonce_binds_secret_message_and_adaptor_point() {
+        // crypto-cluster #1: the derived nonce must depend on the secret key,
+        // the message, AND the adaptor point — not on aux_rand alone.
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[0x11; 32]).unwrap();
+        let (x, _) = PublicKey::from_secret_key(&secp, &sk).x_only_public_key();
+        let t = PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[0x22; 32]).unwrap());
+        let aux = [0x33u8; 32];
+        let m1 = [1u8; 32];
+        let m2 = [2u8; 32];
+
+        let k = |sk: &SecretKey, aux: &[u8; 32], m: &[u8; 32], x: &XOnlyPublicKey, t: &PublicKey| {
+            derive_bip340_nonce(sk, aux, m, x, t, 0)
+                .unwrap()
+                .secret_bytes()
+        };
+
+        let base = k(&sk, &aux, &m1, &x, &t);
+        // deterministic given identical inputs (a bad RNG can't silently reuse)
+        assert_eq!(base, k(&sk, &aux, &m1, &x, &t));
+        // message diverges the nonce even with the SAME aux_rand
+        assert_ne!(base, k(&sk, &aux, &m2, &x, &t));
+        // adaptor point diverges the nonce (no pre-sig / plain-sig collision)
+        let t2 = PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[0x44; 32]).unwrap());
+        assert_ne!(base, k(&sk, &aux, &m1, &x, &t2));
+        // secret binding: a different key yields a different nonce for the same
+        // aux_rand/message — nonce secrecy no longer rests on aux_rand alone
+        let sk2 = SecretKey::from_slice(&[0x55; 32]).unwrap();
+        let (x2, _) = PublicKey::from_secret_key(&secp, &sk2).x_only_public_key();
+        assert_ne!(base, k(&sk2, &aux, &m1, &x2, &t));
+        // aux_rand still contributes entropy: changing it changes the nonce
+        assert_ne!(base, k(&sk, &[0x99; 32], &m1, &x, &t));
     }
 
     #[test]

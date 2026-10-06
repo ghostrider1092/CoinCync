@@ -6,11 +6,69 @@
 // When >= SIGNAL_THRESHOLD% of blocks in a SIGNAL_WINDOW-block window signal
 // for a deployment, it "locks in" and activates the following window.
 
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `bits` module + `SignalBits`** — INVARIANT: every CIP occupies a
+//!   distinct bit, `MUST_SET` (bit 31) is always OR'd in by `SignalBits::new`,
+//!   and `signals()` reports exactly the set bits. THREAT: a bit collision makes
+//!   one coinbase appear to signal two CIPs, corrupting both activation machines.
+//!   TESTS: `signal_bits_must_set`, `signals_specific_bit`,
+//!   `v1_0_12_bundle_bit_distinct_from_other_cips`,
+//!   `v1_0_12_bundle_signaled_by_dedicated_bit_only`.
+//! - **§2 `Deployment` + `DEPLOYMENTS`** — INVARIANT: every Phase-2 deployment
+//!   (halo2 / lelantus-spark / mw-cutthrough) and the v1.0.12 bundle ship DORMANT
+//!   — all three height fields `u64::MAX` — until an operator enables them (M-5).
+//!   THREAT: a non-MAX height lets the BIP-9 state machine begin transitioning a
+//!   pre-audit privacy upgrade silently against the live chain.
+//!   TESTS: `v1_0_12_bundle_deployment_registered_dormant`,
+//!   `all_phase2_deployments_ship_dormant`.
+//! - **§3 `DeploymentState`** — INVARIANT: the state machine has exactly the
+//!   BIP-9 states Defined → Started → LockedIn → Active, plus Failed on timeout;
+//!   `signaling_pct` is a 0..=100 UI value only. THREAT: an unrepresentable or
+//!   skipped state misreports activation to explorers/validators.
+//!   TESTS: `defined_before_start`, `locks_in_at_threshold`,
+//!   `state_reaches_failed_on_timeout_without_lock_in`,
+//!   `locked_in_transitions_to_active_at_min_activation_boundary`.
+//! - **§4 Coinbase `extra` encode/decode** — INVARIANT: `SignalBits(0)` encodes
+//!   to the byte-identical 8-byte legacy layout; a real signal appends 4 LE bytes;
+//!   `decode_signal_bits` never panics on short/attacker-controlled input and
+//!   ignores trailing bytes beyond 12 (forward-compat). THREAT: block-hash drift
+//!   for no-signal coinbases, or a panic in the validator on a crafted `extra`.
+//!   TESTS: `encode_no_signal_matches_legacy_format`,
+//!   `encode_with_signal_appends_4_bytes`, `encode_decode_roundtrip`,
+//!   `decode_legacy_8byte_extra_returns_no_signal`,
+//!   `decode_short_extra_returns_no_signal`,
+//!   `decode_ignores_trailing_bytes_beyond_12`.
+//! - **§5 `ForkSignaler::state` (read-only query)** — INVARIANT: `count >=
+//!   SIGNAL_THRESHOLD` (an ABSOLUTE block count, not a percentage) locks in;
+//!   past `timeout_height` without a recorded lock-in is Failed; a recorded
+//!   lock-in becomes Active at `max(next_window_start, min_activation_height)`;
+//!   the UI `pct` is clamped to ≤100 at a window boundary. THREAT: the pre-fix
+//!   `pct >= SIGNAL_THRESHOLD` comparison could never be true, silently breaking
+//!   all soft-fork activation. TESTS: `defined_before_start`,
+//!   `locks_in_at_threshold`, `below_threshold_stays_started`,
+//!   `threshold_exact_boundary_off_by_one`,
+//!   `state_reaches_failed_on_timeout_without_lock_in`,
+//!   `locked_in_before_timeout_survives_timeout`,
+//!   `locked_in_transitions_to_active_at_min_activation_boundary`,
+//!   `signaling_pct_clamped_to_100_at_window_start`.
+//! - **§6 `record_lock_in` / `state_and_record` (persistence)** — INVARIANT:
+//!   once locked in, the observation is persisted so re-querying in a later
+//!   window (even with signals dropped) stays LockedIn/Active; `state_and_record`
+//!   is idempotent. THREAT: the "forgot to record" bug class where read-only
+//!   `state()` re-counts a fresh window and reverts LOCKED_IN, violating BIP-9's
+//!   persistent-lock-in semantics. TESTS:
+//!   `state_alone_does_not_persist_lock_in_across_window_boundary`,
+//!   `state_and_record_persists_lock_in_across_window_boundary`,
+//!   `state_and_record_is_idempotent`.
+
 use crate::constants::{SIGNAL_THRESHOLD, SIGNAL_WINDOW};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
-// ── Bit assignments ───────────────────────────────────────────
+// ── §1 Bit assignments ───────────────────────────────────────────
 // Each bit corresponds to one pending CoinCync Improvement Proposal.
 // Add new bits here as CIPs are accepted for signaling.
 pub mod bits {
@@ -171,7 +229,7 @@ pub enum DeploymentState {
     Failed,
 }
 
-// ── Coinbase `extra` field encoding ───────────────────────────────
+// ── §4 Coinbase `extra` field encoding ───────────────────────────────
 //
 // Miners signal their CIP votes by embedding `SignalBits` in the
 // coinbase transaction's `extra` field. The layout is:
@@ -707,5 +765,130 @@ mod tests {
         assert_eq!(d.start_height, u64::MAX, "must ship dormant");
         assert_eq!(d.timeout_height, u64::MAX, "must ship dormant");
         assert_eq!(d.min_activation_height, u64::MAX, "must ship dormant");
+    }
+
+    // ── state(): Failed branch ──────────────────────────────────────
+
+    #[test]
+    fn state_reaches_failed_on_timeout_without_lock_in() {
+        // current_height >= timeout_height and never locked in → Failed.
+        let signaler = ForkSignaler::new();
+        let d = synthetic_deployment();
+        let state = signaler.state(&d, d.timeout_height, |_, _, _| 0);
+        assert_eq!(state, DeploymentState::Failed);
+        // Well past the timeout is also Failed.
+        let state_after = signaler.state(&d, d.timeout_height + 5_000, |_, _, _| 0);
+        assert_eq!(state_after, DeploymentState::Failed);
+    }
+
+    #[test]
+    fn locked_in_before_timeout_survives_timeout() {
+        // A deployment that locked in before the timeout must NOT flip to Failed
+        // once current_height crosses timeout_height — it stays LockedIn/Active.
+        let mut signaler = ForkSignaler::new();
+        let d = synthetic_deployment();
+        signaler.record_lock_in(d.bit, 6_000);
+        let state = signaler.state(&d, d.timeout_height, |_, _, _| 0);
+        assert!(
+            matches!(
+                state,
+                DeploymentState::Active | DeploymentState::LockedIn { .. }
+            ),
+            "pre-timeout lock-in must survive timeout — actual: {:?}",
+            state
+        );
+    }
+
+    // ── state(): LockedIn → Active boundary ─────────────────────────
+
+    #[test]
+    fn locked_in_transitions_to_active_at_min_activation_boundary() {
+        // Lock in at height 6_000: activation window opens at next_window_start
+        // (6_048) but min_activation_height (10_000) dominates. So the state is
+        // LockedIn right up to 9_999 and Active at exactly 10_000.
+        let mut signaler = ForkSignaler::new();
+        let d = synthetic_deployment();
+        signaler.record_lock_in(d.bit, 6_000);
+
+        let just_before = signaler.state(&d, d.min_activation_height - 1, |_, _, _| 0);
+        assert!(
+            matches!(just_before, DeploymentState::LockedIn { .. }),
+            "must still be LockedIn one below min_activation_height — actual: {:?}",
+            just_before
+        );
+
+        let at_boundary = signaler.state(&d, d.min_activation_height, |_, _, _| 0);
+        assert_eq!(
+            at_boundary,
+            DeploymentState::Active,
+            "must be Active at exactly min_activation_height"
+        );
+    }
+
+    // ── state(): threshold off-by-one ───────────────────────────────
+
+    #[test]
+    fn threshold_exact_boundary_off_by_one() {
+        let signaler = ForkSignaler::new();
+        let d = synthetic_deployment();
+        // Exactly one below threshold → still Started.
+        let below = signaler.state(&d, 6_000, |_, _, _| SIGNAL_THRESHOLD - 1);
+        assert!(
+            matches!(below, DeploymentState::Started { .. }),
+            "SIGNAL_THRESHOLD-1 must not lock in — actual: {:?}",
+            below
+        );
+        // Exactly at threshold → LockedIn.
+        let at = signaler.state(&d, 6_000, |_, _, _| SIGNAL_THRESHOLD);
+        assert!(
+            matches!(at, DeploymentState::LockedIn { .. }),
+            "SIGNAL_THRESHOLD must lock in — actual: {:?}",
+            at
+        );
+    }
+
+    // ── state(): >100% signaling clamp ──────────────────────────────
+
+    #[test]
+    fn signaling_pct_clamped_to_100_at_window_start() {
+        // At a window boundary, current_height == window_start so `total` is
+        // clamped to 1 via `.max(1)`. A non-zero (but sub-threshold) count would
+        // otherwise compute a nonsensical >100% pct; the `.min(100)` guard caps
+        // the UI-facing value at 100.
+        let signaler = ForkSignaler::new();
+        let d = synthetic_deployment();
+        // 6_048 == 3 * SIGNAL_WINDOW, a window boundary past start_height.
+        let window_boundary = 3 * SIGNAL_WINDOW;
+        assert_eq!(window_boundary, 6_048);
+        let state = signaler.state(&d, window_boundary, |_, _, _| 50);
+        match state {
+            DeploymentState::Started { signaling_pct } => {
+                assert_eq!(signaling_pct, 100, "pct must clamp to 100, never exceed");
+            }
+            other => panic!("expected Started with clamped pct, got {:?}", other),
+        }
+    }
+
+    // ── DEPLOYMENTS: Phase-2 dormancy invariant ─────────────────────
+
+    #[test]
+    fn all_phase2_deployments_ship_dormant() {
+        // The Phase-2 privacy upgrades (Halo2, Lelantus Spark, MimbleWimble) are
+        // gated off until an external audit completes (M-5 fix): all three height
+        // fields MUST be u64::MAX so the BIP-9 state machine cannot begin
+        // transitioning them against a live chain.
+        for name in ["halo2-shielded", "lelantus-spark", "mw-cutthrough"] {
+            let d = DEPLOYMENTS
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered in DEPLOYMENTS"));
+            assert_eq!(d.start_height, u64::MAX, "{name} must ship dormant");
+            assert_eq!(d.timeout_height, u64::MAX, "{name} must ship dormant");
+            assert_eq!(
+                d.min_activation_height,
+                u64::MAX,
+                "{name} must ship dormant"
+            );
+        }
     }
 }

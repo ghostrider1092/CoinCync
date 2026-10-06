@@ -144,7 +144,7 @@ proptest! {
     /// the smallest non-zero value).
     #[test]
     fn target_to_difficulty_of_max_target_is_positive(_unused in 0u8..1) {
-        let d = target_to_difficulty(&max_target());
+        let d = target_to_difficulty(&max_target()).as_u128();
         prop_assert!(d >= 1, "difficulty for max_target was {} (expected ≥ 1)", d);
     }
 
@@ -202,7 +202,7 @@ proptest! {
         height in any::<u64>(),
     ) {
         let target = calculate_difficulty(&seq, height);
-        let diff = target_to_difficulty(&target);
+        let diff = target_to_difficulty(&target).as_u128();
         // The floor only applies to "real" outputs — short sequences
         // returned via early-path will be max_target and have
         // difficulty ≈ 1, below MIN_DIFFICULTY. We've already tested

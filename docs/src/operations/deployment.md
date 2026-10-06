@@ -113,7 +113,7 @@ Activate a profile with `docker compose --profile mining up -d`.
 ## Pattern C: manual (development)
 
 ```bash
-cd /path/to/Coincync-Testnet-
+cd /path/to/CoinCync
 ./target/release/coincync-node --network testnet --data-dir ~/.coincync
 ```
 
