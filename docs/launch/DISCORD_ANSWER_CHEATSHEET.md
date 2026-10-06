@@ -140,7 +140,7 @@ Update the height / build / dates before launch week. Numbers in this file are c
 > Build from source (see #node-setup pinned message). Run `./target/release/coincync-node --network testnet`. DNS seeds auto-discover: `seed1.coincync.network`, `seed2.coincync.network`, `seed3.coincync.network`.
 
 **Q: My node is at height 0 / not syncing.**
-> Check (1) port 28080 outbound is allowed by your firewall, (2) `dig seed1.coincync.network` returns an IP, (3) the seed IPs are reachable from your network with `nc -zv 66.135.23.193 28080`. Post the last 50 lines of node logs in #testnet if still stuck.
+> Check (1) port 28080 outbound is allowed by your firewall, (2) `dig seed2.coincync.network` (or `seed3`) returns an IP, (3) the live seed is reachable from your network with `nc -zv 2.29.34.197 28080` (note: `seed1.coincync.network` currently points at a dead host, #148). Post the last 50 lines of node logs in #testnet if still stuck.
 
 **Q: What ports do I need open?**
 > **Outbound:** 28080/tcp (P2P). **Inbound:** 28080/tcp if you want others to connect to you (recommended but optional). **Local only:** 28081 (RPC, default 127.0.0.1). Don't expose 28081 publicly without auth.

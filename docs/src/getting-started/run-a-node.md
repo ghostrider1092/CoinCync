@@ -33,7 +33,9 @@ chmod +x coincync-node
     --addnode 2.29.34.197:28080
 ```
 
-The `--addnode` flag points at the public testnet seed (Hetzner, Falkenstein DE — `2.29.34.197:28080`), an explicit fallback for the case where DNS seed resolution fails. **Use it for first sync.** Without a reachable peer, your node starts at genesis (height 0), mines its own divergent chain, and rejects its own blocks once it diverges from the public tip. Once fully synced, you can drop the `--addnode` flag on subsequent restarts and rely on DNS (`seed1.coincync.network`). Add more `--addnode` peers as the community brings up additional seeds.
+The `--addnode` flag points at the public testnet seed (Hetzner, Falkenstein DE — `2.29.34.197:28080`), an explicit fallback for the case where DNS seed resolution fails. **Use it for first sync.** Without a reachable peer, your node starts at genesis (height 0), mines its own divergent chain, and rejects its own blocks once it diverges from the public tip. Once fully synced, you can drop the `--addnode` flag on subsequent restarts and rely on DNS — use **`seed2.coincync.network`** or **`seed3.coincync.network`**, which currently resolve to the live seed (`2.29.34.197`). **Note: `seed1.coincync.network` currently resolves to a host that no longer accepts connections (`68.8.46.247`, dead since 2026-09-27), so prefer `seed2`/`seed3` or the explicit `--addnode` above until additional independently-operated seeds are brought up (tracked in [#148](https://github.com/ghostrider1092/CoinCync/issues/148)).** Add more `--addnode` peers as the community brings up additional seeds.
+
+> **Mining needs ≥ 3 peers.** The solo miner / `coincync-rig` will not start producing blocks until the node has **at least 3 connected peers** (`peer_count >= 3`) — a deliberate anti-split guard so a node with an empty or one-host mesh can't mine a private fork off the tip (see `crates/coincync-rig/src/orchestrator.rs`). While the public testnet runs a single seed, a fresh node that only reaches that one seed sits at `peer_count = 1` and **will not mine** until more peers connect. Bring up or `--addnode` additional peers (or run several of your own nodes) to cross the threshold.
 
 That's it. The node will:
 
@@ -76,7 +78,7 @@ INFO  Chain tip: height=0, hash=41f970df
 INFO  Starting P2P listener on 0.0.0.0:28080
 INFO  Starting RPC server on 127.0.0.1:28081
 INFO  RPC server bound, methods: get_info, get_blockchain_info, ...
-INFO  Connected to seed1.coincync.network:28080
+INFO  Connected to seed2.coincync.network:28080
 INFO  Sync started — target height 12345
 INFO  Node is running. Ctrl-C to stop.
 ```
