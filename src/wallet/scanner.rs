@@ -3467,6 +3467,7 @@ mod tests {
             shared_secret: [0u8; 32],
             key_epoch: 0,
             subaddress_index: None,
+            payment_id: None,
         };
 
         let utxo = decrypted_to_utxo(&decrypted, &view, &spend, 7).unwrap();
@@ -3530,6 +3531,7 @@ mod tests {
             shared_secret: [0u8; 32],
             key_epoch: 0,
             subaddress_index: Some((3, 7)),
+            payment_id: None,
         };
         let utxo = decrypted_to_utxo(&decrypted, &view, &spend, 1).unwrap();
         assert_eq!(utxo.subaddress_account, Some(3));
