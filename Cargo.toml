@@ -63,6 +63,12 @@ testnet = ["randomx"]
 mainnet = ["randomx"]
 randomx = ["randomx-rs"]
 metrics = []
+# CIP-Fee-Reservoir "water battery": the PURE charge/discharge/decay rule in
+# `consensus::fee_market` (reservoir_step). Off by default — not wired into the
+# coinbase claim, header commitment, or reorg state (that is the activation-
+# gated follow-up). Gated so production builds are unaffected; lets the rule be
+# built, modelled, and reviewed ahead of any activation decision.
+fee-reservoir = []
 # CIP-Cross-Chain-Onramp: the peg-in turnstile SEAM (design scaffold only —
 # PegAttestation type + PegAttestor trait + FailClosedAttestor). Off by default,
 # fail-closed, nothing wired. Lets the interfaces be reviewed ahead of the

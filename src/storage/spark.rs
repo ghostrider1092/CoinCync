@@ -425,11 +425,45 @@ impl SparkStore {
         // `open_with_db` replay reconstructs the rewound state rather
         // than resurrecting the disconnected block's coins/serials.
         if let Some(p) = &self.persistence {
+            // R-63 parity (was silent `let _ = remove()`): a swallowed delete
+            // failure here lets `open_with_db` resurrect the disconnected block's
+            // coins/serials, diverging the committed spark root or freezing a live
+            // coin via a stale serial. Mirror KernelStore::rewind — log loudly so
+            // the operator knows a reindex is required.
+            let mut remove_failures = 0usize;
             for c in &removed_coins {
-                let _ = p.coins.remove(c.coin_id.to_be_bytes());
+                if let Err(e) = p.coins.remove(c.coin_id.to_be_bytes()) {
+                    remove_failures += 1;
+                    tracing::error!(
+                        target: "storage::spark",
+                        coin_id = c.coin_id,
+                        error = %e,
+                        "R-63: rewind failed to remove on-disk spark coin {} — disk \
+                         may replay an orphan coin on next open, corrupting the \
+                         committed spark root. Reindex required.",
+                        c.coin_id
+                    );
+                }
             }
             for s in &removed_serials {
-                let _ = p.serials.remove(s);
+                if let Err(e) = p.serials.remove(s) {
+                    remove_failures += 1;
+                    tracing::error!(
+                        target: "storage::spark",
+                        error = %e,
+                        "R-63: rewind failed to remove an on-disk spark serial — a \
+                         resurrected serial on next open can freeze a live coin. \
+                         Reindex required."
+                    );
+                }
+            }
+            if remove_failures > 0 {
+                tracing::error!(
+                    target: "storage::spark",
+                    remove_failures = remove_failures,
+                    "R-63: {} spark row removes failed during rewind",
+                    remove_failures
+                );
             }
         }
 
