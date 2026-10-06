@@ -1,10 +1,86 @@
 //! # Network Bootstrap
 //!
 //! DNS seeds, peer discovery, and network bootstrapping.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `BootstrapConfig::for_network`** — INVARIANT: mainnet/testnet/regtest
+//!   each get their own seed list and P2P port; `Default` never leaks the
+//!   testnet seed set onto a mainnet node.
+//!   THREAT: mainnet node dials dead testnet seeds on the wrong port and
+//!   finds zero peers (mainnet launch blocker).
+//!   TESTS: `bootstrap_config_is_network_aware`, `test_bootstrap_config`,
+//!   `test_seed_node_parsing`.
+//! - **§2 `Bootstrapper::get_peers_with_proxy`** — INVARIANT: the OS DNS
+//!   resolver is never queried while `onion_only` or `proxy_active`; when a
+//!   proxy is supplied DNS is instead resolved via DNS-over-TCP through
+//!   SOCKS5, otherwise DNS is skipped entirely.
+//!   THREAT: CRIT-7 (DNS queries bypass SOCKS5/Tor, leaking the user's real
+//!   IP to whoever runs their ISP's DNS resolver).
+//!   TESTS: (gap — no automated test exercises the DNS routing decision
+//!   tree; the fix is covered by manual/integration verification only).
+//! - **§3 `AddressManager::addr_netgroup` / `group_count`** — INVARIANT: the
+//!   netgroup key buckets IPv4 by /16 and IPv6 by /32 in disjoint namespaces,
+//!   and no single netgroup may exceed its quota of the address book.
+//!   THREAT: address-table eclipse attack (flooding the book with one
+//!   netgroup to crowd out honest, diverse peers).
+//!   TESTS: `address_book_netgroup_quota_bounds_flooding`,
+//!   `netgroup_quota_rejects_new_addr_before_evicting_honest_entries`.
+//! - **§4 `AddressManager::add`** — INVARIANT: a known self-address is never
+//!   re-admitted; a new address from an already-quota'd netgroup is rejected
+//!   BEFORE any eviction runs; capacity eviction always removes the oldest
+//!   entry by `last_seen`; operator `manual` peers bypass the netgroup quota.
+//!   THREAT: self-dial waste on restart, and an attacker evicting honest
+//!   diverse peers to seat its own flooded addresses.
+//!   TESTS: `self_address_is_never_dialed_or_readded`,
+//!   `netgroup_quota_rejects_new_addr_before_evicting_honest_entries`,
+//!   `eviction_removes_oldest_by_last_seen_at_capacity`,
+//!   `manual_peers_bypass_netgroup_quota`.
+//! - **§5 `AddressManager::get_next`** — INVARIANT: dial priority is strictly
+//!   manual peers, then anchors, then the discovered book sorted by
+//!   `last_seen`; each tier is skipped once tried this cycle; self-addresses
+//!   are never returned.
+//!   THREAT: a large or stale discovered book starving the operator's manual
+//!   peer or the persisted anchors out of the outbound dialer (2026-08-16
+//!   incident: 0 outbound for 90s+ against an up `--addnode` peer).
+//!   TESTS: `manual_peer_is_dialed_before_discovered_addresses`,
+//!   `anchors_are_dialed_before_general_pool`, `self_address_anchor_is_skipped`,
+//!   `get_next_priority_order_manual_then_anchors_then_book`,
+//!   `manual_and_anchor_not_starved_by_large_fresh_book`.
+//! - **§6 `AddressManager::mark_tried`** — INVARIANT: after
+//!   `FAILURE_PURGE_THRESHOLD` consecutive failures with no intervening
+//!   success, an address is purged from the pool entirely; `manual` peers are
+//!   exempt; purging is not a permanent ban (re-gossip re-adds it fresh).
+//!   THREAT: dead IPs gossiped forever starving outbound dial slots via the
+//!   eclipse-defense subnet counter (2026-06-26 incident).
+//!   TESTS: `peer_aging_purges_after_consecutive_failures`,
+//!   `manual_peer_survives_failure_purge`,
+//!   `discovered_peer_is_purged_after_threshold`,
+//!   `peer_aging_purged_address_can_be_readded`.
+//! - **§7 `AddressManager::mark_success` / tried-set bound** — INVARIANT: a
+//!   successful connect resets the per-address failure counter; the `tried`
+//!   set never exceeds `MAX_TRIED`, evicting the oldest entry first.
+//!   THREAT: M-8 (unbounded memory growth in `tried`, and eventual permanent
+//!   outbound isolation once `get_next` always returns `None`).
+//!   TESTS: `peer_aging_success_resets_failure_count`,
+//!   `tried_eviction_follows_recent_failure_order`.
+//! - **§8 `AddressManager::load_from_file`** — INVARIANT: an address-book
+//!   file larger than `MAX_ADDRBOOK_BYTES` is rejected (and removed) before
+//!   any read; a decoded entry count over `MAX_ADDRBOOK_ENTRIES` is rejected;
+//!   an empty `[]` array loads cleanly with zero entries.
+//!   THREAT: OOM-on-startup DoS via a multi-GB or N-billion-entry address
+//!   book file dropped into the data dir by any actor with filesystem access.
+//!   TESTS: `load_from_file_rejects_oversized_file`,
+//!   `load_from_file_accepts_empty_array`,
+//!   `load_from_file_rejects_too_many_entries`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::path::PathBuf;
 use std::time::Duration;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use tokio::time::timeout;
 use tracing::{info, warn};
 
@@ -129,11 +205,31 @@ impl Bootstrapper {
     ) -> Vec<SocketAddr> {
         let mut peers = HashSet::new();
         let force_disable_dns = env_bool("COINCYNC_BOOTSTRAP_DISABLE_DNS");
+        // Manifest-only mode: trust ONLY the operator-provided signed manifest
+        // (skip DNS discovery). Hardcoded seeds / addnodes still apply.
+        let manifest_only = env_bool("COINCYNC_BOOTSTRAP_MANIFEST_ONLY");
         let allowlist = seed_allowlist();
 
         // Add hardcoded seeds first
         for addr in &self.config.seed_nodes {
             peers.insert(*addr);
+        }
+
+        // Ed25519-signed bootstrap manifest: an operator points
+        // COINCYNC_BOOTSTRAP_SIGNED_MANIFEST at a JSON seed list and
+        // COINCYNC_BOOTSTRAP_SIGNING_PUBKEY at the 32-byte hex key that must
+        // have signed it (domain-separated, size-bounded). This is the
+        // anti-seed-poisoning path: peers whose provenance is cryptographically
+        // verified, independent of DNS/hardcoded trust. Invalid/absent → empty.
+        let mut manifest_peers = load_signed_manifest_peers(self.config.p2p_port);
+        if !manifest_peers.is_empty() {
+            info!(
+                "Bootstrap: loaded {} signed-manifest peers",
+                manifest_peers.len()
+            );
+            for addr in manifest_peers.drain(..) {
+                peers.insert(addr);
+            }
         }
 
         // DNS routing decision tree:
@@ -147,10 +243,15 @@ impl Bootstrapper {
         //     a proxy reference     → skip DNS (legacy callers; same
         //                             posture as before #9 fix).
         //   plain clearnet          → OS resolver (hickory).
-        let use_proxy_dns = proxy.map(|p| p.is_active()).unwrap_or(false) && !force_disable_dns;
+        let use_proxy_dns =
+            proxy.map(|p| p.is_active()).unwrap_or(false) && !force_disable_dns && !manifest_only;
 
-        if force_disable_dns {
-            info!("Bootstrap DNS disabled via COINCYNC_BOOTSTRAP_DISABLE_DNS=1");
+        if force_disable_dns || manifest_only {
+            if manifest_only {
+                info!("Bootstrap DNS disabled: COINCYNC_BOOTSTRAP_MANIFEST_ONLY=1 (signed-manifest peers only)");
+            } else {
+                info!("Bootstrap DNS disabled via COINCYNC_BOOTSTRAP_DISABLE_DNS=1");
+            }
         } else if use_proxy_dns {
             let proxy = proxy.expect("use_proxy_dns implies Some(proxy)");
             info!(
@@ -312,6 +413,14 @@ pub struct AddressManager {
     tried: HashSet<SocketAddr>,
     /// Tried addresses ordered from least to most recently failed.
     tried_order: VecDeque<SocketAddr>,
+    /// GOOD/"tried"-table (Bitcoin new/tried model): addresses we have
+    /// successfully connected to at least once (populated by `mark_success`).
+    /// `get_next` prefers these over never-connected ("new") gossip, so an
+    /// address-book eclipse — flooding the book with attacker-controlled
+    /// untried addresses — cannot starve dialing of proven-good peers. A subset
+    /// of the book (`known_addrs`); pruned alongside book eviction/purge.
+    /// See docs/design/addrman-new-tried.md.
+    good: HashSet<SocketAddr>,
     /// Self-addresses (detected via nonce match) — never connect to these
     self_addresses: HashSet<SocketAddr>,
     /// ANCHORS (Bitcoin Core model): our known-good outbound peers from the
@@ -333,6 +442,14 @@ pub struct AddressManager {
     manual: HashSet<SocketAddr>,
     /// Maximum addresses to store
     max_addresses: usize,
+    /// ANTI-ECLIPSE (address-book netgroup diversity): the most addresses any
+    /// single netgroup (/16 for IPv4, /32 for IPv6) may occupy in the book.
+    /// The connection layer already caps outbound peers per /16
+    /// (`connection_tracker::MAX_OUTBOUND_PER_SUBNET`); this is the
+    /// address-*table* analog — it stops an attacker from flooding the book
+    /// with addresses from one group and crowding out honest, diverse peers
+    /// (an address-table eclipse). Operator `manual` peers are exempt.
+    max_per_group: usize,
 }
 
 impl AddressManager {
@@ -342,12 +459,42 @@ impl AddressManager {
             known_addrs: HashSet::new(),
             tried: HashSet::new(),
             tried_order: VecDeque::new(),
+            good: HashSet::new(),
             self_addresses: HashSet::new(),
             anchors: Vec::new(),
             failures: HashMap::new(),
             manual: HashSet::new(),
             max_addresses,
+            // No single netgroup may hold more than ~1/8 of the book (floor 8
+            // for tiny books), so honest diversity always keeps a majority.
+            max_per_group: (max_addresses / 8).max(8),
         }
+    }
+
+    /// Netgroup key for anti-eclipse book diversity: /16 for IPv4, /32 for
+    /// IPv6, with a high marker bit so v4 and v6 groups never collide.
+    fn addr_netgroup(addr: &SocketAddr) -> u64 {
+        match addr.ip() {
+            std::net::IpAddr::V4(v4) => {
+                let o = v4.octets();
+                ((o[0] as u64) << 8) | (o[1] as u64)
+            }
+            std::net::IpAddr::V6(v6) => {
+                let s = v6.segments();
+                0x1_0000_0000 | ((s[0] as u64) << 16) | (s[1] as u64)
+            }
+        }
+    }
+
+    /// Count how many addresses currently in the book belong to `group`.
+    /// Computed on demand (no separate counter to drift across the several
+    /// removal sites); `add` already sorts O(n log n) when the book is full,
+    /// so this O(n) scan is comparable.
+    fn group_count(&self, group: u64) -> usize {
+        self.addresses
+            .iter()
+            .filter(|a| Self::addr_netgroup(&a.addr) == group)
+            .count()
     }
 
     /// Register a manually-configured (--addnode) peer. Manual peers are
@@ -382,18 +529,32 @@ impl AddressManager {
         if self.self_addresses.contains(&addr.addr) {
             return;
         }
+
+        // Don't add if already known or tried (check before the anti-eclipse
+        // quota + eviction so a re-gossip of a known addr is a cheap no-op).
+        if self.tried.contains(&addr.addr) || self.known_addrs.contains(&addr.addr) {
+            return;
+        }
+
+        // ANTI-ECLIPSE (address-book netgroup diversity): reject a NEW address
+        // whose netgroup already holds its quota, BEFORE any eviction — so an
+        // attacker flooding one /16 cannot evict honest, diverse addresses to
+        // make room for its own. Operator `manual` peers bypass the quota.
+        if !self.manual.contains(&addr.addr) {
+            let group = Self::addr_netgroup(&addr.addr);
+            if self.group_count(group) >= self.max_per_group {
+                return;
+            }
+        }
+
         if self.addresses.len() >= self.max_addresses {
             // Remove oldest
             self.addresses
                 .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
             if let Some(evicted) = self.addresses.pop() {
                 self.known_addrs.remove(&evicted.addr);
+                self.good.remove(&evicted.addr);
             }
-        }
-
-        // Don't add if already known or tried
-        if self.tried.contains(&addr.addr) {
-            return;
         }
 
         // SECURITY (L6): O(1) dedup check via HashSet instead of O(n) linear scan
@@ -421,6 +582,33 @@ impl AddressManager {
         // Also remove from the address list entirely
         self.addresses.retain(|a| a.addr != addr);
         self.known_addrs.remove(&addr);
+        self.good.remove(&addr);
+    }
+
+    /// Select a feeler-probe candidate: a NEW (never-connected) address to
+    /// test-connect so it can be promoted into the GOOD table before we need
+    /// it, keeping the book fresh even when all outbound slots are full. Returns
+    /// a not-yet-good, not-currently-tried, non-self, non-manual/anchor address
+    /// (feelers exist to validate the *unproven* pool). `None` when every book
+    /// address is already good or tried. Most-recently-seen first.
+    pub fn select_feeler_candidate(&mut self) -> Option<SocketAddr> {
+        self.addresses
+            .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
+        self.addresses
+            .iter()
+            .map(|a| a.addr)
+            .find(|addr| {
+                !self.good.contains(addr)
+                    && !self.tried.contains(addr)
+                    && !self.self_addresses.contains(addr)
+                    && !self.manual.contains(addr)
+                    && !self.anchors.contains(addr)
+            })
+    }
+
+    /// Number of proven-good ("tried"-table) addresses. Observability/tests.
+    pub fn good_count(&self) -> usize {
+        self.good.len()
     }
 
     /// Get next address to try connecting
@@ -450,7 +638,23 @@ impl AddressManager {
         self.addresses
             .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
 
-        // Find first address not in tried set and not a self-address
+        // GOOD/"tried" TABLE NEXT (new/tried anti-eclipse): before any
+        // never-connected ("new") address, prefer an address we have
+        // successfully connected to before. This is what stops an address-book
+        // eclipse — a flood of attacker-controlled untried gossip cannot crowd
+        // proven-good peers out of the dialer, because good peers are always
+        // tried first. Skipped once tried this cycle (re-prioritized when the
+        // tried set clears below).
+        for addr in &self.addresses {
+            if self.good.contains(&addr.addr)
+                && !self.tried.contains(&addr.addr)
+                && !self.self_addresses.contains(&addr.addr)
+            {
+                return Some(addr.addr);
+            }
+        }
+
+        // Then a NEW (never-connected) address not in tried set and not a self-address
         for addr in &self.addresses {
             if !self.tried.contains(&addr.addr) && !self.self_addresses.contains(&addr.addr) {
                 return Some(addr.addr);
@@ -519,6 +723,7 @@ impl AddressManager {
             self.tried.remove(&addr);
             self.tried_order.retain(|candidate| *candidate != addr);
             self.failures.remove(&addr);
+            self.good.remove(&addr);
         }
     }
 
@@ -528,6 +733,13 @@ impl AddressManager {
         self.tried_order.retain(|candidate| *candidate != addr);
         // Reset failure count — a successful connect proves the address is alive.
         self.failures.remove(&addr);
+        // Promote into the GOOD/"tried" table: a proven-reachable peer that
+        // get_next prefers over never-connected gossip (new/tried anti-eclipse).
+        // Only track addresses that are (or can be) in the book, so `good` stays
+        // a subset bounded by max_addresses.
+        if self.known_addrs.contains(&addr) || self.manual.contains(&addr) {
+            self.good.insert(addr);
+        }
 
         // Update last_seen
         if let Some(peer) = self.addresses.iter_mut().find(|a| a.addr == addr) {
@@ -657,8 +869,9 @@ impl AddressManager {
 
 /// UPnP port forwarding (optional)
 pub async fn setup_upnp(internal_port: u16, external_port: u16) -> Result<()> {
-    use igd::aio::search_gateway;
-    use igd::PortMappingProtocol;
+    use igd_next::aio::tokio::search_gateway;
+    use igd_next::PortMappingProtocol;
+    use std::net::SocketAddr;
 
     info!("Attempting UPnP port mapping...");
 
@@ -672,12 +885,12 @@ pub async fn setup_upnp(internal_port: u16, external_port: u16) -> Result<()> {
         .await
         .map_err(|e| Error::ConnectionFailed(e.to_string()))?;
 
-    // Add port mapping
+    // Add port mapping. igd-next takes a `SocketAddr` (v4 or v6).
     gateway
         .add_port(
             PortMappingProtocol::TCP,
             external_port,
-            SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), internal_port),
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), internal_port)),
             3600, // 1 hour lease
             "CoinCync",
         )
@@ -694,6 +907,110 @@ pub async fn setup_upnp(internal_port: u16, external_port: u16) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_manifest_verifies_and_parses() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let vk = sk.verifying_key();
+        let manifest = br#"{"peers":["1.2.3.4:28080","5.6.7.8"]}"#;
+        let mut msg = Vec::new();
+        msg.extend_from_slice(BOOTSTRAP_MANIFEST_DOMAIN);
+        msg.extend_from_slice(manifest);
+        let sig = sk.sign(&msg);
+        let peers = verify_and_parse_manifest(manifest, &sig, &vk, 28080)
+            .expect("a correctly-signed manifest must verify");
+        assert_eq!(
+            peers,
+            vec![
+                "1.2.3.4:28080".parse().unwrap(),
+                // Port defaulted from the manifest entry with no ':port'.
+                "5.6.7.8:28080".parse().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn signed_manifest_rejects_tampered_bytes() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[9u8; 32]);
+        let vk = sk.verifying_key();
+        let manifest = br#"{"peers":["1.2.3.4:28080"]}"#;
+        let mut msg = Vec::new();
+        msg.extend_from_slice(BOOTSTRAP_MANIFEST_DOMAIN);
+        msg.extend_from_slice(manifest);
+        let sig = sk.sign(&msg);
+        // A different manifest than what was signed must not verify.
+        let tampered = br#"{"peers":["6.6.6.6:28080"]}"#;
+        assert!(
+            verify_and_parse_manifest(tampered, &sig, &vk, 28080).is_none(),
+            "a tampered manifest must fail signature verification (no peers returned)"
+        );
+    }
+
+    #[test]
+    fn signed_manifest_rejects_cross_context_signature_replay() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[3u8; 32]);
+        let vk = sk.verifying_key();
+        let manifest = br#"{"peers":["1.2.3.4:28080"]}"#;
+        // Sign the raw bytes WITHOUT the domain tag — simulates replaying a
+        // signature made over some other CoinCync payload. Domain separation
+        // must reject it.
+        let sig = sk.sign(manifest);
+        assert!(
+            verify_and_parse_manifest(manifest, &sig, &vk, 28080).is_none(),
+            "a signature lacking the manifest domain tag must not verify as a manifest"
+        );
+    }
+
+    #[test]
+    fn address_book_netgroup_quota_bounds_flooding() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        // max_per_group = (1000 / 8).max(8) = 125.
+        let mut am = AddressManager::new(1000);
+
+        // Flood 500 distinct addresses all inside one /16 (10.20.0.0/16).
+        for i in 0..500u32 {
+            let ip = Ipv4Addr::new(10, 20, (i / 256) as u8, (i % 256) as u8);
+            am.add(PeerAddress::new(SocketAddr::new(IpAddr::V4(ip), 18080)));
+        }
+        let all = am.get_for_exchange(10_000);
+        let flooded = all
+            .iter()
+            .filter(|a| matches!(a.addr.ip(), IpAddr::V4(v4) if v4.octets()[0] == 10 && v4.octets()[1] == 20))
+            .count();
+        assert!(
+            flooded <= 125,
+            "one /16 must not exceed the book quota (125), got {flooded}"
+        );
+
+        // A diverse address from a different /16 is still admitted.
+        let diverse = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 18080);
+        am.add(PeerAddress::new(diverse));
+        assert!(
+            am.get_for_exchange(10_000).iter().any(|a| a.addr == diverse),
+            "an address from an unsaturated netgroup must still be admitted"
+        );
+    }
+
+    #[test]
+    fn manual_peers_bypass_netgroup_quota() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let mut am = AddressManager::new(1000); // quota 125 per /16
+        // Saturate 10.20/16 with discovered addresses.
+        for i in 0..300u32 {
+            let ip = Ipv4Addr::new(10, 20, (i / 256) as u8, (i % 256) as u8);
+            am.add(PeerAddress::new(SocketAddr::new(IpAddr::V4(ip), 18080)));
+        }
+        // An operator --addnode peer in the SAME /16 must still be admitted.
+        let manual = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 20, 255, 254)), 18080);
+        am.add_manual(manual);
+        assert!(
+            am.get_for_exchange(10_000).iter().any(|a| a.addr == manual),
+            "operator manual peer must bypass the netgroup quota"
+        );
+    }
 
     #[test]
     fn bootstrap_config_is_network_aware() {
@@ -1126,6 +1443,201 @@ mod tests {
         );
     }
 
+    /// ANTI-ECLIPSE (explicit): a NEW address whose netgroup is already at its
+    /// quota is rejected BEFORE the capacity-eviction block runs, so an
+    /// attacker flooding one /16 can never evict an honest, diverse entry to
+    /// seat its own. Honest entries here carry OLDER last_seen than the
+    /// flooders, so they'd be the oldest-first eviction victims if eviction
+    /// ever ran — the quota check must prevent that.
+    #[test]
+    fn netgroup_quota_rejects_new_addr_before_evicting_honest_entries() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        // max_addresses = 24 → max_per_group = (24 / 8).max(8) = 8.
+        let mut am = AddressManager::new(24);
+
+        // Saturate one /16 (10.20.0.0/16) up to its group quota (8), with
+        // RECENT last_seen (they'd survive an oldest-first eviction).
+        for i in 0..8u32 {
+            let ip = Ipv4Addr::new(10, 20, 0, i as u8);
+            let mut pa = PeerAddress::new(SocketAddr::new(IpAddr::V4(ip), 28080));
+            pa.last_seen = 9_000 + i as u64;
+            am.add(pa);
+        }
+        // Fill the rest of the book (16 slots) with diverse, distinct /16
+        // honest entries that have OLD last_seen (the eviction victims if
+        // eviction ran).
+        for i in 0..16u32 {
+            let ip = Ipv4Addr::new(172, (16 + i) as u8, 0, 1);
+            let mut pa = PeerAddress::new(SocketAddr::new(IpAddr::V4(ip), 28080));
+            pa.last_seen = 100 + i as u64;
+            am.add(pa);
+        }
+        assert_eq!(am.len(), 24, "book is full");
+
+        // A NEW address in the already-quota'd /16 must be rejected up front —
+        // no honest (older) entry may be evicted to make room for it.
+        let intruder = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 20, 250, 250)), 28080);
+        am.add(PeerAddress::new(intruder));
+
+        assert_eq!(am.len(), 24, "quota rejection must not change book size");
+        let all = am.get_for_exchange(10_000);
+        assert!(
+            !all.iter().any(|a| a.addr == intruder),
+            "over-quota netgroup addr must not be admitted"
+        );
+        for i in 0..16u32 {
+            let ip = Ipv4Addr::new(172, (16 + i) as u8, 0, 1);
+            let honest = SocketAddr::new(IpAddr::V4(ip), 28080);
+            assert!(
+                all.iter().any(|a| a.addr == honest),
+                "honest entry {honest} must not be evicted by an over-quota intruder"
+            );
+        }
+    }
+
+    /// `get_next` priority order across all three tiers in a single scan:
+    /// manual (--addnode) first, then anchors, then the discovered book (by
+    /// last_seen). Each tier is skipped once tried this cycle.
+    #[test]
+    fn good_addresses_are_preferred_over_new_after_anchors() {
+        let mut mgr = AddressManager::new(100);
+        let new_addr: SocketAddr = "203.0.113.10:28080".parse().unwrap();
+        let good_addr: SocketAddr = "203.0.113.20:28080".parse().unwrap();
+        mgr.add(PeerAddress::new(new_addr));
+        mgr.add(PeerAddress::new(good_addr));
+        mgr.mark_success(good_addr); // promote into the GOOD/"tried" table
+        assert_eq!(mgr.good_count(), 1);
+        assert_eq!(
+            mgr.get_next(),
+            Some(good_addr),
+            "proven-good peer must be dialed before a never-connected one"
+        );
+    }
+
+    #[test]
+    fn a_flood_of_new_addresses_cannot_starve_a_good_peer() {
+        // Address-book eclipse simulation: one proven-good peer, then a flood of
+        // diverse never-connected addresses. The good peer must still be dialed
+        // first — new gossip cannot crowd the tried table out of the dialer.
+        let mut mgr = AddressManager::new(1000);
+        let good_addr: SocketAddr = "203.0.113.20:28080".parse().unwrap();
+        mgr.add(PeerAddress::new(good_addr));
+        mgr.mark_success(good_addr);
+        for o in 0..60u16 {
+            let a: SocketAddr = format!("198.{o}.0.1:28080").parse().unwrap();
+            mgr.add(PeerAddress::new(a));
+        }
+        assert_eq!(mgr.get_next(), Some(good_addr));
+    }
+
+    #[test]
+    fn feeler_candidate_is_an_unproven_address() {
+        let mut mgr = AddressManager::new(100);
+        let good_addr: SocketAddr = "203.0.113.20:28080".parse().unwrap();
+        let new_addr: SocketAddr = "203.0.113.30:28080".parse().unwrap();
+        mgr.add(PeerAddress::new(good_addr));
+        mgr.add(PeerAddress::new(new_addr));
+        mgr.mark_success(good_addr);
+        assert_eq!(
+            mgr.select_feeler_candidate(),
+            Some(new_addr),
+            "feeler probes the unproven pool, never a good peer"
+        );
+
+        let mut only_good = AddressManager::new(100);
+        only_good.add(PeerAddress::new(good_addr));
+        only_good.mark_success(good_addr);
+        assert_eq!(
+            only_good.select_feeler_candidate(),
+            None,
+            "nothing to feel when every address is already good"
+        );
+    }
+
+    #[test]
+    fn get_next_priority_order_manual_then_anchors_then_book() {
+        let mut mgr = AddressManager::new(100);
+        let book: SocketAddr = "198.51.100.5:28080".parse().unwrap();
+        let mut pa = PeerAddress::new(book);
+        pa.last_seen = 5_000_000; // very recent — would sort to the front of the book
+        mgr.add(pa);
+        let anchor: SocketAddr = "192.0.2.10:28080".parse().unwrap();
+        mgr.set_anchors(vec![anchor]);
+        let manual: SocketAddr = "203.0.113.7:28080".parse().unwrap();
+        mgr.add_manual(manual);
+
+        // 1) manual peer first.
+        let first = mgr.get_next().unwrap();
+        assert_eq!(first, manual, "manual peer dialed first");
+        mgr.mark_tried(first);
+        // 2) anchor next.
+        let second = mgr.get_next().unwrap();
+        assert_eq!(second, anchor, "anchor dialed after manual");
+        mgr.mark_tried(second);
+        // 3) discovered book last.
+        let third = mgr.get_next().unwrap();
+        assert_eq!(third, book, "discovered book dialed only after manual + anchors");
+    }
+
+    /// At capacity, `add` evicts the OLDEST entry by `last_seen` to seat a
+    /// newer one (distinct netgroups so the quota isn't the gate here).
+    #[test]
+    fn eviction_removes_oldest_by_last_seen_at_capacity() {
+        use std::net::SocketAddr;
+        let mut mgr = AddressManager::new(3);
+        let mk = |o: u8, seen: u64| {
+            let mut pa =
+                PeerAddress::new(format!("172.{o}.0.1:28080").parse::<SocketAddr>().unwrap());
+            pa.last_seen = seen;
+            pa
+        };
+        let oldest = mk(20, 100);
+        mgr.add(oldest.clone());
+        mgr.add(mk(21, 200));
+        mgr.add(mk(22, 300));
+        assert_eq!(mgr.len(), 3);
+
+        // A 4th (newest) address must evict the oldest-by-last_seen entry.
+        mgr.add(mk(23, 400));
+        assert_eq!(mgr.len(), 3, "book stays at capacity");
+        let all = mgr.get_for_exchange(10_000);
+        assert!(
+            !all.iter().any(|a| a.addr == oldest.addr),
+            "oldest-by-last_seen entry must be the eviction victim"
+        );
+        assert!(
+            all.iter().any(|a| a.addr == mk(23, 400).addr),
+            "newest entry must be admitted"
+        );
+    }
+
+    /// Regression (2026-08-16, 0-outbound for 90s+): a large book of fresh
+    /// discovered addresses must NOT starve the operator's manual peer or the
+    /// persisted anchors out of the dialer. Both must still be handed out first
+    /// despite 200 recently-seen discovered entries crowding the last_seen sort.
+    #[test]
+    fn manual_and_anchor_not_starved_by_large_fresh_book() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let mut mgr = AddressManager::new(1000); // quota 125 per /16
+        for i in 0..200u32 {
+            // Distinct /16 per entry so none hit the netgroup quota.
+            let ip = Ipv4Addr::new(10, (i % 256) as u8, 0, 1);
+            let mut pa = PeerAddress::new(SocketAddr::new(IpAddr::V4(ip), 28080));
+            pa.last_seen = 9_000_000 + i as u64; // all very recent
+            mgr.add(pa);
+        }
+        let anchor: SocketAddr = "192.0.2.10:28080".parse().unwrap();
+        mgr.set_anchors(vec![anchor]);
+        let manual: SocketAddr = "203.0.113.7:28080".parse().unwrap();
+        mgr.add_manual(manual);
+
+        let first = mgr.get_next().unwrap();
+        assert_eq!(first, manual, "manual peer must not be starved by a large book");
+        mgr.mark_tried(first);
+        let second = mgr.get_next().unwrap();
+        assert_eq!(second, anchor, "anchor must not be starved by a large book");
+    }
+
     #[test]
     fn test_seed_node_parsing() {
         // Valid socket address should be parseable
@@ -1154,13 +1666,182 @@ mod tests {
 // ── Bootstrap env helpers ─────────────────────────────────────────
 // Shared by `Bootstrapper::get_peers_with_proxy` above.
 //
-// NOTE (2026-08-16 dead-code sweep): removed the second, unused bootstrap
-// path that lived here — `initial_peers` (+ `load_signed_manifest_peers`,
-// `hex_to_32`, `load_signature`, `SignedSeedManifest`,
-// `BOOTSTRAP_MANIFEST_DOMAIN`, and the `MAINNET_NODES` / `TESTNET_NODES`
-// hardcoded lists). Nothing called `initial_peers` at runtime; the live
-// bootstrap path is `Bootstrapper::get_peers`. The signed-manifest tooling
-// still lives in `src/bin/bootstrap_manifest_tool.rs`.
+// NOTE (2026-09-26): the Ed25519-signed bootstrap manifest loader was removed
+// on 2026-08-16 as "dead code" (only the then-unused `initial_peers` called
+// it), but the hardening guardrail (`scripts/check_insecure_defaults.py`),
+// `scripts/preflight_bootstrap_manifest.py`, and the signing tool
+// (`src/bin/bootstrap_manifest_tool.rs`) all still expect it. Restored and
+// WIRED into the live bootstrap path (`get_peers_with_proxy` above), so an
+// operator can bootstrap from a cryptographically-verified seed list — it is no
+// longer dead code.
+
+/// Domain-separation tag for the Ed25519-signed bootstrap manifest. The signed
+/// message is this tag followed by the raw manifest bytes, so a signature over
+/// some other CoinCync payload can never be replayed as a manifest signature.
+const BOOTSTRAP_MANIFEST_DOMAIN: &[u8] = b"coincync/bootstrap-manifest/v1";
+
+/// Size ceiling for a signed manifest file — otherwise a misconfigured operator
+/// could point `COINCYNC_BOOTSTRAP_SIGNED_MANIFEST` at a huge file and OOM the
+/// node at startup. Real manifests are a few KB; 10 MB is ~1000× headroom.
+const MAX_MANIFEST_BYTES: u64 = 10 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct SignedSeedManifest {
+    peers: Vec<String>,
+}
+
+fn hex_to_32(hex_str: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(hex_str.trim()).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Some(out)
+}
+
+fn load_signature(path: &PathBuf) -> Option<[u8; 64]> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() == 64 {
+        let mut out = [0u8; 64];
+        out.copy_from_slice(&bytes);
+        return Some(out);
+    }
+    // Also accept a hex-encoded signature file.
+    let as_text = std::str::from_utf8(&bytes).ok()?.trim();
+    let decoded = hex::decode(as_text).ok()?;
+    if decoded.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 64];
+    out.copy_from_slice(&decoded);
+    Some(out)
+}
+
+/// Pure core: verify the domain-separated Ed25519 signature over the manifest
+/// bytes and, on success, parse the JSON seed list into socket addresses
+/// (defaulting the port to `default_port` when an entry omits one). Returns
+/// `None` when the signature fails or the JSON is invalid — never a partial or
+/// unverified list. Factored out of the env/file IO so it is deterministically
+/// testable without touching process env vars or the filesystem.
+fn verify_and_parse_manifest(
+    manifest_bytes: &[u8],
+    signature: &Signature,
+    verify_key: &VerifyingKey,
+    default_port: u16,
+) -> Option<Vec<SocketAddr>> {
+    let mut msg = Vec::with_capacity(BOOTSTRAP_MANIFEST_DOMAIN.len() + manifest_bytes.len());
+    msg.extend_from_slice(BOOTSTRAP_MANIFEST_DOMAIN);
+    msg.extend_from_slice(manifest_bytes);
+    if verify_key.verify(&msg, signature).is_err() {
+        return None;
+    }
+    let parsed: SignedSeedManifest = serde_json::from_slice(manifest_bytes).ok()?;
+    let mut out = Vec::new();
+    for raw in parsed.peers {
+        let with_port = if raw.contains(':') {
+            raw
+        } else {
+            format!("{}:{}", raw, default_port)
+        };
+        match with_port.parse::<SocketAddr>() {
+            Ok(addr) => out.push(addr),
+            Err(_) => warn!("Skipping invalid manifest peer '{}'", with_port),
+        }
+    }
+    Some(out)
+}
+
+/// Load bootstrap peers from an Ed25519-signed manifest, if configured via env:
+/// `COINCYNC_BOOTSTRAP_SIGNED_MANIFEST` (manifest path),
+/// `COINCYNC_BOOTSTRAP_SIGNING_PUBKEY` (32-byte hex key that must have signed
+/// it), and optionally `COINCYNC_BOOTSTRAP_SIGNED_MANIFEST_SIG` (signature path,
+/// default `<manifest>.sig`). Any misconfiguration or verification failure logs
+/// and returns an empty list — never an unverified peer. The read is bounded
+/// (TOCTOU-safe: single open + capped `Read::take`) to prevent a startup OOM.
+fn load_signed_manifest_peers(default_port: u16) -> Vec<SocketAddr> {
+    let manifest_path = match std::env::var("COINCYNC_BOOTSTRAP_SIGNED_MANIFEST") {
+        Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
+        _ => return Vec::new(),
+    };
+    let pubkey_hex = match std::env::var("COINCYNC_BOOTSTRAP_SIGNING_PUBKEY") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => {
+            warn!("Signed bootstrap manifest requested but COINCYNC_BOOTSTRAP_SIGNING_PUBKEY is missing");
+            return Vec::new();
+        }
+    };
+    let pubkey_bytes = match hex_to_32(&pubkey_hex) {
+        Some(v) => v,
+        None => {
+            warn!("Invalid COINCYNC_BOOTSTRAP_SIGNING_PUBKEY (expected 32-byte hex)");
+            return Vec::new();
+        }
+    };
+    let verify_key = match VerifyingKey::from_bytes(&pubkey_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Invalid bootstrap signing key: {}", e);
+            return Vec::new();
+        }
+    };
+    let sig_path = std::env::var("COINCYNC_BOOTSTRAP_SIGNED_MANIFEST_SIG")
+        .ok()
+        .map(|v| PathBuf::from(v.trim()))
+        .unwrap_or_else(|| PathBuf::from(format!("{}.sig", manifest_path.display())));
+    let signature = match load_signature(&sig_path) {
+        Some(v) => Signature::from_bytes(&v),
+        None => {
+            warn!(
+                "Unable to read bootstrap manifest signature at {}",
+                sig_path.display()
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut file = match std::fs::File::open(&manifest_path) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(
+                "Unable to open bootstrap manifest {}: {}",
+                manifest_path.display(),
+                e
+            );
+            return Vec::new();
+        }
+    };
+    let mut manifest_bytes = Vec::with_capacity(64 * 1024);
+    use std::io::Read;
+    let read_cap = MAX_MANIFEST_BYTES.saturating_add(1);
+    if let Err(e) = (&mut file).take(read_cap).read_to_end(&mut manifest_bytes) {
+        warn!(
+            "Unable to read bootstrap manifest {}: {}",
+            manifest_path.display(),
+            e
+        );
+        return Vec::new();
+    }
+    if manifest_bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        warn!(
+            "Bootstrap manifest {} is over the {} MB ceiling; refusing to load",
+            manifest_path.display(),
+            MAX_MANIFEST_BYTES / (1024 * 1024)
+        );
+        return Vec::new();
+    }
+
+    match verify_and_parse_manifest(&manifest_bytes, &signature, &verify_key, default_port) {
+        Some(peers) => peers,
+        None => {
+            warn!(
+                "Bootstrap manifest signature/JSON verification failed for {}",
+                manifest_path.display()
+            );
+            Vec::new()
+        }
+    }
+}
 
 fn env_bool(name: &str) -> bool {
     std::env::var(name)

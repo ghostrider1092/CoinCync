@@ -20,6 +20,85 @@
 //! - Async flushing to reduce write latency
 //! - Optimized segment size for blockchain workloads
 //! - Optional compression for storage efficiency
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `DbConfig` / `DbMode` presets, `get_available_memory_mb`, `open*`** —
+//!   INVARIANT: every preset (fast_sync/low_memory/maximum_safety/auto/default)
+//!   opens a working store; the Windows memory probe reports true host RAM or
+//!   falls back to 4096 MB, never silently mis-sizing the cache.
+//!   THREAT: R-33 — the pre-fix empty Windows branch gave every host the 4-8 GB
+//!   config (OOM on small boxes, undersized cache on large ones).
+//!   TESTS: `test_database_open`, `test_database_config`.
+//! - **§2 `verify_or_stamp_schema_version` / `reject_newer_schema` /
+//!   `migrate_schema` / `EXPECTED_DB_SCHEMA_VERSION`** — INVARIANT: a fresh DB is
+//!   stamped; a matching version proceeds; missing-stamp-with-blocks, wrong-length,
+//!   and future (stored > expected) all refuse to open; older runs a registered
+//!   migration or fails. THREAT: silently mutating a mis-versioned DB (the "v1.1
+//!   upgrade bricked the testnet DB" failure mode). TESTS:
+//!   `schema_version_stamped_on_fresh_db`,
+//!   `schema_version_preserved_across_reopen`,
+//!   `schema_version_future_version_rejected`,
+//!   `schema_version_older_version_requires_migration`,
+//!   `schema_version_wrong_length_rejected`,
+//!   `schema_version_legacy_unstamped_db_rejected`.
+//! - **§3 `migrate_schema_v1_to_v2`** — INVARIANT: the state rewrite (supply
+//!   u64→u128) and the v2 stamp share ONE synchronous batch — a failed migration
+//!   leaves both the v1 record and the v1 stamp unchanged; an empty DB advances
+//!   without inventing chain state. THREAT: a half-migrated DB stamped v2 over
+//!   incomplete state → unloadable or wrong supply. TESTS:
+//!   `schema_v1_supply_migrates_reopens_and_rejects_v1_downgrade`,
+//!   `schema_v1_empty_database_advances_without_inventing_chain_state`,
+//!   `failed_v1_supply_migration_does_not_advance_schema_stamp`.
+//! - **§4 `migrate_legacy_db_to_v1` / `MigrationOutcome`** — INVARIANT: a legacy
+//!   (unstamped) DB is stamped v1 ONLY after the on-disk block-0 hash matches the
+//!   caller-supplied expected genesis; an empty DB is rejected; the call is
+//!   idempotent when already stamped; a failed migration writes no stamp.
+//!   THREAT: stamping a wrong-network / forked / corrupt DB as canonical.
+//!   TESTS: `migrate_legacy_db_to_v1_stamps_matching_genesis`,
+//!   `migrate_legacy_db_to_v1_rejects_wrong_genesis`,
+//!   `migrate_legacy_db_to_v1_rejects_empty_db`,
+//!   `migrate_legacy_db_to_v1_is_idempotent_when_already_stamped`.
+//! - **§5 `apply_reorg_atomic`** — INVARIANT: output-index removals+additions,
+//!   height sets, height removals, chain state, and tx-index add/remove all land
+//!   in ONE fsync-durable transaction or none; a re-mined output (in BOTH removals
+//!   and additions) is re-inserted with the NEW chain's entry; oldest-wins holds
+//!   for a non-removed shared address. THREAT: R-68 — dropping a re-mined
+//!   output_index entry makes ring-member lookups reject valid txs; a crash
+//!   mid-reorg leaving a hybrid tip. TESTS:
+//!   `reorg_does_not_drop_a_re_mined_output_index_entry`,
+//!   `reorg_preserves_oldest_wins_for_non_removed_shared_address`,
+//!   `apply_reorg_atomic_applies_full_tuple_atomically`,
+//!   `apply_reorg_atomic_four_tree_set_unchanged_when_closure_aborts`,
+//!   `apply_reorg_atomic_all_or_nothing_survives_reopen`.
+//!   (gap: true kill-mid-reorg-commit needs a process-kill harness.)
+//! - **§6 `commit_block_atomic`** — INVARIANT: the extend-path output-index +
+//!   height→hash + chain state + tx-index commit atomically; the height index can
+//!   never outrun committed state on reopen; oldest-wins on the output index.
+//!   THREAT: a crash between the pre-fix five separate writes → height index ahead
+//!   of state / orphaned output-index entries. TESTS:
+//!   `commit_block_atomic_writes_all_four_trees_together`,
+//!   `commit_block_atomic_height_index_never_outruns_state`,
+//!   `commit_block_atomic_does_not_overwrite_existing_stealth_oldest_wins`,
+//!   `commit_block_atomic_four_tree_set_rolls_back_when_closure_aborts`,
+//!   `commit_block_atomic_all_or_nothing_survives_reopen`.
+//!   (gap: true kill-mid-commit needs a process-kill harness.)
+//! - **§7 `index_tx` / `get_tx_location` / `remove_tx_index` /
+//!   `tx_index_is_empty`, `flush` / `flush_best_effort`** — INVARIANT: the 12-byte
+//!   height‖idx little-endian encoding round-trips; flush surfaces Ok on a healthy
+//!   DB and best-effort never panics. THREAT: a mis-encoded tx index silently
+//!   returns the wrong (height, idx). TESTS:
+//!   `tx_index_round_trip_and_12_byte_encoding`,
+//!   `flush_and_flush_best_effort_succeed_on_healthy_db`.
+//!   (gap: flush error-surfaced-vs-logged split needs an injectable I/O fault.)
+//! - **§8 `schema_version` accessor, `serialize`/`deserialize`, `stats`** —
+//!   INVARIANT: `schema_version` reads back the stamp of a successfully-opened DB;
+//!   borsh (de)serialize map errors to a typed `SerializationError`; `stats`
+//!   reports the nominal 8-field tree count (R-35, not the physical CF count).
+//!   TESTS: (gap — exercised transitively by the schema suite; no direct
+//!   stats/serialize unit test).
 
 mod blocks;
 pub mod filters;
@@ -272,7 +351,7 @@ pub struct Database {
     pub metadata: shim::Tree,
 }
 
-// ─── Schema versioning ──────────────────────────────────────────────
+// ─── §2 Schema versioning ───────────────────────────────────────────
 //
 // The DB carries a single `u32` schema-version stamp in the
 // `__db_metadata__` tree under the key `b"schema/db_version"`. Every
@@ -843,7 +922,7 @@ impl Database {
         self.tx_index.is_empty()
     }
 
-    // ── Atomic reorg state transition ──────────────────────────────────────
+    // ── §5 Atomic reorg state transition ───────────────────────────────────
     //
     // SECURITY: During a chain reorg, the output_index, height_index, state,
     // and tx_index trees must all transition atomically. A crash between
@@ -912,12 +991,32 @@ impl Database {
     ) -> Result<()> {
         use shim::transaction::Transactional;
 
-        // Pre-compute oldest-wins additions: the transaction closure must
-        // be purely writes (shim TxTree reads pass through to committed
-        // state, not the pending batch), so do the "already present" check
-        // up-front against the committed DB.
+        // Pre-compute oldest-wins additions: the transaction closure must be
+        // purely writes (shim TxTree reads pass through to committed state, not
+        // the pending batch), so decide up-front which additions to apply.
+        //
+        // FIX (db/mod.rs:920): an addition is skipped ONLY if its stealth
+        // address will STILL be present after this batch's removals — i.e. it is
+        // genuinely already indexed and staying. An address that is ALSO in
+        // output_removals is being disconnected and re-added (a re-mined output
+        // on the winning fork) and MUST be re-inserted; removals run before
+        // inserts in the transaction below, so the re-insert lands on top of the
+        // removal and the address ends up present with the NEW chain's entry.
+        // Pre-fix, the committed-state check saw it still present and skipped the
+        // insert, then the removal deleted it — silently dropping a live output
+        // from the index, which made ring-member lookups reject valid txs.
+        let removal_set: std::collections::HashSet<&[u8; 32]> = output_removals.iter().collect();
         let mut oi_to_insert: Vec<(&[u8; 32], &Vec<u8>)> = Vec::new();
         for (stealth, entry_bytes) in output_additions {
+            if removal_set.contains(stealth) {
+                // Removed in this same batch → not a pre-existing duplicate;
+                // always re-insert the new chain's entry.
+                oi_to_insert.push((stealth, entry_bytes));
+                continue;
+            }
+            // Not being removed → oldest-wins against committed state: skip if
+            // already indexed (keeps the earliest entry for a genuinely shared
+            // stealth address, e.g. coinbase reuse).
             if self
                 .output_index
                 .tree
@@ -984,6 +1083,105 @@ impl Database {
             })?;
 
         // Sync to disk after atomic transaction completes
+        self.flush()?;
+
+        Ok(())
+    }
+
+    /// Atomically commit a single connected (extend-path) block: output-index
+    /// additions, the height→hash mapping, the new chain state, and the
+    /// tx-index additions — all in ONE sled transaction, then flush.
+    ///
+    /// Crash-consistent by construction: on restart the height index, output
+    /// index, tx index, and chain state can never disagree, closing the
+    /// `db/blocks.rs:227` (height index ahead of state) and
+    /// `output_index.rs:130` (output-index entries for an uncommitted block)
+    /// findings. The pre-fix extend path wrote these as five separate,
+    /// non-transactional calls (`persist_output_index`, per-tx `index_tx`,
+    /// `set_height_hash`, `save_state`) with no crash barrier between them.
+    ///
+    /// Deliberately bundles the SAME four trees as [`Self::apply_reorg_atomic`]
+    /// so the connect and reorg commit paths share one transaction discipline
+    /// and cannot drift. Checkpoint recording is intentionally NOT part of this
+    /// transaction — a checkpoint lost to a crash is re-recorded at the next
+    /// interval, and it is not part of the height/state/output consistency
+    /// invariant this method guarantees.
+    ///
+    /// `output_additions` follows the same oldest-wins rule as the reorg path:
+    /// a stealth address already present in the committed output index is not
+    /// overwritten (the "already present" test is precomputed against committed
+    /// state because shim transaction reads pass through to committed data, not
+    /// the pending batch).
+    pub fn commit_block_atomic(
+        &self,
+        // Output index additions: (stealth_address, serialized OutputIndexEntry)
+        output_additions: &[([u8; 32], Vec<u8>)],
+        // The (height, block_hash) mapping for the newly connected tip.
+        height_set: (u64, [u8; 32]),
+        // Tx index additions: (tx_hash, height, tx_idx)
+        tx_index_adds: &[([u8; 32], u64, u32)],
+        // New chain state (serialized ChainStateData).
+        new_state: &[u8],
+    ) -> Result<()> {
+        use shim::transaction::Transactional;
+
+        // Oldest-wins precompute against the COMMITTED index (same discipline as
+        // apply_reorg_atomic — the transaction closure must be writes-only since
+        // its reads see committed state, not the pending batch).
+        let mut oi_to_insert: Vec<(&[u8; 32], &Vec<u8>)> = Vec::new();
+        for (stealth, entry_bytes) in output_additions {
+            if self
+                .output_index
+                .tree
+                .get(stealth.as_slice())
+                .map_err(|e| Error::DatabaseError(e.to_string()))?
+                .is_none()
+            {
+                oi_to_insert.push((stealth, entry_bytes));
+            }
+        }
+
+        let trees: &[&shim::Tree] = &[
+            &self.output_index.tree,
+            &self.blocks.height_index,
+            &self.state.state,
+            &self.tx_index,
+        ];
+
+        trees
+            .transaction(|tx_trees| {
+                let oi_tree = &tx_trees[0];
+                let hi_tree = &tx_trees[1];
+                let st_tree = &tx_trees[2];
+                let ti_tree = &tx_trees[3];
+
+                // 1. Output-index additions (oldest-wins filtered above)
+                for (stealth, entry_bytes) in &oi_to_insert {
+                    oi_tree.insert(stealth.as_slice(), entry_bytes.as_slice())?;
+                }
+
+                // 2. Height → hash for the new tip
+                let (height, hash) = height_set;
+                hi_tree.insert(&height.to_be_bytes(), hash.as_slice())?;
+
+                // 3. Chain state (same key the reorg path uses)
+                st_tree.insert(b"chain_state", new_state)?;
+
+                // 4. Tx index (same 12-byte height||idx encoding as the reorg path)
+                for (hash, height, tx_idx) in tx_index_adds {
+                    let mut value = [0u8; 12];
+                    value[..8].copy_from_slice(&height.to_le_bytes());
+                    value[8..].copy_from_slice(&tx_idx.to_le_bytes());
+                    ti_tree.insert(hash.as_slice(), &value)?;
+                }
+
+                Ok(())
+            })
+            .map_err(|e: shim::transaction::TransactionError| {
+                Error::DatabaseError(format!("commit_block_atomic transaction failed: {:?}", e))
+            })?;
+
+        // Durability barrier before the caller announces "Accepted".
         self.flush()?;
 
         Ok(())
@@ -1107,6 +1305,108 @@ pub fn deserialize<T: borsh::BorshDeserialize>(bytes: &[u8]) -> Result<T> {
 }
 
 #[cfg(test)]
+mod reorg_output_index_tests {
+    #[test]
+    fn reorg_does_not_drop_a_re_mined_output_index_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = super::Database::open(dir.path()).unwrap();
+
+        let x = [0xABu8; 32]; // stealth address re-mined across the reorg
+
+        let old_entry = super::serialize(&super::OutputIndexEntry {
+            commitment: [1u8; 32],
+            height: 100,
+            is_coinbase: false,
+            lock_height: None,
+        })
+        .unwrap();
+        let new_entry = super::serialize(&super::OutputIndexEntry {
+            commitment: [2u8; 32],
+            height: 101,
+            is_coinbase: false,
+            lock_height: None,
+        })
+        .unwrap();
+
+        // X exists in the committed index from the about-to-be-disconnected block.
+        db.output_index.tree.insert(x.as_slice(), old_entry.as_slice()).unwrap();
+
+        let new_state = super::serialize(&super::ChainStateData {
+            tip_hash: super::Hash::from_bytes([9u8; 32]),
+            height: 101,
+            total_difficulty: 1,
+            total_supply: 0,
+            total_burned: 0,
+            last_checkpoint: 0,
+        })
+        .unwrap();
+
+        // Reorg: X removed (old block disconnected) AND re-added (re-mined, new entry).
+        db.apply_reorg_atomic(&[x], &[(x, new_entry.clone())], &[], &[], &new_state, &[], &[])
+            .unwrap();
+
+        // PRE-FIX: X filtered from the insert then removed → None (dropped).
+        // POST-FIX: X re-inserted with the new chain's entry.
+        let got = db.output_index.tree.get(x.as_slice()).unwrap();
+        assert!(
+            got.is_some(),
+            "re-mined output X was dropped from output_index (db/mod.rs:920)"
+        );
+        assert_eq!(
+            got.unwrap().as_ref(),
+            new_entry.as_slice(),
+            "re-mined X must carry the NEW chain's entry, not the disconnected old one"
+        );
+    }
+
+    #[test]
+    fn reorg_preserves_oldest_wins_for_non_removed_shared_address() {
+        // Guard the intent we must NOT break: a shared stealth address that is
+        // NOT being removed keeps its earliest (committed) entry.
+        let dir = tempfile::tempdir().unwrap();
+        let db = super::Database::open(dir.path()).unwrap();
+
+        let y = [0xCDu8; 32];
+        let first = super::serialize(&super::OutputIndexEntry {
+            commitment: [1u8; 32],
+            height: 10,
+            is_coinbase: true,
+            lock_height: None,
+        })
+        .unwrap();
+        let later = super::serialize(&super::OutputIndexEntry {
+            commitment: [2u8; 32],
+            height: 20,
+            is_coinbase: true,
+            lock_height: None,
+        })
+        .unwrap();
+
+        db.output_index.tree.insert(y.as_slice(), first.as_slice()).unwrap();
+
+        let new_state = super::serialize(&super::ChainStateData {
+            tip_hash: super::Hash::from_bytes([9u8; 32]),
+            height: 20,
+            total_difficulty: 1,
+            total_supply: 0,
+            total_burned: 0,
+            last_checkpoint: 0,
+        })
+        .unwrap();
+
+        // Y only in additions (not removals) → oldest-wins keeps `first`.
+        db.apply_reorg_atomic(&[], &[(y, later)], &[], &[], &new_state, &[], &[])
+            .unwrap();
+
+        assert_eq!(
+            db.output_index.tree.get(y.as_slice()).unwrap().unwrap().as_ref(),
+            first.as_slice(),
+            "oldest-wins must be preserved for a non-removed shared address"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
@@ -1143,6 +1443,90 @@ mod tests {
             )
             .unwrap();
         db.flush().unwrap();
+    }
+
+    /// commit_block_atomic writes output-index + height→hash + chain-state +
+    /// tx-index in ONE transaction; after it returns, all four trees reflect
+    /// the same block. (Happy-path proof that the bundle lands together.)
+    #[test]
+    fn commit_block_atomic_writes_all_four_trees_together() {
+        let db = Database::open_temp().unwrap();
+        let h = 5u64;
+        let blk_hash = [0xABu8; 32];
+        let stealth = [0x11u8; 32];
+        let entry = OutputIndexEntry {
+            commitment: [0x22u8; 32],
+            height: h,
+            is_coinbase: false,
+            lock_height: None,
+        };
+        let tx_hash = [0x33u8; 32];
+        let state = ChainStateData {
+            tip_hash: Hash::from_bytes(blk_hash),
+            height: h,
+            total_difficulty: 100,
+            total_supply: 5_000,
+            total_burned: 0,
+            last_checkpoint: 0,
+        };
+
+        db.commit_block_atomic(
+            &[(stealth, serialize(&entry).unwrap())],
+            (h, blk_hash),
+            &[(tx_hash, h, 0u32)],
+            &serialize(&state).unwrap(),
+        )
+        .unwrap();
+
+        // All four trees agree on the committed block.
+        let st = db.state.get_state().unwrap().expect("chain state present");
+        assert_eq!(st.height, h);
+        assert_eq!(st.tip_hash, Hash::from_bytes(blk_hash));
+        assert_eq!(
+            db.blocks.get_hash_by_height(h).unwrap(),
+            Some(Hash::from_bytes(blk_hash)),
+            "height index must map h -> tip hash"
+        );
+        let oi = db.output_index.get(&stealth).unwrap().expect("output index entry present");
+        assert_eq!(oi.commitment, [0x22u8; 32]);
+        assert_eq!(oi.height, h);
+        assert_eq!(db.get_tx_location(&tx_hash), Some((h, 0)));
+    }
+
+    /// The db/blocks.rs:227 invariant stated as an assertion: after every
+    /// commit_block_atomic, the height index maps state.height -> state.tip_hash
+    /// and NO height entry exists above state.height. Pre-fix (separate
+    /// set_height_hash + save_state), a crash between them could leave a height
+    /// entry above the committed state; the single transaction makes that
+    /// impossible.
+    #[test]
+    fn commit_block_atomic_height_index_never_outruns_state() {
+        let db = Database::open_temp().unwrap();
+        for h in 1..=10u64 {
+            let blk_hash = [h as u8; 32];
+            let state = ChainStateData {
+                tip_hash: Hash::from_bytes(blk_hash),
+                height: h,
+                total_difficulty: h as u128,
+                total_supply: (h as u128) * 1_000,
+                total_burned: 0,
+                last_checkpoint: 0,
+            };
+            db.commit_block_atomic(&[], (h, blk_hash), &[], &serialize(&state).unwrap())
+                .unwrap();
+
+            let st = db.state.get_state().unwrap().unwrap();
+            assert_eq!(
+                db.blocks.get_hash_by_height(st.height).unwrap(),
+                Some(st.tip_hash),
+                "height index must agree with state at h={h}"
+            );
+            assert_eq!(
+                db.blocks.get_hash_by_height(st.height + 1).unwrap(),
+                None,
+                "height index must never outrun committed state (h={h})"
+            );
+        }
     }
 
     #[test]
@@ -1567,5 +1951,411 @@ mod tests {
         // And the stamp is still correct after the no-op.
         let db = Database::open(dir.path()).unwrap();
         assert_eq!(db.schema_version().unwrap(), EXPECTED_DB_SCHEMA_VERSION);
+    }
+
+    // ─── commit_block_atomic (additional coverage) ───────────────
+
+    /// oldest-wins on the extend path: a stealth address already present in
+    /// the committed output index is NOT overwritten by a later commit.
+    #[test]
+    fn commit_block_atomic_does_not_overwrite_existing_stealth_oldest_wins() {
+        let db = Database::open_temp().unwrap();
+        let stealth = [0x55u8; 32];
+        let first = OutputIndexEntry {
+            commitment: [1u8; 32],
+            height: 7,
+            is_coinbase: true,
+            lock_height: None,
+        };
+        // Pre-existing committed entry (the "oldest").
+        db.output_index
+            .tree
+            .insert(stealth.as_slice(), serialize(&first).unwrap().as_slice())
+            .unwrap();
+
+        let later = OutputIndexEntry {
+            commitment: [2u8; 32],
+            height: 9,
+            is_coinbase: false,
+            lock_height: None,
+        };
+        let state = ChainStateData {
+            tip_hash: Hash::from_bytes([9u8; 32]),
+            height: 9,
+            total_difficulty: 1,
+            total_supply: 0,
+            total_burned: 0,
+            last_checkpoint: 0,
+        };
+        db.commit_block_atomic(
+            &[(stealth, serialize(&later).unwrap())],
+            (9, [9u8; 32]),
+            &[],
+            &serialize(&state).unwrap(),
+        )
+        .unwrap();
+
+        let got = db.output_index.get(&stealth).unwrap().unwrap();
+        assert_eq!(
+            got.commitment, [1u8; 32],
+            "oldest-wins: existing stealth entry must not be overwritten"
+        );
+        assert_eq!(got.height, 7);
+    }
+
+    /// A tx-body failure while committing the extend-path four-tree bundle
+    /// must roll everything back — none of output_index / height_index /
+    /// state / tx_index is mutated. `commit_block_atomic`'s own closure is
+    /// writes-only and cannot fail through the public API, so we drive the
+    /// SAME four-tree transaction discipline directly through the shim's
+    /// `Transactional` trait (the rollback guarantee `commit_block_atomic`
+    /// relies on) and abort inside the closure.
+    #[test]
+    fn commit_block_atomic_four_tree_set_rolls_back_when_closure_aborts() {
+        use shim::transaction::{Transactional, TransactionError};
+        let db = Database::open_temp().unwrap();
+        let stealth = [0x77u8; 32];
+        let tx_hash = [0x88u8; 32];
+        let trees: &[&shim::Tree] = &[
+            &db.output_index.tree,
+            &db.blocks.height_index,
+            &db.state.state,
+            &db.tx_index,
+        ];
+        let res: std::result::Result<(), TransactionError> = trees.transaction(|tx| {
+            tx[0].insert(stealth.as_slice(), b"x".as_slice())?;
+            tx[1].insert(&5u64.to_be_bytes(), b"h".as_slice())?;
+            tx[2].insert(b"chain_state".as_slice(), b"s".as_slice())?;
+            tx[3].insert(tx_hash.as_slice(), b"t".as_slice())?;
+            Err(TransactionError::Abort("simulated tx-body failure".into()))
+        });
+        assert!(res.is_err(), "aborted closure must surface an error");
+        assert!(db.output_index.tree.get(stealth.as_slice()).unwrap().is_none());
+        assert!(db
+            .blocks
+            .height_index
+            .get(&5u64.to_be_bytes())
+            .unwrap()
+            .is_none());
+        assert!(db.state.get_state().unwrap().is_none());
+        assert!(db.tx_index.get(tx_hash.as_slice()).unwrap().is_none());
+    }
+
+    /// CC emulation (harness cannot kill mid-op): commit then reopen the DB
+    /// and assert all-or-nothing — because the commit is one atomic,
+    /// fsync-durable transaction, every one of the four trees is present
+    /// after a fresh reopen. The true kill-mid-op variant is deferred:
+    /// needs a process-kill harness.
+    #[test]
+    fn commit_block_atomic_all_or_nothing_survives_reopen() {
+        let dir = tempdir().unwrap();
+        let stealth = [0x11u8; 32];
+        let blk = [0x22u8; 32];
+        let tx = [0x33u8; 32];
+        {
+            let db = Database::open(dir.path()).unwrap();
+            let entry = OutputIndexEntry {
+                commitment: [0x44u8; 32],
+                height: 3,
+                is_coinbase: false,
+                lock_height: None,
+            };
+            let state = ChainStateData {
+                tip_hash: Hash::from_bytes(blk),
+                height: 3,
+                total_difficulty: 9,
+                total_supply: 3_000,
+                total_burned: 0,
+                last_checkpoint: 0,
+            };
+            db.commit_block_atomic(
+                &[(stealth, serialize(&entry).unwrap())],
+                (3, blk),
+                &[(tx, 3, 0)],
+                &serialize(&state).unwrap(),
+            )
+            .unwrap();
+        }
+        let db = Database::open(dir.path()).unwrap();
+        assert_eq!(db.state.get_state().unwrap().unwrap().height, 3);
+        assert_eq!(
+            db.blocks.get_hash_by_height(3).unwrap(),
+            Some(Hash::from_bytes(blk))
+        );
+        assert_eq!(
+            db.output_index.get(&stealth).unwrap().unwrap().commitment,
+            [0x44u8; 32]
+        );
+        assert_eq!(db.get_tx_location(&tx), Some((3, 0)));
+    }
+
+    // ─── apply_reorg_atomic (additional coverage) ────────────────
+
+    /// Full-tuple atomicity: output removals + output additions (with a
+    /// non-removed shared address exercising oldest-wins) + height sets +
+    /// height removals + state + tx add/remove all land in one call.
+    #[test]
+    fn apply_reorg_atomic_applies_full_tuple_atomically() {
+        let db = Database::open_temp().unwrap();
+        let rem = [0x01u8; 32]; // disconnected output -> removed
+        let shared = [0x02u8; 32]; // present, NOT removed -> oldest wins
+        let added = [0x03u8; 32]; // fresh fork output -> added
+
+        db.output_index
+            .tree
+            .insert(
+                rem.as_slice(),
+                serialize(&OutputIndexEntry {
+                    commitment: [8u8; 32],
+                    height: 2,
+                    is_coinbase: false,
+                    lock_height: None,
+                })
+                .unwrap()
+                .as_slice(),
+            )
+            .unwrap();
+        let old_shared = OutputIndexEntry {
+            commitment: [9u8; 32],
+            height: 1,
+            is_coinbase: true,
+            lock_height: None,
+        };
+        db.output_index
+            .tree
+            .insert(shared.as_slice(), serialize(&old_shared).unwrap().as_slice())
+            .unwrap();
+        // Stale heights above the new tip.
+        for h in [8u64, 9, 10] {
+            db.blocks
+                .set_height_hash(h, &Hash::from_bytes([h as u8; 32]))
+                .unwrap();
+        }
+        // Tx that the reorg disconnects.
+        db.index_tx(&[0x0Au8; 32], 8, 0).unwrap();
+
+        let new_shared = OutputIndexEntry {
+            commitment: [7u8; 32],
+            height: 6,
+            is_coinbase: true,
+            lock_height: None,
+        };
+        let added_entry = OutputIndexEntry {
+            commitment: [6u8; 32],
+            height: 6,
+            is_coinbase: false,
+            lock_height: None,
+        };
+        let state = ChainStateData {
+            tip_hash: Hash::from_bytes([6u8; 32]),
+            height: 6,
+            total_difficulty: 30,
+            total_supply: 6_000,
+            total_burned: 0,
+            last_checkpoint: 0,
+        };
+        db.apply_reorg_atomic(
+            &[rem],
+            &[
+                (added, serialize(&added_entry).unwrap()),
+                (shared, serialize(&new_shared).unwrap()),
+            ],
+            &[(6, [6u8; 32]), (5, [5u8; 32])],
+            &[8, 9, 10],
+            &serialize(&state).unwrap(),
+            &[([0x0Bu8; 32], 6, 0)],
+            &[[0x0Au8; 32]],
+        )
+        .unwrap();
+
+        // Output index: removed, added, shared kept-oldest.
+        assert!(db.output_index.get(&rem).unwrap().is_none());
+        assert!(db.output_index.get(&added).unwrap().is_some());
+        assert_eq!(
+            db.output_index.get(&shared).unwrap().unwrap().commitment,
+            [9u8; 32],
+            "oldest-wins preserved for a non-removed shared address"
+        );
+        // Height sets + removals.
+        assert_eq!(
+            db.blocks.get_hash_by_height(6).unwrap(),
+            Some(Hash::from_bytes([6u8; 32]))
+        );
+        assert_eq!(
+            db.blocks.get_hash_by_height(5).unwrap(),
+            Some(Hash::from_bytes([5u8; 32]))
+        );
+        for h in [8u64, 9, 10] {
+            assert!(
+                db.blocks.get_hash_by_height(h).unwrap().is_none(),
+                "stale height {h} must be removed"
+            );
+        }
+        // State.
+        assert_eq!(db.state.get_state().unwrap().unwrap().height, 6);
+        // Tx add/remove.
+        assert_eq!(db.get_tx_location(&[0x0Bu8; 32]), Some((6, 0)));
+        assert_eq!(db.get_tx_location(&[0x0Au8; 32]), None);
+    }
+
+    /// Reorg tx failure => four trees unchanged. As with the commit path,
+    /// the public closure is writes-only, so we exercise the shared shim
+    /// transaction discipline directly: stage the reorg-shaped mutations
+    /// (removing pre-existing entries, writing new state) then abort, and
+    /// assert every prior entry survived and no new state was written.
+    #[test]
+    fn apply_reorg_atomic_four_tree_set_unchanged_when_closure_aborts() {
+        use shim::transaction::{Transactional, TransactionError};
+        let db = Database::open_temp().unwrap();
+        let keep = [0x21u8; 32];
+        let entry = OutputIndexEntry {
+            commitment: [3u8; 32],
+            height: 2,
+            is_coinbase: false,
+            lock_height: None,
+        };
+        db.output_index
+            .tree
+            .insert(keep.as_slice(), serialize(&entry).unwrap().as_slice())
+            .unwrap();
+        db.blocks
+            .set_height_hash(9, &Hash::from_bytes([9u8; 32]))
+            .unwrap();
+        db.index_tx(&[0x22u8; 32], 9, 0).unwrap();
+
+        let trees: &[&shim::Tree] = &[
+            &db.output_index.tree,
+            &db.blocks.height_index,
+            &db.state.state,
+            &db.tx_index,
+        ];
+        let res: std::result::Result<(), TransactionError> = trees.transaction(|tx| {
+            tx[0].remove(keep.as_slice())?;
+            tx[1].remove(&9u64.to_be_bytes())?;
+            tx[2].insert(b"chain_state".as_slice(), b"new".as_slice())?;
+            tx[3].remove([0x22u8; 32].as_slice())?;
+            Err(TransactionError::Abort("simulated reorg tx failure".into()))
+        });
+        assert!(res.is_err());
+        // Every pre-existing entry survived; no new state committed.
+        assert!(db.output_index.get(&keep).unwrap().is_some());
+        assert_eq!(
+            db.blocks.get_hash_by_height(9).unwrap(),
+            Some(Hash::from_bytes([9u8; 32]))
+        );
+        assert!(db.state.get_state().unwrap().is_none());
+        assert_eq!(db.get_tx_location(&[0x22u8; 32]), Some((9, 0)));
+    }
+
+    /// CC emulation (harness cannot kill mid-op): apply a reorg over a prior
+    /// canonical state, reopen, and assert the reopened DB shows the NEW
+    /// canonical state with no hybrid — stale outputs/heights/txs gone, new
+    /// ones present. True kill-mid-reorg-commit is deferred: needs a
+    /// process-kill harness.
+    #[test]
+    fn apply_reorg_atomic_all_or_nothing_survives_reopen() {
+        let dir = tempdir().unwrap();
+        let stale = [0xAAu8; 32];
+        let newst = [0xBBu8; 32];
+        let tip = [0xCCu8; 32];
+        {
+            let db = Database::open(dir.path()).unwrap();
+            let old = OutputIndexEntry {
+                commitment: [1u8; 32],
+                height: 5,
+                is_coinbase: false,
+                lock_height: None,
+            };
+            db.output_index
+                .tree
+                .insert(stale.as_slice(), serialize(&old).unwrap().as_slice())
+                .unwrap();
+            db.blocks
+                .set_height_hash(5, &Hash::from_bytes([5u8; 32]))
+                .unwrap();
+            db.index_tx(&[0xDDu8; 32], 5, 0).unwrap();
+            db.flush().unwrap();
+
+            let new_entry = OutputIndexEntry {
+                commitment: [2u8; 32],
+                height: 4,
+                is_coinbase: false,
+                lock_height: None,
+            };
+            let state = ChainStateData {
+                tip_hash: Hash::from_bytes(tip),
+                height: 4,
+                total_difficulty: 20,
+                total_supply: 4_000,
+                total_burned: 0,
+                last_checkpoint: 0,
+            };
+            db.apply_reorg_atomic(
+                &[stale],
+                &[(newst, serialize(&new_entry).unwrap())],
+                &[(4, tip)],
+                &[5],
+                &serialize(&state).unwrap(),
+                &[([0xEEu8; 32], 4, 0)],
+                &[[0xDDu8; 32]],
+            )
+            .unwrap();
+        }
+        let db = Database::open(dir.path()).unwrap();
+        assert_eq!(db.state.get_state().unwrap().unwrap().height, 4);
+        assert!(
+            db.output_index.get(&stale).unwrap().is_none(),
+            "stale output removed"
+        );
+        assert!(
+            db.output_index.get(&newst).unwrap().is_some(),
+            "new output added"
+        );
+        assert_eq!(
+            db.blocks.get_hash_by_height(4).unwrap(),
+            Some(Hash::from_bytes(tip))
+        );
+        assert!(
+            db.blocks.get_hash_by_height(5).unwrap().is_none(),
+            "stale height removed"
+        );
+        assert_eq!(db.get_tx_location(&[0xEEu8; 32]), Some((4, 0)));
+        assert_eq!(db.get_tx_location(&[0xDDu8; 32]), None);
+    }
+
+    // ─── tx_index round-trip + encoding, flush ───────────────────
+
+    /// index_tx / get_tx_location / remove_tx_index / tx_index_is_empty
+    /// round-trip, and the 12-byte height‖idx little-endian encoding.
+    #[test]
+    fn tx_index_round_trip_and_12_byte_encoding() {
+        let db = Database::open_temp().unwrap();
+        assert!(db.tx_index_is_empty());
+        let h = [0xA1u8; 32];
+        let height = 0x0102_0304_0506_0708u64;
+        let idx = 0x0A0B_0C0Du32;
+        db.index_tx(&h, height, idx).unwrap();
+        assert!(!db.tx_index_is_empty());
+        assert_eq!(db.get_tx_location(&h), Some((height, idx)));
+
+        let raw = db.tx_index.get(h.as_slice()).unwrap().unwrap();
+        assert_eq!(raw.as_ref().len(), 12, "encoding is exactly 12 bytes");
+        assert_eq!(&raw.as_ref()[..8], &height.to_le_bytes());
+        assert_eq!(&raw.as_ref()[8..], &idx.to_le_bytes());
+
+        db.remove_tx_index(&h);
+        assert_eq!(db.get_tx_location(&h), None);
+        assert!(db.tx_index_is_empty());
+    }
+
+    /// flush surfaces Ok on a healthy DB; flush_best_effort does not panic.
+    /// (The error-surfaced-vs-logged split needs a forced I/O failure, which
+    /// is not injectable through the real API — deferred.)
+    #[test]
+    fn flush_and_flush_best_effort_succeed_on_healthy_db() {
+        let db = Database::open_temp().unwrap();
+        db.index_tx(&[0x01u8; 32], 1, 0).unwrap();
+        assert!(db.flush().is_ok());
+        db.flush_best_effort(); // must not panic
     }
 }

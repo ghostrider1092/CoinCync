@@ -1,3 +1,60 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `NodeRuntime::shutdown`** — INVARIANT: every tracked task is given
+//!   up to a 5-second deadline to join after the shutdown signal fires; a
+//!   task that misses the deadline is aborted and awaited rather than left
+//!   to run forever.
+//!   THREAT: an unbounded join would let a stuck task hang node shutdown
+//!   indefinitely, blocking process exit or restart.
+//!   TESTS: `node_runtime_shutdown_joins_tracked_tasks`.
+//! - **§2 `wait_for_shutdown`** — INVARIANT: if the shutdown flag is already
+//!   set when checked, returns immediately instead of waiting on a `changed()`
+//!   that may never fire again (a `watch` channel only reports one edge per
+//!   waiter).
+//!   THREAT: waiting on `changed()` after the flag was already flipped could
+//!   deadlock a task that starts polling late.
+//!   TESTS: `processor_exits_on_shutdown_signal`.
+//! - **§3 `spawn_padding_broadcast`** — INVARIANT: the padding loop's own
+//!   `AtomicBool` shutdown flag is set before the task returns on the
+//!   `wait_for_shutdown` branch, so `run_padding_loop_broadcast` observes
+//!   cancellation even though it's driven by a separate flag from the
+//!   `watch::Receiver`.
+//!   THREAT: forgetting to propagate the signal into the padding loop's own
+//!   flag would leave the traffic-shaping padding task running after
+//!   shutdown, delaying process exit.
+//!   TESTS: (gap — no dedicated test for `spawn_padding_broadcast`'s shutdown
+//!   propagation).
+//! - **§4 `spawn_message_processor` rate-tracker pruning (P5-N3)** — INVARIANT:
+//!   `rate_trackers` is pruned of any peer no longer present in
+//!   `processor_peers` every `RATE_PRUNE_EVERY` (1000) messages, bounding its
+//!   size to roughly the live peer set.
+//!   THREAT: pre-fix, entries were inserted per peer but never removed on
+//!   disconnect, so a long-running node with peer churn leaked memory
+//!   unboundedly (P5-N3).
+//!   TESTS: `prune_rate_trackers_drops_only_absent_peers` (the extracted prune
+//!   helper; the 1000-msg cadence that calls it is still driven only indirectly
+//!   by `processor_continues_after_a_bad_message`).
+//! - **§5 `spawn_message_processor` rate-limit / misbehavior scoring** —
+//!   INVARIANT: a peer that exceeds its per-message-type rate limit has the
+//!   offending message dropped (not processed) and is scored
+//!   `MisbehaviorType::MessageFlood`, but the processor loop itself keeps
+//!   running.
+//!   THREAT: without the drop-and-continue behavior, a flooding peer could
+//!   either starve the queue for other peers or crash/stall the single
+//!   processor task shared by all peers.
+//!   TESTS: `processor_continues_after_a_bad_message`.
+//! - **§6 `spawn_message_processor` shutdown/close semantics** — INVARIANT:
+//!   the processor task exits when either the shutdown signal fires or every
+//!   message producer drops its sender (channel closes) — whichever comes
+//!   first, checked with `biased` select so a pending shutdown always wins a
+//!   simultaneous race.
+//!   THREAT: an ambiguous or unbiased exit condition could leave the
+//!   processor task running after node shutdown, or exit it prematurely while
+//!   producers still expect it to drain.
+//!   TESTS: `processor_exits_on_channel_close`, `processor_exits_on_shutdown_signal`.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -143,6 +200,18 @@ pub(super) struct MessageProcessorContext {
     pub magic: [u8; 4],
 }
 
+/// Prune rate-tracker entries whose peer is no longer connected (P5-N3, §4):
+/// retain only trackers for which `is_live` returns true. Extracted as a pure
+/// helper so the memory bound can be unit-tested without driving the async
+/// processor; the processor calls it every `RATE_PRUNE_EVERY` messages with
+/// `is_live = |pid| processor_peers.contains_key(pid)`.
+fn prune_rate_trackers<V, F: Fn(&super::super::peer::PeerId) -> bool>(
+    rate_trackers: &mut std::collections::HashMap<super::super::peer::PeerId, V>,
+    is_live: F,
+) {
+    rate_trackers.retain(|pid, _| is_live(pid));
+}
+
 /// The processor exits as soon as the node runtime is cancelled or every
 /// producer closes the channel.
 pub(super) fn spawn_message_processor(
@@ -199,7 +268,9 @@ pub(super) fn spawn_message_processor(
                     // P5-N3: periodic prune of dead peers.
                     rate_prune_ctr = rate_prune_ctr.wrapping_add(1);
                     if rate_prune_ctr.is_multiple_of(RATE_PRUNE_EVERY) {
-                        rate_trackers.retain(|pid, _| processor_peers.contains_key(pid));
+                        prune_rate_trackers(&mut rate_trackers, |pid| {
+                            processor_peers.contains_key(pid)
+                        });
                     }
                     // Rate-limit check (before expensive processing)
                     let tracker = rate_trackers
@@ -247,4 +318,161 @@ pub(super) fn spawn_message_processor(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    use crate::chain::Blockchain;
+
+    // §4 P5-N3: the rate-tracker map keeps entries for live peers and drops any
+    // whose peer is no longer connected, bounding it to roughly the live set.
+    #[test]
+    fn prune_rate_trackers_drops_only_absent_peers() {
+        let (live_a, live_b, gone): (PeerId, PeerId, PeerId) =
+            ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let mut trackers: std::collections::HashMap<PeerId, u8> =
+            std::collections::HashMap::new();
+        trackers.insert(live_a, 0);
+        trackers.insert(live_b, 0);
+        trackers.insert(gone, 0);
+
+        let live = [live_a, live_b];
+        prune_rate_trackers(&mut trackers, |pid| live.contains(pid));
+
+        assert_eq!(trackers.len(), 2, "only live peers' trackers remain");
+        assert!(trackers.contains_key(&live_a) && trackers.contains_key(&live_b));
+        assert!(!trackers.contains_key(&gone), "the disconnected peer's tracker is pruned");
+    }
+    use crate::network::protocol::MessageType;
+    use crate::primitives::Hash;
+    use std::net::SocketAddr;
+
+    fn make_context(
+        peers: Arc<DashMap<PeerId, PeerInfo>>,
+        scorer: Arc<RwLock<PeerScorer>>,
+    ) -> MessageProcessorContext {
+        let chain: SharedBlockchain = Arc::new(Blockchain::new());
+        chain.init_genesis().unwrap();
+        MessageProcessorContext {
+            peers,
+            dandelion: Arc::new(RwLock::new(DandelionRouter::new())),
+            sync: Arc::new(RwLock::new(ChainSync::new(0, Hash::zero()))),
+            event_tx: broadcast::channel(16).0,
+            senders: Arc::new(DashMap::new()),
+            nonce: 0,
+            chain,
+            mempool: SharedMempool::new(),
+            addresses: Arc::new(RwLock::new(AddressManager::new(1000))),
+            scorer,
+            tx_absence_cache: Arc::new(parking_lot::RwLock::new(TxAbsenceCache::new())),
+            relay_scores: Arc::new(RwLock::new(RelayScoreMap::new())),
+            magic: [1, 2, 3, 4],
+        }
+    }
+
+    #[tokio::test]
+    async fn node_runtime_shutdown_joins_tracked_tasks() {
+        let mut rt = NodeRuntime::new();
+        let mut rx = rt.shutdown_receiver();
+        let handle = tokio::spawn(async move {
+            wait_for_shutdown(&mut rx).await;
+        });
+        rt.track("waiter", handle);
+        tokio::time::timeout(Duration::from_secs(5), rt.shutdown())
+            .await
+            .expect("shutdown joins tasks within the deadline");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn processor_exits_on_channel_close() {
+        let (msg_tx, msg_rx) = mpsc::channel(8);
+        let (_sd_tx, sd_rx) = watch::channel(false);
+        let ctx = make_context(
+            Arc::new(DashMap::new()),
+            Arc::new(RwLock::new(PeerScorer::new())),
+        );
+        let handle = spawn_message_processor(msg_rx, ctx, sd_rx);
+        drop(msg_tx);
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("processor exits when the channel closes")
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn processor_exits_on_shutdown_signal() {
+        let (_msg_tx, msg_rx) = mpsc::channel(8);
+        let (sd_tx, sd_rx) = watch::channel(false);
+        let ctx = make_context(
+            Arc::new(DashMap::new()),
+            Arc::new(RwLock::new(PeerScorer::new())),
+        );
+        let handle = spawn_message_processor(msg_rx, ctx, sd_rx);
+        sd_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("processor exits on shutdown")
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn processor_continues_after_a_bad_message() {
+        let peer_id = [5u8; 32];
+        let addr: SocketAddr = "127.0.0.1:34500".parse().unwrap();
+        let peers = Arc::new(DashMap::new());
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let scorer = Arc::new(RwLock::new(PeerScorer::new()));
+        let ctx = make_context(peers.clone(), scorer.clone());
+        let (msg_tx, msg_rx) = mpsc::channel(8);
+        let (_sd_tx, sd_rx) = watch::channel(false);
+        let handle = spawn_message_processor(msg_rx, ctx, sd_rx);
+
+        // 1) An unknown message type makes process_message return Err — the loop
+        //    must log and keep going, not die.
+        msg_tx
+            .send(PeerMessage {
+                peer_id,
+                msg_type: 200,
+                payload: vec![],
+                _reservation: Arc::new(
+                    crate::network::connection_tracker::ConnectionTracker::new(1024),
+                )
+                .reservation(),
+            })
+            .await
+            .unwrap();
+        // 2) An oversized Version — processed only if the loop survived (1).
+        //    handle_version scores OversizedMessage and removes the peer.
+        msg_tx
+            .send(PeerMessage {
+                peer_id,
+                msg_type: MessageType::Version as u8,
+                payload: vec![0u8; 1025],
+                _reservation: Arc::new(
+                    crate::network::connection_tracker::ConnectionTracker::new(1024),
+                )
+                .reservation(),
+            })
+            .await
+            .unwrap();
+        drop(msg_tx);
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("processor drains and exits")
+            .unwrap();
+
+        assert!(
+            scorer
+                .read()
+                .await
+                .get(&addr)
+                .is_some_and(|s| s.reputation < 100),
+            "second message processed after the bad one"
+        );
+        assert!(
+            peers.get(&peer_id).is_none(),
+            "oversized Version removed the peer"
+        );
+    }
 }

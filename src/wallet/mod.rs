@@ -10,6 +10,8 @@ pub mod background_sync;
 pub mod balance;
 pub mod churn;
 pub mod decoy_selection;
+#[cfg(feature = "hardware")]
+pub mod hardware;
 pub mod history;
 pub mod key_epoch;
 pub mod keys;
@@ -19,10 +21,15 @@ pub mod node_rpc;
 pub mod persistence;
 pub mod scanner;
 pub mod send;
+// Shielded (Spark) wallet note tracking — receive-scan + spend-select. Gated to
+// the shielded consensus regime; never in a production build. See module docs.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+pub mod shielded_notes;
 pub mod spend;
 pub mod subaddress;
 #[cfg(feature = "cyncswap")]
 pub mod swap;
+pub mod sync_checkpoint_signing;
 pub mod wallet_keys;
 // `lightsync` is the SPV path. Network handler for `GetOutputDigests`
 // is wired in `crate::network::node` (serves up to 100 blocks/request);

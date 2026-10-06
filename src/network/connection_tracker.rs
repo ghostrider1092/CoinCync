@@ -24,6 +24,42 @@
 //!   from the node maintenance loop to reap zero-count entries that
 //!   leaked due to missed untrack calls, and caps total tracked IPs
 //!   at 10 000 to prevent unbounded growth under DoS.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `new` / construction**  — INVARIANT: a fresh tracker holds zero tracked
+//!   IPs and its memory budget starts fully available.
+//!   THREAT: a mis-initialized budget silently admits unbounded buffers.
+//!   TESTS: `new_tracker_is_empty`.
+//! - **§2 `try_track_connection` / `can_accept` (per-IP Sybil cap)** — INVARIANT:
+//!   inbound connections from a single IP are capped; the (N+1)-th is refused.
+//!   THREAT: one host opens unlimited sockets to eclipse/DoS the node.
+//!   TESTS: `per_ip_limit_enforced_by_try_track`, `test_connection_tracker_per_ip_limit`.
+//! - **§3 `untrack_connection` / `cleanup_stale_entries`** — INVARIANT: releasing a
+//!   connection decrements the count and zero-count IPs are pruned, so slots and
+//!   the map never leak. THREAT: leaked counts wedge the cap shut against honest peers.
+//!   TESTS: `untrack_removes_entry_when_count_reaches_zero`, `cleanup_removes_zero_count_entries`.
+//! - **§4 outbound-subnet cap (`try_track_outbound_subnet*`)** — INVARIANT: outbound
+//!   connections per /16 (or v6 group) are capped and admission is atomic under races.
+//!   THREAT: all outbound slots land in one attacker-controlled subnet (eclipse).
+//!   TESTS: `outbound_subnet_cap_admits_up_to_max_then_rejects`, `outbound_subnet_cap_is_per_subnet`,
+//!   `outbound_subnet_concurrent_admission_does_not_exceed_cap`.
+//! - **§5 `reconcile_outbound_subnets` / `untrack_outbound_subnet`** — INVARIANT:
+//!   reconciliation against the live set frees leaked subnet slots and an empty live
+//!   set zeroes every counter. THREAT: leaked outbound counts permanently block new dials.
+//!   TESTS: `untrack_outbound_subnet_releases_slot`, `reconcile_frees_leaked_outbound_slots`,
+//!   `reconcile_with_empty_live_set_zeroes_all_counters`.
+//! - **§6 memory budget (`allocate` / `deallocate`)** — INVARIANT: allocations never
+//!   exceed the budget; a rejected growth leaves existing reservations intact.
+//!   THREAT: an attacker forces unbounded inbound-buffer allocation (memory DoS).
+//!   TESTS: `allocate_respects_budget`, `failed_reservation_growth_preserves_existing_bytes`.
+//! - **§7 reservation RAII (`slot` / reservation drop)** — INVARIANT: a reservation
+//!   returns its bytes/slot exactly once on drop, including under panic and task cancel.
+//!   THREAT: dropped-without-release reservations slow-leak the budget to zero.
+//!   TESTS: `reservation_releases_bytes_on_drop`, `slot_decrements_through_panic_unwind`,
+//!   `slot_drops_on_tokio_task_cancel`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,8 +67,13 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-/// Two permits one inbound and one outbound localhost connection without
-/// allowing a single address to occupy several peer slots.
+/// Default per-IP connection cap. Two permits one inbound and one outbound
+/// localhost connection without allowing a single address to occupy several
+/// peer slots. This is an anti-Sybil policy knob — raising it network-wide
+/// weakens per-IP Sybil resistance — so it is configurable per node rather
+/// than a hard constant: operators running several nodes behind one NAT (all
+/// sharing one public IP) can raise it on the seed they control via
+/// `--max-connections-per-ip` / `NodeConfig::max_connections_per_ip` (#193).
 pub const MAX_CONNECTIONS_PER_IP: usize = 2;
 
 /// Per-IP connection tracking and memory budget for inbound P2P buffers.
@@ -62,15 +103,28 @@ pub struct ConnectionTracker {
     /// Memory budget ceiling. `allocate()` refuses requests that would
     /// push `memory_used` over this limit.
     memory_budget: usize,
+    /// Per-IP connection cap (#193). Defaults to [`MAX_CONNECTIONS_PER_IP`];
+    /// an operator can raise it (e.g. for a LAN of nodes behind one NAT) via
+    /// `--max-connections-per-ip`. Always at least 1.
+    max_connections_per_ip: usize,
 }
 
 impl ConnectionTracker {
+    /// Build a tracker with the default per-IP cap ([`MAX_CONNECTIONS_PER_IP`]).
     pub fn new(memory_budget: usize) -> Self {
+        Self::new_with_cap(memory_budget, MAX_CONNECTIONS_PER_IP)
+    }
+
+    /// Build a tracker with an explicit per-IP cap (#193). A value of 0 is
+    /// treated as 1 — the admission paths must always allow at least one
+    /// connection per IP, or the node could never peer with anyone.
+    pub fn new_with_cap(memory_budget: usize, max_connections_per_ip: usize) -> Self {
         ConnectionTracker {
             connections_per_ip: DashMap::new(),
             outbound_per_subnet: DashMap::new(),
             memory_used: AtomicUsize::new(0),
             memory_budget,
+            max_connections_per_ip: max_connections_per_ip.max(1),
         }
     }
 
@@ -266,7 +320,7 @@ impl ConnectionTracker {
     pub fn can_accept(&self, addr: &SocketAddr) -> bool {
         let ip = addr.ip();
         let count = self.connections_per_ip.get(&ip).map(|c| *c).unwrap_or(0);
-        count < MAX_CONNECTIONS_PER_IP
+        count < self.max_connections_per_ip
     }
 
     /// Atomically check-and-increment the per-IP counter.
@@ -283,7 +337,7 @@ impl ConnectionTracker {
         self.connections_per_ip
             .entry(ip)
             .and_modify(|c| {
-                if *c < MAX_CONNECTIONS_PER_IP {
+                if *c < self.max_connections_per_ip {
                     *c += 1;
                     accepted = true;
                 }
@@ -511,6 +565,32 @@ mod tests {
         }
         // One more must fail.
         assert!(!t.try_track_connection(&a));
+    }
+
+    /// #193: the per-IP cap is configurable via `new_with_cap`. A raised cap
+    /// admits more connections from one IP (the LAN-behind-one-NAT case); a
+    /// zero cap is clamped to 1 so a node can always still peer.
+    #[test]
+    fn configurable_per_ip_cap_193() {
+        let a = addr(7);
+
+        // Raised cap of 4: four from one IP admitted, the fifth refused.
+        let raised = ConnectionTracker::new_with_cap(1024, 4);
+        for i in 0..4 {
+            assert!(raised.try_track_connection(&a), "conn {i} should fit under cap 4");
+        }
+        assert!(!raised.try_track_connection(&a), "5th must be refused at cap 4");
+
+        // Default constructor keeps the default cap (2).
+        let default = ConnectionTracker::new(1024);
+        assert!(default.try_track_connection(&a));
+        assert!(default.try_track_connection(&a));
+        assert!(!default.try_track_connection(&a));
+
+        // Zero is clamped to 1 — never lock the node out of peering entirely.
+        let zero = ConnectionTracker::new_with_cap(1024, 0);
+        assert!(zero.try_track_connection(&a));
+        assert!(!zero.try_track_connection(&a));
     }
 
     #[test]

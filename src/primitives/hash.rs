@@ -227,8 +227,25 @@ pub fn merkle_root(hashes: &[Hash]) -> Hash {
         return hash_concat(&[&[0x00], hashes[0].as_slice()]);
     }
 
-    // H-4 FIX: RFC 6962 domain separation prevents merkle malleability (CVE-2012-2459)
-    // Leaf nodes are prefixed with 0x00; internal nodes with 0x01.
+    // The 0x00 (leaf) / 0x01 (internal) domain tags prevent the leaf-as-node
+    // second-preimage attack. They do NOT, however, prevent the classic
+    // CVE-2012-2459 *duplication* malleability, because the odd-node branch
+    // below DUPLICATES the lone node (`chunk[0], chunk[0]`) rather than
+    // promoting it RFC-6962-style — so `merkle_root([A,B,C]) ==
+    // merkle_root([A,B,C,C])` (identical root, different tx set).
+    //
+    // Why this is not a live consensus-split/DoS today (contained by the block
+    // validator, NOT by this construction): duplicating a non-coinbase tx
+    // repeats its key images (rejected by the block dup-key-image check; every
+    // non-coinbase tx must have >=1 input), duplicating the coinbase trips the
+    // "multiple coinbase" reject, and there is no invalid-block-hash cache to
+    // poison. The safety therefore rests on those downstream checks.
+    //
+    // ROOT FIX is a consensus (hard-fork) change — promoting odd nodes instead
+    // of duplicating, or committing the tx count into the header, alters every
+    // tx_root — so it must land before the mainnet genesis hash is finalized.
+    // Tracked as an owner decision; do not change the construction here without
+    // re-freezing MAINNET_GENESIS_HASH and versioning testnet.
     let mut level: Vec<Hash> = hashes
         .iter()
         .map(|h| hash_concat(&[&[0x00], h.as_slice()]))
@@ -239,6 +256,9 @@ pub fn merkle_root(hashes: &[Hash]) -> Hash {
             let hash = if chunk.len() == 2 {
                 hash_concat(&[&[0x01], chunk[0].as_slice(), chunk[1].as_slice()])
             } else {
+                // NOTE: duplication (not RFC-6962 promotion) — see the
+                // CVE-2012-2459 note above. Consensus-frozen; changing this is a
+                // hard fork.
                 hash_concat(&[&[0x01], chunk[0].as_slice(), chunk[0].as_slice()])
             };
             next.push(hash);
@@ -281,5 +301,114 @@ mod tests {
         // the previous `.is_err()` was a compile error.
         assert!(Hash::from_hex("xyz").is_none());
         assert!(Hash::from_hex("").is_none());
+    }
+
+    #[test]
+    fn first_byte_returns_leading_byte() {
+        assert_eq!(Hash::from_bytes([7u8; 32]).first_byte(), 7);
+        let mut b = [0u8; 32];
+        b[0] = 0xAB;
+        assert_eq!(Hash::from_bytes(b).first_byte(), 0xAB);
+    }
+
+    #[test]
+    fn meets_difficulty_below_equal_and_above_target() {
+        let target = Hash::from_bytes([0x80; 32]);
+        let below = Hash::from_bytes([0x7F; 32]);
+        let above = Hash::from_bytes([0x81; 32]);
+        assert!(below.meets_difficulty(&target));
+        assert!(!above.meets_difficulty(&target));
+        // Equal to the target counts as meeting it.
+        assert!(target.meets_difficulty(&target));
+    }
+
+    #[test]
+    fn from_difficulty_zero_and_one_are_max_target() {
+        // Difficulty 0 → easiest (all-FF) target.
+        assert_eq!(Hash::from_difficulty(0), Hash::from_bytes([0xFF; 32]));
+        // M-2 off-by-one fix: from_difficulty(1) must equal the max target too.
+        assert_eq!(Hash::from_difficulty(1), Hash::from_bytes([0xFF; 32]));
+        assert_eq!(Hash::from_difficulty(1), Hash::from_difficulty(0));
+        // Each doubling of difficulty adds one leading zero bit.
+        assert_eq!(Hash::from_difficulty(2).first_byte(), 0x7F);
+    }
+
+    #[test]
+    fn to_difficulty_counts_leading_zeros_and_saturates() {
+        // No leading zeros → difficulty 1.
+        assert_eq!(Hash::from_bytes([0xFF; 32]).to_difficulty(), 1);
+        // One leading zero byte then 0xFF → 8 zero bits → 1 << 8.
+        let mut one_zero_byte = [0xFFu8; 32];
+        one_zero_byte[0] = 0x00;
+        assert_eq!(Hash::from_bytes(one_zero_byte).to_difficulty(), 256);
+        // Partial leading zeros inside the first byte (0x0F → 4 zero bits).
+        let mut nibble = [0xFFu8; 32];
+        nibble[0] = 0x0F;
+        assert_eq!(Hash::from_bytes(nibble).to_difficulty(), 16);
+        // L7: all-zero (≥64 zero bits) saturates to u64::MAX via checked_shl.
+        assert_eq!(Hash::zero().to_difficulty(), u64::MAX);
+    }
+
+    #[test]
+    fn from_and_to_difficulty_roundtrip_for_powers_of_two() {
+        for d in [1u64, 256, 65_536, 16_777_216] {
+            assert_eq!(
+                Hash::from_difficulty(d).to_difficulty(),
+                d,
+                "roundtrip for {}",
+                d
+            );
+        }
+        // Non-power difficulties round-trip only approximately (to the nearest
+        // power of two at or below the input).
+        let rt = Hash::from_difficulty(1000).to_difficulty();
+        assert!(rt <= 1000 && rt * 2 > 1000, "approx within 2x, got {}", rt);
+    }
+
+    #[test]
+    fn from_str_rejects_non_hex_and_wrong_length() {
+        assert!(matches!(
+            "zz".parse::<Hash>(),
+            Err(crate::error::Error::InvalidHashLength { .. })
+        ));
+        assert!(matches!(
+            "abcd".parse::<Hash>(),
+            Err(crate::error::Error::InvalidHashLength { expected: 32, .. })
+        ));
+        // A well-formed 64-hex string round-trips through FromStr.
+        let h = hash_data(b"fromstr");
+        assert_eq!(h.to_hex().parse::<Hash>().unwrap(), h);
+    }
+
+    #[test]
+    fn serde_json_hex_roundtrip() {
+        // The human-readable serde branch encodes the hash as a hex string.
+        let h = hash_data(b"serde-hash");
+        let json = serde_json::to_string(&h).unwrap();
+        assert_eq!(json, format!("\"{}\"", h.to_hex()));
+        let back: Hash = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, h);
+        // Invalid hex is rejected by the human-readable deserializer.
+        assert!(serde_json::from_str::<Hash>("\"nothex\"").is_err());
+        // NOTE: the non-human-readable (binary bytes) serde branch is not
+        // exercised — no binary serde format is available in this crate's deps.
+    }
+
+    #[test]
+    fn merkle_root_is_vulnerable_to_cve_2012_2459_duplication() {
+        // Documented-not-fixed: the odd-node branch DUPLICATES the lone node
+        // rather than RFC-6962 promotion, so appending a duplicate of the last
+        // leaf yields an identical root. Asserting the ACTUAL current behavior
+        // (consensus-frozen; contained by the downstream block validator, not
+        // by this construction).
+        let a = hash_data(b"A");
+        let b = hash_data(b"B");
+        let c = hash_data(b"C");
+        let root_abc = merkle_root(&[a, b, c]);
+        let root_abcc = merkle_root(&[a, b, c, c]);
+        assert_eq!(
+            root_abc, root_abcc,
+            "merkle_root([A,B,C]) currently equals merkle_root([A,B,C,C])"
+        );
     }
 }

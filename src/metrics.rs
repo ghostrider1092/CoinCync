@@ -20,7 +20,10 @@
 //! Phase 1 #6 of the post-launch campaign.
 
 use once_cell::sync::Lazy;
-use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
+use prometheus::{
+    Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts,
+    Registry, TextEncoder,
+};
 
 use crate::error::Result;
 
@@ -51,6 +54,31 @@ fn register_histogram(name: &str, help: &str, buckets: Vec<f64>) -> Histogram {
         .register(Box::new(h.clone()))
         .expect("metric not double-registered");
     h
+}
+
+fn register_gauge(name: &str, help: &str) -> Gauge {
+    let g = Gauge::new(name, help).expect("metric name valid");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("metric not double-registered");
+    g
+}
+
+fn register_int_counter_vec(name: &str, help: &str, labels: &[&str]) -> IntCounterVec {
+    let c = IntCounterVec::new(Opts::new(name, help), labels).expect("metric name valid");
+    REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("metric not double-registered");
+    c
+}
+
+#[allow(dead_code)]
+fn register_gauge_vec(name: &str, help: &str, labels: &[&str]) -> GaugeVec {
+    let g = GaugeVec::new(Opts::new(name, help), labels).expect("metric name valid");
+    REGISTRY
+        .register(Box::new(g.clone()))
+        .expect("metric not double-registered");
+    g
 }
 
 // ─── Histograms for the four Phase-1 hot paths ────────────────────────
@@ -103,6 +131,225 @@ pub static RANDOMX_HASH: Lazy<Histogram> = Lazy::new(|| {
     )
 });
 
+// ═══════════════════════════════════════════════════════════════════════
+// Enterprise chain-health metrics (2026-08-22)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// State GAUGES are refreshed together by `record_chain_snapshot`, called from
+// the node's periodic loop. Event COUNTERS/HISTOGRAMS are incremented at their
+// event sites via the `record_*` helpers below. Ranges chosen for CoinCync's
+// realistic operating envelope; big u128 values (difficulty, supply) are cast
+// to f64 for the gauge — dashboard precision, not consensus.
+
+// ── Consensus / chain state ──
+/// Current chain tip height.
+pub static CHAIN_HEIGHT: Lazy<IntGauge> =
+    Lazy::new(|| register_int_gauge("coincync_chain_height", "Current chain tip height"));
+/// Seconds since the tip block's timestamp (staleness / liveness signal).
+pub static TIP_AGE_SECONDS: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge("coincync_tip_age_seconds", "Seconds since the tip block timestamp")
+});
+/// Current block difficulty (tip target).
+pub static DIFFICULTY: Lazy<Gauge> =
+    Lazy::new(|| register_gauge("coincync_difficulty", "Current block difficulty"));
+/// Cumulative chain work (total difficulty).
+pub static TOTAL_DIFFICULTY: Lazy<Gauge> =
+    Lazy::new(|| register_gauge("coincync_total_difficulty", "Cumulative chain work"));
+/// Total confirmed transactions seen on-chain.
+pub static TOTAL_TRANSACTIONS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge("coincync_total_transactions", "Total on-chain transactions")
+});
+
+// ── Emission / supply (transparency for a 0%-tax fair-launch coin) ──
+/// Circulating supply in atomic units (`total_supply - total_burned`).
+pub static CIRCULATING_SUPPLY: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge("coincync_circulating_supply_atomic", "Circulating supply (atomic units)")
+});
+/// Total emitted supply in atomic units.
+pub static TOTAL_SUPPLY: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge("coincync_total_supply_atomic", "Total emitted supply (atomic units)")
+});
+/// Cumulative fees burned in atomic units.
+pub static FEE_BURNED_TOTAL: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge("coincync_fee_burned_total_atomic", "Cumulative fees burned (atomic units)")
+});
+/// Current per-block coinbase reward in atomic units.
+pub static BLOCK_REWARD: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge("coincync_block_reward_atomic", "Current block reward (atomic units)")
+});
+
+// ── Sync / IBD (catches the wedge incidents) ──
+/// 1 if the node considers itself synced, else 0.
+pub static IS_SYNCED: Lazy<IntGauge> =
+    Lazy::new(|| register_int_gauge("coincync_is_synced", "1 if node is synced, else 0"));
+/// Best-known height minus our height (blocks behind the network).
+pub static BLOCKS_BEHIND: Lazy<IntGauge> =
+    Lazy::new(|| register_int_gauge("coincync_blocks_behind", "Blocks behind best-known peer"));
+/// Sync progress as a percentage [0,100].
+pub static SYNC_PROGRESS: Lazy<Gauge> =
+    Lazy::new(|| register_gauge("coincync_sync_progress_percent", "Sync progress percent"));
+
+// ── P2P ──
+pub static PEERS: Lazy<IntGauge> =
+    Lazy::new(|| register_int_gauge("coincync_peers", "Connected peer count"));
+pub static PEERS_INBOUND: Lazy<IntGauge> =
+    Lazy::new(|| register_int_gauge("coincync_peers_inbound", "Inbound peer count"));
+pub static PEERS_OUTBOUND: Lazy<IntGauge> =
+    Lazy::new(|| register_int_gauge("coincync_peers_outbound", "Outbound peer count"));
+/// Peers banned (cumulative).
+pub static PEER_BANS_TOTAL: Lazy<IntCounter> =
+    Lazy::new(|| register_int_counter("coincync_peer_bans_total", "Cumulative peers banned"));
+
+// ── Mempool ──
+pub static MEMPOOL_SIZE: Lazy<IntGauge> =
+    Lazy::new(|| register_int_gauge("coincync_mempool_size", "Mempool transaction count"));
+pub static MEMPOOL_BYTES: Lazy<IntGauge> =
+    Lazy::new(|| register_int_gauge("coincync_mempool_bytes", "Mempool size in bytes"));
+/// Mempool admission rejections, labeled by reason.
+pub static MEMPOOL_REJECTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec(
+        "coincync_mempool_rejects_total",
+        "Mempool admission rejections by reason",
+        &["reason"],
+    )
+});
+
+// ── Storage ──
+pub static UTXO_SET_SIZE: Lazy<IntGauge> =
+    Lazy::new(|| register_int_gauge("coincync_utxo_set_size", "UTXO set size (outputs)"));
+pub static DB_SIZE_BYTES: Lazy<IntGauge> =
+    Lazy::new(|| register_int_gauge("coincync_db_size_bytes", "On-disk database size in bytes"));
+
+// ── Reorg / finality (catches the reorg-deadlock / runaway-fork incidents) ──
+pub static REORG_TOTAL: Lazy<IntCounter> =
+    Lazy::new(|| register_int_counter("coincync_reorg_total", "Cumulative chain reorganizations"));
+pub static ORPHAN_BLOCKS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter("coincync_orphan_blocks_total", "Cumulative orphan/stale blocks")
+});
+/// Depth of each reorganization (distribution).
+pub static REORG_DEPTH: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram(
+        "coincync_reorg_depth",
+        "Depth of each chain reorganization",
+        vec![1.0, 2.0, 3.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 1000.0],
+    )
+});
+/// Observed interval between accepted blocks, in seconds.
+pub static BLOCK_INTERVAL: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram(
+        "coincync_block_interval_seconds",
+        "Interval between accepted blocks",
+        vec![1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0],
+    )
+});
+
+/// A snapshot of chain state for the periodic gauge refresh. Built by the node
+/// (which owns the chain/mempool/p2p handles) and passed to
+/// [`record_chain_snapshot`]. Keeping this a plain-value struct keeps
+/// `metrics.rs` free of chain/network type dependencies.
+#[derive(Debug, Clone, Default)]
+pub struct ChainSnapshot {
+    pub height: u64,
+    pub tip_age_seconds: f64,
+    pub difficulty: f64,
+    pub total_difficulty: f64,
+    pub total_transactions: u64,
+    pub circulating_supply_atomic: f64,
+    pub total_supply_atomic: f64,
+    pub fee_burned_total_atomic: f64,
+    pub block_reward_atomic: f64,
+    pub is_synced: bool,
+    pub blocks_behind: i64,
+    pub sync_progress_percent: f64,
+    pub peers: i64,
+    pub peers_inbound: i64,
+    pub peers_outbound: i64,
+    pub mempool_size: i64,
+    pub mempool_bytes: i64,
+    pub utxo_set_size: i64,
+    pub db_size_bytes: i64,
+}
+
+/// Refresh all state gauges from a snapshot. Call periodically from the node.
+pub fn record_chain_snapshot(s: &ChainSnapshot) {
+    CHAIN_HEIGHT.set(s.height as i64);
+    TIP_AGE_SECONDS.set(s.tip_age_seconds);
+    DIFFICULTY.set(s.difficulty);
+    TOTAL_DIFFICULTY.set(s.total_difficulty);
+    TOTAL_TRANSACTIONS.set(s.total_transactions as i64);
+    CIRCULATING_SUPPLY.set(s.circulating_supply_atomic);
+    TOTAL_SUPPLY.set(s.total_supply_atomic);
+    FEE_BURNED_TOTAL.set(s.fee_burned_total_atomic);
+    BLOCK_REWARD.set(s.block_reward_atomic);
+    IS_SYNCED.set(if s.is_synced { 1 } else { 0 });
+    BLOCKS_BEHIND.set(s.blocks_behind);
+    SYNC_PROGRESS.set(s.sync_progress_percent);
+    PEERS.set(s.peers);
+    PEERS_INBOUND.set(s.peers_inbound);
+    PEERS_OUTBOUND.set(s.peers_outbound);
+    MEMPOOL_SIZE.set(s.mempool_size);
+    MEMPOOL_BYTES.set(s.mempool_bytes);
+    UTXO_SET_SIZE.set(s.utxo_set_size);
+    DB_SIZE_BYTES.set(s.db_size_bytes);
+}
+
+/// Record a chain reorganization of the given depth.
+pub fn record_reorg(depth: u64) {
+    REORG_TOTAL.inc();
+    REORG_DEPTH.observe(depth as f64);
+}
+
+/// Record an orphan / stale block.
+pub fn record_orphan_block() {
+    ORPHAN_BLOCKS_TOTAL.inc();
+}
+
+/// Record a mempool admission rejection, labeled by a short stable reason.
+pub fn record_mempool_reject(reason: &str) {
+    MEMPOOL_REJECTS_TOTAL.with_label_values(&[reason]).inc();
+}
+
+/// Record a peer ban.
+pub fn record_peer_ban() {
+    PEER_BANS_TOTAL.inc();
+}
+
+/// Record the interval (seconds) between two accepted blocks.
+pub fn record_block_interval(seconds: f64) {
+    BLOCK_INTERVAL.observe(seconds);
+}
+
+/// Force-register the enterprise metrics so a freshly-started node exposes them
+/// (at 0 / empty) before their first update — dashboards then see the series
+/// exist immediately. Called from `serve_metrics`.
+fn touch_enterprise_metrics() {
+    Lazy::force(&CHAIN_HEIGHT);
+    Lazy::force(&TIP_AGE_SECONDS);
+    Lazy::force(&DIFFICULTY);
+    Lazy::force(&TOTAL_DIFFICULTY);
+    Lazy::force(&TOTAL_TRANSACTIONS);
+    Lazy::force(&CIRCULATING_SUPPLY);
+    Lazy::force(&TOTAL_SUPPLY);
+    Lazy::force(&FEE_BURNED_TOTAL);
+    Lazy::force(&BLOCK_REWARD);
+    Lazy::force(&IS_SYNCED);
+    Lazy::force(&BLOCKS_BEHIND);
+    Lazy::force(&SYNC_PROGRESS);
+    Lazy::force(&PEERS);
+    Lazy::force(&PEERS_INBOUND);
+    Lazy::force(&PEERS_OUTBOUND);
+    Lazy::force(&PEER_BANS_TOTAL);
+    Lazy::force(&MEMPOOL_SIZE);
+    Lazy::force(&MEMPOOL_BYTES);
+    Lazy::force(&MEMPOOL_REJECTS_TOTAL);
+    Lazy::force(&UTXO_SET_SIZE);
+    Lazy::force(&DB_SIZE_BYTES);
+    Lazy::force(&REORG_TOTAL);
+    Lazy::force(&ORPHAN_BLOCKS_TOTAL);
+    Lazy::force(&REORG_DEPTH);
+    Lazy::force(&BLOCK_INTERVAL);
+}
+
 // ─── HTTP scrape server ───────────────────────────────────────────────
 //
 // Spawn one per process via `serve_metrics`. Listens on the provided
@@ -139,6 +386,9 @@ pub async fn serve_metrics(bind_addr: std::net::SocketAddr) -> Result<()> {
     let _ = &*TX_ADMIT_TO_MEMPOOL;
     let _ = &*PEER_HANDSHAKE;
     let _ = &*RANDOMX_HASH;
+    // Pre-register the enterprise chain-health metrics so they appear at 0
+    // before their first update.
+    touch_enterprise_metrics();
 
     let app = Router::new().route(
         "/metrics",
@@ -210,42 +460,9 @@ pub mod dandelion {
     });
 }
 
-// ─── Legacy thin-helper API (retained, callers are mostly absent) ────
-//
-// These were noop stubs in the 1.0 trim and have no production callers
-// today. Kept as no-op signatures so future code that wants them as
-// convenience helpers can write `metrics::block_height(h)` without
-// reaching for the histogram types directly. When a real caller lands,
-// re-implement the relevant fn to push to a registered metric.
-pub fn block_height(_h: u64) {}
-pub fn block_time_secs(_t: f64) {}
-pub fn block_size_bytes(_s: usize) {}
-pub fn orphan_block() {}
-pub fn reorg(_depth: u64) {}
-pub fn difficulty(_d: f64) {}
-pub fn circulating_supply(_s: u64) {}
-
-pub fn mempool_size(_n: usize) {}
-pub fn mempool_bytes(_b: usize) {}
-pub fn tx_accepted() {}
-pub fn tx_rejected() {}
-
-pub fn validation_ms(_ms: f64) {}
-pub fn clsag_verify_ms(_ms: f64) {}
-pub fn bp_verify_ms(_ms: f64) {}
-pub fn halo2_verify_ms(_ms: f64) {}
-
-pub fn peer_count(_n: usize) {}
-pub fn inbound_peers(_n: usize) {}
-pub fn outbound_peers(_n: usize) {}
-pub fn bytes_sent(_b: u64) {}
-pub fn bytes_recv(_b: u64) {}
-pub fn msg_sent() {}
-pub fn msg_recv() {}
-
-pub fn hashrate(_hr: f64) {}
-pub fn mined_block() {}
-
-pub fn shielded_tx_count() {}
-pub fn shielded_pool_size(_n: u64) {}
-pub fn shielded_tx_ratio(_r: f64) {}
+// (Removed 2026-08-22) The "legacy thin-helper API" — ~30 no-op `pub fn`
+// stubs (block_height, reorg, hashrate, …) — had zero call sites and did
+// nothing when called. A no-op that looks like it records a metric is a
+// footgun (silent data loss), so the dead surface was deleted. Real metrics
+// live in the registered `Lazy<...>` gauges/histograms above; add a new one
+// there and record to it directly when a producer actually exists.

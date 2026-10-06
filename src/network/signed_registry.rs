@@ -58,6 +58,38 @@
 //!
 //! Each caller MUST pass a namespace unique to its domain. Reusing
 //! the peer-snapshot namespace would defeat the isolation.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 Ed25519 signature verification** — INVARIANT: a payload verifies only when
+//!   namespace, payload bytes, and key all match; any mismatch is rejected.
+//!   THREAT: a forged or cross-namespace signature authorizes a malicious payload.
+//!   TESTS: `signature_verifies_when_namespace_and_payload_and_key_match`,
+//!   `signature_rejected_when_namespace_differs`, `signature_rejected_when_payload_tampered`.
+//! - **§2 signature length gate** — INVARIANT: a signature that is not exactly 64
+//!   bytes is rejected before any curve operation. THREAT: malformed-length input
+//!   triggers a panic or an accidental accept. TESTS: `signature_rejected_when_length_not_64`.
+//! - **§3 network / schema binding** — INVARIANT: a payload for the wrong network or
+//!   an unexpected schema version is refused. THREAT: a mainnet-signed (or future-schema)
+//!   payload is replayed onto testnet clients. TESTS: `validate_payload_rejects_wrong_network`,
+//!   `validate_payload_rejects_wrong_schema`.
+//! - **§4 anti-replay freshness gate** — INVARIANT: a payload older than the last-seen
+//!   timestamp is rejected, while a strictly fresher one is accepted.
+//!   THREAT: an attacker replays a stale-but-valid directory to roll back the view.
+//!   TESTS: `validate_payload_rejects_stale_replay`, `validate_payload_accepts_fresh_after_last_seen`.
+//! - **§5 NTP clock slack** — INVARIANT: a timestamp within the NTP slack window is
+//!   accepted but one beyond the future bound is rejected. THREAT: a far-future
+//!   timestamp poisons the replay gate against all later honest payloads.
+//!   TESTS: `validate_payload_accepts_within_ntp_slack`, `validate_payload_rejects_future_beyond_slack`.
+//! - **§6 cold-start replay gate** — INVARIANT: with no prior last-seen the replay gate
+//!   is skipped so a fresh install can bootstrap. THREAT: cold-start deadlock leaves a
+//!   new node unable to accept any directory. TESTS: `validate_payload_ignores_replay_gate_on_fresh_cold_start`.
+//! - **§7 `RegistryPointer` serde / `fetch_verified_json`** — INVARIANT: the pointer
+//!   parses with optional fields absent and fetch returns only a fully verified payload.
+//!   THREAT: a strict parser breaks fetch, or an unverified payload reaches the caller.
+//!   TESTS: `registry_pointer_round_trips_through_json`, `registry_pointer_accepts_missing_optional_fields`.
 
 use std::time::Duration;
 

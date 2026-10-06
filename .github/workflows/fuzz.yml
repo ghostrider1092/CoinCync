@@ -40,18 +40,23 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          # The 5 most attacker-reachable surfaces:
+          # The attacker-reachable + consensus-critical crypto surfaces:
           #   - p2p_message: peer wire format (anyone over the network)
           #   - block: block deserialization (peer-supplied)
           #   - transaction: tx deserialization (peer-supplied)
           #   - rpc_body: JSON-RPC body parser (peer-supplied if RPC is exposed)
           #   - wallet_persistence: caught the kdf_m_cost bug in fuzz #1
           #     (commit 91a19cd). Kept in CI to lock the regression.
+          #   - clsag: ring-signature verify path (the C-1/C-2 key-image class
+          #     lives here — the highest-value surface to fuzz continuously).
+          #   - stealth: one-time-address / ECDH derivation (fund direction).
           - fuzz_p2p_message
           - fuzz_block
           - fuzz_transaction
           - fuzz_rpc_body
           - fuzz_wallet_persistence
+          - fuzz_clsag
+          - fuzz_stealth
     steps:
       - uses: actions/checkout@v7
 

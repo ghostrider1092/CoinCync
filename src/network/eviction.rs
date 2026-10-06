@@ -42,6 +42,55 @@
 //!     (src/node/eviction.cpp:26, used at :188).
 //!   - Heilman et al. 2015, "Eclipse Attacks on Bitcoin's Peer-to-Peer
 //!     Network" — motivational paper for the eviction defense.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `netgroup`** — INVARIANT: keys IPv4 by /16 and IPv6 by /32, and the
+//!   IPv4/IPv6 keyspaces are tagged so they can never collide.
+//!   THREAT: a mis-keyed netgroup would let an attacker's addresses spread
+//!   across "different" groups and evade concentration-based eviction.
+//!   TESTS: `ipv6_netgroup_is_32`.
+//! - **§2 `select_inbound_to_evict` candidate filtering** — INVARIANT: only
+//!   inbound peers older than `MIN_AGE_BEFORE_EVICT` are ever eviction
+//!   candidates; outbound (self-chosen) connections are never touched.
+//!   THREAT: evicting an outbound peer or a still-handshaking inbound peer
+//!   would waste both sides' connection setup work and could be steered by
+//!   an attacker.
+//!   TESTS: `no_candidates_returns_none`, `skips_outbound_peers`,
+//!   `skips_young_peers`.
+//! - **§3 Per-axis protection (age / activity / reputation)** — INVARIANT:
+//!   protection is purely RELATIVE (top-`PROTECT_PER_AXIS` per axis), never
+//!   an absolute reputation floor.
+//!   THREAT: audit M-1 — the former absolute `reputation < 80` floor exempted
+//!   every peer at the default reputation (100), so an all-quiet inbound
+//!   flood produced an empty candidate set and every new honest inbound was
+//!   rejected — the exact eclipse this module exists to prevent.
+//!   TESTS: `all_high_reputation_flood_still_yields_eviction_candidate`.
+//! - **§4 Relay-score protection axis** — INVARIANT: up to
+//!   `PROTECT_PER_AXIS` peers with `relay_scores.score(id) > 0` are
+//!   protected, but this axis can never prevent eviction from a
+//!   netgroup-concentrated flood, even if every flooder has earned score.
+//!   THREAT: an eclipse attacker "buying" eviction-immunity by having every
+//!   flood peer relay a few real blocks.
+//!   TESTS: `relay_scored_flood_is_still_evicted_eclipse_safe`,
+//!   `relay_score_protects_a_good_relayer_when_its_group_is_not_flooded`.
+//! - **§5 Netgroup-concentration selection** — INVARIANT: among the
+//!   unprotected remaining candidates, the netgroup with the most members is
+//!   selected as the eviction target.
+//!   THREAT: without concentration-based grouping, an eclipse attacker
+//!   filling all slots from one /16 would have its members evicted no more
+//!   often than diverse, legitimate peers.
+//!   TESTS: `netgroup_concentration_picks_largest`.
+//! - **§6 Within-group evictee tie-break**  — INVARIANT: within the targeted
+//!   netgroup, the YOUNGEST (largest `connected_at`) peer is evicted first;
+//!   ties break toward lower reputation, then toward keeping the encrypted
+//!   peer (plaintext evicted first).
+//!   THREAT: a LIFO-within-group policy makes churn attacks costly (the
+//!   attacker's newest connections die first, not its oldest); preferring to
+//!   keep encrypted peers biases eviction against low-cost plaintext bots.
+//!   TESTS: `within_attacker_group_picks_youngest`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
@@ -69,10 +118,10 @@ const PROTECT_PER_AXIS: usize = 4;
 /// local design pick with the rationale above.)
 const MIN_AGE_BEFORE_EVICT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Reputation threshold above which a peer is exempted from eviction
-/// outright. PeerInfo reputation is clamped to [-100, 100]; default is 100.
-/// Anything ≥ this is considered well-behaved and never evicted.
-const REPUTATION_PROTECT_FLOOR: i32 = 80;
+// audit M-1: the former REPUTATION_PROTECT_FLOOR (absolute "never evict above
+// reputation 80") was removed — with a default reputation of 100 it exempted
+// every quiet peer and let an inbound flooder eclipse the node. Protection is
+// now purely relative (per-axis top-N below), matching Bitcoin Core.
 
 /// /16 (IPv4) or /32 (IPv6) netgroup key. Similar in spirit to Bitcoin
 /// Core's netgroup keying — in current upstream that logic lives in
@@ -83,7 +132,7 @@ const REPUTATION_PROTECT_FLOOR: i32 = 80;
 /// current shape in upstream. (CoinCync doesn't route Tor/I2P-aware
 /// grouping yet, so we treat them as their underlying transport's
 /// netgroup.)
-fn netgroup(addr: SocketAddr) -> u64 {
+pub(crate) fn netgroup(addr: SocketAddr) -> u64 {
     match addr.ip() {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -129,8 +178,14 @@ where
         .filter(|p| !p.outbound)
         // Skip very-young connections — they may still be handshaking.
         .filter(|p| now.duration_since(p.connected_at) >= MIN_AGE_BEFORE_EVICT)
-        // Skip peers above the reputation floor (well-behaved, never evict).
-        .filter(|p| p.reputation < REPUTATION_PROTECT_FLOOR)
+        // audit M-1: NO absolute reputation floor here. The default reputation
+        // is 100 and only drops on misbehavior, so an absolute
+        // `reputation < 80` candidate filter meant a quiet inbound flooder (all
+        // peers at rep 100) produced an EMPTY candidate set → eviction returned
+        // None → every new (honest) inbound was rejected: the exact eclipse this
+        // function exists to prevent. Well-behaved peers are still protected
+        // RELATIVELY by the per-axis top-N steps below (which include a
+        // reputation axis), matching Bitcoin Core's purely-relative eviction.
         .collect();
 
     if candidates.is_empty() {
@@ -260,6 +315,7 @@ mod tests {
             encrypted,
             remote_static_key: None,
             capabilities: 0,
+            consensus_fingerprint: None,
             consecutive_full: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             connection_token: std::sync::Arc::new(()),
             eclipse_slot: None,
@@ -301,14 +357,21 @@ mod tests {
     }
 
     #[test]
-    fn skips_high_reputation_peers() {
+    fn all_high_reputation_flood_still_yields_eviction_candidate() {
+        // audit M-1: a quiet inbound flood — all peers at the DEFAULT maximum
+        // reputation (100), same netgroup, well-aged — must STILL yield an
+        // eviction candidate, or the node can never admit a new honest inbound
+        // peer and is eclipsed. Pre-fix, the absolute reputation floor made this
+        // return None (the bug). Well-behaved peers remain protected RELATIVELY
+        // (per-axis top-N), so a legitimately diverse, non-flooded set is still
+        // safe — see the other eviction tests.
         let peers: Vec<PeerInfo> = (0..20u8)
             .map(|i| mk(i, &format!("1.2.3.{}", i + 10), 3600, 100, false, false))
             .collect();
         let refs: Vec<&PeerInfo> = peers.iter().collect();
         assert!(
-            select_inbound_to_evict(refs, test_now(), &RelayScoreMap::new()).is_none(),
-            "all-high-reputation peer pool must yield no eviction candidate"
+            select_inbound_to_evict(refs, test_now(), &RelayScoreMap::new()).is_some(),
+            "an all-high-reputation single-netgroup flood must remain evictable (eclipse-safe)"
         );
     }
 

@@ -514,4 +514,141 @@ mod tests {
         let diff = zero.saturating_sub(one);
         assert_eq!(diff.as_atomic(), 0);
     }
+
+    #[test]
+    fn from_float_cync_rejects_above_max() {
+        // u64::MAX / ATOMIC_UNITS is the largest representable whole-CYNC value.
+        let over = u64::MAX as f64 / ATOMIC_UNITS as f64 * 2.0;
+        assert!(matches!(
+            Amount::from_float_cync(over),
+            Err(Error::AmountOverflow)
+        ));
+    }
+
+    #[test]
+    fn checked_mul_detects_factor_overflow() {
+        let max = Amount::from_atomic(u64::MAX);
+        assert!(matches!(max.checked_mul(2), Err(Error::AmountOverflow)));
+        // A non-overflowing multiply is exact.
+        assert_eq!(
+            Amount::from_atomic(1000).checked_mul(3).unwrap().as_atomic(),
+            3000
+        );
+    }
+
+    #[test]
+    fn div_operator_by_zero_returns_zero_without_panic() {
+        let a = Amount::from_atomic(100);
+        assert_eq!(a / 0, Amount::ZERO);
+        assert_eq!((a / 0).as_atomic(), 0);
+        // Normal division truncates toward zero.
+        assert_eq!((Amount::from_atomic(100) / 4).as_atomic(), 25);
+    }
+
+    #[test]
+    fn mul_operator_saturates() {
+        let max = Amount::from_atomic(u64::MAX);
+        assert_eq!((max * 2).as_atomic(), u64::MAX);
+        // A non-overflowing multiply is exact.
+        assert_eq!((Amount::from_atomic(21) * 2).as_atomic(), 42);
+    }
+
+    #[test]
+    fn from_str_rejects_non_digit_fractional_chars() {
+        assert!("1.5x".parse::<Amount>().is_err());
+        assert!("0.12a34".parse::<Amount>().is_err());
+    }
+
+    #[test]
+    fn from_str_rejects_integer_part_above_max() {
+        // Max whole-CYNC integer part is u64::MAX / ATOMIC_UNITS ≈ 18_446_744.
+        assert!(matches!(
+            "99999999999999".parse::<Amount>(),
+            Err(Error::AmountOverflow)
+        ));
+    }
+
+    #[test]
+    fn from_str_truncates_fractional_beyond_twelve_digits() {
+        // 13 fractional digits: the 13th is dropped (truncated, not rounded).
+        let a = "0.1234567890123".parse::<Amount>().unwrap();
+        assert_eq!(a.as_atomic(), 123_456_789_012);
+        // A trailing digit past 12 places cannot affect the result.
+        let b = "1.0000000000009".parse::<Amount>().unwrap();
+        assert_eq!(b.as_atomic(), ATOMIC_UNITS);
+    }
+
+    #[test]
+    fn from_millicync_and_microcync_guard_bad_floats() {
+        // millicync guards
+        assert!(matches!(
+            Amount::from_millicync(f64::NAN),
+            Err(Error::AmountOverflow)
+        ));
+        assert!(matches!(
+            Amount::from_millicync(f64::INFINITY),
+            Err(Error::AmountOverflow)
+        ));
+        assert!(matches!(
+            Amount::from_millicync(-1.0),
+            Err(Error::AmountUnderflow)
+        ));
+        assert!(matches!(
+            Amount::from_millicync(u64::MAX as f64 / MILLICYNC as f64 * 2.0),
+            Err(Error::AmountOverflow)
+        ));
+        // microcync guards
+        assert!(matches!(
+            Amount::from_microcync(f64::NAN),
+            Err(Error::AmountOverflow)
+        ));
+        assert!(matches!(
+            Amount::from_microcync(f64::NEG_INFINITY),
+            Err(Error::AmountOverflow)
+        ));
+        assert!(matches!(
+            Amount::from_microcync(-0.5),
+            Err(Error::AmountUnderflow)
+        ));
+        assert!(matches!(
+            Amount::from_microcync(u64::MAX as f64 / MICROCYNC as f64 * 2.0),
+            Err(Error::AmountOverflow)
+        ));
+        // Happy path: 1000 mCYNC == 1 CYNC; 1_000_000 μCYNC == 1 CYNC.
+        assert_eq!(
+            Amount::from_millicync(1000.0).unwrap().as_atomic(),
+            ATOMIC_UNITS
+        );
+        assert_eq!(
+            Amount::from_microcync(1_000_000.0).unwrap().as_atomic(),
+            ATOMIC_UNITS
+        );
+    }
+
+    #[test]
+    fn syncs_and_denomination_accessors_roundtrip() {
+        let a = Amount::from_syncs(1_500_000_000);
+        assert_eq!(a.as_syncs(), 1_500_000_000);
+        assert_eq!(a.as_millicync(), 1.5); // 1.5e9 / 1e9
+        assert_eq!(a.as_microcync(), 1500.0); // 1.5e9 / 1e6
+                                              // from_syncs / as_syncs is the identity on atomic units.
+        assert_eq!(Amount::from_syncs(u64::MAX).as_syncs(), u64::MAX);
+        // from_millicync → as_millicync round-trips an exactly representable value.
+        assert_eq!(Amount::from_millicync(2.5).unwrap().as_millicync(), 2.5);
+    }
+
+    #[test]
+    fn sum_saturates_on_overflow() {
+        let over = vec![Amount::MAX, Amount::MAX, Amount::from_atomic(1)];
+        let total: Amount = over.into_iter().sum();
+        assert_eq!(total.as_atomic(), u64::MAX);
+        // The borrowed-iterator Sum impl saturates too.
+        let refs = vec![Amount::MAX, Amount::MAX];
+        let total_ref: Amount = refs.iter().sum();
+        assert_eq!(total_ref, Amount::MAX);
+        // A non-overflowing sum is exact.
+        let ok = vec![Amount::from_cync(1).unwrap(), Amount::from_cync(2).unwrap()];
+        let s: Amount = ok.into_iter().sum();
+        assert_eq!(s.as_cync(), 3);
+    }
 }

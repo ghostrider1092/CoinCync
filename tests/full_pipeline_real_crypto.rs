@@ -502,3 +502,35 @@ fn real_crypto_complete_ring_forgery_rejected() {
          If this passes, CLSAG verification is not checking the ring at all."
     );
 }
+
+/// C-2 (supply inflation): the double-spend set is keyed on `input.key_image`,
+/// but CLSAG proves ownership of `input.signature.key_image`. If the two aren't
+/// bound, an attacker keeps the honest signature (so crypto verifies) while
+/// swapping `input.key_image`, spending the same output repeatedly under fresh
+/// double-spend keys. A real, honest tx with a mismatched `input.key_image`
+/// must be rejected.
+#[test]
+fn real_crypto_unbound_key_image_rejected() {
+    let mut pool = Mempool::new();
+    let mut tx = build_valid_tx_for_mempool();
+    let other = build_valid_tx_for_mempool();
+
+    let honest = tx.inputs[0].key_image.as_bytes().to_owned();
+    let different_valid = other.inputs[0].key_image.as_bytes().to_owned();
+    assert_ne!(
+        honest, different_valid,
+        "test setup: need a different, valid key image"
+    );
+
+    // Swap in the different (valid) key image; the honest signature (and its
+    // signature.key_image) is left untouched.
+    tx.inputs[0].key_image = KeyImage::from_bytes(different_valid);
+
+    let result = pool.add(tx);
+    assert!(
+        result.is_err(),
+        "Unbound key image (honest signature, mismatched input.key_image) MUST be \
+         rejected. If this passes, the same output can be double-spent under fresh \
+         key images (audit C-2)."
+    );
+}

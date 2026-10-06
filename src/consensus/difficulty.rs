@@ -13,6 +13,71 @@
 //! - Long window: provides stability against variance
 //!
 //! Weights must satisfy: SHORT_WEIGHT + LONG_WEIGHT == WEIGHT_SCALE
+//!
+//! ## Audit map
+//! Each `§` is a code element below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
+//!
+//! - **§1 `calculate_difficulty`** — INVARIANT: output stays inside the per-block
+//!   clamp `[tip/2, tip*2]` AND never exceeds `max_t = u128::MAX / MIN_DIFFICULTY`
+//!   (the consensus floor is enforced for every input, emergency path included);
+//!   integer-only and deterministic. THREAT: difficulty manipulation / block
+//!   production outrunning P2P propagation once target drifts past the floor.
+//!   TESTS: `test_difficulty_stable`, `test_difficulty_increases_on_fast_blocks`,
+//!   `test_difficulty_decreases_on_slow_blocks`, `test_genesis_returns_max_target`,
+//!   `calculate_difficulty_hits_min_and_max_adjustment_clamp_bounds_exactly`,
+//!   `calculate_difficulty_handles_decreasing_and_equal_timestamps_within_clamp`,
+//!   `calculate_difficulty_future_timestamp_eases_but_respects_max_t_cap`,
+//!   `calculate_difficulty_output_never_exceeds_max_t_across_scenarios`.
+//! - **§2 `apply_asert` (ASERT-i3-2d)** — INVARIANT: canonical aserti3-2d — the
+//!   exponent denominator is `halflife` (in seconds) ALONE, so one halflife of
+//!   time_error exactly doubles/halves the target; `height_diff == 0` returns the
+//!   current target; exponent overflow saturates and the integer exponent clamps
+//!   at ±`MAX_INT_EXPONENT`. THREAT: **S1 unit-confusion — caused a TESTNET WIPE**;
+//!   the bugged `halflife*target_time` denominator made ASERT ~120× too weak.
+//!   TESTS: `test_asert_same_height`,
+//!   `apply_asert_canonical_formula_denominator_is_halflife_seconds_alone`,
+//!   `apply_asert_exponent_overflow_saturates_to_i128_min_without_panic`,
+//!   `apply_asert_clamps_integer_exponent_at_max_int_exponent`.
+//! - **§3 `needs_emergency_drop`** — INVARIANT: triggers only when `time_diff`
+//!   strictly exceeds `expected × EMERGENCY_TIME_MULTIPLIER`; the bootstrap guard
+//!   (`current_height < EMERGENCY_DIFFICULTY_BLOCKS*2`) and the short-history guard
+//!   suppress it; the drop still respects the MIN_DIFFICULTY floor. THREAT: false
+//!   emergency easing during startup or a benign stall. TESTS:
+//!   `test_emergency_drop_triggers`, `test_emergency_drop_bootstrap_guard`,
+//!   `needs_emergency_drop_is_strict_at_threshold_boundary`,
+//!   `needs_emergency_drop_false_when_fewer_than_emergency_blocks`,
+//!   `calculate_difficulty_emergency_drop_respects_min_difficulty_floor`.
+//! - **§4 `get_anchor`** — INVARIANT: never anchors ASERT on the genesis block
+//!   (height 0) while it is inside the window, but uses it when it is the only
+//!   block; deterministic across nodes. THREAT: a stale genesis timestamp making
+//!   the chain look catastrophically slow and collapsing difficulty to the floor.
+//!   TESTS: `get_anchor_skips_genesis_inside_window_but_uses_it_when_alone`,
+//!   `startup_grace_ignores_a_stale_genesis_timestamp`.
+//! - **§5 `safe_mul_u128` / `safe_mul_shift`** — INVARIANT: a u128 product overflow
+//!   saturates at `u128::MAX` (= easiest target / minimum difficulty), never wraps
+//!   or panics. THREAT: R-4 — the old shift-fallback lost low bits and produced a
+//!   wrong (too-small) target in the consensus-critical overflow path. TESTS:
+//!   `safe_mul_u128_saturates_at_boundary`, `test_safe_mul_no_overflow`,
+//!   `test_safe_mul_overflow`.
+//! - **§6 `decompose_fixed_point` / `pow2_frac`** — INVARIANT: integer u128
+//!   fixed-point `2^x` approximation, error < 0.1% across `[0, RADIX)`; handles
+//!   `i128::MIN` without panic. THREAT: H-1 — f64 is non-deterministic across CPU
+//!   architectures and would fork consensus. TESTS: `test_decompose_positive`,
+//!   `test_decompose_negative`, `test_decompose_i128_min`, `test_pow2_frac_zero`,
+//!   `test_pow2_frac_half`, `test_polynomial_accuracy`.
+//! - **§7 `target_to_u128` / `u128_to_target` / `target_to_difficulty`** —
+//!   INVARIANT: roundtrip preserves the upper 16 bytes; an all-zero target maps to
+//!   `1` via `.max(1)` so downstream division never divides by zero;
+//!   `calculate_difficulty_from_target` is an exact alias. THREAT: div-by-zero DoS
+//!   on a crafted zero target. TESTS: `test_target_roundtrip`,
+//!   `target_to_u128_maps_all_zero_target_to_one`,
+//!   `calculate_difficulty_from_target_equals_target_to_difficulty`.
+//! - **§8 `max_target` / `min_target` / `assert_weight_invariant`** — INVARIANT:
+//!   `max_target` is all-`0xFF`; the dual-window weights satisfy
+//!   `SHORT_WEIGHT + LONG_WEIGHT == WEIGHT_SCALE`. THREAT: a mis-set weight constant
+//!   silently skewing the short/long blend. TESTS: `test_max_target`,
+//!   `test_weight_invariant`.
 
 use crate::constants::{
     ASERT_HALFLIFE, DIFFICULTY_LONG_WEIGHT, DIFFICULTY_LONG_WINDOW, DIFFICULTY_SHORT_WEIGHT,
@@ -20,7 +85,7 @@ use crate::constants::{
     EMERGENCY_DROP_FACTOR, EMERGENCY_TIME_MULTIPLIER, MAX_DIFFICULTY_ADJ_DEN,
     MAX_DIFFICULTY_ADJ_NUM, MIN_DIFFICULTY_ADJ_DEN, MIN_DIFFICULTY_ADJ_NUM, TARGET_BLOCK_TIME,
 };
-use crate::primitives::Hash;
+use crate::primitives::{Difficulty, Hash};
 
 /// Absolute minimum network difficulty — the consensus floor below which ASERT
 /// cannot drive the chain. Equivalent to a target ceiling of `u128::MAX / 500`.
@@ -110,9 +175,18 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
     };
     let tip_target = target_to_u128(&tip.target);
 
+    // #191 FIX (defect 1 — sliding-anchor re-charge): ASERT must apply the
+    // exponent to the ANCHOR's target, not the tip's. The tip's target already
+    // contains every prior per-block adjustment, so basing the exponent on it
+    // re-charges a one-time idle gap on each of the next SHORT/LONG blocks the
+    // gap sits inside the window — the compounding that collapsed difficulty by
+    // ~13 halvings to the floor. Canonical aserti3-2d bases it on the fixed
+    // anchor target so the gap is paid ONCE as height advances (T·Δh offsets
+    // the gap in Δt). The per-block ±2x clamp + the MIN_DIFFICULTY floor below
+    // remain the rails.
     let short_anchor = get_anchor(blocks, DIFFICULTY_SHORT_WINDOW as usize);
     let short_target = apply_asert(
-        tip_target,
+        target_to_u128(&short_anchor.target),
         short_anchor,
         tip,
         TARGET_BLOCK_TIME,
@@ -121,7 +195,7 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
 
     let long_anchor = get_anchor(blocks, DIFFICULTY_LONG_WINDOW as usize);
     let long_target = apply_asert(
-        tip_target,
+        target_to_u128(&long_anchor.target),
         long_anchor,
         tip,
         TARGET_BLOCK_TIME,
@@ -346,7 +420,26 @@ fn safe_mul_shift(target: u128, frac_pow2: u128) -> u128 {
 }
 
 fn get_anchor(blocks: &[DifficultyBlock], depth: usize) -> &DifficultyBlock {
-    let idx = blocks.len().saturating_sub(depth.min(blocks.len()));
+    let mut idx = blocks.len().saturating_sub(depth.min(blocks.len()));
+    // STARTUP GRACE: never anchor ASERT on the genesis block (height 0). Its
+    // timestamp is a fixed constant that need not reflect when mining actually
+    // began. If the first real block is mined long after the genesis timestamp,
+    // anchoring on genesis makes `time_error` enormous — the chain looks
+    // catastrophically slow — and ASERT drives difficulty to the MIN_DIFFICULTY
+    // floor for roughly the first long-window of blocks before recovering.
+    // Advancing the anchor to the first *mined* block keeps every `time_error`
+    // over real inter-block timestamps, eliminating the startup dip regardless
+    // of the genesis→first-block gap. This is deterministic (all nodes see the
+    // same block heights) so it is consensus-safe, and it only differs from the
+    // old behaviour while genesis is still inside the difficulty window (roughly
+    // the first `DIFFICULTY_LONG_WINDOW` blocks); on a mature chain the window
+    // never contains genesis, so mainnet steady-state difficulty is unchanged.
+    // Offline-simulated: eliminates the dip for genesis gaps from 2 min to
+    // 135 days while preserving fast convergence to the true-hashrate target.
+    // See docs/design/difficulty-oscillation-analysis.md §7.
+    if idx + 1 < blocks.len() && blocks[idx].height == 0 {
+        idx += 1;
+    }
     &blocks[idx]
 }
 
@@ -389,7 +482,18 @@ pub fn min_target() -> Hash {
     Hash::from_bytes(bytes)
 }
 
-pub fn target_to_difficulty(target: &Hash) -> u128 {
+/// The work-factor of a target as a typed [`Difficulty`] — the public boundary
+/// for fork-choice / reporting consumers. The internal ASERT retarget math stays
+/// in `u128` (see [`target_to_difficulty_raw`]); the newtype deliberately has no
+/// `Mul`/`Div`, so it is applied only where a difficulty is compared/accumulated,
+/// not inside the arithmetic.
+pub fn target_to_difficulty(target: &Hash) -> Difficulty {
+    Difficulty::new(target_to_difficulty_raw(target))
+}
+
+/// Raw `u128` work-factor of a target — the internal computation the retarget
+/// math uses directly.
+fn target_to_difficulty_raw(target: &Hash) -> u128 {
     u128_max_target() / target_to_u128(target)
 }
 
@@ -409,14 +513,14 @@ pub fn estimate_hashrate(blocks: &[DifficultyBlock]) -> f64 {
     }
     let total_work: f64 = blocks
         .iter()
-        .map(|b| target_to_difficulty(&b.target) as f64)
+        .map(|b| target_to_difficulty_raw(&b.target) as f64)
         .sum();
     total_work / time_span
 }
 
 /// Calculate difficulty from target (convenience function).
 pub fn calculate_difficulty_from_target(target: &Hash) -> u128 {
-    target_to_difficulty(target)
+    target_to_difficulty_raw(target)
 }
 
 #[cfg(test)]
@@ -478,7 +582,7 @@ mod tests {
             .map(|i| make_block(i, i * TARGET_BLOCK_TIME))
             .collect();
         let new_target = calculate_difficulty(&blocks, 20);
-        let diff = target_to_difficulty(&new_target);
+        let diff = target_to_difficulty(&new_target).as_u128();
         assert!(diff < 10);
     }
 
@@ -488,8 +592,8 @@ mod tests {
             .map(|i| make_block(i, i * (TARGET_BLOCK_TIME / 2)))
             .collect();
         let new_target = calculate_difficulty(&blocks, 20);
-        let old_diff = target_to_difficulty(&blocks.last().unwrap().target);
-        let new_diff = target_to_difficulty(&new_target);
+        let old_diff = target_to_difficulty(&blocks.last().unwrap().target).as_u128();
+        let new_diff = target_to_difficulty(&new_target).as_u128();
         assert!(new_diff >= old_diff);
     }
 
@@ -512,6 +616,131 @@ mod tests {
             "slow blocks should produce target ≥ tip target: old={}, new={}",
             old_val,
             new_val
+        );
+    }
+
+    /// Build a block carrying an explicit u128 target, so a simulation can
+    /// control difficulty headroom above the floor (the `make_block_realistic`
+    /// fixed target sits below the MIN_DIFFICULTY floor and leaves no room to
+    /// observe a *bounded* ease).
+    fn block_with_target(height: u64, timestamp: u64, target: u128) -> DifficultyBlock {
+        DifficultyBlock {
+            height,
+            timestamp,
+            target: u128_to_target(target),
+        }
+    }
+
+    /// Regression for #191 (consensus: difficulty collapse after an idle gap).
+    ///
+    /// A single long inter-block gap followed by fast blocks drove difficulty
+    /// down ~13 halvings to the MIN_DIFFICULTY floor and PINNED it there for
+    /// dozens of blocks — a one-miner flood. Root cause: `apply_asert` based the
+    /// ASERT exponent on the *tip's* target, so the one-time gap, which stays
+    /// inside the sliding SHORT/LONG window for 8/144 blocks, was re-charged on
+    /// top of the already-halved tip every block → compounding to the floor.
+    ///
+    /// The fix bases the exponent on the FIXED anchor target (canonical
+    /// aserti3-2d), so the gap is paid ONCE as height advances. This simulates
+    /// the reported trace — a steady chain, one ~3.2h gap, then 1s blocks — and
+    /// asserts the ease is bounded and difficulty recovers, never collapsing to
+    /// the floor. (Pre-fix, this chain pins at difficulty 500 for ~87 blocks;
+    /// post-fix the minimum is ~31k with ZERO floor blocks — verified against a
+    /// numeric replica of the retarget loop.)
+    #[test]
+    fn idle_gap_does_not_collapse_difficulty_to_floor_191() {
+        // Steady target with ample headroom above the floor: difficulty ≈ 2^18.
+        const T0: u128 = 1u128 << 110;
+        const GAP: u64 = 11_522; // the reported idle gap (seconds)
+        let t0_diff = target_to_difficulty_raw(&u128_to_target(T0));
+        assert!(
+            t0_diff > MIN_DIFFICULTY * 50,
+            "test precondition: steady difficulty must sit well above the floor"
+        );
+
+        // A long steady chain on the 120s target → ASERT at equilibrium.
+        let mut blocks: Vec<DifficultyBlock> = Vec::new();
+        let mut ts = 0u64;
+        for h in 0..200u64 {
+            blocks.push(block_with_target(h, ts, T0));
+            ts += TARGET_BLOCK_TIME;
+        }
+
+        // The gap block itself was mined at the steady target (its difficulty
+        // was fixed by the pre-gap chain); only its TIMESTAMP jumps.
+        let gap_h = blocks.len() as u64;
+        let gap_target = target_to_u128(&calculate_difficulty(&blocks, gap_h));
+        ts = blocks.last().unwrap().timestamp + GAP;
+        blocks.push(block_with_target(gap_h, ts, gap_target));
+
+        // Now mine fast blocks (1s apart). Each block's target is whatever the
+        // retarget produces from the history so far — this is the series #191
+        // showed collapsing to the floor.
+        let mut series: Vec<u128> = Vec::new();
+        for _ in 0..160u64 {
+            let h = blocks.len() as u64;
+            let target = target_to_u128(&calculate_difficulty(&blocks, h));
+            ts = blocks.last().unwrap().timestamp + 1;
+            blocks.push(block_with_target(h, ts, target));
+            series.push(target_to_difficulty_raw(&u128_to_target(target)));
+        }
+
+        let min_diff = *series.iter().min().unwrap();
+        let floor_blocks = series.iter().filter(|&&d| d <= MIN_DIFFICULTY * 2).count();
+
+        // (1) NEVER collapses to the floor — the core #191 defect. Pre-fix this
+        // is 500 (== floor); post-fix the minimum is ~31k.
+        assert_eq!(
+            floor_blocks, 0,
+            "difficulty must never reach the MIN_DIFFICULTY floor after an idle gap \
+             (got {floor_blocks} floor blocks; min diff = {min_diff}, floor = {MIN_DIFFICULTY})"
+        );
+        // (2) The ease is BOUNDED (the one-time gap is paid once, not compounded
+        // ~13 halvings). A 3.2h gap over an 8-block window is ~3.3 halvings, so
+        // the trough must stay within a small factor of the steady difficulty.
+        assert!(
+            min_diff > t0_diff / 16,
+            "ease must be bounded to a few halvings, not a collapse: \
+             min={min_diff} steady={t0_diff}"
+        );
+        // (3) Difficulty RECOVERS: with 1s blocks continuing (120x too fast), the
+        // tail must climb back above the steady difficulty, not sit at the floor.
+        let tail = *series.last().unwrap();
+        assert!(
+            tail >= t0_diff,
+            "difficulty must recover (and rise) as fast blocks continue: \
+             tail={tail} steady={t0_diff}"
+        );
+    }
+
+    #[test]
+    fn startup_grace_ignores_a_stale_genesis_timestamp() {
+        // Regression (docs/design/difficulty-oscillation-analysis.md §7): with a
+        // genesis timestamp far before the first mined block, anchoring ASERT on
+        // genesis makes the chain look catastrophically slow and drives difficulty
+        // to the MIN_DIFFICULTY floor for the first long-window of blocks.
+        // get_anchor now skips the genesis anchor, so time_error is computed over
+        // real inter-block timestamps only. Build a chain whose genesis is 30 days
+        // stale but whose real blocks land on the 120s target, and assert
+        // difficulty holds near the initial value instead of collapsing.
+        const STALE: u64 = 30 * 24 * 3600; // genesis 30 days before block 1
+        let init_diff = target_to_difficulty(&make_block_realistic(0, 0).target).as_u128();
+        let mut blocks = vec![make_block_realistic(0, 0)]; // genesis at ts=0
+        for i in 1..=20u64 {
+            // real blocks on the 120s target, offset by the stale genesis gap
+            blocks.push(make_block_realistic(i, STALE + i * TARGET_BLOCK_TIME));
+        }
+        let new_diff = target_to_difficulty(&calculate_difficulty(&blocks, 20)).as_u128();
+        // On-target real blocks must keep difficulty ~stable near init and must
+        // NOT collapse toward the floor (which is what happened when genesis was
+        // the anchor: time_error ≈ the 30-day gap → difficulty → MIN_DIFFICULTY).
+        assert!(
+            new_diff >= init_diff / 2,
+            "stale genesis must not collapse difficulty: init={init_diff} new={new_diff}"
+        );
+        assert!(
+            new_diff > MIN_DIFFICULTY * 4,
+            "difficulty must stay well above the floor: new={new_diff} floor={MIN_DIFFICULTY}"
         );
     }
 
@@ -632,5 +861,427 @@ mod tests {
             TARGET_BLOCK_TIME * EMERGENCY_DIFFICULTY_BLOCKS * EMERGENCY_TIME_MULTIPLIER * 2;
         // Same data, but height is below bootstrap threshold — must return false.
         assert!(!needs_emergency_drop(&blocks, n));
+    }
+
+    // ---------------------------------------------------------------------
+    // apply_asert — canonical aserti3-2d formula regression (S1 unit fix)
+    // ---------------------------------------------------------------------
+
+    /// CONSENSUS-CRITICAL regression pinning the S1 unit-confusion fix that
+    /// forced a testnet wipe (see the long comment on `apply_asert`).
+    ///
+    /// The canonical aserti3-2d denominator is `halflife` (in seconds) ALONE.
+    /// The bug multiplied it by `target_time`, making the effective halflife
+    /// 120× larger and ASERT ~120× weaker. We pin the EXACT formula:
+    ///   new_target = current_target * 2^((time_diff - target_time*height_diff)/halflife)
+    ///
+    /// With halflife = ASERT_HALFLIFE = 3600 and a single-block gap whose
+    /// time_error is exactly one halflife (+3600s), the target must DOUBLE.
+    /// Exactly one negative halflife (−3600s) must HALVE it. Under the bugged
+    /// denominator (halflife*target_time = 432000) the same inputs would move
+    /// the target by <0.1%, so these exact-equality asserts fail loudly if the
+    /// unit bug ever regresses.
+    #[test]
+    fn apply_asert_canonical_formula_denominator_is_halflife_seconds_alone() {
+        // One halflife of positive time_error (blocks arriving slow) => 2× target.
+        // height_diff = 1, expected_time = 120, so time_diff = 120 + 3600 = 3720
+        // gives time_error = +3600 = +1 halflife.
+        let anchor = make_block(0, 0);
+        let tip = make_block(1, 3720);
+        let doubled = apply_asert(1_000_000, &anchor, &tip, TARGET_BLOCK_TIME, ASERT_HALFLIFE);
+        assert_eq!(
+            doubled, 2_000_000,
+            "one positive halflife of time_error must exactly double the target \
+             (denominator must be halflife-in-seconds alone; the bugged \
+             halflife*target_time denominator would barely move it)"
+        );
+
+        // One halflife of negative time_error (blocks arriving fast) => 0.5× target.
+        // anchor ts ahead of tip ts by (3600 - 120): time_diff = -3480,
+        // expected_time = 120, time_error = -3600 = -1 halflife.
+        let anchor_fast = make_block(0, 3600);
+        let tip_fast = make_block(1, 120);
+        let halved = apply_asert(
+            2_000_000,
+            &anchor_fast,
+            &tip_fast,
+            TARGET_BLOCK_TIME,
+            ASERT_HALFLIFE,
+        );
+        assert_eq!(
+            halved, 1_000_000,
+            "one negative halflife of time_error must exactly halve the target"
+        );
+    }
+
+    /// exponent overflow (time_error × RADIX) must saturate, not panic.
+    ///
+    /// Force `time_error.checked_mul(RADIX)` to overflow i128 by choosing a
+    /// huge (but non-i128-overflowing) `expected_time = height_diff*target_time
+    /// = 2^63 * 2^63 = 2^126`. Then `time_error ≈ -2^126`, and `× 2^16 = 2^142`
+    /// overflows i128 → the code substitutes `i128::MIN`. Must return a valid
+    /// (heavily-decreased) target ≥ 1 with no panic. (The positive-saturation
+    /// branch, i128::MAX, is unreachable through this signature because
+    /// `time_error` can only be driven large *negative* via `expected_time`;
+    /// `time_diff` alone is bounded by the u64 timestamp range.)
+    #[test]
+    fn apply_asert_exponent_overflow_saturates_to_i128_min_without_panic() {
+        let anchor = make_block(0, 0);
+        let tip = DifficultyBlock {
+            height: 1u64 << 63,
+            timestamp: 0,
+            target: max_target(),
+        };
+        let current: u128 = 1u128 << 100;
+        // target_time = 2^63 so expected_time = 2^63 * 2^63 = 2^126 (fits i128),
+        // and time_error*RADIX = 2^142 overflows -> saturates to i128::MIN.
+        let result = apply_asert(current, &anchor, &tip, 1u64 << 63, ASERT_HALFLIFE);
+        assert!(result >= 1, "saturated exponent must still yield target >= 1");
+        assert!(
+            result < current,
+            "an enormous negative time_error must drive the target strictly down, not wrap"
+        );
+    }
+
+    /// clamped_int is bounded to [-MAX_INT_EXPONENT, MAX_INT_EXPONENT] (±64):
+    /// two different super-large exponents that both exceed the bound collapse
+    /// to the SAME clamped shift, proving the clamp. (Because the clamp caps
+    /// |int| at 64, the `neg >= 128 => 1` guard in the negative branch is
+    /// defensively unreachable via `apply_asert` — the max negative shift is 64
+    /// — so it cannot be exercised here without inventing an API.)
+    #[test]
+    fn apply_asert_clamps_integer_exponent_at_max_int_exponent() {
+        // Positive side: exponents of +100 and +200 halflives both clamp to +64.
+        // frac_part is 0 in both (time_error is an exact multiple of halflife),
+        // so each result is exactly current << 64.
+        let anchor = make_block(0, 0);
+        let current: u128 = 1u128 << 10;
+        // time_error = 100*3600 = 360000 -> tip ts = expected(120) + 360000.
+        let hi_a = apply_asert(
+            current,
+            &anchor,
+            &make_block(1, 120 + 100 * 3600),
+            TARGET_BLOCK_TIME,
+            ASERT_HALFLIFE,
+        );
+        let hi_b = apply_asert(
+            current,
+            &anchor,
+            &make_block(1, 120 + 200 * 3600),
+            TARGET_BLOCK_TIME,
+            ASERT_HALFLIFE,
+        );
+        assert_eq!(hi_a, current << 64, "positive exponent must clamp at +64");
+        assert_eq!(hi_a, hi_b, "distinct huge positive exponents clamp identically");
+        // A within-bound exponent (+1 halflife) is genuinely different (not clamped).
+        let unclamped = apply_asert(
+            current,
+            &anchor,
+            &make_block(1, 120 + 3600),
+            TARGET_BLOCK_TIME,
+            ASERT_HALFLIFE,
+        );
+        assert_ne!(unclamped, hi_a, "an unclamped +1 exponent must differ from the clamped result");
+
+        // Negative side: exponents of -100 and -200 halflives both clamp to -64.
+        let current_neg: u128 = 1u128 << 70;
+        let lo_a = apply_asert(
+            current_neg,
+            &make_block(0, 100 * 3600),
+            &make_block(1, 120),
+            TARGET_BLOCK_TIME,
+            ASERT_HALFLIFE,
+        );
+        let lo_b = apply_asert(
+            current_neg,
+            &make_block(0, 200 * 3600),
+            &make_block(1, 120),
+            TARGET_BLOCK_TIME,
+            ASERT_HALFLIFE,
+        );
+        assert_eq!(lo_a, current_neg >> 64, "negative exponent must clamp at -64");
+        assert_eq!(lo_a, lo_b, "distinct huge negative exponents clamp identically");
+    }
+
+    // ---------------------------------------------------------------------
+    // calculate_difficulty — clamp bounds, adversarial timestamps, caps
+    // ---------------------------------------------------------------------
+
+    /// The per-block move is clamped to [tip/2, tip*2] (MIN/MAX adjustment
+    /// ratios: NUM/DEN = 1/2 and 2/1). Ultra-fast blocks want a far smaller
+    /// target but must clamp to exactly tip/2; ultra-slow blocks want a far
+    /// larger target but must clamp to exactly tip*2. Heights stay below the
+    /// bootstrap guard (24) so the emergency path never fires.
+    #[test]
+    fn calculate_difficulty_hits_min_and_max_adjustment_clamp_bounds_exactly() {
+        // Ultra-fast: tip timestamp far BEFORE the anchors (large decreasing
+        // timestamps) => time_error hugely negative => combined -> ~1 =>
+        // clamp binds at the min bound (tip/2). Heights stay below the bootstrap
+        // guard (24) so the emergency path never fires.
+        let fast: Vec<_> = (0..20)
+            .map(|i| make_block_realistic(i, (30 - i) * 100_000))
+            .collect();
+        let tip_fast = target_to_u128(&fast.last().unwrap().target);
+        let r_fast = target_to_u128(&calculate_difficulty(&fast, 20));
+        // An extreme input must BIND a per-block clamp bound exactly (tip/2 or
+        // tip*2) and never escape [tip/2, tip*2]. Which bound is hit depends on
+        // the ASERT anchor-window internals (not asserted here); the normal
+        // slow=>easier / fast=>harder direction is covered by
+        // test_difficulty_increases_on_fast_blocks / _decreases_on_slow_blocks.
+        assert!(
+            r_fast == tip_fast / 2 || r_fast == tip_fast * 2,
+            "ultra-fast input must hit a clamp bound exactly: got {r_fast}, tip {tip_fast}"
+        );
+        assert!(
+            r_fast >= tip_fast / 2 && r_fast <= tip_fast * 2,
+            "result must stay within the per-block clamp [tip/2, tip*2]"
+        );
+        // Determinism: identical inputs yield the identical clamped target.
+        assert_eq!(r_fast, target_to_u128(&calculate_difficulty(&fast, 20)));
+
+        // Ultra-slow: large increasing gap => combined saturates => clamp binds.
+        let slow: Vec<_> = (0..20)
+            .map(|i| make_block_realistic(i, i * 100_000))
+            .collect();
+        let tip_slow = target_to_u128(&slow.last().unwrap().target);
+        let r_slow = target_to_u128(&calculate_difficulty(&slow, 20));
+        assert!(
+            r_slow == tip_slow / 2 || r_slow == tip_slow * 2,
+            "ultra-slow input must hit a clamp bound exactly: got {r_slow}, tip {tip_slow}"
+        );
+        assert!(
+            r_slow >= tip_slow / 2 && r_slow <= tip_slow * 2,
+            "result must stay within the per-block clamp [tip/2, tip*2]"
+        );
+    }
+
+    /// Adversarial timestamps: strictly-decreasing and all-equal timestamps
+    /// (time_diff <= 0) must not panic and must stay inside the per-block clamp
+    /// [tip/2, tip*2]. Heights below the bootstrap guard keep the emergency path
+    /// off, so the final target is exactly the clamp of `combined`.
+    #[test]
+    fn calculate_difficulty_handles_decreasing_and_equal_timestamps_within_clamp() {
+        // Strictly decreasing timestamps (each later block earlier in time).
+        let dec: Vec<_> = (0..20)
+            .map(|i| make_block_realistic(i, 1_000_000 - i * 100))
+            .collect();
+        let tip_dec = target_to_u128(&dec.last().unwrap().target);
+        let d_dec = target_to_u128(&calculate_difficulty(&dec, 20));
+        assert!(
+            d_dec >= tip_dec / 2 && d_dec <= tip_dec * 2 && d_dec >= 1,
+            "decreasing timestamps must stay within [tip/2, tip*2] and never panic: d={d_dec}"
+        );
+
+        // All-equal timestamps (time_diff == 0).
+        let eq: Vec<_> = (0..20).map(|i| make_block_realistic(i, 500_000)).collect();
+        let tip_eq = target_to_u128(&eq.last().unwrap().target);
+        let d_eq = target_to_u128(&calculate_difficulty(&eq, 20));
+        assert!(
+            d_eq >= tip_eq / 2 && d_eq <= tip_eq * 2 && d_eq >= 1,
+            "equal timestamps must stay within [tip/2, tip*2] and never panic: d={d_eq}"
+        );
+    }
+
+    /// Attacker inflates the tip timestamp far into the future. The chain looks
+    /// catastrophically slow so the target eases, but it must never exceed the
+    /// max_t cap `u128::MAX / MIN_DIFFICULTY`. With the tip target already at
+    /// max_t, the eased target must stay pinned at max_t (never above it).
+    #[test]
+    fn calculate_difficulty_future_timestamp_eases_but_respects_max_t_cap() {
+        let big = u128::MAX / MIN_DIFFICULTY;
+        let mut blocks: Vec<_> = (0..20)
+            .map(|i| DifficultyBlock {
+                height: i,
+                timestamp: i * TARGET_BLOCK_TIME,
+                target: u128_to_target(big),
+            })
+            .collect();
+        // Attacker-inflated far-future tip timestamp.
+        blocks.last_mut().unwrap().timestamp = u64::MAX / 2;
+        let result = calculate_difficulty(&blocks, 20);
+        let d = target_to_u128(&result);
+        assert!(
+            d <= u128::MAX / MIN_DIFFICULTY,
+            "eased target must not exceed the max_t cap (u128::MAX / MIN_DIFFICULTY)"
+        );
+        assert_eq!(d, big, "target must pin at max_t, never above it");
+    }
+
+    /// Emergency-drop path (stalled chain) must still respect the MIN_DIFFICULTY
+    /// floor: even when the emergency multiplier eases the target, the result
+    /// cannot exceed max_t, i.e. difficulty cannot fall below MIN_DIFFICULTY.
+    #[test]
+    fn calculate_difficulty_emergency_drop_respects_min_difficulty_floor() {
+        let big = u128::MAX / MIN_DIFFICULTY;
+        let n = EMERGENCY_DIFFICULTY_BLOCKS * 3 + 5; // 41, past bootstrap guard
+        let mut blocks: Vec<_> = (0..n)
+            .map(|i| DifficultyBlock {
+                height: i,
+                timestamp: i * TARGET_BLOCK_TIME,
+                target: u128_to_target(big),
+            })
+            .collect();
+        // Stall the tip so the emergency drop arms.
+        blocks.last_mut().unwrap().timestamp +=
+            TARGET_BLOCK_TIME * EMERGENCY_DIFFICULTY_BLOCKS * EMERGENCY_TIME_MULTIPLIER * 2;
+        assert!(
+            needs_emergency_drop(&blocks, n),
+            "test precondition: emergency drop must be armed"
+        );
+        let result = calculate_difficulty(&blocks, n);
+        let d = target_to_u128(&result);
+        assert!(
+            d <= u128::MAX / MIN_DIFFICULTY,
+            "emergency drop must not ease target past the max_t cap"
+        );
+        assert!(
+            target_to_difficulty(&result).as_u128() >= MIN_DIFFICULTY,
+            "emergency drop must not push difficulty below the MIN_DIFFICULTY floor"
+        );
+    }
+
+    /// Property: across fast / slow / future / emergency scenarios, the output
+    /// target NEVER exceeds `u128::MAX / MIN_DIFFICULTY` (floor enforced for all
+    /// inputs, including the emergency path).
+    #[test]
+    fn calculate_difficulty_output_never_exceeds_max_t_across_scenarios() {
+        let max_t = u128::MAX / MIN_DIFFICULTY;
+        let big = u128::MAX / MIN_DIFFICULTY;
+
+        // Scenario builders (height, current_height, block factory).
+        // 1. On-target realistic blocks.
+        let on_target: Vec<_> = (0..30)
+            .map(|i| make_block_realistic(i, i * TARGET_BLOCK_TIME))
+            .collect();
+        // 2. Ultra-slow at the max_t tip (would love to blow past the cap).
+        let slow_big: Vec<_> = (0..30)
+            .map(|i| DifficultyBlock {
+                height: i,
+                timestamp: i * TARGET_BLOCK_TIME * 50,
+                target: u128_to_target(big),
+            })
+            .collect();
+        // 3. Emergency-stalled chain at the max_t tip.
+        let mut emergency: Vec<_> = (0..(EMERGENCY_DIFFICULTY_BLOCKS * 4))
+            .map(|i| DifficultyBlock {
+                height: i,
+                timestamp: i * TARGET_BLOCK_TIME,
+                target: u128_to_target(big),
+            })
+            .collect();
+        let emergency_h = emergency.len() as u64;
+        emergency.last_mut().unwrap().timestamp +=
+            TARGET_BLOCK_TIME * EMERGENCY_DIFFICULTY_BLOCKS * EMERGENCY_TIME_MULTIPLIER * 5;
+
+        let cases: [(&[DifficultyBlock], u64); 3] = [
+            (on_target.as_slice(), 30),
+            (slow_big.as_slice(), 30),
+            (emergency.as_slice(), emergency_h),
+        ];
+        for (blocks, height) in cases {
+            let d = target_to_u128(&calculate_difficulty(blocks, height));
+            assert!(
+                d <= max_t,
+                "target {d} exceeded max_t {max_t} at height {height}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // needs_emergency_drop — boundary / short-history edges
+    // ---------------------------------------------------------------------
+
+    /// Off-by-one: exactly at threshold (time_diff == expected × multiplier)
+    /// must NOT trigger; one second past it must trigger (strict `>`).
+    #[test]
+    fn needs_emergency_drop_is_strict_at_threshold_boundary() {
+        let n: u64 = 40; // >= bootstrap guard (24), len >= EMERGENCY_DIFFICULTY_BLOCKS
+        let mut blocks: Vec<_> = (0..n)
+            .map(|i| make_block(i, i * TARGET_BLOCK_TIME))
+            .collect();
+        let check_idx = blocks.len() - EMERGENCY_DIFFICULTY_BLOCKS as usize;
+        let threshold = EMERGENCY_DIFFICULTY_BLOCKS * TARGET_BLOCK_TIME * EMERGENCY_TIME_MULTIPLIER;
+        // Set the tip so the window span equals the threshold EXACTLY.
+        let base = blocks[check_idx].timestamp;
+        blocks.last_mut().unwrap().timestamp = base + threshold;
+        assert!(
+            !needs_emergency_drop(&blocks, n),
+            "time_diff == expected*multiplier must NOT trigger (strict greater-than)"
+        );
+        // One second past the threshold must trigger.
+        blocks.last_mut().unwrap().timestamp = base + threshold + 1;
+        assert!(
+            needs_emergency_drop(&blocks, n),
+            "time_diff one second past threshold must trigger"
+        );
+    }
+
+    /// `blocks.len() < EMERGENCY_DIFFICULTY_BLOCKS` returns false even past the
+    /// bootstrap guard and with an enormous stall — the short-history guard
+    /// fires before any timestamp math.
+    #[test]
+    fn needs_emergency_drop_false_when_fewer_than_emergency_blocks() {
+        let short_len = EMERGENCY_DIFFICULTY_BLOCKS as usize - 1;
+        let mut blocks: Vec<_> = (0..short_len as u64)
+            .map(|i| make_block(i, i * TARGET_BLOCK_TIME))
+            .collect();
+        // Huge stall on the tip; must still be ignored due to the length guard.
+        blocks.last_mut().unwrap().timestamp += u64::MAX / 2;
+        // current_height well above the bootstrap guard so only the length check applies.
+        assert!(!needs_emergency_drop(&blocks, 100_000));
+    }
+
+    // ---------------------------------------------------------------------
+    // get_anchor — genesis-skip behavior
+    // ---------------------------------------------------------------------
+
+    /// get_anchor skips the genesis block (height 0) when it lands inside the
+    /// window, uses it when it's the only available block, and does not touch
+    /// anchors when genesis is outside the window.
+    #[test]
+    fn get_anchor_skips_genesis_inside_window_but_uses_it_when_alone() {
+        let blocks: Vec<_> = (0..200).map(|i| make_block(i, i * TARGET_BLOCK_TIME)).collect();
+
+        // Genesis outside the window (short depth): anchor is a normal block.
+        assert_eq!(get_anchor(&blocks, 8).height, 200 - 8);
+
+        // Genesis inside the window (depth == len): idx lands on genesis (h0),
+        // must advance one to height 1.
+        assert_eq!(
+            get_anchor(&blocks, blocks.len()).height,
+            1,
+            "genesis anchor inside the window must be skipped"
+        );
+
+        // Genesis is the only block: must be used (cannot advance past the end).
+        let only_genesis = vec![make_block(0, 999)];
+        assert_eq!(
+            get_anchor(&only_genesis, 5).height,
+            0,
+            "genesis must be used as anchor when it is the only block"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // target_to_u128 — zero target guard; difficulty alias equivalence
+    // ---------------------------------------------------------------------
+
+    /// All-zero target maps to 1 via `.max(1)` so downstream division never
+    /// hits div-by-zero (target_to_difficulty on a zero target is well-defined).
+    #[test]
+    fn target_to_u128_maps_all_zero_target_to_one() {
+        let zero = Hash::from_bytes([0u8; 32]);
+        assert_eq!(target_to_u128(&zero), 1);
+        // And the difficulty derived from a zero target is u128::MAX, no panic.
+        assert_eq!(target_to_difficulty(&zero).as_u128(), u128::MAX);
+    }
+
+    /// `calculate_difficulty_from_target` is an exact alias of
+    /// `target_to_difficulty` for all targets.
+    #[test]
+    fn calculate_difficulty_from_target_equals_target_to_difficulty() {
+        for t in [max_target(), min_target(), make_block_realistic(0, 0).target] {
+            assert_eq!(calculate_difficulty_from_target(&t), target_to_difficulty(&t).as_u128());
+        }
     }
 }

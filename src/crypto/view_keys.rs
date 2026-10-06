@@ -1,4 +1,11 @@
-//! Forward-secret view keys for CoinCync 1.0
+//! Epoch-scoped view keys for CoinCync 1.0
+//!
+//! SECURITY NOTE (naming, M2): these are *epoch-scoped*, NOT forward-secret.
+//! Each epoch's `key_data` is derived deterministically as
+//! `H("COINCYNC_VIEWKEY_v2", view_secret ‖ epoch)`, so compromising the
+//! long-term `view_secret` derives every epoch key, past and future. There is
+//! no ratchet and thus no forward secrecy — treat `view_secret` as the single
+//! root secret it is.
 //!
 //! AUDIT (R-14 SURGICAL FIX, 2026-07-03): `AmountCapped(u64)` and
 //! `SingleUse` are now enforced via `ViewKey::authorize_scan(amount)`
@@ -9,10 +16,53 @@
 //! for AmountCapped (each scan reduces the remaining budget by
 //! the amount it observed). Callers who mint a
 //! `ViewKeyScope::AmountCapped(1_000_000)` and hand it out MUST
-//! use the `authorize_scan` API before decrypting — the deprecated
-//! `is_valid_for_epoch` gate is retained for backward compat with
-//! `EpochOnly` and `TimeRange` callers, but returns false for
-//! the two enforced variants once their budget/use is exhausted.
+//! use the `authorize_scan` API before decrypting — the read-only
+//! `is_valid_for_epoch` gate is retained for `EpochOnly` and
+//! `TimeRange` callers, but now ALWAYS returns false for the two
+//! enforced variants (M2 fix) so it can never be used to authorize a
+//! budgeted key without consuming the budget.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `derive`** — INVARIANT: `key_data = H("COINCYNC_VIEWKEY_v2", view_secret‖epoch)`
+//!   is deterministic in the inputs and distinct across epochs; R-12 — the scratch
+//!   buffer holding `view_secret` is zeroized after hashing.
+//!   THREAT: R-12 — un-wiped `view_secret` bytes linger in freed allocator memory;
+//!   R-13 — the deterministic watermark links two exported keys of one origin.
+//!   TESTS: `test_view_key_derivation_determinism`, `test_view_key_different_epochs_differ`,
+//!   `ic_099_forward_secrecy_old_epoch`, `ic_100_forward_secrecy_new_epoch`.
+//! - **§2 `ViewKeyScope`** — INVARIANT: the scope defines the exact scanning
+//!   envelope of a view key — EpochOnly, TimeRange, AmountCapped, SingleUse — and
+//!   authorization must respect it.
+//!   THREAT: a scope that authorizes beyond its bound lets a view key scan epochs
+//!   or amounts it was never granted.
+//!   TESTS: `test_view_key_epoch_validity`, `authorize_scan_rejects_epoch_mismatch_for_each_scope`.
+//! - **§3 `is_valid_for_epoch`** — INVARIANT: M2 — the read-only check gates only
+//!   the stateless EpochOnly / TimeRange scopes and fails closed (returns `false`)
+//!   for the stateful AmountCapped / SingleUse variants.
+//!   THREAT: M2 — a read-only gate that authorized a budgeted key would never
+//!   consume the budget, granting unlimited scans.
+//!   TESTS: `test_view_key_epoch_validity`, `is_valid_for_epoch_is_failclosed_for_stateful_scopes`.
+//! - **§4 `authorize_scan`** — INVARIANT: R-14 — the stateful authorize+consume
+//!   path decrements the AmountCapped budget (denying once exhausted) and fires
+//!   SingleUse exactly once; an epoch mismatch is rejected without consuming state.
+//!   THREAT: R-14 — scanning past the cap or reusing a SingleUse key escalates a
+//!   scoped view key into an unbounded scanner.
+//!   TESTS: `is_valid_for_epoch_is_failclosed_for_stateful_scopes`,
+//!   `authorize_scan_rejects_epoch_mismatch_for_each_scope`.
+//! - **§5 `ViewKey`** — INVARIANT: A6-VIEWKEY — `key_data` is excluded from
+//!   Serialize, redacted in Debug, and zeroed on drop (no `zeroize(skip)` on the
+//!   secret). THREAT: A6-VIEWKEY — `key_data` leaking into logs, JSON, or RPC hands
+//!   an attacker scan authority; the historical `zeroize(skip)` bug left it un-wiped.
+//!   TESTS: `test_view_key_debug_redacts_key_data`, `test_view_key_serialize_excludes_key_data`.
+//! - **§6 `Deserialize`** — INVARIANT: R-15 — a deserialized ViewKey carries the
+//!   all-`0xEE` sentinel `key_data` (never usable key bytes) so re-derivation is
+//!   mandatory, while non-secret metadata round-trips and consumption state resets.
+//!   THREAT: R-15 — a caller that skipped re-derivation would silently scan with
+//!   wrong-but-plausible key material; the sentinel makes that failure loud.
+//!   TESTS: `deserialize_sets_key_data_to_0xee_sentinel`, `test_view_key_serialize_excludes_key_data`.
 
 use crate::primitives::{hash_domain, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -26,7 +76,7 @@ pub enum ViewKeyScope {
     SingleUse,
 }
 
-/// Forward-secret view key.
+/// Epoch-scoped view key (see the module note: epoch-scoped, not forward-secret).
 ///
 /// SECURITY (A6-VIEWKEY): `key_data` is excluded from `Serialize` to prevent
 /// accidental exposure in logs, RPC responses, or JSON dumps. The field is
@@ -130,8 +180,9 @@ impl<'de> Deserialize<'de> for ViewKey {
 }
 
 impl ViewKey {
-    /// Derive a forward-secret view key from a wallet's view_secret,
-    /// an epoch, and a scope.
+    /// Derive an epoch-scoped view key from a wallet's view_secret,
+    /// an epoch, and a scope. (Epoch-scoped, not forward-secret — see the
+    /// module note; `view_secret` derives every epoch's key.)
     ///
     /// AUDIT (R-12 fix, 2026-07-02): the pre-fix code did
     ///   `[view_secret.as_bytes().as_slice(), &epoch.to_le_bytes()].concat()`
@@ -178,12 +229,21 @@ impl ViewKey {
         }
     }
 
+    /// Read-only epoch-relevance check.
+    ///
+    /// SECURITY (M2 fix): this cannot authorize the stateful scopes — a
+    /// `&self` check can neither decrement an `AmountCapped` budget nor fire
+    /// the `SingleUse` flag — so for those two variants it returns `false` and
+    /// callers MUST use [`ViewKey::authorize_scan`]. Previously it returned
+    /// `true` while budget remained, so a caller gating on it alone got
+    /// unlimited scans (the budget was never consumed). Use it only for the
+    /// stateless `EpochOnly` / `TimeRange` scopes.
     pub fn is_valid_for_epoch(&self, epoch: u64) -> bool {
         match self.scope {
             ViewKeyScope::EpochOnly(e) => epoch == e,
             ViewKeyScope::TimeRange { start, end } => epoch >= start && epoch <= end,
-            ViewKeyScope::AmountCapped(cap) => epoch == self.epoch && self.consumed_amount < cap,
-            ViewKeyScope::SingleUse => epoch == self.epoch && !self.single_use_fired,
+            // Stateful scopes are not authorizable read-only — force authorize_scan.
+            ViewKeyScope::AmountCapped(_) | ViewKeyScope::SingleUse => false,
         }
     }
 
@@ -280,6 +340,35 @@ mod tests {
         assert!(!vk_range.is_valid_for_epoch(8));
     }
 
+    /// M2 regression: `is_valid_for_epoch` must NOT authorize the stateful
+    /// scopes read-only (it would never consume the budget). Only
+    /// `authorize_scan` gates those, and it enforces the cap / single-use.
+    #[test]
+    fn is_valid_for_epoch_is_failclosed_for_stateful_scopes() {
+        let secret = SecretKey::from_bytes([7u8; 32]);
+
+        // AmountCapped: read-only check is always false, even with budget left.
+        let mut capped = ViewKey::derive(&secret, 4, ViewKeyScope::AmountCapped(1_000));
+        assert!(
+            !capped.is_valid_for_epoch(4),
+            "AmountCapped must not be authorizable read-only"
+        );
+        assert!(capped.authorize_scan(4, 600).is_ok());
+        assert!(
+            capped.authorize_scan(4, 600).is_err(),
+            "second scan exceeds the 1000 budget and must be denied"
+        );
+
+        // SingleUse: read-only check is always false; authorize_scan fires once.
+        let mut single = ViewKey::derive(&secret, 9, ViewKeyScope::SingleUse);
+        assert!(!single.is_valid_for_epoch(9));
+        assert!(single.authorize_scan(9, 1).is_ok());
+        assert!(
+            single.authorize_scan(9, 1).is_err(),
+            "SingleUse must fire exactly once"
+        );
+    }
+
     #[test]
     fn test_view_key_debug_redacts_key_data() {
         let secret = SecretKey::from_bytes([42u8; 32]);
@@ -307,5 +396,74 @@ mod tests {
             json.contains("epoch"),
             "Serialized ViewKey should contain epoch"
         );
+    }
+
+    /// authorize_scan must reject an epoch mismatch for EVERY scope variant.
+    #[test]
+    fn authorize_scan_rejects_epoch_mismatch_for_each_scope() {
+        let secret = SecretKey::from_bytes([11u8; 32]);
+
+        // EpochOnly(5): a scan at epoch 6 is a mismatch.
+        let mut epoch_only = ViewKey::derive(&secret, 5, ViewKeyScope::EpochOnly(5));
+        assert!(epoch_only.authorize_scan(5, 0).is_ok());
+        assert!(
+            epoch_only.authorize_scan(6, 0).is_err(),
+            "EpochOnly must reject a mismatched epoch"
+        );
+
+        // TimeRange { 3..=7 }: epoch 8 is outside the range.
+        let mut range = ViewKey::derive(&secret, 3, ViewKeyScope::TimeRange { start: 3, end: 7 });
+        assert!(range.authorize_scan(5, 0).is_ok());
+        assert!(
+            range.authorize_scan(8, 0).is_err(),
+            "TimeRange must reject an epoch outside [start, end]"
+        );
+        assert!(
+            range.authorize_scan(2, 0).is_err(),
+            "TimeRange must reject an epoch below start"
+        );
+
+        // AmountCapped: the enforced epoch is the key's own derive epoch.
+        let mut capped = ViewKey::derive(&secret, 4, ViewKeyScope::AmountCapped(1_000));
+        assert!(
+            capped.authorize_scan(5, 10).is_err(),
+            "AmountCapped must reject a mismatched epoch"
+        );
+        // A mismatched-epoch reject must NOT have consumed any budget.
+        assert!(capped.authorize_scan(4, 10).is_ok());
+
+        // SingleUse: likewise gated on the derive epoch.
+        let mut single = ViewKey::derive(&secret, 9, ViewKeyScope::SingleUse);
+        assert!(
+            single.authorize_scan(8, 1).is_err(),
+            "SingleUse must reject a mismatched epoch"
+        );
+        // A mismatched-epoch reject must NOT have fired the single-use flag.
+        assert!(single.authorize_scan(9, 1).is_ok());
+    }
+
+    /// R-15 sentinel: a deserialized ViewKey carries the all-0xEE `key_data`
+    /// sentinel (re-derivation required) rather than usable-looking key bytes.
+    #[test]
+    fn deserialize_sets_key_data_to_0xee_sentinel() {
+        let secret = SecretKey::from_bytes([42u8; 32]);
+        let vk = ViewKey::derive(&secret, 1, ViewKeyScope::EpochOnly(1));
+        // Sanity: a real derived key is not the sentinel.
+        assert_ne!(vk.key_data, [0xEEu8; 32]);
+
+        let json = serde_json::to_string(&vk).unwrap();
+        let loaded: ViewKey = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            loaded.key_data, [0xEEu8; 32],
+            "deserialized ViewKey must carry the 0xEE re-derive sentinel"
+        );
+        // Non-secret metadata still round-trips.
+        assert_eq!(loaded.epoch, vk.epoch);
+        assert_eq!(loaded.scope, vk.scope);
+        assert_eq!(loaded.watermark, vk.watermark);
+        // Consumption state resets to fresh on load.
+        assert_eq!(loaded.consumed_amount, 0);
+        assert!(!loaded.single_use_fired);
     }
 }

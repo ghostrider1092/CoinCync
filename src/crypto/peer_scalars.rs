@@ -103,6 +103,45 @@
 //! "some things should be complex and some things should be simple" —
 //! the scalar side is simple prior art; the point-identity question is
 //! genuine complexity that deserves its own care.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `PeerScalar::decode`** — INVARIANT: a `PeerScalar` is constructible only from
+//!   canonical curve25519 bytes (via `from_canonical_bytes`); non-canonical encodings are
+//!   rejected with a typed error. THREAT: `from_bytes_mod_order` silently reduces distinct
+//!   byte strings to the same scalar, letting an attacker mint two txids/cache-keys for one
+//!   spend — txid-confusion double-spend or cache poisoning. TESTS: `scalar_decode_accepts_canonical`,
+//!   `scalar_decode_rejects_non_canonical`, `scalar_zero_roundtrips`.
+//! - **§2 `PeerPoint::decode`** — INVARIANT: a `PeerPoint` decodes only from bytes that
+//!   form a valid Ristretto element (identity admitted here). THREAT: `CompressedRistretto`
+//!   accepts arbitrary bytes at construction; skipping the decompress check would admit
+//!   non-points into curve math. TESTS: `point_decode_accepts_valid_ristretto`,
+//!   `point_decode_rejects_junk`.
+//! - **§3 `PeerPoint::decode_non_identity`** — INVARIANT: the default point decoder also
+//!   rejects the identity element (a valid Ristretto encoding). THREAT: an identity public
+//!   key / commitment / challenge point breaks CLSAG distinguishability, ECDH secrecy, and
+//!   Pedersen balance (forgery). TESTS: `point_decode_non_identity_rejects_identity`,
+//!   `point_decode_non_identity_accepts_random`.
+//! - **§4 `PeerScalar` serde/borsh** — INVARIANT (C31): `Deserialize`/`BorshDeserialize`
+//!   route through `decode`, so any wire→typed scalar path enforces canonicity; serialize
+//!   emits canonical bytes and round-trips. THREAT: a raw-bytes serde/borsh fallback would
+//!   let a non-canonical scalar re-enter through a container field, regressing §1 structurally.
+//!   TESTS: `scalar_borsh_roundtrip_valid`, `scalar_borsh_rejects_non_canonical`,
+//!   `scalar_serde_json_roundtrip_valid`, `scalar_serde_json_rejects_non_canonical`.
+//! - **§5 `PeerPoint` serde/borsh** — INVARIANT (C31): `Deserialize`/`BorshDeserialize` route
+//!   through `decode_non_identity` (safer default), rejecting identity and junk at parse time;
+//!   serialize emits compressed canonical bytes and round-trips. THREAT: a raw-bytes fallback
+//!   would admit identity/non-Ristretto points into any struct holding a `PeerPoint`.
+//!   TESTS: `point_borsh_roundtrip_valid`, `point_borsh_rejects_identity_via_non_identity_default`,
+//!   `point_borsh_rejects_junk_bytes`, `point_serde_json_roundtrip_valid`, `point_serde_json_rejects_identity`.
+//! - **§6 struct-field structural enforcement** — INVARIANT (C31): a struct containing a
+//!   `PeerScalar`/`PeerPoint` field fails to deserialize when the wire bytes at that field are
+//!   non-canonical (or identity for the default point path) — no container-side discipline
+//!   required. THREAT: a new proof struct silently reverting to `[u8; 32]` fields would reopen
+//!   the non-canonical-input class the wrapper was built to close. TESTS:
+//!   `peerpoint_field_in_struct_rejected_at_borsh_parse`, `peerscalar_field_in_struct_rejected_at_borsh_parse`.
 
 use curve25519_dalek::{
     ristretto::{CompressedRistretto, RistrettoPoint},

@@ -1,0 +1,44 @@
+[Unit]
+Description=CoinCync RandomX rig (solo, full-memory) — dedicated box
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=coincync
+Group=coincync
+
+# RPC Bearer key for the remote node (rig's --api-key reads this env). Same value
+# as the shared box's node.env / rpc.key.
+EnvironmentFile=/etc/coincync/rig.env
+
+# Points at the SHARED box's Bearer-gated RPC. Keyless: only the payout ADDRESS
+# lives here (receive-only). --threads 0 = all cores, since the rig owns this box.
+# /metrics stays on loopback (--metrics-bind default 127.0.0.1).
+#
+# NOTE: COINCYNC_RANDOMX_LIGHT_MODE is deliberately NOT set here, so the rig uses
+# full-memory RandomX (~2.3 GB dataset) for full hashrate. Needs >=4 GB RAM.
+ExecStart=/usr/local/bin/coincync-rig run-solo \
+  --node http://<SHARED_IP>:28081 \
+  --address tCYNC3ZLMRvaHny2TywoyCK5un1aGmFfmx95petCPxH3pikWBZwuqfQufVvUN4tvJoNWRksLDM2csXyjhojgWhJWUDmmFFdWHUfA \
+  --network testnet \
+  --threads 0 \
+  --metrics-port 9109 \
+  --metrics-bind 127.0.0.1
+
+Restart=on-failure
+RestartSec=5
+# Full-mem RandomX + hugepages want a high memlock ceiling.
+LimitMEMLOCK=infinity
+
+# Hardening — the rig writes nothing and holds no keys.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

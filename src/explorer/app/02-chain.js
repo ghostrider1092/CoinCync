@@ -373,7 +373,7 @@ function renderAllBlocks(){
   tb.innerHTML=blockList.map(b=>`<tr class="block-row" data-age-class="${_blockAgeClass(b.timestamp)}" onclick="viewBlock(${b.height})">
     <td><span class="hash">#${num(b.height)}</span> <button onclick="event.stopPropagation();copyText('#${b.height}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button></td>
     <td class="age">${age(b.timestamp)} ago</td>
-    <td class="hash" style="font-size:10px">${b.hash?b.hash.slice(0,18)+'...':'—'} ${b.hash?`<button onclick="event.stopPropagation();copyText('${b.hash}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:''}</td>
+    <td class="hash" style="font-size:10px">${b.hash?esc(b.hash.slice(0,18))+'...':'—'} ${b.hash?`<button onclick="event.stopPropagation();copyText('${hex(b.hash)}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:''}</td>
     <td><span class="badge badge-amber" style="font-size:9px">${algoName(b.algorithm||0)}</span></td>
     <td>${b.tx_count||1}</td>
     <td class="age">${fmtSize(b.size||393)}</td>
@@ -400,8 +400,8 @@ async function viewBlock(height){
   $('bd-algo').innerHTML='<span class="badge badge-amber">'+algoName(b.algorithm||0)+'</span>';
   $('bd-txs').textContent=b.tx_count||1;
   $('bd-size').textContent=fmtSize(b.size||393);
-  $('bd-hash').innerHTML=(b.hash||'—')+(b.hash?` <button onclick="copyText('${b.hash}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:'');
-  $('bd-prev-hash').innerHTML=(b.prev_hash||'—')+(b.prev_hash?` <button onclick="copyText('${b.prev_hash}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:'');
+  $('bd-hash').innerHTML=esc(b.hash||'—')+(b.hash?` <button onclick="copyText('${hex(b.hash)}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:'');
+  $('bd-prev-hash').innerHTML=esc(b.prev_hash||'—')+(b.prev_hash?` <button onclick="copyText('${hex(b.prev_hash)}',this)" class="btn btn-outline" style="font-size:9px;padding:1px 6px">copy</button>`:'');
   $('bd-prev').onclick=height>1?()=>viewBlock(height-1):null;
   $('bd-prev').disabled=height<=1;
   $('bd-next').onclick=height<chainHeight?()=>viewBlock(height+1):null;

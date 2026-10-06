@@ -2,6 +2,76 @@
 //!
 //! Compact Linkable Spontaneous Anonymous Group signatures.
 //! Based on the Monero CLSAG specification with proper curve operations.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `clsag_sign`** — INVARIANT: a signature is producible only by the holder
+//!   of the secret for `ring[real_index]`, and binds the key image `I = x·Hp(P)`,
+//!   the commitment image `D`, the whole ring, the `pseudo_output`, and the message;
+//!   ring size `< 2`, an out-of-range `real_index`, or a secret not matching the ring
+//!   member are rejected before any curve work.
+//!   THREAT: forged spend authorization / signing on behalf of an output the attacker
+//!   does not own.
+//!   TESTS: `test_clsag_sign_verify`, `clsag_sign_verify_kat_deterministic_and_golden`,
+//!   `clsag_verifies_at_production_ring_size_and_rejects_single_slot_tamper`,
+//!   `clsag_sign_rejects_ring_size_below_two`, `clsag_sign_rejects_real_index_out_of_range`,
+//!   `clsag_sign_rejects_secret_key_not_matching_ring_member`.
+//! - **§2 `clsag_verify`** — INVARIANT: the challenge chain closes back to `c1` (checked
+//!   in constant time) only for a genuine signature; identity key image, identity
+//!   commitment image, identity ring public keys / commitments (R-1), non-canonical
+//!   response / `c1` scalars, and a zero `c1` challenge (A6-ZERO-CHALLENGE) are all rejected.
+//!   THREAT: forged ring signature accepted → unauthorized spend / double spend; identity
+//!   inputs collapse the aggregate key (R-1 small-subgroup-style forgery).
+//!   TESTS: `test_clsag_sign_verify`, `clsag_verify_rejects_identity_ring_public_key`,
+//!   `clsag_verify_rejects_identity_commitment_image`,
+//!   `clsag_verify_rejects_identity_ring_member_commitment`,
+//!   `clsag_verify_rejects_non_canonical_response_scalar`,
+//!   `clsag_verify_rejects_non_canonical_c1_scalar`, `clsag_verify_rejects_zero_challenge_c1`,
+//!   `attack_clsag_forgery_without_secret`, `attack_clsag_signature_not_replayable_across_messages`,
+//!   `tier9_clsag_verify_timing_independent_of_signer`.
+//! - **§3 `compute_aggregate_coefficients`** — INVARIANT: both aggregation coefficients
+//!   `mu_p` and `mu_c` are independent random-oracle evaluations that bind the *entire*
+//!   public statement, including the commitment image `D` (C-1 fix).
+//!   THREAT: C-1 key-image malleability — if `D` is unbound an attacker can attach an
+//!   arbitrary key image `I'` and solve for a matching `D'`, minting distinct key images
+//!   for one output → double spend / supply inflation.
+//!   TESTS: `clsag_rejects_arbitrary_forged_key_image`, `clsag_verify_rejects_tampered_commitment_image`.
+//! - **§4 `key_image` handling** — INVARIANT: the key image is the deterministic
+//!   `x·Hp(x·G)`, unique per spending key and identical across messages, so it is a
+//!   stable linking tag for double-spend detection.
+//!   THREAT: colliding or malleable key images defeat double-spend dedup → double spend.
+//!   TESTS: `test_key_image_uniqueness`, `test_key_image_linkability`.
+//! - **§5 `simple_ring_sign`** — INVARIANT: the simple (commitment-free) ring signature
+//!   authorizes only the real signer who knows the secret; ring size `< 2` and an
+//!   out-of-range `real_index` are rejected.
+//!   THREAT: unauthorized spend via a forged basic-authorization ring signature.
+//!   TESTS: `test_simple_ring_signature`, `test_different_real_index`,
+//!   `simple_ring_sign_rejects_ring_size_below_two`,
+//!   `simple_ring_sign_rejects_real_index_out_of_range`.
+//! - **§6 `simple_ring_verify`** — INVARIANT: rejects identity key image, any identity
+//!   ring member (R-1 parity), non-canonical response scalars, and a zero `c0` challenge
+//!   (A6-ZERO-CHALLENGE); closes the chain under constant-time comparison.
+//!   THREAT: forged simple ring signature accepted → unauthorized spend.
+//!   TESTS: `simple_ring_verify_rejects_identity_key_image`,
+//!   `simple_ring_verify_rejects_identity_ring_member`,
+//!   `simple_ring_verify_rejects_non_canonical_response_scalar`,
+//!   `simple_ring_verify_rejects_zero_challenge_c0`, `test_simple_ring_wrong_message`.
+//! - **§7 `clsag_hash` (challenge / domain separation)** — INVARIANT: every per-round
+//!   challenge is domain-tagged (`CLSAG_`) and the ring size and message are length-framed,
+//!   so the transcript is unambiguous and the message is bound into the challenge.
+//!   THREAT: cross-instance / boundary-shift collision letting a signature be replayed
+//!   under a different ring or message.
+//!   TESTS: `clsag_sign_verify_kat_deterministic_and_golden`,
+//!   `attack_clsag_signature_not_replayable_across_messages`.
+//! - **§8 `ClsagSignature::to_bytes` (serialization)** — INVARIANT: serialization is
+//!   `Result`-typed with no silent empty-`Vec` variant (H3 2026-06-30), and a serialized
+//!   signature round-trips back to one that still verifies; the wire format is frozen by a
+//!   golden digest.
+//!   THREAT: H3 — a silently-empty encoding fed into hashing / cache keying (\"empty
+//!   signature accidentally cached\"), or an undetected wire-format change.
+//!   TESTS: `test_clsag_serialization`, `clsag_sign_verify_kat_deterministic_and_golden`.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar};
@@ -92,6 +162,13 @@ fn clsag_hash(
     hasher.update(b"CLSAG_");
     hasher.update(prefix);
 
+    // Ring size, length-framed. Committing `n` and length-prefixing the
+    // variable-length `message` (below) makes the transcript unambiguous, so an
+    // attacker-chosen ring/message can't produce a cross-instance collision by
+    // shifting the concatenation boundaries. (Hardening; message is a
+    // fixed-length tx signing hash in the consensus path.)
+    hasher.update((ring.len() as u64).to_le_bytes());
+
     // Ring members
     for member in ring {
         hasher.update(member.public_key.to_bytes());
@@ -102,7 +179,8 @@ fn clsag_hash(
     hasher.update(key_image.to_bytes());
     hasher.update(commitment_image.to_bytes());
 
-    // Message
+    // Message, length-framed.
+    hasher.update((message.len() as u64).to_le_bytes());
     hasher.update(message);
 
     // L and R values
@@ -112,42 +190,57 @@ fn clsag_hash(
     Scalar::from_bytes_mod_order_wide(&hasher.finalize().into())
 }
 
-/// Round hash for CLSAG
-fn clsag_round_hash(
+/// Aggregation-coefficient hash for CLSAG.
+///
+/// SECURITY (C-1 fix, key-image malleability): both aggregation coefficients
+/// bind the *entire* public statement — the ring size, every ring public key
+/// and commitment, the key image `I`, the commitment image `D`, and the
+/// pseudo-output `C'` — each under its own domain tag (`_0` for `mu_p`, `_1`
+/// for `mu_c`). Binding `D` (which the previous `clsag_round_hash` omitted from
+/// both coefficients) is what defeats the forgery: an attacker can no longer
+/// pick an arbitrary key image `I'` and solve `D' = mu_c^{-1}(w·Hp(P) − mu_p·I')`,
+/// because any change to `D'` now changes both coefficients, so no closed-form
+/// solution exists. This matches Monero's CLSAG construction, which hashes both
+/// `I` and `D` into `mu_P` and `mu_C`. All inputs are fixed-width (ring size is
+/// length-framed) so the transcript is unambiguous.
+fn clsag_agg_hash(
+    tag: &[u8],
     ring: &[RingMember],
     key_image: &KeyImage,
+    commitment_image: &PublicPoint,
     pseudo_output: &Commitment,
-    message: &[u8],
 ) -> Scalar {
     let mut hasher = Sha3_512::new();
-    hasher.update(b"CLSAG_round");
+    hasher.update(b"CLSAG_agg");
+    hasher.update(tag);
 
+    hasher.update((ring.len() as u64).to_le_bytes());
     for member in ring {
         hasher.update(member.public_key.to_bytes());
         hasher.update(member.commitment.to_bytes());
     }
 
     hasher.update(key_image.to_bytes());
+    hasher.update(commitment_image.to_bytes());
     hasher.update(pseudo_output.to_bytes());
-    hasher.update(message);
 
     Scalar::from_bytes_mod_order_wide(&hasher.finalize().into())
 }
 
-/// Compute aggregate key coefficients
+/// Compute the two aggregate key coefficients `(mu_p, mu_c)`.
+///
+/// Each is an independent random-oracle evaluation over the full statement
+/// (see [`clsag_agg_hash`]); `mu_c` is NOT derived from `mu_p`. The message is
+/// intentionally not bound here — it is bound in the per-round challenge
+/// ([`clsag_hash`]) exactly as in Monero CLSAG.
 fn compute_aggregate_coefficients(
     ring: &[RingMember],
     key_image: &KeyImage,
+    commitment_image: &PublicPoint,
     pseudo_output: &Commitment,
-    message: &[u8],
 ) -> (Scalar, Scalar) {
-    let mu_p = clsag_round_hash(ring, key_image, pseudo_output, message);
-
-    let mut hasher = Sha3_512::new();
-    hasher.update(b"CLSAG_agg_1");
-    hasher.update(mu_p.as_bytes());
-    let mu_c = Scalar::from_bytes_mod_order_wide(&hasher.finalize().into());
-
+    let mu_p = clsag_agg_hash(b"_0", ring, key_image, commitment_image, pseudo_output);
+    let mu_c = clsag_agg_hash(b"_1", ring, key_image, commitment_image, pseudo_output);
     (mu_p, mu_c)
 }
 
@@ -202,8 +295,10 @@ pub fn clsag_sign<R: RngCore + CryptoRng>(
     let hp = hash_to_point(&expected_public.to_bytes());
     let commitment_image = PublicPoint::from_point(blinding_diff.as_scalar() * hp);
 
-    // Compute aggregate coefficients
-    let (mu_p, mu_c) = compute_aggregate_coefficients(ring, &key_image, pseudo_output, message);
+    // Compute aggregate coefficients. C-1 fix: bind the commitment image `D`
+    // (`commitment_image`, computed just above) into both coefficients.
+    let (mu_p, mu_c) =
+        compute_aggregate_coefficients(ring, &key_image, &commitment_image, pseudo_output);
 
     // Generate random alpha
     let alpha = SecretScalar::random(rng);
@@ -401,9 +496,15 @@ pub fn clsag_verify(
         return false;
     }
 
-    // Compute aggregate coefficients
-    let (mu_p, mu_c) =
-        compute_aggregate_coefficients(ring, &signature.key_image, pseudo_output, message);
+    // Compute aggregate coefficients. C-1 fix: the commitment image `D` from
+    // the signature is now bound into both coefficients, so an attacker cannot
+    // attach an arbitrary key image and solve for a matching `D`.
+    let (mu_p, mu_c) = compute_aggregate_coefficients(
+        ring,
+        &signature.key_image,
+        &signature.commitment_image,
+        pseudo_output,
+    );
 
     // Compute aggregate public keys (must match signing formulation)
     // W_i = mu_p * P_i + mu_c * (C_i - C')
@@ -661,6 +762,267 @@ mod tests {
     use super::*;
     use rand::rngs::OsRng;
 
+    /// AUDIT KAT (crypto C1): a deterministic, portable CLSAG test vector.
+    /// `clsag_sign` draws its nonces only from the caller's RNG, so a seeded RNG
+    /// with fixed keys/message yields a byte-reproducible signature. This pins:
+    /// (1) determinism under a fixed seed (a golden vector is meaningful only if
+    /// reproducible), (2) the signature verifies, (3) the key image equals the
+    /// RNG-independent `x·Hp(x·G)` golden, and (4) a SHA-256 digest of the
+    /// serialized signature is frozen so any change to the CLSAG wire format or
+    /// challenge construction is caught. An external auditor can regenerate this
+    /// vector from the fixed inputs and cross-check it against a reference.
+    #[test]
+    fn clsag_sign_verify_kat_deterministic_and_golden() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+        use sha2::{Digest, Sha256};
+
+        let secret = SecretScalar::from_bytes([0x22u8; 32]);
+        let public = secret.to_public();
+        let value = 1000u64;
+        let z_real = SecretScalar::from_bytes([0x33u8; 32]);
+        let real_commitment = Commitment::commit(value, &z_real);
+        let z_pseudo = SecretScalar::from_bytes([0x44u8; 32]);
+        let pseudo_output = Commitment::commit(value, &z_pseudo);
+        let blinding_diff =
+            SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
+        let d1 = SecretScalar::from_bytes([0x55u8; 32]);
+        let d2 = SecretScalar::from_bytes([0x66u8; 32]);
+        let ring = vec![
+            RingMember::new(public, real_commitment),
+            RingMember::new(
+                d1.to_public(),
+                Commitment::commit(value, &SecretScalar::from_bytes([0x77u8; 32])),
+            ),
+            RingMember::new(
+                d2.to_public(),
+                Commitment::commit(value, &SecretScalar::from_bytes([0x88u8; 32])),
+            ),
+        ];
+        let message = b"coincync-clsag-kat".to_vec();
+        let sign = || {
+            let mut rng = ChaCha20Rng::seed_from_u64(42);
+            clsag_sign(&message, &ring, 0, &secret, &blinding_diff, &pseudo_output, &mut rng)
+                .unwrap()
+        };
+
+        let sig = sign();
+        assert!(
+            clsag_verify(&message, &ring, &pseudo_output, &sig),
+            "KAT signature must verify"
+        );
+        let bytes = borsh::to_vec(&sig).unwrap();
+        assert_eq!(
+            bytes,
+            borsh::to_vec(&sign()).unwrap(),
+            "CLSAG must be byte-reproducible for a fixed RNG seed"
+        );
+        // Key image golden (RNG-independent: x·Hp(x·G)).
+        assert_eq!(
+            hex::encode(sig.key_image.to_bytes()),
+            "8807b998b83a0ef9a9710b21cc7fd89a9a9b6ea9a1bd8a2bdede7b570d630973"
+        );
+        // Full-signature wire-format golden (SHA-256 of the borsh encoding).
+        assert_eq!(hex::encode(Sha256::digest(&bytes)), "67fcc3936e6f6621dd9ed3fe9684552666e173785e769a2920b34a7031bd99c3");
+    }
+
+    /// AUDIT (crypto M4): CLSAG was only ever exercised at ring size 2–3, so
+    /// challenge-chain rotation / loop-index bugs that only manifest at a large
+    /// ring were untested. This signs and verifies at the PRODUCTION ring size
+    /// with the real signer at several positions, and asserts a single-slot
+    /// tamper (one response scalar, or one decoy ring member) is rejected.
+    #[test]
+    fn clsag_verifies_at_production_ring_size_and_rejects_single_slot_tamper() {
+        let n = crate::constants::RING_SIZE; // 16
+        assert!(n >= 8, "this test targets the real, large ring size");
+
+        // Build an n-member ring with a known real signer at `real`.
+        let build = |real: usize| {
+            let secret = SecretScalar::random(&mut OsRng);
+            let value = 1000u64;
+            let z_real = SecretScalar::random(&mut OsRng);
+            let real_commitment = Commitment::commit(value, &z_real);
+            let z_pseudo = SecretScalar::random(&mut OsRng);
+            let pseudo_output = Commitment::commit(value, &z_pseudo);
+            let blinding_diff =
+                SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
+            let mut ring: Vec<RingMember> = (0..n)
+                .map(|_| {
+                    RingMember::new(
+                        SecretScalar::random(&mut OsRng).to_public(),
+                        Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+                    )
+                })
+                .collect();
+            ring[real] = RingMember::new(secret.to_public(), real_commitment);
+            let message = b"clsag production-ring-size test".to_vec();
+            let sig = clsag_sign(
+                &message,
+                &ring,
+                real,
+                &secret,
+                &blinding_diff,
+                &pseudo_output,
+                &mut OsRng,
+            )
+            .unwrap();
+            (message, ring, pseudo_output, sig)
+        };
+
+        for real in [0usize, 1, n / 2, n - 1] {
+            let (message, ring, pseudo_output, sig) = build(real);
+            assert_eq!(sig.ring_size(), n, "signature must cover the full ring");
+            assert!(
+                clsag_verify(&message, &ring, &pseudo_output, &sig),
+                "valid n={n} signature (real={real}) must verify"
+            );
+
+            // (1) Tamper one response scalar (the LAST slot — exercises the
+            //     challenge-chain wrap) → must reject.
+            let mut bad = sig.clone();
+            bad.responses[n - 1][0] ^= 0x01;
+            assert!(
+                !clsag_verify(&message, &ring, &pseudo_output, &bad),
+                "a single flipped response scalar at slot n-1 must fail (real={real})"
+            );
+
+            // (2) Alter one DECOY ring member's public key → must reject
+            //     (the challenge chain no longer closes on c1).
+            let victim = (real + 1) % n;
+            let mut ring2 = ring.clone();
+            ring2[victim] = RingMember::new(
+                SecretScalar::random(&mut OsRng).to_public(),
+                ring2[victim].commitment.clone(),
+            );
+            assert!(
+                !clsag_verify(&message, &ring2, &pseudo_output, &sig),
+                "an altered ring member must fail verification (real={real})"
+            );
+        }
+    }
+
+    /// SECURITY REGRESSION (C-1 — CLSAG key-image malleability).
+    ///
+    /// A signer who legitimately owns a ring member must NOT be able to attach
+    /// an *arbitrary* key image to an otherwise-valid CLSAG signature. The key
+    /// image is the only value double-spend detection dedups on
+    /// (`consensus::validation`), so if it is attacker-chosen the same output
+    /// can be spent under unlimited distinct key images → undetected
+    /// double-spend / supply inflation.
+    ///
+    /// Root cause (pre-fix): the aggregation coefficients `mu_p`/`mu_c` did not
+    /// bind the commitment image `D`, so an attacker could pick any key image
+    /// `I'` and solve `D' = mu_c^{-1} (w·Hp(P) − mu_p·I')` to satisfy the
+    /// real-index verification closure. This test performs exactly that
+    /// construction; the verifier MUST reject it.
+    #[test]
+    fn clsag_rejects_arbitrary_forged_key_image() {
+        use curve25519_dalek::traits::Identity;
+
+        let value = 1000u64;
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let z_real = SecretScalar::random(&mut OsRng);
+        let real_commitment = Commitment::commit(value, &z_real);
+        let z_pseudo = SecretScalar::random(&mut OsRng);
+        let pseudo_output = Commitment::commit(value, &z_pseudo);
+        let blinding_diff = *z_real.as_scalar() - *z_pseudo.as_scalar();
+
+        let decoy1 = SecretScalar::random(&mut OsRng);
+        let decoy2 = SecretScalar::random(&mut OsRng);
+        let ring = vec![
+            RingMember::new(public, real_commitment),
+            RingMember::new(
+                decoy1.to_public(),
+                Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+            RingMember::new(
+                decoy2.to_public(),
+                Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+        ];
+        let real_index = 0usize;
+        let n = ring.len();
+        let message = b"key-image malleability forgery PoC";
+
+        let hp = hash_to_point(&public.to_bytes());
+        let honest_ki = KeyImage::from_secret(&secret);
+
+        // Attacker chooses an ARBITRARY key image I' = (x + 1)·Hp(P), which is a
+        // valid non-identity point but is NOT the canonical x·Hp(P).
+        let forged_ki_point = (*secret.as_scalar() + Scalar::ONE) * hp;
+        let forged_ki = KeyImage::from_bytes(forged_ki_point.compress().to_bytes())
+            .expect("forged key image is a valid ristretto point");
+        assert_ne!(forged_ki.to_bytes(), honest_ki.to_bytes());
+        assert_ne!(forged_ki_point, RistrettoPoint::identity());
+
+        // Coefficients. Pre-fix these depended on I' but not on D', which made
+        // the forgery solvable. Post-fix they bind D', so the attacker faces a
+        // circular dependency (D' is derived from the coefficients, but the
+        // coefficients now depend on D'). Here we mount the direct attack: the
+        // attacker computes coefficients under a guessed D (identity) and solves
+        // D' from them; the verifier then recomputes coefficients from the real
+        // D' ≠ guess, so the closure no longer holds and the forgery is rejected.
+        let guessed_d = PublicPoint::identity();
+        let (mu_p, mu_c) =
+            compute_aggregate_coefficients(&ring, &forged_ki, &guessed_d, &pseudo_output);
+
+        // Aggregate secret w = mu_p·x + mu_c·(z_real − z_pseudo), known to the
+        // rightful owner of ring member 0.
+        let w = mu_p * (*secret.as_scalar()) + mu_c * blinding_diff;
+
+        // Solve D' so that mu_p·I' + mu_c·D' = w·Hp(P): the R-side closes.
+        let forged_d_point = mu_c.invert() * (w * hp - mu_p * forged_ki_point);
+        let forged_d = PublicPoint::from_point(forged_d_point);
+        assert_ne!(forged_d_point, RistrettoPoint::identity());
+
+        // Rebuild the CLSAG challenge ring with the forged (I', D').
+        let aggregate_keys: Vec<RistrettoPoint> = ring
+            .iter()
+            .map(|m| {
+                let p = m.public_key.as_point();
+                let c_diff = m.commitment.sub(&pseudo_output);
+                mu_p * p + mu_c * c_diff.as_point().as_point()
+            })
+            .collect();
+        let aggregate_key_image =
+            mu_p * forged_ki.as_point().as_point() + mu_c * forged_d_point;
+
+        let alpha = *SecretScalar::random(&mut OsRng).as_scalar();
+        let mut responses: Vec<Scalar> = (0..n)
+            .map(|_| *SecretScalar::random(&mut OsRng).as_scalar())
+            .collect();
+
+        let l_real = alpha * generator();
+        let r_real = alpha * hp;
+        let mut challenges = vec![Scalar::ZERO; n];
+        challenges[(real_index + 1) % n] =
+            clsag_hash(b"c", &ring, &forged_ki, &forged_d, message, &l_real, &r_real);
+        for offset in 1..n {
+            let i = (real_index + offset) % n;
+            let next = (i + 1) % n;
+            let hp_i = hash_to_point(&ring[i].public_key.to_bytes());
+            let l_i = responses[i] * generator() + challenges[i] * aggregate_keys[i];
+            let r_i = responses[i] * hp_i + challenges[i] * aggregate_key_image;
+            challenges[next] =
+                clsag_hash(b"c", &ring, &forged_ki, &forged_d, message, &l_i, &r_i);
+        }
+        responses[real_index] = alpha - challenges[real_index] * w;
+
+        let forged_sig = ClsagSignature {
+            key_image: forged_ki,
+            commitment_image: forged_d,
+            c1: challenges[1].to_bytes(),
+            responses: responses.iter().map(|s| s.to_bytes()).collect(),
+        };
+
+        assert!(
+            !clsag_verify(message, &ring, &pseudo_output, &forged_sig),
+            "CLSAG accepted a signature with an arbitrary forged key image \
+             (key-image malleability, C-1) — enables double-spend / inflation"
+        );
+    }
+
     #[test]
     fn test_simple_ring_signature() {
         let secret = SecretScalar::random(&mut OsRng);
@@ -895,5 +1257,287 @@ mod tests {
             ki2.to_bytes(),
             "Different keys must produce different key images"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Adversarial verifier tests (appended). These mirror the construction
+    // style of `test_clsag_sign_verify` / `test_simple_ring_signature`
+    // above and mutate the (public) signature fields to assert the verifier
+    // rejects malformed / malicious inputs.
+    // ---------------------------------------------------------------------
+
+    /// Build a valid 3-member CLSAG signature (real signer at index 0)
+    /// together with the message, ring, and pseudo-output it verifies
+    /// against. Mirrors `test_clsag_sign_verify`.
+    fn valid_clsag() -> (Vec<u8>, Vec<RingMember>, Commitment, ClsagSignature) {
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+
+        let value = 1000u64;
+        let z_real = SecretScalar::random(&mut OsRng);
+        let real_commitment = Commitment::commit(value, &z_real);
+        let z_pseudo = SecretScalar::random(&mut OsRng);
+        let pseudo_output = Commitment::commit(value, &z_pseudo);
+        let blinding_diff = SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
+
+        let decoy1 = SecretScalar::random(&mut OsRng);
+        let decoy2 = SecretScalar::random(&mut OsRng);
+        let ring = vec![
+            RingMember::new(public, real_commitment),
+            RingMember::new(
+                decoy1.to_public(),
+                Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+            RingMember::new(
+                decoy2.to_public(),
+                Commitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+        ];
+        let message = b"adversarial CLSAG verifier test".to_vec();
+
+        let sig = clsag_sign(
+            &message,
+            &ring,
+            0,
+            &secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut OsRng,
+        )
+        .unwrap();
+
+        // Sanity: the freshly-built signature verifies.
+        assert!(clsag_verify(&message, &ring, &pseudo_output, &sig));
+
+        (message, ring, pseudo_output, sig)
+    }
+
+    #[test]
+    fn clsag_verify_rejects_identity_commitment_image() {
+        let (message, ring, pseudo_output, mut sig) = valid_clsag();
+        // Set D to the curve identity point.
+        sig.commitment_image = PublicPoint::identity();
+        assert!(
+            !clsag_verify(&message, &ring, &pseudo_output, &sig),
+            "verifier must reject an identity commitment_image"
+        );
+    }
+
+    #[test]
+    fn clsag_verify_rejects_identity_ring_member_commitment() {
+        let (message, ring, pseudo_output, sig) = valid_clsag();
+        let mut malicious_ring = ring.clone();
+        // Mutate one ring member's commitment to the identity point.
+        malicious_ring[1] = RingMember::new(
+            malicious_ring[1].public_key,
+            Commitment::from_point(PublicPoint::identity()),
+        );
+        assert!(
+            !clsag_verify(&message, &malicious_ring, &pseudo_output, &sig),
+            "verifier must reject an identity ring-member commitment"
+        );
+    }
+
+    #[test]
+    fn clsag_verify_rejects_non_canonical_response_scalar() {
+        let (message, ring, pseudo_output, mut sig) = valid_clsag();
+        // 0xFF..FF exceeds the group order ℓ, so it is a non-canonical
+        // scalar encoding that PeerScalar::decode must reject.
+        sig.responses[0] = [0xFFu8; 32];
+        assert!(
+            !clsag_verify(&message, &ring, &pseudo_output, &sig),
+            "verifier must reject a non-canonical response scalar"
+        );
+    }
+
+    #[test]
+    fn clsag_verify_rejects_non_canonical_c1_scalar() {
+        let (message, ring, pseudo_output, mut sig) = valid_clsag();
+        sig.c1 = [0xFFu8; 32];
+        assert!(
+            !clsag_verify(&message, &ring, &pseudo_output, &sig),
+            "verifier must reject a non-canonical c1 scalar"
+        );
+    }
+
+    #[test]
+    fn clsag_verify_rejects_zero_challenge_c1() {
+        let (message, ring, pseudo_output, mut sig) = valid_clsag();
+        // All-zero bytes decode canonically to Scalar::ZERO; the verifier's
+        // A6-ZERO-CHALLENGE guard must reject it.
+        sig.c1 = [0u8; 32];
+        assert!(
+            !clsag_verify(&message, &ring, &pseudo_output, &sig),
+            "verifier must reject a zero c1 challenge"
+        );
+    }
+
+    #[test]
+    fn clsag_sign_rejects_ring_size_below_two() {
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let z_real = SecretScalar::random(&mut OsRng);
+        let real_commitment = Commitment::commit(1000, &z_real);
+        let z_pseudo = SecretScalar::random(&mut OsRng);
+        let pseudo_output = Commitment::commit(1000, &z_pseudo);
+        let blinding_diff = SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
+
+        // Single-member ring (n < 2).
+        let ring = vec![RingMember::new(public, real_commitment)];
+        let result = clsag_sign(
+            b"too small",
+            &ring,
+            0,
+            &secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut OsRng,
+        );
+        assert!(result.is_err(), "ring size < 2 must be rejected");
+    }
+
+    #[test]
+    fn clsag_sign_rejects_real_index_out_of_range() {
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let z_real = SecretScalar::random(&mut OsRng);
+        let real_commitment = Commitment::commit(1000, &z_real);
+        let z_pseudo = SecretScalar::random(&mut OsRng);
+        let pseudo_output = Commitment::commit(1000, &z_pseudo);
+        let blinding_diff = SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
+
+        let decoy = SecretScalar::random(&mut OsRng).to_public();
+        let ring = vec![
+            RingMember::new(public, real_commitment),
+            RingMember::new(
+                decoy,
+                Commitment::commit(1000, &SecretScalar::random(&mut OsRng)),
+            ),
+        ];
+        // real_index == ring.len() is out of range.
+        let result = clsag_sign(
+            b"bad index",
+            &ring,
+            ring.len(),
+            &secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut OsRng,
+        );
+        assert!(result.is_err(), "real_index >= ring length must be rejected");
+    }
+
+    #[test]
+    fn clsag_sign_rejects_secret_key_not_matching_ring_member() {
+        // ring[0].public_key is derived from `secret`, but we sign with a
+        // DIFFERENT secret key — the sign routine must reject it.
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let wrong_secret = SecretScalar::random(&mut OsRng);
+
+        let z_real = SecretScalar::random(&mut OsRng);
+        let real_commitment = Commitment::commit(1000, &z_real);
+        let z_pseudo = SecretScalar::random(&mut OsRng);
+        let pseudo_output = Commitment::commit(1000, &z_pseudo);
+        let blinding_diff = SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
+
+        let decoy = SecretScalar::random(&mut OsRng).to_public();
+        let ring = vec![
+            RingMember::new(public, real_commitment),
+            RingMember::new(
+                decoy,
+                Commitment::commit(1000, &SecretScalar::random(&mut OsRng)),
+            ),
+        ];
+        let result = clsag_sign(
+            b"wrong secret",
+            &ring,
+            0,
+            &wrong_secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut OsRng,
+        );
+        assert!(
+            result.is_err(),
+            "secret key not matching ring[real_index] must be rejected"
+        );
+    }
+
+    /// Build a valid 3-member simple ring signature (real signer at index 0)
+    /// with its message and ring. Mirrors `test_simple_ring_signature`.
+    fn valid_simple_ring() -> (Vec<u8>, Vec<PublicPoint>, SimpleRingSignature) {
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let decoy1 = SecretScalar::random(&mut OsRng).to_public();
+        let decoy2 = SecretScalar::random(&mut OsRng).to_public();
+        let ring = vec![public, decoy1, decoy2];
+        let message = b"adversarial simple ring test".to_vec();
+        let sig = simple_ring_sign(&message, &ring, 0, &secret, &mut OsRng).unwrap();
+        assert!(simple_ring_verify(&message, &ring, &sig));
+        (message, ring, sig)
+    }
+
+    #[test]
+    fn simple_ring_verify_rejects_identity_key_image() {
+        let (message, ring, mut sig) = valid_simple_ring();
+        // Identity Ristretto element encodes as all-zero bytes.
+        sig.key_image = KeyImage::from_bytes(PublicPoint::identity().to_bytes())
+            .expect("identity is a valid ristretto encoding");
+        assert!(
+            !simple_ring_verify(&message, &ring, &sig),
+            "verifier must reject an identity key_image"
+        );
+    }
+
+    #[test]
+    fn simple_ring_verify_rejects_identity_ring_member() {
+        let (message, ring, sig) = valid_simple_ring();
+        let mut malicious_ring = ring.clone();
+        malicious_ring[1] = PublicPoint::identity();
+        assert!(
+            !simple_ring_verify(&message, &malicious_ring, &sig),
+            "verifier must reject an identity ring member"
+        );
+    }
+
+    #[test]
+    fn simple_ring_verify_rejects_non_canonical_response_scalar() {
+        let (message, ring, mut sig) = valid_simple_ring();
+        sig.responses[0] = [0xFFu8; 32];
+        assert!(
+            !simple_ring_verify(&message, &ring, &sig),
+            "verifier must reject a non-canonical response scalar"
+        );
+    }
+
+    #[test]
+    fn simple_ring_verify_rejects_zero_challenge_c0() {
+        let (message, ring, mut sig) = valid_simple_ring();
+        sig.c0 = [0u8; 32];
+        assert!(
+            !simple_ring_verify(&message, &ring, &sig),
+            "verifier must reject a zero c0 challenge"
+        );
+    }
+
+    #[test]
+    fn simple_ring_sign_rejects_ring_size_below_two() {
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let ring = vec![public];
+        let result = simple_ring_sign(b"too small", &ring, 0, &secret, &mut OsRng);
+        assert!(result.is_err(), "ring size < 2 must be rejected");
+    }
+
+    #[test]
+    fn simple_ring_sign_rejects_real_index_out_of_range() {
+        let secret = SecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let decoy = SecretScalar::random(&mut OsRng).to_public();
+        let ring = vec![public, decoy];
+        // real_index == ring.len() is out of range.
+        let result = simple_ring_sign(b"bad index", &ring, ring.len(), &secret, &mut OsRng);
+        assert!(result.is_err(), "real_index >= ring length must be rejected");
     }
 }

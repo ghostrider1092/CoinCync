@@ -1,9 +1,9 @@
 {
   "expected": {
     "adaptor_pubkey_t_secp": "031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
-    "adaptor_r_point_compressed": "033f4d613adfd34102d6f7de21412e11e45dbeb133842ab5aca3337c5b7503819c",
-    "adaptor_s_pre": "84bdec86701c943a35712cf5d4079465fc9ae4d60dcfad80da9d507f4e7402d7",
-    "final_sig_64": "5ed5de32fca20bb646163f8534c10b7ccaf67cf1e46cce20ad87378191946cdb85beed87711d953b36722df6d5089566fd9be5d70ed0ae81db9e51804f7503d8",
+    "adaptor_r_point_compressed": "031644f6853f3046a9e2ff1beb4ac2612a073eb78f5c8c3eb04992b6f30ec539a8",
+    "adaptor_s_pre": "13875f1c2275aface76bce9b4acddcae3d86058b170e28795e889aa7d497edd0",
+    "final_sig_64": "ec969406ef998dcad54a74b638b272cabfcc8bfb029efec9d7840f9c4545bd3f1488601d2376b0ade86ccf9c4bceddaf3e87068c180f297a5f899ba8d598eed1",
     "recovered_secret_secp": "0101010101010101010101010101010101010101010101010101010101010101",
     "signer_x_only_pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
   },
