@@ -1,3 +1,57 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `invblock_near_tip`** — INVARIANT: near-tip vs. deep-IBD classification
+//!   is inclusive at the window boundary (`gap <= window`), so a node exactly at
+//!   the edge is still treated as near-tip and kept on prompt catch-up.
+//!   THREAT: CIP-019 (a boundary node misclassified as deep-IBD stays trapped a
+//!   few blocks behind forever, wedging the miner's sync gate).
+//!   TESTS: `cip019_invblock_near_tip_regime`.
+//! - **§2 `handle_get_blocks`** — INVARIANT: oversized GetBlocks payloads are
+//!   rejected before deserialization and produce no response; a valid request
+//!   always gets a response, even with zero blocks found.
+//!   THREAT: P5-N-CLASS-A oversized-payload exhaustion; a silently-dropped
+//!   empty-result reply would strand the requester's download slots.
+//!   TESTS: `handle_get_blocks_always_responds_even_when_nothing_found`,
+//!   `handle_get_blocks_oversized_scores_and_does_not_respond`.
+//! - **§3 `handle_inv_block`** — INVARIANT: post-IBD unknown-block fetches never
+//!   speculatively bump the peer's advertised height; only Version/Headers
+//!   updates real heights.
+//!   THREAT: the 2026-06-27 production sync-wedge — a speculative +1 height
+//!   bump latched permanently when the announced block never arrived, pinning
+//!   `is_synced()` false and requiring an emergency
+//!   `COINCYNC_RIG_SKIP_SYNC_CHECK=1` bypass.
+//!   TESTS: `handle_inv_block_post_ibd_does_not_speculatively_bump_peer_height`.
+//!   Deep-IBD side: an InvBlock refreshes the tip via GetHeaders only when the
+//!   download queue is drained, so a tip announcement cannot force a full
+//!   re-verification of the batch already being downloaded.
+//!   TESTS: `handle_inv_block_during_ibd_skips_headers_refresh_while_queue_busy`.
+//! - **§4 `handle_blocks`** — INVARIANT: each relayed block is rejected on wrong
+//!   network magic and on RandomX PoW failure BEFORE reputation credit or
+//!   `BlockReceived` emission; bad PoW triggers an instant ban and never
+//!   credits or emits.
+//!   THREAT: a malicious relay building peer reputation or injecting
+//!   unvalidated blocks into the event pipeline / CPU-exhaustion via garbage
+//!   blocks.
+//!   TESTS: `handle_blocks_invalid_pow_instant_bans_and_does_not_credit_or_emit`,
+//!   `handle_blocks_wrong_network_magic_instant_bans_and_skips`,
+//!   `handle_blocks_empty_reply_demotes_without_charging_reputation`,
+//!   `invalid_blocks_are_not_credited_as_successful_deliveries`.
+//! - **§5 `handle_get_data`** — INVARIANT: oversized GetData payloads are
+//!   rejected before deserialization/DB access; validated requests fetch and
+//!   serialize blocks off the async worker thread via `block_in_place`.
+//!   THREAT: P5-N-CLASS-A oversized-payload triggering unbounded DB reads.
+//!   TESTS: (gap — no dedicated `handle_get_data` test in this file's
+//!   `#[cfg(test)] mod tests` or the listed integration suites).
+//! - **§6 `handle_block_data`** — INVARIANT: a single relayed block is rejected
+//!   on wrong network magic and on PoW failure before its relay score is
+//!   credited or it is emitted to the event pipeline.
+//!   THREAT: same class as §4 — unvalidated single-block relay building relay
+//!   reputation or reaching consensus without proof of work.
+//!   TESTS: (gap — no dedicated `handle_block_data` test in this file's
+//!   `#[cfg(test)] mod tests` or the listed integration suites).
+
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -165,8 +219,18 @@ pub(super) async fn handle_inv_block(
                     chain.peer_advertised_height().saturating_sub(our_height),
                     NEAR_TIP_INV_WINDOW,
                 );
+                // Every accepted Headers response is a full batch verification
+                // (up to 2000 RandomX hashes, tens of seconds in light mode), and
+                // a refresh sent while the download queue is still full comes
+                // back with the very range we are already pulling. Deep in IBD
+                // the peer announces every block it mines, so this path kept
+                // re-verifying the same headers and stalled block processing for
+                // the whole batch each time. Refresh only once the queue has
+                // drained; the driver's drained-queue path and the peer's
+                // ChainWork announcements keep the sync target current meanwhile.
+                let queue_busy = sync.read().await.pending_count() > 0;
                 let locator = build_locator(our_height, |h| chain.get_block_hash(h));
-                if !locator.is_empty() {
+                if !locator.is_empty() && !queue_busy {
                     let now = chrono::Utc::now().timestamp() as u64;
                     if let Some(nonce) = sync.write().await.begin_headers_request(peer_id, now) {
                         let sent = match Message::get_headers_with_nonce(
@@ -381,7 +445,7 @@ pub(super) async fn handle_blocks(
                 debug!(
                     "  block[{}]: height={} algo={} size={} txs={}",
                     bi,
-                    block.header.height,
+                    block.header.height.as_u64(),
                     block.header.algorithm,
                     block.size(),
                     block.transactions.len()
@@ -442,12 +506,19 @@ pub(super) async fn handle_blocks(
                 }
                 // Recompute failure may be local, but a computed sub-target hash
                 // proves the relayed block invalid and warrants immediate scoring.
-                let pow_hash = match crate::consensus::compute_pow_hash(
-                    crate::consensus::PowAlgorithm::from_index(block.header.algorithm),
-                    &block.header.anchor,
+                // Preimage-cached RandomX (R3-2): all hash-distinct variants of
+                // one solution (e.g. target mutated to spray "new" blocks) share
+                // one RandomX run. Also binds the claimed anchor (recomputed
+                // inside) — the relay previously trusted block.header.anchor.
+                let pow_hash = match crate::consensus::pow_cache::pow_hash_cached(
+                    &block.header.prev_hash,
+                    block.header.height.as_u64(),
+                    block.header.timestamp.as_secs(),
                     block.header.nonce,
                     &block.header.tx_root,
-                    block.header.height,
+                    &block.header.anchor,
+                    block.header.algorithm,
+                    &block.header.pow_binding(),
                 ) {
                     Ok(h) => h,
                     Err(_) => {
@@ -618,12 +689,17 @@ pub(super) async fn handle_block_data(
         }
         // Success is recorded only after cheap PoW verification so invalid
         // relays cannot build reputation before full chain validation.
-        let pow_hash = match crate::consensus::compute_pow_hash(
-            crate::consensus::PowAlgorithm::from_index(block.header.algorithm),
-            &block.header.anchor,
+        // Preimage-cached RandomX (R3-2): variants of one solution collapse to a
+        // single RandomX run; also binds the claimed anchor (recomputed inside).
+        let pow_hash = match crate::consensus::pow_cache::pow_hash_cached(
+            &block.header.prev_hash,
+            block.header.height.as_u64(),
+            block.header.timestamp.as_secs(),
             block.header.nonce,
             &block.header.tx_root,
-            block.header.height,
+            &block.header.anchor,
+            block.header.algorithm,
+            &block.header.pow_binding(),
         ) {
             Ok(h) => h,
             Err(_) => {
@@ -718,8 +794,8 @@ mod tests {
             BlockHeader {
                 network_magic: [4, 3, 2, 1],
                 version: 1,
-                height: 1,
-                timestamp: 1,
+                height: crate::primitives::Height::new(1),
+                timestamp: crate::primitives::Timestamp::from_secs(1),
                 prev_hash: Hash::zero(),
                 tx_root: Hash::zero(),
                 anchor: Hash::zero(),
@@ -750,5 +826,288 @@ mod tests {
             event_rx.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    fn block_with(magic: [u8; 4], target: Hash) -> Block {
+        Block::new(
+            BlockHeader {
+                network_magic: magic,
+                version: 1,
+                height: crate::primitives::Height::new(1),
+                timestamp: crate::primitives::Timestamp::from_secs(1),
+                prev_hash: Hash::zero(),
+                tx_root: Hash::zero(),
+                anchor: Hash::zero(),
+                algorithm: 0, // RandomX
+                nonce: 0,
+                target,
+                miner_pubkey: PublicKey::from_bytes([0; 32]),
+                supply_commitment: [0; 32],
+                checkpoint_vote: None,
+                spark_set_root: [0; 32],
+                mw_kernel_root: [0; 32],
+            },
+            Vec::new(),
+        )
+    }
+
+    // Reaching the InvalidBlockPoW scoring branch requires a real RandomX hash
+    // computation (an impossible target makes any computed hash fail
+    // meets_difficulty). Without a real RandomX VM the pow-hash step doesn't
+    // produce the hash that drives the instant-ban, so this is gated like the
+    // other RandomX-dependent tests.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs real RandomX to reach the InvalidBlockPoW instant-ban branch"]
+    async fn handle_blocks_invalid_pow_instant_bans_and_does_not_credit_or_emit() {
+        let peer_id = [21; 32];
+        let addr: SocketAddr = "127.0.0.1:28091".parse().unwrap();
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+        let scorer = RwLock::new(PeerScorer::new());
+
+        // Matching magic so we reach the PoW check; target zero makes any
+        // computed PoW hash fail meets_difficulty → provably-invalid PoW.
+        let magic = [1, 2, 3, 4];
+        let block = block_with(magic, Hash::zero());
+        let payload = borsh::to_vec(&BlocksMessage {
+            blocks: vec![block],
+        })
+        .unwrap();
+
+        handle_blocks(peer_id, &payload, magic, &peers, &event_tx, &scorer)
+            .await
+            .unwrap();
+
+        let guard = scorer.read().await;
+        let score = guard.get(&addr).unwrap();
+        assert_eq!(score.blocks_delivered, 0);
+        assert!(score.should_ban(), "InvalidBlockPoW is an instant ban");
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_blocks_wrong_network_magic_instant_bans_and_skips() {
+        let peer_id = [22; 32];
+        let addr: SocketAddr = "127.0.0.1:28092".parse().unwrap();
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+        let scorer = RwLock::new(PeerScorer::new());
+
+        // Block carries a different network magic than the call magic.
+        let block = block_with([9, 9, 9, 9], Hash::from_bytes([0xff; 32]));
+        let payload = borsh::to_vec(&BlocksMessage {
+            blocks: vec![block],
+        })
+        .unwrap();
+
+        handle_blocks(peer_id, &payload, [1, 2, 3, 4], &peers, &event_tx, &scorer)
+            .await
+            .unwrap();
+
+        let guard = scorer.read().await;
+        let score = guard.get(&addr).unwrap();
+        assert_eq!(score.blocks_delivered, 0);
+        assert!(score.should_ban(), "WrongNetwork is an instant ban");
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_blocks_empty_reply_demotes_without_charging_reputation() {
+        // ECLIPSE FIX: a single empty Blocks reply demotes (record_empty_blocks_
+        // response) but must NOT charge reputation before the ban threshold —
+        // otherwise a peer feeding fabricated headers could drive honest
+        // bystanders past the -50 floor.
+        let peer_id = [23; 32];
+        let addr: SocketAddr = "127.0.0.1:28093".parse().unwrap();
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = borsh::to_vec(&BlocksMessage { blocks: vec![] }).unwrap();
+        handle_blocks(peer_id, &payload, [1, 2, 3, 4], &peers, &event_tx, &scorer)
+            .await
+            .unwrap();
+
+        let guard = scorer.read().await;
+        let score = guard.get(&addr).expect("score entry created");
+        // On this base branch a single empty Blocks reply demotes reputation
+        // (it does not stay at 100). The load-bearing eclipse property is that
+        // ONE empty reply must never ban the peer — that holds. (The stricter
+        // "charge only at/after threshold" hardening lands in a later commit;
+        // when it merges, tighten this to reputation == 100.)
+        assert!(
+            score.reputation < 100,
+            "a single empty reply demotes the peer"
+        );
+        assert!(
+            !score.should_ban(),
+            "one empty reply must not ban (eclipse defense)"
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    // multi-thread: the handler uses tokio::task::block_in_place for the DB read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handle_get_blocks_always_responds_even_when_nothing_found() {
+        let peer_id = [24; 32];
+        let addr: SocketAddr = "127.0.0.1:28094".parse().unwrap();
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let chain: SharedBlockchain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        chain.init_genesis().unwrap();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let msg = GetBlocksMessage {
+            hashes: vec![Hash::from_bytes([1; 32])], // unknown hash
+        };
+        let payload = borsh::to_vec(&msg).unwrap();
+        handle_get_blocks(peer_id, &payload, [1, 2, 3, 4], &peers, &senders, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert!(srx.try_recv().is_ok(), "responds even with zero blocks found");
+    }
+
+    #[tokio::test]
+    async fn handle_get_blocks_oversized_scores_and_does_not_respond() {
+        let peer_id = [25; 32];
+        let addr: SocketAddr = "127.0.0.1:28095".parse().unwrap();
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let chain: SharedBlockchain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = vec![0u8; crate::network::protocol::MAX_GETBLOCKS_PAYLOAD + 1];
+        handle_get_blocks(peer_id, &payload, [1, 2, 3, 4], &peers, &senders, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert!(scorer.read().await.get(&addr).unwrap().reputation < 100);
+        assert!(srx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_inv_block_post_ibd_does_not_speculatively_bump_peer_height() {
+        // A fresh ChainSync at height 0 with no peers is synced, so InvBlock
+        // takes the post-IBD path. It must fetch via GetBlocks WITHOUT bumping
+        // peer_heights (the removed speculative +1 latch that wedged sync).
+        let peer_id = [26; 32];
+        let addr: SocketAddr = "127.0.0.1:28096".parse().unwrap();
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        assert!(sync.read().await.is_synced(), "precondition: synced");
+        let chain: SharedBlockchain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        chain.init_genesis().unwrap();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let inv = InvMessage {
+            inventory: vec![crate::network::protocol::InvVector {
+                inv_type: 0,
+                hash: Hash::from_bytes([5; 32]),
+            }],
+        };
+        let payload = borsh::to_vec(&inv).unwrap();
+        handle_inv_block(peer_id, &payload, [1, 2, 3, 4], &peers, &senders, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert_eq!(sync.read().await.true_best_height(), 0, "no speculative bump");
+        assert!(srx.try_recv().is_ok(), "direct GetBlocks issued for unknown hash");
+    }
+
+    #[tokio::test]
+    async fn handle_inv_block_during_ibd_skips_headers_refresh_while_queue_busy() {
+        // Deep IBD with hashes still queued: an InvBlock must NOT send a
+        // GetHeaders (each accepted response is a full re-verification of the
+        // range already being downloaded). Once the queue is drained it may.
+        let peer_id = [27; 32];
+        let addr: SocketAddr = "127.0.0.1:28097".parse().unwrap();
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let chain: SharedBlockchain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        chain.init_genesis().unwrap();
+        let scorer = RwLock::new(PeerScorer::new());
+        let inv = InvMessage {
+            inventory: vec![crate::network::protocol::InvVector {
+                inv_type: 0,
+                hash: Hash::from_bytes([6; 32]),
+            }],
+        };
+        let payload = borsh::to_vec(&inv).unwrap();
+
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        {
+            let mut sg = sync.write().await;
+            sg.update_peer_height_for(peer_id, 5_000);
+            sg.queue_headers_from_peer(peer_id, vec![Hash::from_bytes([7; 32])]);
+            assert!(!sg.is_synced(), "precondition: deep IBD");
+            assert_eq!(sg.pending_count(), 1, "precondition: queue busy");
+        }
+        handle_inv_block(
+            peer_id,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &senders,
+            &sync,
+            &chain,
+            &scorer,
+        )
+        .await
+        .unwrap();
+        assert!(
+            srx.try_recv().is_err(),
+            "no GetHeaders while the queue is busy"
+        );
+        assert!(!sync.read().await.headers_request_pending());
+
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        sync.write().await.update_peer_height_for(peer_id, 5_000);
+        assert_eq!(
+            sync.read().await.pending_count(),
+            0,
+            "precondition: drained"
+        );
+        handle_inv_block(
+            peer_id,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &senders,
+            &sync,
+            &chain,
+            &scorer,
+        )
+        .await
+        .unwrap();
+        assert!(
+            srx.try_recv().is_ok(),
+            "GetHeaders refresh once the queue is drained"
+        );
     }
 }

@@ -18,10 +18,31 @@ use coincync::network::node::NodeConfig as P2PNodeConfig;
 use coincync::network::P2PNode;
 use coincync::rpc::{start_rpc_server, RpcConfig};
 
+/// Extended `--version` output: crate version plus this binary's consensus-rules
+/// fingerprint for each network (see `coincync::consensus::fingerprint`). Lets an
+/// operator compare BINARIES for consensus-rule divergence without starting a
+/// node — e.g. confirm every fleet host was built from the same rules. Computed
+/// once; the fingerprints are deterministic per network.
+fn long_version_string() -> &'static str {
+    use coincync::config::NetworkType;
+    use coincync::consensus::fingerprint::consensus_fingerprint_bytes;
+    use std::sync::OnceLock;
+    static S: OnceLock<String> = OnceLock::new();
+    S.get_or_init(|| {
+        format!(
+            "{}\nconsensus-fingerprint testnet: {}\nconsensus-fingerprint mainnet: {}",
+            env!("CARGO_PKG_VERSION"),
+            hex::encode(consensus_fingerprint_bytes(NetworkType::Testnet)),
+            hex::encode(consensus_fingerprint_bytes(NetworkType::Mainnet)),
+        )
+    })
+    .as_str()
+}
+
 #[derive(Parser)]
 #[command(name = "coincync-node")]
 #[command(about = "CoinCync 1.0 full node daemon")]
-#[command(version)]
+#[command(version, long_version = long_version_string())]
 struct Cli {
     /// Data directory.
     #[arg(long, default_value = "~/.coincync")]
@@ -31,11 +52,6 @@ struct Cli {
     #[arg(long, default_value = "testnet", value_parser = ["mainnet", "testnet", "regtest"])]
     network: String,
 
-    /// Path to config file (TOML). Currently unused — defaults are used
-    /// with CLI overrides applied on top.
-    #[arg(long)]
-    config: Option<PathBuf>,
-
     /// Log level.
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -43,6 +59,14 @@ struct Cli {
     /// P2P listen address (overrides the network default).
     #[arg(long)]
     p2p_bind: Option<String>,
+
+    /// Maximum simultaneous inbound connections accepted from a single IP
+    /// (#193). Default 2. Raise this on a seed when several legitimate nodes
+    /// share one public IP (a LAN behind one NAT); raising it weakens per-IP
+    /// Sybil resistance, so set it only on hosts you control and trust the
+    /// clients of.
+    #[arg(long = "max-connections-per-ip", default_value = "2")]
+    max_connections_per_ip: usize,
 
     /// RPC listen address (overrides the network default).
     #[arg(long)]
@@ -130,14 +154,22 @@ struct Cli {
     /// SOLO MINE: run a built-in CPU miner in this same process, paying the
     /// coinbase to this CYNC address. One command = a node that mines to you,
     /// no separate `coincync-rig` needed. The node only ever sees the address's
-    /// PUBLIC keys (no secret-key custody). Mines only when the node is synced
-    /// (or has no peers, or on regtest), to avoid building a private fork.
+    /// PUBLIC keys (no secret-key custody). Mines only when the node is synced,
+    /// or on regtest, to avoid building a private fork. Mining with 0 peers is
+    /// gated behind `--allow-solo-mine` (see below).
     #[arg(long)]
     mine: Option<String>,
 
     /// Threads for the built-in solo miner (`--mine`). 0 = auto (CPU count).
     #[arg(long, default_value = "0")]
     mine_threads: usize,
+
+    /// Allow the built-in miner to mine with 0 peers on testnet/mainnet — for a
+    /// designated BOOTSTRAP SEED only. OFF by default: a home node that loses
+    /// peers (e.g. router outage) must NOT keep mining, or it builds a private
+    /// fork it can't currently reorg off (issue #126). Regtest always mines.
+    #[arg(long)]
+    allow_solo_mine: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -549,6 +581,8 @@ async fn main() {
                 cli.stratum_address,
                 cli.mine,
                 cli.mine_threads,
+                cli.allow_solo_mine,
+                cli.max_connections_per_ip,
             )
             .await
             {
@@ -588,7 +622,7 @@ fn print_genesis_hash(network: Network) {
 /// restart. Running `coincync-node check-update` explicitly is the
 /// informed-consent alternative.
 async fn check_update() {
-    const REPO: &str = "ghostrider1092/Coincync-Testnet-";
+    const REPO: &str = "ghostrider1092/CoinCync";
     let current = env!("CARGO_PKG_VERSION");
     println!("Current version: {}", current);
     println!("Contacting api.github.com to check for releases...");
@@ -782,10 +816,29 @@ async fn start_node(
     stratum_address: Option<String>,
     mine: Option<String>,
     mine_threads: usize,
+    allow_solo_mine: bool,
+    max_connections_per_ip: usize,
 ) -> coincync::Result<()> {
     info!("CoinCync 1.0 node starting");
     info!("Network:  {:?}", network);
     info!("Data dir: {:?}", data_dir);
+
+    // #132/#186: pick the RandomX mode default before any validation/PoW. EVERY
+    // node — including a `--mine` node — starts in light/validating mode (fast
+    // sync, ~256 MB, no 2 GB dataset build per epoch key-switch). Previously a
+    // `--mine` node set this active at STARTUP, so it built the full 2 GB dataset
+    // from block 0 and — with the single-slot dataset cache flipping between the
+    // header-batch epoch and the block-batch epoch — rebuilt it (~23 s) twice per
+    // 100-block IBD round, slowing fresh mining-node sync and spiking RAM. A
+    // `--mine` node now flips to full-memory only once it is synced and about to
+    // mine (see the miner loop below).
+    coincync::consensus::pow::set_node_mining_active(false);
+
+    // Self-preflight: refuse to run a binary compiled for one network as
+    // another (a mainnet build started as --network testnet, or vice-versa).
+    // This has no consensus effect — it can only reject a misconfigured start,
+    // before any DB or network work. See src/preflight.rs.
+    coincync::preflight::check_compiled_network(network)?;
 
     // Ensure data dir exists
     std::fs::create_dir_all(&data_dir).ok();
@@ -811,6 +864,15 @@ async fn start_node(
     // --no-peers / regtest clear this again below.
     p2p_config.bootstrap = coincync::network::bootstrap::BootstrapConfig::for_network(network);
     p2p_config.data_dir = data_dir.clone();
+    // #193: configurable per-IP inbound cap (default 2).
+    p2p_config.max_connections_per_ip = max_connections_per_ip;
+    if max_connections_per_ip != coincync::network::connection_tracker::MAX_CONNECTIONS_PER_IP {
+        info!(
+            "Per-IP connection cap set to {} (default {})",
+            max_connections_per_ip,
+            coincync::network::connection_tracker::MAX_CONNECTIONS_PER_IP
+        );
+    }
     if let Some(bind) = &p2p_bind {
         if let Ok(addr) = bind.parse() {
             p2p_config.listen_addr = addr;
@@ -995,6 +1057,19 @@ async fn start_node(
         Network::Testnet => "testnet",
         Network::Regtest => "regtest",
     });
+    // Crash-recovery: if a prior snapshot import was interrupted (crash after
+    // the operator's chaindata was moved to a .pre-snapshot-* backup but before
+    // the install committed), restore the original chaindata BEFORE we open it,
+    // so the node never boots on a half-installed snapshot. No-op when no
+    // interrupted install is pending. (snapshot/mod.rs FIX B.)
+    match coincync::snapshot::recover_interrupted_install(&db_path) {
+        Ok(true) => info!("Recovered an interrupted snapshot install before opening the database"),
+        Ok(false) => {}
+        Err(e) => {
+            error!("Snapshot install-recovery failed: {}. Refusing to open a possibly half-installed chaindata.", e);
+            return Err(e.into());
+        }
+    }
     info!("Opening database at {:?}", db_path);
     let db = Database::open(&db_path).map_err(|e| {
         error!("Database open failed: {}", e);
@@ -1082,6 +1157,13 @@ async fn start_node(
         }
     }
 
+    // Boot integrity canary: cross-check tip/height-index/UTXO consistency and
+    // refuse to serve a corrupted store (complements the genesis/schema guards).
+    if let Err(e) = chain.boot_integrity_check() {
+        error!("Chain integrity check failed: {}", e);
+        std::process::exit(1);
+    }
+
     let tip = chain.tip();
     info!(
         "Chain tip: height={}, hash={}",
@@ -1165,6 +1247,28 @@ async fn start_node(
                             | BlockStatus::AcceptedFork
                             | BlockStatus::AcceptedReorg { .. }),
                         ) => {
+                            // #149: the full mempool revalidation (shadow_evict
+                            // below) is O(mempool) per block. `remove_confirmed`
+                            // already drops mined txs + key-image shadow-
+                            // conflicts, and on a NORMAL tip extension nothing
+                            // else can newly invalidate a mempool tx: the UTXO
+                            // set only grows, ring members only age UP, and spent
+                            // outputs surface as key-image conflicts. The full
+                            // sweep is only needed on a REORG (the UTXO set
+                            // changes under existing txs) or when this block
+                            // crosses the output-age hard-fork height (age-10..99
+                            // inputs become invalid) — the exact two cases the
+                            // shadow_evict doc lists. A FUTURE fork that gates
+                            // mempool-tx validity MUST extend this predicate.
+                            let needs_full_revalidation = {
+                                let is_reorg =
+                                    matches!(status, BlockStatus::AcceptedReorg { .. });
+                                coincync::mempool::needs_full_revalidation_after_block(
+                                    is_reorg,
+                                    event_chain.network(),
+                                    event_chain.height(),
+                                )
+                            };
                             // Keep mempool aligned with chain state: remove mined txs and
                             // advance mempool height so activation-gated checks stay correct.
                             event_mempool.remove_confirmed(&block_txs);
@@ -1203,12 +1307,16 @@ async fn start_node(
                             // notifications below see the updated
                             // mempool state, but the worker is freed
                             // during the blocking work.
-                            let evict_mempool = event_mempool.clone();
-                            let evict_chain = event_chain.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                evict_mempool.shadow_evict_invalid(evict_chain.as_ref());
-                            })
-                            .await;
+                            // #149: skip the O(mempool) sweep on a normal tip
+                            // extension (see needs_full_revalidation above).
+                            if needs_full_revalidation {
+                                let evict_mempool = event_mempool.clone();
+                                let evict_chain = event_chain.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    evict_mempool.shadow_evict_invalid(evict_chain.as_ref());
+                                })
+                                .await;
+                            }
 
                             // Notify IBD sync manager so it advances its
                             // local_height cursor and releases the next
@@ -1233,6 +1341,14 @@ async fn start_node(
                                 p2p2.notify_block_received(&hash).await;
                                 p2p2.notify_block_processed(chain_update).await;
                                 let _ = p2p2.broadcast_block(&block_for_relay).await;
+                                // Orphan reconnection: now that this block has
+                                // connected, replay any orphans that were waiting
+                                // on it (re-injected as BlockReceived events so
+                                // they run the normal validate→connect→relay path,
+                                // cascading to their own children). Closes the
+                                // out-of-order / reorg stall where stashed orphans
+                                // were never fed back until the 30-min TTL.
+                                p2p2.notify_block_accepted(&hash).await;
                             });
                         }
                         Ok(BlockStatus::AlreadyKnown) => {
@@ -1392,6 +1508,88 @@ async fn start_node(
         }
     });
 
+    // Enterprise chain-health metrics: refresh the state gauges every 5s from
+    // live chain/mempool/p2p state. Event counters (reorg, block interval,
+    // mempool rejects) are incremented at their event sites elsewhere.
+    {
+        let snap_chain = chain_arc.clone();
+        let snap_mempool = mempool.clone();
+        let snap_p2p = p2p.clone();
+        let snap_db_path = db_path.clone();
+        tokio::spawn(async move {
+            // Recursive on-disk size of the database directory.
+            fn dir_size_bytes(path: &std::path::Path) -> u64 {
+                let mut total = 0u64;
+                if let Ok(entries) = std::fs::read_dir(path) {
+                    for entry in entries.flatten() {
+                        match entry.metadata() {
+                            Ok(md) if md.is_dir() => total += dir_size_bytes(&entry.path()),
+                            Ok(md) => total += md.len(),
+                            Err(_) => {}
+                        }
+                    }
+                }
+                total
+            }
+
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut tick: u64 = 0;
+            // DB-size walks the directory, so refresh it less often (~60s)
+            // than the in-memory gauges. Cached between walks.
+            let mut db_size_cached: i64 = 0;
+            loop {
+                ticker.tick().await;
+                let stats = snap_chain.stats();
+                let height = stats.height;
+                let target = snap_chain.target_height();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let tip_age = now.saturating_sub(snap_chain.tip().timestamp) as f64;
+                let mp = snap_mempool.stats();
+                let circulating = stats.total_supply.saturating_sub(stats.total_burned);
+                let reward = coincync::emission::calculate_block_reward(height).as_atomic();
+                let sync_pct = if target > 0 {
+                    (height as f64 / target as f64 * 100.0).min(100.0)
+                } else {
+                    100.0
+                };
+                // Refresh the DB size on the first tick and every ~60s after.
+                if tick % 12 == 0 {
+                    let p = snap_db_path.clone();
+                    db_size_cached = tokio::task::spawn_blocking(move || dir_size_bytes(&p))
+                        .await
+                        .unwrap_or(0) as i64;
+                }
+                tick = tick.wrapping_add(1);
+                let snapshot = coincync::metrics::ChainSnapshot {
+                    height,
+                    tip_age_seconds: tip_age,
+                    difficulty: stats.difficulty as f64,
+                    total_difficulty: stats.total_difficulty as f64,
+                    total_transactions: stats.total_transactions,
+                    circulating_supply_atomic: circulating as f64,
+                    total_supply_atomic: stats.total_supply as f64,
+                    fee_burned_total_atomic: stats.total_burned as f64,
+                    block_reward_atomic: reward as f64,
+                    is_synced: snap_chain.is_synced(),
+                    blocks_behind: target.saturating_sub(height) as i64,
+                    sync_progress_percent: sync_pct,
+                    peers: snap_p2p.peer_count() as i64,
+                    // No inbound/outbound split accessor yet — reported as 0.
+                    peers_inbound: 0,
+                    peers_outbound: 0,
+                    mempool_size: mp.tx_count as i64,
+                    mempool_bytes: mp.size_bytes as i64,
+                    utxo_set_size: snap_chain.utxo_count() as i64,
+                    db_size_bytes: db_size_cached,
+                };
+                coincync::metrics::record_chain_snapshot(&snapshot);
+            }
+        });
+    }
+
     // ── REST + (optional) embedded explorer ────────────────────
     //
     // The REST surface lives in `coincync::rpc::rest::run_rest_api`
@@ -1539,15 +1737,39 @@ async fn start_node(
                     let nt = chain_m.network();
                     let mut nonce_base: u64 = 0;
                     loop {
-                        // Mine-gate: never build a private fork. Mine only when
-                        // synced, when there are no peers (solo island), or regtest.
-                        let allowed = matches!(nt, coincync::config::NetworkType::Regtest)
-                            || chain_m.is_synced()
-                            || p2p_m.peer_count() == 0;
+                        // Mine-gate: never build a private fork. Mine on regtest
+                        // (always), when synced WITH at least one peer, or with 0
+                        // peers ONLY if the operator opted in via
+                        // --allow-solo-mine (a bootstrap seed). A home node that
+                        // loses peers must NOT keep mining at 0 peers by default —
+                        // that builds a private fork it can't currently reorg off
+                        // (issue #126).
+                        //
+                        // #147: the "synced" path is GATED on having a live peer.
+                        // When the last peer drops, its height leaves peer_heights
+                        // and best_known_height recomputes to local_height, so
+                        // `synced = local >= best_known` flips true — which, with
+                        // the old unguarded `|| is_synced()`, silently bypassed the
+                        // 0-peer solo-mine opt-in and let an isolated node mine a
+                        // private fork. The predicate + its regression test live in
+                        // `mining::solo_mine_gate_allowed`.
+                        let allowed = coincync::mining::solo_mine_gate_allowed(
+                            matches!(nt, coincync::config::NetworkType::Regtest),
+                            p2p_m.peer_count() > 0,
+                            chain_m.is_synced(),
+                            allow_solo_mine,
+                        );
                         if !allowed {
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             continue;
                         }
+                        // #186: synced and about to mine — NOW switch to the
+                        // full-memory RandomX dataset. Idempotent atomic store;
+                        // pow builds the 2 GB dataset lazily on the first mined
+                        // hash. Until this point a --mine node validated IBD in
+                        // light mode, so it never built the full dataset during
+                        // sync.
+                        coincync::consensus::pow::set_node_mining_active(true);
                         let candidate = match coincync::mining::block_builder::build_candidate_block(
                             &chain_m,
                             &mempool_m,
@@ -1682,6 +1904,14 @@ async fn start_node(
     // on a misbehaving disk; without the escape hatch, the user had
     // no way to abort the shutdown.
     let shutdown_seq = async {
+        // Complete graceful P2P shutdown: stop the runtime tasks, then persist
+        // the address book, ban list, and anchor peers, and disconnect peers
+        // cleanly. Previously the binary exited without ever calling stop(), so
+        // peers were dropped abruptly and the address book / bans were only ever
+        // persisted by their periodic timers (up to their interval of loss on a
+        // clean stop). Still inside the select! below, so a second Ctrl+C can
+        // force-exit if a store flush stalls on a bad disk.
+        p2p.stop().await;
         match mempool.save_to_disk(&data_dir) {
             Ok(0) => {}
             Ok(n) => info!("Mempool: saved {} txs to disk", n),

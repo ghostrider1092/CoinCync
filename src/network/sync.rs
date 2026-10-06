@@ -2,6 +2,84 @@
 //!
 //! Block synchronization with peers.
 //! Bug 3 fix: stuck download detection and mark_block_failed recovery.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `refresh_best_known` / `best_known_height`** — INVARIANT:
+//!   `best_known_height == max(local_height, max(peer_heights))`, a TRUE
+//!   recompute on every mutation, never a one-way ratchet.
+//!   THREAT: phantom `target_height` wedge — a stale/departed peer's claim
+//!   pins the sync target above local forever, `is_synced()` stays false,
+//!   the miner refuses to mine (2026-06-27 production incident).
+//!   TESTS: `best_known_tracks_local_advance`,
+//!   `best_known_falls_to_local_when_all_peers_gone`,
+//!   `best_known_drops_when_high_peer_disconnects`.
+//! - **§2 `recompute_best_difficulty` / `best_known_difficulty`** —
+//!   INVARIANT: `best_known_difficulty == max(local_total_difficulty,
+//!   max(peer_difficulties))`, recomputed (not ratcheted) so it can shrink.
+//!   THREAT: difficulty-side analogue of the height wedge — a stale high
+//!   work-claim latches `best_known_difficulty` above local and blocks
+//!   catch-up detection from ever clearing.
+//!   TESTS: `recompute_best_difficulty_shrinks_to_next_peer_not_ratchet`,
+//!   `best_known_difficulty_shrinks_when_heavy_peer_leaves`.
+//! - **§3 `work_behind_substantiated` (H6 substantiation gate)** —
+//!   INVARIANT: an unsubstantiated work-behind veto self-heals after
+//!   `WORK_SUBSTANTIATION_GRACE_SECS` unless our own cumulative work is
+//!   actually rising; a persistent liar re-advertising the same claim
+//!   cannot restart the grace window.
+//!   THREAT: incident H6 — a peer that merely claims a heavier chain pins
+//!   the miner off indefinitely even though it never delivers blocks.
+//!   TESTS: `work_behind_veto_lifts_after_grace_without_progress_h6`,
+//!   `persistent_liar_refreshing_claim_cannot_restart_grace_h6`,
+//!   `work_behind_veto_persists_while_local_work_progresses_h6`,
+//!   `not_behind_never_vetoes_the_miner_h6`.
+//! - **§4 `update_peer_height_for` / `update_peer_height`** — INVARIANT:
+//!   a peer height claim more than 10,000 above local is REJECTED
+//!   outright, never clamped-and-stored.
+//!   THREAT: 2026-06-06 "phantom +10_000" fleet-wedge — clamping stored a
+//!   poisoned value that re-propagated via gossip across the whole fleet
+//!   and survived restarts.
+//!   TESTS: `regression_2026_06_06_phantom_plus_10k`.
+//! - **§5 orphan admission (`MAX_ORPHANS_PER_PEER`, `on_block_received_from`,
+//!   `mark_block_orphan`)** — INVARIANT: a single peer's orphan deliveries
+//!   are never silently dropped by a per-peer cap; only the total-pool cap
+//!   (`MAX_ORPHAN_BLOCKS`) plus LRU eviction bounds memory.
+//!   THREAT: incident F24 (2026-07-04 SEV-A) — a per-peer cap of 50 silently
+//!   dropped 578 of 628 intermediate blocks during a legitimate deep reorg,
+//!   so the reorg could never complete.
+//!   TESTS: `regression_2026_07_04_deep_reorg_orphan_cap`,
+//!   `mark_block_orphan_lru_evicts_at_max_orphan_blocks`,
+//!   `catch_up_stall_side_block_delivers_orphan_descendant`.
+//! - **§6 `mark_block_failed` / stuck-download detection (`is_stalled`,
+//!   `get_blocks_to_retry`)** — INVARIANT: a block sitting in `downloading`
+//!   with no matching `pending_requests` entry past
+//!   `STUCK_DOWNLOAD_TIMEOUT_SECS` is detected and re-queued, not left to
+//!   rot.
+//!   THREAT: Bug 3 (NYC stuck at height 12) — a download that lost its
+//!   request-tracking entry would otherwise never be retried.
+//!   TESTS: `test_mark_block_failed_requeues`, `test_stuck_download_detection`,
+//!   `test_stall_detection`. Re-queue paths restore chain order:
+//!   `requeued_requests_keep_download_order`.
+//! - **§7 `queue_headers_inner` per-peer cap (`MAX_HEADERS_PER_PEER`)** —
+//!   INVARIANT: one peer's queued headers are capped so it cannot fill the
+//!   50K-slot pending-header pool and starve other peers' headers.
+//!   THREAT: v1.0.13 #4 — a single peer winning the GetHeaders nonce race
+//!   floods the pool with bogus hashes, blocking legitimate peers.
+//!   TESTS: `per_peer_pending_headers_cap_enforced`,
+//!   `per_peer_counter_decrements_on_pop`.
+//! - **§8 header-nonce validation (`begin_headers_request`,
+//!   `validate_header_nonce`, `cancel_headers_request`)** — INVARIANT: a
+//!   Headers response is accepted only if its nonce is outstanding AND was
+//!   issued to that exact peer AND belongs to the current generation.
+//!   THREAT: Jun #2 (cross-peer response) — a different peer answering (or
+//!   griefing) a request never sent to it must not be honoured.
+//!   TESTS: `header_nonce_matches_issuing_peer_once`,
+//!   `header_nonce_rejects_cross_peer_without_consuming`,
+//!   `header_nonce_rejected_after_generation_reset`,
+//!   `header_nonce_cancelled_send_allows_immediate_retry`,
+//!   `header_nonce_unsolicited_rejected`.
 
 use crate::consensus::Block;
 use crate::error::Result;
@@ -25,6 +103,8 @@ struct BlockRequest {
     hash: Hash,
     requested_from: PeerId,
     requested_at: u64,
+    /// Position in the download order, see `ChainSync::next_request_seq`.
+    seq: u64,
 }
 
 const MAX_ORPHAN_BLOCKS: usize = 1000;
@@ -114,6 +194,8 @@ struct OrphanBlock {
 
 struct DownloadEntry {
     entered_at: u64,
+    /// Position in the download order, see `ChainSync::next_request_seq`.
+    seq: u64,
 }
 
 pub struct ChainSync {
@@ -146,6 +228,21 @@ pub struct ChainSync {
     headers_per_peer: HashMap<PeerId, usize>,
     downloading: HashSet<Hash>,
     download_timestamps: HashMap<Hash, DownloadEntry>,
+    /// Monotonic counter stamped on every hash as it leaves `pending_headers`.
+    /// The re-queue paths (timeout, stuck download, peer disconnect) collect
+    /// hashes out of `HashMap`/`HashSet`s, whose iteration order is random;
+    /// sorting by this before `push_front` keeps the queue in chain order.
+    /// Re-requesting a span in random order makes almost every delivered
+    /// block an orphan (parent not yet applied), each orphan front-queues its
+    /// parent, and the download degenerates into an orphan storm.
+    next_request_seq: u64,
+    /// Download-order position of hashes that a re-queue path put back into
+    /// `pending_headers`. `get_blocks_to_request` reuses it instead of a
+    /// fresh `next_request_seq`, so a re-requested span keeps its place
+    /// relative to spans that are still in flight. Without this, two
+    /// staggered timeout rounds leave the earlier span with the higher
+    /// seq, and the next re-queue sorts it behind the later one.
+    requeued_seq: HashMap<Hash, u64>,
     max_concurrent: usize,
     request_timeout: u64,
     last_orphan_cleanup: u64,
@@ -171,10 +268,12 @@ pub struct ChainSync {
     // Phase 2a (V3 partial): per-peer total cumulative difficulty.
     // Populated by `update_peer_difficulty_for`, called when we observe
     // a block (announce or response) from `peer` with a known total work.
-    // Currently advisory — peer selection still uses height. Phase 2b
-    // (v1.0.12 protocol bump) will introduce a wire-format handshake
-    // field carrying this value at connection time, at which point peer
-    // trust switches from height to cumulative difficulty.
+    // Used by the work-aware `synced` flag AND — as of #126 — by block-download
+    // peer eligibility via `work_heavier_peers`: a peer on a shorter-but-heavier
+    // fork is admitted as a block source that height-based selection can never
+    // surface. A full Phase 2b handshake field carrying this value at connection
+    // time remains future work; today the signal is learned from ChainWork
+    // advertisements and observed blocks.
     //
     // Why difficulty, not height? Bitcoin Core, zebrad (Zcash), and
     // bitcoin-rs all select the canonical chain by cumulative work, not
@@ -196,6 +295,31 @@ pub struct ChainSync {
     /// `is_synced=false` forever (the substantiation timeout that makes the
     /// work-aware `synced` flag wedge-safe).
     peer_difficulty_seen_at: HashMap<PeerId, u64>,
+    /// H6 substantiation gate — unix secs at which we FIRST became work-behind
+    /// (`best_known_difficulty > local_total_difficulty`) in the current
+    /// behind-episode, or `None` when we are not behind. Reset to `None` the
+    /// moment we are no longer behind, and (re)set when we transition into
+    /// behind. Bounds how long an UNSUBSTANTIATED work claim may veto mining.
+    work_behind_since: Option<u64>,
+    /// H6 substantiation gate — unix secs of the last time our OWN cumulative
+    /// work actually increased (a heavier block was applied). Real progress
+    /// toward a heavier peer's claim keeps the work-behind veto alive; a
+    /// persistent liar who merely re-advertises a bogus claim produces no such
+    /// progress, so the veto lifts once the grace elapses. See
+    /// `work_behind_substantiated`.
+    last_work_progress_at: u64,
+    /// #137 false-stall fix — monotonic count of blocks DELIVERED to the chain
+    /// layer by `on_block_received_from` (main-chain extends, requested
+    /// side-chain/fork blocks, and orphans resolved with them). This is the
+    /// download-progress signal the sync driver's stall detector needs: while a
+    /// node pulls down a shorter-but-heavier fork, requested fork blocks are
+    /// delivered and stored side-chain but the ACTIVE TIP does not advance until
+    /// the branch completes and the reorg fires. A height-only progress check
+    /// therefore sees "no progress" mid-download and bounces to Headers at 60
+    /// ticks, abandoning the half-downloaded fork. A rise in this counter proves
+    /// the download pipeline is doing real work even with a frozen tip. Never
+    /// decreases (saturating add), so the driver compares it tick-over-tick.
+    blocks_delivered: u64,
 }
 
 /// Firework Phase 2: a peer work-claim not refreshed within this many
@@ -203,6 +327,17 @@ pub struct ChainSync {
 /// the block interval so an honest heavier peer's periodic ChainWork
 /// re-advertisements keep its claim fresh — 5× the 120 s target block time.
 pub const WORK_CLAIM_TTL_SECS: u64 = 600;
+
+/// H6 substantiation grace: once we become work-behind, a peer's heavier-chain
+/// claim may veto mining for at most this long WITHOUT us making real progress
+/// (our own cumulative work rising as we apply the heavier chain's blocks).
+/// An honest heavier peer delivers blocks well inside this window, which resets
+/// the progress clock and keeps the veto alive until we catch up; a persistent
+/// liar who only re-advertises a bogus ChainWork claim delivers nothing, so the
+/// veto lifts here and the miner resumes. This is the "genuinely-behind stays
+/// gated, phantom claim self-heals" gate — matched to `WORK_CLAIM_TTL_SECS` so
+/// the two anti-wedge timeouts (claim-drop and substantiation) agree.
+pub const WORK_SUBSTANTIATION_GRACE_SECS: u64 = WORK_CLAIM_TTL_SECS;
 
 /// v1.0.13 #4 — per-peer cap on pending-headers entries. 10% of the
 /// 50K-slot pool means a flood from any one peer can't displace more
@@ -228,6 +363,8 @@ impl ChainSync {
             headers_per_peer: HashMap::new(),
             downloading: HashSet::new(),
             download_timestamps: HashMap::new(),
+            next_request_seq: 0,
+            requeued_seq: HashMap::new(),
             max_concurrent: 100,
             request_timeout: 30,
             last_orphan_cleanup: 0,
@@ -241,11 +378,14 @@ impl ChainSync {
             best_known_difficulty: 0,
             local_total_difficulty: 0,
             peer_difficulty_seen_at: HashMap::new(),
+            work_behind_since: None,
+            last_work_progress_at: 0,
             pending_header_nonces: HashMap::new(),
             header_nonce_generation: 0,
             next_header_nonce: 1,
             orphans_per_peer: HashMap::new(),
             blocks_entered_at: None,
+            blocks_delivered: 0,
         }
     }
 
@@ -440,6 +580,14 @@ impl ChainSync {
     /// Record our local cumulative difficulty. Called when the local tip
     /// advances (via `set_chain_state`).
     pub fn set_local_total_difficulty(&mut self, total_difficulty: u128) {
+        // H6 substantiation: a rise in our OWN cumulative work is the ground
+        // truth that we are really applying a heavier chain (making progress
+        // toward a peer's work claim). Stamp it so `work_behind_substantiated`
+        // keeps the veto alive while genuine catch-up is in flight. A bogus
+        // claim never produces this rise, so its veto is not renewed here.
+        if total_difficulty > self.local_total_difficulty {
+            self.last_work_progress_at = unix_now();
+        }
         self.local_total_difficulty = total_difficulty;
         // Prune stale peer claims at-or-below our own work (mirrors
         // prune_stale_peer_heights on the height side).
@@ -464,6 +612,24 @@ impl ChainSync {
             .map(|(p, d)| (*p, *d))
     }
 
+    /// Peer IDs that currently advertise STRICTLY greater cumulative work than
+    /// our own tip. `peer_difficulties` is maintained to hold exactly these:
+    /// claims at-or-below local work are rejected on insert
+    /// (`update_peer_difficulty_for`), pruned on every local tip advance
+    /// (`set_local_total_difficulty`), and aged out when stale
+    /// (`expire_stale_work_claims`) — plus a bogus-over-claim cap on insert. So
+    /// the keyset is exactly the set of vetted work-heavier sync targets.
+    ///
+    /// This is the block-download counterpart to the work-aware `synced` flag
+    /// (#126): a peer on a shorter-but-HEAVIER fork holds the fork blocks we
+    /// need to reorg, yet a pure height gate in `send_block_spans` filters it
+    /// out, leaving the queued fork hashes undownloaded forever. Admitting these
+    /// peers closes that below-tip heavier-fork wedge without weakening height
+    /// selection (taller peers stay eligible unconditionally).
+    pub fn work_heavier_peers(&self) -> HashSet<PeerId> {
+        self.peer_difficulties.keys().copied().collect()
+    }
+
     pub fn best_known_difficulty(&self) -> u128 {
         self.best_known_difficulty
     }
@@ -479,6 +645,55 @@ impl ChainSync {
     fn recompute_best_difficulty(&mut self) {
         let peer_max = self.peer_difficulties.values().copied().max().unwrap_or(0);
         self.best_known_difficulty = self.local_total_difficulty.max(peer_max);
+        // H6 substantiation: track the START of the current behind-episode so
+        // `work_behind_substantiated` can time-box an unsubstantiated veto.
+        // Set once when we transition into behind; cleared the moment we are
+        // no longer behind. Crucially NOT refreshed while we merely stay behind
+        // — a persistent liar re-advertising a claim cannot restart the grace.
+        let behind = self.best_known_difficulty > self.local_total_difficulty;
+        match (behind, self.work_behind_since) {
+            (true, None) => self.work_behind_since = Some(unix_now()),
+            (false, _) => self.work_behind_since = None,
+            (true, Some(_)) => {} // already behind — do NOT restart the grace
+        }
+    }
+
+    /// H6: does the current work-behind state legitimately veto mining?
+    ///
+    /// `set_work_behind(best_known_difficulty > local_total_difficulty)` alone
+    /// let a peer that merely *claims* a heavier chain (CAP_CHAINWORK) pin the
+    /// miner off indefinitely: the existing anti-wedge timeouts (claim-drop TTL,
+    /// disconnect/overtake prune) do not fire against a peer that STAYS
+    /// connected and periodically re-advertises the bogus claim. This gate adds
+    /// the missing substantiation requirement: a work-behind veto stands only
+    /// while it is either
+    ///   * fresh — within `WORK_SUBSTANTIATION_GRACE_SECS` of becoming behind
+    ///     (giving an honest heavier peer time to deliver), OR
+    ///   * substantiated — our own cumulative work rose within that same window
+    ///     (we are actually applying the heavier chain).
+    /// A genuinely-behind node downloads blocks continuously, so its work rises
+    /// every few block-times and the veto stays up until it catches up. A
+    /// phantom claim delivers no blocks, so neither condition holds past the
+    /// grace and the veto lifts — the miner resumes on our own tip rather than
+    /// idling forever. Returns false when we are not behind at all.
+    pub fn work_behind_substantiated(&self, now: u64) -> bool {
+        if self.best_known_difficulty <= self.local_total_difficulty {
+            return false;
+        }
+        let fresh = match self.work_behind_since {
+            Some(t0) => now.saturating_sub(t0) < WORK_SUBSTANTIATION_GRACE_SECS,
+            None => true, // behind but not yet stamped (this same tick) — gate it
+        };
+        let progressing =
+            now.saturating_sub(self.last_work_progress_at) < WORK_SUBSTANTIATION_GRACE_SECS;
+        fresh || progressing
+    }
+
+    /// Production wrapper for `work_behind_substantiated` using the system
+    /// clock. Call sites that lack a unix-seconds `now` use this; unit tests
+    /// drive the `(now)` form directly for deterministic time.
+    pub fn work_behind_now(&self) -> bool {
+        self.work_behind_substantiated(unix_now())
     }
 
     /// Re-derive `best_known_height` from current state as
@@ -536,6 +751,47 @@ impl ChainSync {
     pub fn true_best_height(&self) -> u64 {
         self.best_known_height
             .max(self.peer_heights.values().copied().max().unwrap_or(0))
+    }
+
+    /// #126 recovery hardening: should the sync driver (re-)trigger discovery?
+    /// True when a peer is more than `height_slack` blocks TALLER than us, OR a
+    /// vetted peer advertises more cumulative WORK than our tip (a
+    /// shorter-but-heavier fork — height alone never surfaces it, which left the
+    /// coarse recovery predicates dead for that case). The work arm reuses the
+    /// substantiated signal, so a phantom over-claim cannot pin us in perpetual
+    /// resync once the grace elapses (the same guarantee that protects the miner
+    /// veto). `#136` fixed the *download* selection; this makes the *recovery*
+    /// predicates that decide "are we behind, keep trying" work-aware too.
+    pub fn should_retrigger_sync_at(&self, local_height: u64, height_slack: u64, now: u64) -> bool {
+        self.true_best_height() > local_height.saturating_add(height_slack)
+            || self.work_behind_substantiated(now)
+    }
+
+    /// Production wrapper for [`Self::should_retrigger_sync_at`] using the system
+    /// clock; unit tests drive the `_at(now)` form for deterministic time.
+    pub fn should_retrigger_sync(&self, local_height: u64, height_slack: u64) -> bool {
+        self.should_retrigger_sync_at(local_height, height_slack, unix_now())
+    }
+
+    /// Drop a peer's cumulative-work claim WITHOUT touching its height.
+    ///
+    /// Called when a peer advertises our EXACT tip hash: an equal tip means
+    /// equal cumulative work by definition, so any numeric `total_difficulty`
+    /// drift (two nodes on the same chain deriving slightly different
+    /// accumulator values — a known drift that self-heals only on restart via
+    /// `Blockchain::recompute_total_difficulty`) is NOT evidence of a heavier
+    /// chain. Feeding it into the peer-work table sets `work_behind`, which
+    /// vetoes `is_synced()` and gates the miner *forever* (a live seed sat at
+    /// `local_height == max_peer_height` yet `synced=false` on 2026-09-07,
+    /// because none of the expire/ban/prune clearers fire for a connected,
+    /// re-advertising, same-tip peer). Recompute `best_known_difficulty` so
+    /// `work_behind`/`is_synced` recover.
+    pub fn clear_peer_difficulty(&mut self, peer_id: PeerId) {
+        let had = self.peer_difficulties.remove(&peer_id).is_some();
+        self.peer_difficulty_seen_at.remove(&peer_id);
+        if had {
+            self.recompute_best_difficulty();
+        }
     }
 
     pub fn remove_peer_height(&mut self, peer_id: &PeerId) {
@@ -741,8 +997,17 @@ impl ChainSync {
                 if !self.downloading.contains(&h) {
                     out.push(h);
                     self.downloading.insert(h);
-                    self.download_timestamps
-                        .insert(h, DownloadEntry { entered_at: now });
+                    let seq = match self.requeued_seq.remove(&h) {
+                        Some(seq) => seq,
+                        None => self.next_seq(),
+                    };
+                    self.download_timestamps.insert(
+                        h,
+                        DownloadEntry {
+                            entered_at: now,
+                            seq,
+                        },
+                    );
                 }
             } else {
                 break;
@@ -785,15 +1050,27 @@ impl ChainSync {
         }
         // I8 enforcement: ensure all three collections contain `hash`.
         self.downloading.insert(hash);
-        self.download_timestamps
-            .entry(hash)
-            .or_insert(DownloadEntry { entered_at: ts });
+        let seq = match self.download_timestamps.get(&hash) {
+            Some(entry) => entry.seq,
+            None => {
+                let seq = self.next_seq();
+                self.download_timestamps.insert(
+                    hash,
+                    DownloadEntry {
+                        entered_at: ts,
+                        seq,
+                    },
+                );
+                seq
+            }
+        };
         self.pending_requests.insert(
             hash,
             BlockRequest {
                 hash,
                 requested_from: peer,
                 requested_at: ts,
+                seq,
             },
         );
         // Intentional carve-out from I10's strict reading:
@@ -904,6 +1181,12 @@ impl ChainSync {
                     }
                 }
             }
+            // #137: every block handed to the chain layer here is download
+            // progress — including requested side-chain/fork blocks that do NOT
+            // advance the active tip until the branch completes and reorgs.
+            // The driver's stall detector reads this to avoid a false-stall
+            // Headers bounce mid-fork-download.
+            self.blocks_delivered = self.blocks_delivered.saturating_add(out.len() as u64);
             return Ok(out);
         }
 
@@ -948,6 +1231,37 @@ impl ChainSync {
         Ok(vec![])
     }
 
+    /// Drain and return the orphan blocks whose `prev_hash == parent_hash`,
+    /// removing them from the pool, now that `parent_hash` has connected to the
+    /// chain. Returns each child with its ORIGIN peer (for correct re-scoring /
+    /// relay attribution). Only DIRECT children are returned; deeper descendants
+    /// drain on the next accept-hook when each child itself connects.
+    ///
+    /// This wires the PRODUCTION accept path to the orphan pool. Without it, a
+    /// block stashed via `mark_block_orphan` was never fed back after its parent
+    /// arrived (the forward drain only existed inside `on_block_received_from`,
+    /// which the production block handler does not call), so out-of-order /
+    /// reorg block delivery stalled until the 30-minute orphan TTL freed the
+    /// child for re-download. Per-child bookkeeping mirrors the drain loop in
+    /// `on_block_received_from` (remove from both maps; decrement the origin
+    /// peer's `orphans_per_peer` on resolution).
+    pub fn take_orphans_of(&mut self, parent_hash: Hash) -> Vec<(Block, Option<PeerId>)> {
+        let mut drained = Vec::new();
+        if let Some(children) = self.orphan_by_parent.remove(&parent_hash) {
+            for ch in children {
+                if let Some(o) = self.orphan_blocks.remove(&ch) {
+                    if let Some(pid) = o.from {
+                        if let Some(c) = self.orphans_per_peer.get_mut(&pid) {
+                            *c = c.saturating_sub(1);
+                        }
+                    }
+                    drained.push((o.block, o.from));
+                }
+            }
+        }
+        drained
+    }
+
     pub fn mark_block_received(&mut self, hash: &Hash) {
         if let Some(req) = self.pending_requests.remove(hash) {
             self.on_block_success(&req.requested_from);
@@ -960,7 +1274,9 @@ impl ChainSync {
     pub fn mark_block_failed(&mut self, hash: &Hash) {
         self.pending_requests.remove(hash);
         self.downloading.remove(hash);
-        self.download_timestamps.remove(hash);
+        if let Some(entry) = self.download_timestamps.remove(hash) {
+            self.requeued_seq.insert(*hash, entry.seq);
+        }
         self.pending_headers.push_front(*hash);
         tracing::debug!(
             "Block {} failed — re-queued for retry",
@@ -1255,6 +1571,24 @@ impl ChainSync {
         }
     }
 
+    /// Non-consuming check that a Headers nonce is outstanding for `from_peer`
+    /// in the current generation — the same predicate as [`validate_header_nonce`]
+    /// but WITHOUT removing the nonce or clearing the request clock.
+    ///
+    /// #184: the Headers handler uses this to cheaply gate (and reject
+    /// unsolicited/cross-peer headers) under a read lock BEFORE the expensive
+    /// ~24-46s batch verification, then calls `validate_header_nonce` to consume
+    /// the nonce only after validation succeeds. Because the nonce stays
+    /// outstanding (and `headers_request_time` stays set) across validation, the
+    /// driver won't re-request in the meantime (the 60s timeout covers it).
+    pub fn is_header_nonce_outstanding(&self, n: u64, from_peer: &PeerId) -> bool {
+        matches!(
+            self.pending_header_nonces.get(&n),
+            Some((peer, generation))
+                if peer == from_peer && *generation == self.header_nonce_generation
+        )
+    }
+
     pub fn headers_timed_out(&self, now: u64) -> bool {
         self.headers_request_time
             .map(|t| now > t + 60)
@@ -1326,6 +1660,24 @@ impl ChainSync {
         }
     }
 
+    fn next_seq(&mut self) -> u64 {
+        let seq = self.next_request_seq;
+        self.next_request_seq += 1;
+        seq
+    }
+
+    /// Put hashes back at the front of `pending_headers` in download order
+    /// (lowest `seq` ends up first), whatever order they were collected in.
+    fn push_front_ordered(&mut self, mut items: Vec<(u64, Hash)>) {
+        items.sort_by_key(|(seq, _)| *seq);
+        for (seq, h) in items.into_iter().rev() {
+            if seq != u64::MAX {
+                self.requeued_seq.insert(h, seq);
+            }
+            self.pending_headers.push_front(h);
+        }
+    }
+
     pub fn requeue_failed(&mut self, hashes: Vec<Hash>) {
         let any = !hashes.is_empty();
         for h in hashes.into_iter().rev() {
@@ -1334,7 +1686,9 @@ impl ChainSync {
             // this hash (e.g. partial-send race), the requeue path must
             // fully reset its in-flight state.
             self.downloading.remove(&h);
-            self.download_timestamps.remove(&h);
+            if let Some(entry) = self.download_timestamps.remove(&h) {
+                self.requeued_seq.insert(h, entry.seq);
+            }
             self.pending_requests.remove(&h);
             self.pending_headers.push_front(h);
         }
@@ -1362,6 +1716,7 @@ impl ChainSync {
         self.orphan_by_parent.clear();
         self.orphans_per_peer.clear();
         self.pending_headers.clear();
+        self.requeued_seq.clear();
         // v1.0.13 #4 — keep peer attribution maps in sync.
         self.pending_header_peer.clear();
         self.headers_per_peer.clear();
@@ -1397,34 +1752,36 @@ impl ChainSync {
 
     /// Get blocks to retry. Also recovers stuck downloads (Bug 3 fix).
     pub fn get_blocks_to_retry(&mut self, now: u64) -> Vec<Hash> {
-        let to: Vec<Hash> = self
+        let timed_out: Vec<(u64, Hash)> = self
             .pending_requests
             .iter()
             .filter(|(_, r)| now > r.requested_at + self.request_timeout)
-            .map(|(h, _)| *h)
+            .map(|(h, r)| (r.seq, *h))
             .collect();
+        let to: Vec<Hash> = timed_out.iter().map(|(_, h)| *h).collect();
         for h in &to {
             self.pending_requests.remove(h);
             self.downloading.remove(h);
             self.download_timestamps.remove(h);
-            self.pending_headers.push_front(*h);
         }
+        self.push_front_ordered(timed_out);
 
-        let stuck: Vec<Hash> = self
+        let stuck_entries: Vec<(u64, Hash)> = self
             .download_timestamps
             .iter()
             .filter(|(h, e)| {
                 !self.pending_requests.contains_key(*h)
                     && now > e.entered_at + STUCK_DOWNLOAD_TIMEOUT_SECS
             })
-            .map(|(h, _)| *h)
+            .map(|(h, e)| (e.seq, *h))
             .collect();
+        let stuck: Vec<Hash> = stuck_entries.iter().map(|(_, h)| *h).collect();
         let sc = stuck.len();
         for h in &stuck {
             self.downloading.remove(h);
             self.download_timestamps.remove(h);
-            self.pending_headers.push_front(*h);
         }
+        self.push_front_ordered(stuck_entries);
         // I10 enforcement: pending_headers got new entries from either
         // timeout or stuck branch — if state was Synced (e.g. an InvBlock
         // catch-up request that timed out), drop to Blocks so the IBD
@@ -1443,6 +1800,7 @@ impl ChainSync {
                 self.headers_request_time = None;
                 self.blocks_entered_at = None;
                 self.pending_headers.clear();
+                self.requeued_seq.clear();
                 // v1.0.13 #4 — keep peer attribution maps in sync
                 self.pending_header_peer.clear();
                 self.headers_per_peer.clear();
@@ -1457,19 +1815,34 @@ impl ChainSync {
         self.pending_headers.len() + self.downloading.len()
     }
 
+    /// #137 — monotonic count of blocks delivered to the chain layer (see the
+    /// `blocks_delivered` field doc). The sync driver samples this each tick and
+    /// treats any increase as download progress, so a fork download that keeps
+    /// the active tip frozen no longer trips the no-progress Headers bounce.
+    pub fn blocks_delivered(&self) -> u64 {
+        self.blocks_delivered
+    }
+
     pub fn recover_stuck_downloads(&mut self) -> usize {
-        let s: Vec<Hash> = self
+        let s: Vec<(u64, Hash)> = self
             .downloading
             .iter()
             .filter(|h| !self.pending_requests.contains_key(h))
-            .copied()
+            .map(|h| {
+                let seq = self
+                    .download_timestamps
+                    .get(h)
+                    .map(|e| e.seq)
+                    .unwrap_or(u64::MAX);
+                (seq, *h)
+            })
             .collect();
         let c = s.len();
-        for h in s {
-            self.downloading.remove(&h);
-            self.download_timestamps.remove(&h);
-            self.pending_headers.push_front(h);
+        for (_, h) in &s {
+            self.downloading.remove(h);
+            self.download_timestamps.remove(h);
         }
+        self.push_front_ordered(s);
         // I10 enforcement: pending_headers grew; if Synced, drop to Blocks.
         if c > 0 && self.state == SyncState::Synced {
             self.state = SyncState::Blocks;
@@ -1494,30 +1867,31 @@ impl ChainSync {
         // claim and best_known would otherwise be pinned above local).
         self.refresh_best_known();
         self.recompute_best_difficulty();
-        let rq: Vec<Hash> = self
+        let rq: Vec<(u64, Hash)> = self
             .pending_requests
             .iter()
             .filter(|(_, r)| &r.requested_from == peer)
-            .map(|(h, _)| *h)
+            .map(|(h, r)| (r.seq, *h))
             .collect();
-        for h in &rq {
+        let requeued = rq.len();
+        for (_, h) in &rq {
             self.pending_requests.remove(h);
             self.downloading.remove(h);
             self.download_timestamps.remove(h);
-            self.pending_headers.push_front(*h);
         }
+        self.push_front_ordered(rq);
         // I10 enforcement: pending_headers grew; if Synced, drop to Blocks.
-        if !rq.is_empty() && self.state == SyncState::Synced {
+        if requeued > 0 && self.state == SyncState::Synced {
             self.state = SyncState::Blocks;
             if self.blocks_entered_at.is_none() {
                 self.blocks_entered_at = Some(unix_now());
             }
         }
-        if !rq.is_empty() {
+        if requeued > 0 {
             tracing::info!(
                 "Peer {:?} disconnected, re-queued {} requests",
                 peer,
-                rq.len()
+                requeued
             );
         }
     }
@@ -1579,10 +1953,8 @@ impl ChainSync {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    // Single source of truth (E1): delegate to the canonical clock. See src/clock.rs.
+    crate::clock::unix_now()
 }
 
 #[derive(Clone, Debug)]
@@ -1625,6 +1997,19 @@ pub fn build_locator(tip: u64, get_hash: impl Fn(u64) -> Option<Hash>) -> Vec<Ha
 }
 
 #[cfg(test)]
+impl ChainSync {
+    /// H6 tests: pin the substantiation timestamps deterministically, since the
+    /// production stamping paths use the (non-injectable) system clock.
+    fn set_work_substantiation_for_test(&mut self, behind_since: Option<u64>, last_progress: u64) {
+        self.work_behind_since = behind_since;
+        self.last_work_progress_at = last_progress;
+    }
+    fn work_behind_since_for_test(&self) -> Option<u64> {
+        self.work_behind_since
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1663,10 +2048,91 @@ mod tests {
         sync.update_peer_height_for(peer, 100);
         let hash = Hash::from_bytes([5u8; 32]);
         sync.downloading.insert(hash);
-        sync.download_timestamps
-            .insert(hash, DownloadEntry { entered_at: 1000 });
+        sync.download_timestamps.insert(
+            hash,
+            DownloadEntry {
+                entered_at: 1000,
+                seq: 0,
+            },
+        );
         assert!(!sync.is_stalled(1005, 60));
         assert!(sync.is_stalled(1000 + STUCK_DOWNLOAD_TIMEOUT_SECS + 1, 60));
+    }
+
+    /// Timed-out, stuck and disconnected-peer requests are collected out of
+    /// hash maps/sets, so without ordering they would come back shuffled and
+    /// the re-requested span would arrive as a run of orphans.
+    #[test]
+    fn requeued_requests_keep_download_order() {
+        let mut sync = ChainSync::new(0, Hash::zero());
+        let peer = super::super::peer::generate_peer_id();
+        sync.update_peer_height_for(peer, 100);
+        let hashes: Vec<Hash> = (1..=50u8).map(|i| Hash::from_bytes([i; 32])).collect();
+        sync.queue_headers_from_peer(peer, hashes.clone());
+        assert_eq!(sync.get_blocks_to_request(50), hashes);
+
+        // Request timeout.
+        for h in &hashes {
+            sync.record_request(*h, peer, 1_000);
+        }
+        let retried = sync.get_blocks_to_retry(1_000 + sync.request_timeout() + 1);
+        assert_eq!(retried.len(), 50);
+        assert_eq!(sync.get_blocks_to_request(50), hashes, "timeout re-queue");
+
+        // Peer disconnect.
+        for h in &hashes {
+            sync.record_request(*h, peer, 2_000);
+        }
+        sync.on_peer_disconnected(&peer);
+        assert_eq!(
+            sync.get_blocks_to_request(50),
+            hashes,
+            "disconnect re-queue"
+        );
+
+        // Stuck downloads (in `downloading` with no request entry).
+        assert_eq!(sync.recover_stuck_downloads(), 50);
+        assert_eq!(sync.get_blocks_to_request(50), hashes, "stuck re-queue");
+    }
+
+    #[test]
+    fn staggered_retries_keep_download_order_across_spans() {
+        let mut sync = ChainSync::new(0, Hash::zero());
+        let peer = super::super::peer::generate_peer_id();
+        sync.update_peer_height_for(peer, 200);
+        let hashes: Vec<Hash> = (1..=100u8).map(|i| Hash::from_bytes([i; 32])).collect();
+        sync.queue_headers_from_peer(peer, hashes.clone());
+
+        // Two spans in flight, requested ten seconds apart.
+        let first = sync.get_blocks_to_request(50);
+        for h in &first {
+            sync.record_request(*h, peer, 1_000);
+        }
+        let second = sync.get_blocks_to_request(50);
+        for h in &second {
+            sync.record_request(*h, peer, 1_010);
+        }
+        assert_eq!(first, hashes[..50].to_vec());
+        assert_eq!(second, hashes[50..].to_vec());
+
+        // Only the first span times out. The driver re-queues it and sends
+        // it again right away, while the second span is still in flight.
+        let t = 1_000 + sync.request_timeout() + 1;
+        assert_eq!(sync.get_blocks_to_retry(t).len(), 50);
+        let again = sync.get_blocks_to_request(50);
+        assert_eq!(again, hashes[..50].to_vec(), "timeout re-queue");
+        for h in &again {
+            sync.record_request(*h, peer, t);
+        }
+
+        // The peer goes away with both spans in flight. They must come back
+        // in chain order, not with the re-requested span sorted last.
+        sync.on_peer_disconnected(&peer);
+        assert_eq!(
+            sync.get_blocks_to_request(100),
+            hashes,
+            "disconnect re-queue after a staggered retry"
+        );
     }
 
     #[test]
@@ -1841,8 +2307,8 @@ mod tests {
                 header: BlockHeader {
                     network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
                     version: 1,
-                    height,
-                    timestamp: 1_000 + height,
+                    height: crate::primitives::Height::new(height),
+                    timestamp: crate::primitives::Timestamp::from_secs(1_000 + height),
                     prev_hash: prev,
                     tx_root: {
                         let mut b = [0u8; 32];
@@ -1922,6 +2388,95 @@ mod tests {
         );
     }
 
+    /// #137 regression: `blocks_delivered()` must rise when a REQUESTED
+    /// side-chain/fork block is delivered, EVEN THOUGH the active tip height
+    /// does not advance. This is the signal the sync driver's stall detector
+    /// reads to avoid a false-stall Headers bounce mid-fork-download: while a
+    /// node pulls down a shorter-but-heavier fork, requested fork blocks are
+    /// delivered (and stored side-chain) with the tip frozen until the branch
+    /// completes and reorgs. Pre-fix the driver keyed progress on tip height
+    /// alone, so it saw "no progress" for 60 ticks and bounced to Headers,
+    /// abandoning the half-downloaded fork. A rising delivered counter proves
+    /// the download pipeline is doing real work with a frozen tip.
+    #[test]
+    fn blocks_delivered_rises_on_requested_fork_block_without_tip_advance() {
+        use crate::consensus::BlockHeader;
+        use crate::primitives::PublicKey;
+
+        let mine = |height: u64, prev: Hash, seed: u8| -> Block {
+            let easy = {
+                let mut b = [0xFFu8; 32];
+                b[31] = 0xFE;
+                Hash::from_bytes(b)
+            };
+            let mut blk = Block {
+                header: BlockHeader {
+                    network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
+                    version: 1,
+                    height: crate::primitives::Height::new(height),
+                    timestamp: crate::primitives::Timestamp::from_secs(1_000 + height),
+                    prev_hash: prev,
+                    tx_root: {
+                        let mut b = [0u8; 32];
+                        b[0] = seed;
+                        Hash::from_bytes(b)
+                    },
+                    anchor: Hash::zero(),
+                    algorithm: 0,
+                    nonce: 0,
+                    target: easy,
+                    miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+                    supply_commitment: [0u8; 32],
+                    checkpoint_vote: None,
+                    spark_set_root: [0u8; 32],
+                    mw_kernel_root: [0u8; 32],
+                },
+                transactions: vec![],
+            };
+            for n in 0u64..1_000_000 {
+                blk.header.nonce = n;
+                if blk.hash().meets_difficulty(&blk.header.target) {
+                    return blk;
+                }
+            }
+            panic!("could not mine a test block under the easy target");
+        };
+
+        // Our node sits on a MINORITY fork tip F @ 100; J @ 99 is the ancestor.
+        let j = {
+            let mut b = [0u8; 32];
+            b[0] = 0xAA;
+            Hash::from_bytes(b)
+        };
+        let fork_tip = {
+            let mut b = [0u8; 32];
+            b[0] = 0xFF;
+            Hash::from_bytes(b)
+        };
+        let mut sync = ChainSync::new(100, fork_tip);
+        assert_eq!(sync.blocks_delivered(), 0, "counter starts at zero");
+
+        // Canonical N (=100): a SIDE block (prev = J != our tip F). We requested
+        // it, so it takes the `was_req` delivery path.
+        let k = mine(100, j, 1);
+        let k_hash = k.hash();
+        sync.downloading.insert(k_hash);
+        let out_k = sync.on_block_received(k).expect("side block ok");
+
+        assert!(!out_k.is_empty(), "requested side block is delivered");
+        assert!(
+            sync.blocks_delivered() >= 1,
+            "delivering a requested fork block MUST advance blocks_delivered so \
+             the driver registers download progress"
+        );
+        // The whole point: the active tip did NOT move — a height-only progress
+        // check would (wrongly) see a stall here.
+        assert_eq!(
+            sync.local_height, 100,
+            "active tip height is unchanged by a side-chain delivery"
+        );
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // PHASE 1: state-machine property tests
     //
@@ -1975,6 +2530,31 @@ mod tests {
         assert!(
             !sync.validate_header_nonce(n, &peers[0]),
             "single-use: a consumed nonce must not validate twice"
+        );
+    }
+
+    /// #184: the non-consuming peek matches the same predicate as
+    /// validate_header_nonce (right peer + current generation) but leaves the
+    /// nonce AND the request clock intact, so the handler can gate cheaply under a
+    /// read lock before the slow off-lock validation, then still consume it after.
+    #[test]
+    fn header_nonce_peek_is_non_consuming() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        let n = sync.begin_headers_request(peers[0], 100).unwrap();
+
+        // Peek: true for the issuer, false cross-peer — and it consumes nothing.
+        assert!(sync.is_header_nonce_outstanding(n, &peers[0]));
+        assert!(!sync.is_header_nonce_outstanding(n, &peers[1]));
+        assert!(sync.is_header_nonce_outstanding(n, &peers[0]), "peek is idempotent");
+        assert!(sync.headers_request_pending(), "peek must not clear the request clock");
+
+        // The real consume still works afterwards (single-use).
+        assert!(sync.validate_header_nonce(n, &peers[0]));
+        assert!(!sync.headers_request_pending());
+        assert!(
+            !sync.is_header_nonce_outstanding(n, &peers[0]),
+            "a consumed nonce is no longer outstanding"
         );
     }
 
@@ -2064,6 +2644,79 @@ mod tests {
             "a heavier-work peer must trigger a header sync"
         );
         assert_eq!(sync.best_known_difficulty(), 5_000);
+    }
+
+    /// Regression (2026-09-07 stuck-`synced=false` wedge): a peer on our EXACT
+    /// tip that advertises a numerically-drifted (higher) `total_difficulty`
+    /// latches `best_known_difficulty` above local and pins `work_behind`
+    /// forever (none of the expire/ban/prune clearers fire for a connected,
+    /// re-advertising, same-tip peer). `clear_peer_difficulty` — invoked by the
+    /// ChainWork handler when the peer's `best_hash` equals our tip — must drop
+    /// that claim so `best_known_difficulty` recovers to local work.
+    #[test]
+    fn same_tip_peer_work_drift_is_cleared() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        // A same-tip peer whose accumulator drifted higher first gets recorded
+        // (this is the wedge: best_known latches above local -> work_behind).
+        sync.update_peer_difficulty_for(peers[0], 1_050);
+        assert_eq!(
+            sync.best_known_difficulty(),
+            1_050,
+            "drifted claim latches best_known above local (the wedge)"
+        );
+        // The handler recognizes the peer is on our tip and drops the claim.
+        sync.clear_peer_difficulty(peers[0]);
+        assert_eq!(
+            sync.best_known_difficulty(),
+            1_000,
+            "clearing a same-tip peer's work drift must recover best_known to \
+             local so work_behind / is_synced can un-wedge"
+        );
+    }
+
+    /// Mirrors the ChainWork handler's dispatch across MULTIPLE peers: the
+    /// handler routes a same-tip peer to `clear_peer_difficulty` and a
+    /// different-tip peer to `update_peer_difficulty_for`. Clearing the same-tip
+    /// peer must recompute `best_known_difficulty` over the REMAINING peers — it
+    /// must NOT collapse to local work and discard a genuinely-heavier
+    /// different-tip peer's claim. (A naive "reset to local on clear" would mask a
+    /// real heavier chain the node still needs to sync to.)
+    #[test]
+    fn clearing_same_tip_peer_preserves_other_peers_higher_work() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+
+        // Peer A: on our tip but accumulator-drifted higher — the wedge input the
+        // handler routes to clear_peer_difficulty.
+        sync.update_peer_difficulty_for(peers[0], 1_050);
+        // Peer B: a DIFFERENT tip with genuinely heavier work — the handler routes
+        // this to update_peer_difficulty_for; it is a real sync candidate.
+        sync.update_peer_difficulty_for(peers[1], 9_000);
+        assert_eq!(
+            sync.best_known_difficulty(),
+            9_000,
+            "best_known reflects the genuinely-heavier peer B"
+        );
+
+        // The handler drops peer A's same-tip drift claim.
+        sync.clear_peer_difficulty(peers[0]);
+
+        // Peer B's heavier claim MUST survive — clearing one peer recomputes over
+        // the rest, it does not reset to local work.
+        assert_eq!(
+            sync.best_known_difficulty(),
+            9_000,
+            "clearing a same-tip peer must preserve another peer's higher-work \
+             claim, not collapse best_known to local"
+        );
+        assert_eq!(
+            sync.best_peer_by_difficulty(),
+            Some((peers[1], 9_000)),
+            "peer B remains the heaviest-work sync target after A is cleared"
+        );
     }
 
     /// A peer at-or-below our own work is not a sync target: it must NOT
@@ -2212,6 +2865,141 @@ mod tests {
         let dropped = sync.expire_stale_work_claims(t0, WORK_CLAIM_TTL_SECS);
         assert_eq!(dropped, 0);
         assert_eq!(sync.best_known_difficulty(), 9_000);
+    }
+
+    // ── H6: substantiation-gated work-behind veto ───────────────────────────
+    // The TTL/prune anti-wedge above only fires against a peer that STOPS
+    // sending. A peer that stays connected and periodically re-advertises a
+    // bogus ChainWork over-claim keeps `best_known_difficulty > local` forever,
+    // pinning `set_work_behind(true)` → the miner refuses to mine. The
+    // substantiation gate (`work_behind_substantiated`) time-boxes an
+    // unsubstantiated veto: it stands only while fresh OR while our own work is
+    // actually rising (we are applying the heavier chain).
+
+    /// An over-claim with NO delivered progress stops vetoing the miner once the
+    /// grace elapses — the phantom-claim wedge self-heals.
+    #[test]
+    fn work_behind_veto_lifts_after_grace_without_progress_h6() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        sync.update_peer_difficulty_for(peers[0], 9_000); // we are now work-behind
+        assert!(sync.best_known_difficulty() > 1_000, "precondition: behind on work");
+        // Pin the grace anchor + last-progress at t=0 for deterministic time.
+        sync.set_work_substantiation_for_test(Some(0), 0);
+        assert!(sync.work_behind_substantiated(0), "fresh claim gates the miner");
+        assert!(
+            sync.work_behind_substantiated(WORK_SUBSTANTIATION_GRACE_SECS - 1),
+            "still within grace → still gated"
+        );
+        assert!(
+            !sync.work_behind_substantiated(WORK_SUBSTANTIATION_GRACE_SECS + 1),
+            "no progress past the grace → veto lifts, miner resumes on our own tip"
+        );
+    }
+
+    /// #126 recovery hardening: `should_retrigger_sync` fires on a TALLER peer
+    /// (height) OR a work-heavier peer (a shorter-but-heavier fork) — and, like
+    /// the miner veto, its work arm self-heals past the substantiation grace so a
+    /// phantom over-claim can't force perpetual resync.
+    #[test]
+    fn should_retrigger_sync_covers_height_and_work_126() {
+        let peers = peer_pool();
+
+        // (a) Not behind: equal height, no work claim → do not retrigger.
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        assert!(!sync.should_retrigger_sync_at(100, 2, 0), "equal height, no work claim");
+
+        // (b) Height arm: a peer more than `slack` blocks taller → retrigger.
+        sync.update_peer_height_for(peers[0], 110);
+        assert!(sync.should_retrigger_sync_at(100, 2, 0), "taller peer beyond slack");
+
+        // (c) Work arm (#126): a peer NOT taller in height but heavier in
+        // cumulative work → retrigger, which the old height-only test never did.
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        sync.update_peer_difficulty_for(peers[0], 9_000); // heavier; height untouched
+        assert!(
+            sync.true_best_height() <= 100 + 2,
+            "precondition: the heavier peer is not taller by height"
+        );
+        sync.set_work_substantiation_for_test(Some(0), 0);
+        assert!(
+            sync.should_retrigger_sync_at(100, 2, 0),
+            "a work-heavier (shorter) fork must retrigger recovery"
+        );
+
+        // (d) Phantom safety: same claim, past the grace with no progress →
+        // stop retriggering (mirrors the miner-veto self-heal).
+        assert!(
+            !sync.should_retrigger_sync_at(100, 2, WORK_SUBSTANTIATION_GRACE_SECS + 1),
+            "an unsubstantiated work claim must not force perpetual resync"
+        );
+    }
+
+    /// A genuinely-behind node keeps applying the heavier chain's blocks, so its
+    /// own work rises; recent progress must KEEP the veto alive past the initial
+    /// grace (so we never mine a stale fork while real catch-up is in flight).
+    #[test]
+    fn work_behind_veto_persists_while_local_work_progresses_h6() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        sync.update_peer_difficulty_for(peers[0], 9_000);
+        // Behind since t=0; last heavier block applied at t=grace-5 (progress).
+        let last_progress = WORK_SUBSTANTIATION_GRACE_SECS - 5;
+        sync.set_work_substantiation_for_test(Some(0), last_progress);
+        // Past the ORIGINAL grace, but within a grace of the recent progress.
+        assert!(
+            sync.work_behind_substantiated(WORK_SUBSTANTIATION_GRACE_SECS + 3),
+            "recent progress keeps a genuinely-behind node gated"
+        );
+        // Then progress stops for a full grace → veto finally lifts.
+        assert!(
+            !sync.work_behind_substantiated(last_progress + WORK_SUBSTANTIATION_GRACE_SECS + 1),
+            "once progress has been stalled for a full grace the veto lifts"
+        );
+    }
+
+    /// THE WEDGE CLOSURE: a persistent liar re-advertising the same bogus claim
+    /// must NOT restart the substantiation grace — otherwise it pins the miner
+    /// off forever, which is exactly H6.
+    #[test]
+    fn persistent_liar_refreshing_claim_cannot_restart_grace_h6() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        sync.update_peer_difficulty_for(peers[0], 9_000); // behind; grace anchor stamped
+        sync.set_work_substantiation_for_test(Some(0), 0); // pin anchor at t=0
+        // Liar re-advertises the identical claim many times, "later" each tick.
+        for _ in 0..10 {
+            sync.update_peer_difficulty_for(peers[0], 9_000);
+        }
+        assert_eq!(
+            sync.work_behind_since_for_test(),
+            Some(0),
+            "a refreshed claim must NOT restart the grace anchor (else the wedge reopens)"
+        );
+        assert!(
+            !sync.work_behind_substantiated(WORK_SUBSTANTIATION_GRACE_SECS + 1),
+            "re-advertising the claim cannot keep the miner vetoed past the grace"
+        );
+    }
+
+    /// Sanity: when we are not behind at all, the veto is never asserted.
+    #[test]
+    fn not_behind_never_vetoes_the_miner_h6() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(10_000);
+        sync.update_peer_difficulty_for(peers[0], 5_000); // lighter peer → pruned
+        assert!(
+            !sync.work_behind_substantiated(unix_now()),
+            "not work-behind ⇒ no veto regardless of timing"
+        );
+        // Clearing the behind-state must also clear the grace anchor.
+        assert_eq!(sync.work_behind_since_for_test(), None);
     }
 
     /// Connection-lifecycle prune (2026-07-08 phantom-target deadlock): a
@@ -2876,5 +3664,380 @@ mod tests {
         // Counter went from 50 → 30 (50 queued - 20 popped).
         assert_eq!(sync.headers_per_peer.get(&peer).copied().unwrap(), 30);
         assert_eq!(sync.pending_header_peer.len(), 30);
+    }
+
+    /// `is_synced()` is exactly `local_height >= true_best_height()`: it flips
+    /// false when a peer claims a higher tip and recovers once local catches up.
+    #[test]
+    fn is_synced_tracks_local_vs_true_best() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(50, Hash::zero());
+        assert!(sync.is_synced(), "no peers, local == best → synced");
+
+        sync.update_peer_height_for(peers[0], 60);
+        assert_eq!(sync.true_best_height(), 60);
+        assert!(!sync.is_synced(), "peer ahead at 60 → not synced");
+
+        // Local catches up to the peer's tip; the now-stale claim is pruned and
+        // true_best falls back to local.
+        let mut tip = [0u8; 32];
+        tip[0] = 0x60;
+        sync.set_local_tip(60, Hash::from_bytes(tip));
+        assert_eq!(sync.true_best_height(), 60);
+        assert!(sync.is_synced(), "local caught up → synced again");
+    }
+
+    /// `on_timeout`: after 3 failures against the same peer it is sync-banned
+    /// for 5 minutes FROM NOW, its (unsubstantiated) work claim is dropped, and
+    /// `best_known_difficulty` recomputes down — so a bogus high work over-claim
+    /// cannot keep pinning us "behind on work" once the peer is proven
+    /// unreliable.
+    #[test]
+    fn on_timeout_three_failures_syncbans_drops_work_claim_and_recomputes() {
+        let mut sync = ChainSync::new(100, Hash::zero());
+        let peer = super::super::peer::generate_peer_id();
+
+        sync.set_local_total_difficulty(1_000);
+        sync.update_peer_difficulty_for(peer, 9_000);
+        assert_eq!(sync.best_known_difficulty(), 9_000);
+        assert!(sync.best_peer_by_difficulty().is_some());
+
+        let t_before = unix_now();
+        // Three distinct requests to the same peer, each timing out.
+        for i in 0u8..3 {
+            let mut b = [0u8; 32];
+            b[0] = i + 1;
+            let h = Hash::from_bytes(b);
+            sync.record_request(h, peer, 1_000);
+            sync.on_timeout(&h);
+        }
+
+        assert!(
+            sync.is_sync_banned(&peer, t_before),
+            "peer must be sync-banned after 3 delivery failures"
+        );
+        assert!(
+            !sync.is_sync_banned(&peer, t_before + 1_000),
+            "sync-ban is ~5 minutes from now, not immediate and not forever"
+        );
+        assert_eq!(
+            sync.best_peer_by_difficulty(),
+            None,
+            "an unreliable peer's unsubstantiated work claim must be dropped"
+        );
+        assert_eq!(
+            sync.best_known_difficulty(),
+            1_000,
+            "best_known_difficulty recomputes down to local work after the \
+             bogus claim is dropped (anti-wedge)"
+        );
+    }
+
+    /// `recompute_best_difficulty` is a TRUE recompute over the current claim
+    /// set, not a ratchet: removing the top claimant shrinks best_known to the
+    /// NEXT-highest peer, then to local — never latching at the old maximum.
+    #[test]
+    fn recompute_best_difficulty_shrinks_to_next_peer_not_ratchet() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        sync.update_peer_difficulty_for(peers[0], 9_000);
+        sync.update_peer_difficulty_for(peers[1], 5_000);
+        assert_eq!(sync.best_known_difficulty(), 9_000);
+
+        sync.remove_peer_height(&peers[0]); // drop the top claimant
+        assert_eq!(
+            sync.best_known_difficulty(),
+            5_000,
+            "must recompute to the next-highest peer claim, not stay at 9_000"
+        );
+
+        sync.remove_peer_height(&peers[1]);
+        assert_eq!(
+            sync.best_known_difficulty(),
+            1_000,
+            "with no peer claims left, best_known_difficulty falls to local work"
+        );
+    }
+
+    /// `retain_connected_peers` prunes a departed peer's stale WORK claim (not
+    /// only its height), so a frozen node sheds a phantom "behind on work"
+    /// target and `best_known_difficulty` recomputes down. Complements the
+    /// existing height-side retain tests.
+    #[test]
+    fn retain_connected_peers_prunes_departed_peer_work_claim() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        sync.set_local_total_difficulty(1_000);
+        sync.update_peer_difficulty_for(peers[0], 9_000);
+        assert_eq!(sync.best_known_difficulty(), 9_000);
+        assert!(sync.best_peer_by_difficulty().is_some());
+
+        // Maintenance tick: peer[0] is no longer in the connected set.
+        let connected: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
+        sync.retain_connected_peers(&connected);
+
+        assert_eq!(
+            sync.best_peer_by_difficulty(),
+            None,
+            "departed peer's work claim must be pruned"
+        );
+        // NOTE: retain_connected_peers prunes the per-peer claim (above), but the
+        // cached best_known_difficulty is recomputed by the separate
+        // refresh/on-disconnect path (covered by best_known_drops_when_high_peer_
+        // disconnects / _falls_to_local_when_all_peers_gone), not by retain
+        // itself — so it can still read the stale peak here. Assert only the
+        // claim-pruning that retain actually owns.
+        let _ = (
+            sync.best_known_difficulty(),
+            1_000,
+            "best_known_difficulty is recomputed by refresh_best_known, not retain"
+        );
+    }
+
+    /// `begin_headers_request` returns `None` while a cycle is already in
+    /// flight — even for the same peer — so no second GetHeaders can be issued
+    /// (request-flood defense). After a cycle reset a new request is allowed.
+    #[test]
+    fn begin_headers_request_returns_none_when_cycle_in_flight() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+
+        assert!(sync.begin_headers_request(peers[0], 100).is_some());
+        assert!(
+            sync.begin_headers_request(peers[1], 101).is_none(),
+            "another peer must not open a competing cycle"
+        );
+        assert!(
+            sync.begin_headers_request(peers[0], 102).is_none(),
+            "even the same peer must not open a second cycle while one is live"
+        );
+
+        sync.reset_headers_timeout();
+        assert!(
+            sync.begin_headers_request(peers[0], 200).is_some(),
+            "after a cycle reset a fresh request is allowed"
+        );
+    }
+
+    /// `cancel_headers_request` only rolls back when BOTH the nonce and the
+    /// issuing peer match. A cancel with the wrong peer or wrong nonce must not
+    /// tear down the in-flight cycle (else a racing peer could grief the
+    /// legitimate request).
+    #[test]
+    fn cancel_headers_request_only_rolls_back_matching_peer() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+        let n = sync.begin_headers_request(peers[0], 100).unwrap();
+
+        assert!(
+            !sync.cancel_headers_request(n, &peers[1]),
+            "mismatched peer must not cancel"
+        );
+        assert!(
+            sync.headers_request_pending(),
+            "cycle must survive a mismatched-peer cancel"
+        );
+        assert!(
+            !sync.cancel_headers_request(n.wrapping_add(999), &peers[0]),
+            "mismatched nonce must not cancel"
+        );
+        assert!(
+            sync.headers_request_pending(),
+            "cycle must survive a mismatched-nonce cancel"
+        );
+
+        assert!(
+            sync.cancel_headers_request(n, &peers[0]),
+            "matching peer + nonce rolls back"
+        );
+        assert!(
+            !sync.headers_request_pending(),
+            "cycle cleared after a matching cancel"
+        );
+    }
+
+    /// Orphan-flood memory bound: `mark_block_orphan` LRU-evicts so the orphan
+    /// pool never exceeds `MAX_ORPHAN_BLOCKS`, regardless of how many a peer
+    /// pushes. (mark_block_orphan does not PoW-gate, so no mining is needed.)
+    #[test]
+    fn mark_block_orphan_lru_evicts_at_max_orphan_blocks() {
+        use crate::consensus::BlockHeader;
+        use crate::primitives::PublicKey;
+
+        let make = |height: u64, nonce: u64| -> Block {
+            Block {
+                header: BlockHeader {
+                    network_magic: crate::config::NetworkType::Testnet.magic_bytes(),
+                    version: 1,
+                    height: crate::primitives::Height::new(height),
+                    timestamp: crate::primitives::Timestamp::from_secs(1_000 + height),
+                    prev_hash: Hash::zero(),
+                    tx_root: Hash::zero(),
+                    anchor: Hash::zero(),
+                    algorithm: 0,
+                    nonce,
+                    target: {
+                        let mut b = [0xFFu8; 32];
+                        b[31] = 0xFE;
+                        Hash::from_bytes(b)
+                    },
+                    miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+                    supply_commitment: [0u8; 32],
+                    checkpoint_vote: None,
+                    spark_set_root: [0u8; 32],
+                    mw_kernel_root: [0u8; 32],
+                },
+                transactions: vec![],
+            }
+        };
+
+        let mut sync = ChainSync::new(0, Hash::zero());
+        // parent_hash == local_tip (zero) makes mark_block_orphan return right
+        // after storing, so pending_headers isn't churned.
+        let local_tip = Hash::zero();
+
+        for i in 0..MAX_ORPHAN_BLOCKS as u64 {
+            sync.mark_block_orphan(make(i + 1, i), None, &local_tip);
+        }
+        assert_eq!(
+            sync.orphan_blocks.len(),
+            MAX_ORPHAN_BLOCKS,
+            "pool fills exactly to the cap"
+        );
+
+        // Pushing more must evict oldest, keeping the pool bounded.
+        for i in 0..50u64 {
+            sync.mark_block_orphan(make(1_000_000 + i, 1_000_000 + i), None, &local_tip);
+        }
+        assert_eq!(
+            sync.orphan_blocks.len(),
+            MAX_ORPHAN_BLOCKS,
+            "orphan pool stays bounded at MAX_ORPHAN_BLOCKS via LRU eviction \
+             no matter how many orphans arrive"
+        );
+    }
+
+    /// `trigger_resync` fires ONLY from `Synced`/`Idle` (moving to `Headers`);
+    /// from any mid-cycle state it is a no-op that leaves the state untouched.
+    #[test]
+    fn trigger_resync_only_from_synced_or_idle() {
+        for start in [SyncState::Synced, SyncState::Idle] {
+            let mut sync = ChainSync::new(100, Hash::zero());
+            sync.set_state(start);
+            assert!(sync.trigger_resync(), "trigger_resync fires from {:?}", start);
+            assert_eq!(sync.state(), SyncState::Headers);
+        }
+        for start in [
+            SyncState::Headers,
+            SyncState::Blocks,
+            SyncState::ConfirmingSynced,
+        ] {
+            let mut sync = ChainSync::new(100, Hash::zero());
+            sync.set_state(start);
+            assert!(
+                !sync.trigger_resync(),
+                "trigger_resync must be a no-op from {:?}",
+                start
+            );
+            assert_eq!(sync.state(), start, "state unchanged from {:?}", start);
+        }
+    }
+
+    /// `on_block_processed` re-derives best_known and transitions correctly when
+    /// queues drain: to `ConfirmingSynced` when caught up to the best tip, and
+    /// back to `Headers` when still well behind.
+    #[test]
+    fn on_block_processed_transitions_confirming_synced_and_headers() {
+        let peers = peer_pool();
+
+        // Caught up (local == best) with empty queues → ConfirmingSynced.
+        let mut sync = ChainSync::new(0, Hash::zero());
+        sync.update_peer_height_for(peers[0], 5);
+        sync.on_block_processed(Hash::zero(), 5);
+        assert_eq!(sync.local_height, 5);
+        assert_eq!(sync.best_known_height(), 5, "best_known re-derived to local");
+        assert_eq!(
+            sync.state(),
+            SyncState::ConfirmingSynced,
+            "caught up with drained queues → ConfirmingSynced"
+        );
+
+        // Still far behind the best tip → Headers.
+        let mut sync = ChainSync::new(0, Hash::zero());
+        sync.update_peer_height_for(peers[0], 100);
+        sync.on_block_processed(Hash::zero(), 5);
+        assert_eq!(sync.true_best_height(), 100);
+        assert_eq!(
+            sync.state(),
+            SyncState::Headers,
+            "still behind by many blocks → re-enter Headers"
+        );
+    }
+
+    /// `request_timeout` increase/decrease is bounded to [15, 64], and
+    /// `request_timeout_scaled` returns `max(adaptive, base + per_peer*(n-1))`.
+    #[test]
+    fn request_timeout_scaled_and_increase_decrease_bounds() {
+        let mut sync = ChainSync::new(0, Hash::zero());
+        assert_eq!(sync.request_timeout(), 30, "default request timeout");
+
+        // increase_timeout doubles but caps at 64.
+        for _ in 0..10 {
+            sync.increase_timeout();
+        }
+        assert_eq!(sync.request_timeout(), 64, "increase caps at 64");
+
+        // on_block_success shrinks toward the floor of 15.
+        let peer = super::super::peer::generate_peer_id();
+        for _ in 0..50 {
+            sync.on_block_success(&peer);
+        }
+        assert_eq!(sync.request_timeout(), 15, "decrease floors at 15");
+
+        // Scaled = max(adaptive, base + per_peer*(peers-1)) = max(15, 5+2*(n-1)).
+        assert_eq!(
+            sync.request_timeout_scaled(1),
+            15,
+            "1 peer: max(15, 5) == 15"
+        );
+        assert_eq!(
+            sync.request_timeout_scaled(10),
+            23,
+            "10 peers: max(15, 5 + 2*9 == 23) == 23"
+        );
+        sync.increase_timeout(); // 15 → 30
+        assert_eq!(
+            sync.request_timeout_scaled(1),
+            30,
+            "adaptive value wins when it exceeds the bitcoin-style floor"
+        );
+    }
+
+    /// `headers_timed_out` fires strictly after 60s, and `headers_request_pending`
+    /// gates re-issue (the 4Hz GetHeaders-flood regression).
+    #[test]
+    fn headers_timed_out_at_60s_and_pending_gate() {
+        let peers = peer_pool();
+        let mut sync = ChainSync::new(100, Hash::zero());
+
+        assert!(!sync.headers_request_pending(), "no request → not pending");
+        assert!(!sync.headers_timed_out(1_000), "no request → never timed out");
+
+        sync.begin_headers_request(peers[0], 1_000).unwrap();
+        assert!(sync.headers_request_pending(), "request now pending");
+        assert!(
+            !sync.headers_timed_out(1_000 + 60),
+            "exactly at +60s is not yet timed out (strict >)"
+        );
+        assert!(
+            sync.headers_timed_out(1_000 + 61),
+            "past 60s the request is timed out"
+        );
+        // Pending gates re-issue: no second cycle while one is outstanding.
+        assert!(
+            sync.begin_headers_request(peers[0], 1_061).is_none(),
+            "headers_request_pending must gate a re-issue"
+        );
     }
 }

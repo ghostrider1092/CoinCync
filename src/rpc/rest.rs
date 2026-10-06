@@ -117,6 +117,15 @@ static EMISSION_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 static RECENT_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, (u64, u32)>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+// SEC (2026-09-07): transaction submit drives full CLSAG + Bulletproofs+
+// verification in the backend, but was the only expensive REST endpoint with
+// NO self-rate-limit. Give it the same global + per-IP fixed-window limiter,
+// tighter than the read endpoints since each request is heavy validation.
+const SUBMIT_MAX_REQ_PER_SEC: u32 = 5;
+static SUBMIT_WINDOW_SEC: AtomicU64 = AtomicU64::new(0);
+static SUBMIT_WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
+static SUBMIT_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, (u64, u32)>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 // ─── Shared State ────────────────────────────────────────────────────────────
 
@@ -207,6 +216,13 @@ const RPC_ALLOWED_METHODS: &[&str] = &[
     // ── P0 (currently registered on jsonrpsee server) ──────
     // Node info — exercised by explorer and TUIs.
     "get_info",
+    // Stable, versioned health subset for monitoring / LB health checks /
+    // partition detectors (crate::vitals). Read-only, non-sensitive.
+    "get_vitals",
+    // Non-consensus difficulty / block-interval telemetry. Read-only.
+    "get_difficulty_health",
+    // Non-consensus mempool-health schema. Read-only.
+    "get_mempool_health",
     "get_blockchain_info",
     "get_network_info",
     "get_sync_status",
@@ -915,10 +931,22 @@ struct SubmitTxBody {
 /// POST /api/v1/transaction/submit — broadcast a transaction
 async fn submit_transaction(
     State(st): State<RestState>,
+    headers: HeaderMap,
     Json(body): Json<SubmitTxBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // SECURITY: Validate tx_hex is actually hex and not oversized
-    if body.tx_hex.len() > 2 * 1024 * 1024 || !body.tx_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+    // SEC: rate-limit before the expensive backend verification (unauthenticated
+    // endpoint driving full CLSAG + Bulletproofs+ validation).
+    let client_ip = client_ip_from_headers(&headers);
+    enforce_fixed_window_limit(
+        &SUBMIT_WINDOW_SEC,
+        &SUBMIT_WINDOW_COUNT,
+        SUBMIT_MAX_REQ_PER_SEC,
+    )?;
+    enforce_ip_fixed_window_limit(&SUBMIT_IP_WINDOW, &client_ip, SUBMIT_MAX_REQ_PER_SEC)?;
+
+    // SECURITY: Validate tx_hex is actually hex and not oversized (1 MiB cap,
+    // matching the message).
+    if body.tx_hex.len() > 1024 * 1024 || !body.tx_hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "Invalid tx_hex: must be hex, max 1MB"})),
@@ -1317,20 +1345,34 @@ async fn get_emission(
 
 /// GET /api/v1/asset/:id — asset info by ID
 async fn get_asset(
-    State(st): State<RestState>,
-    Path(id): Path<String>,
+    State(_st): State<RestState>,
+    Path(_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    validate_hex_hash(&id)?;
-    let asset = jsonrpc_call(&st, "get_asset_info", Value::Array(vec![Value::String(id)])).await?;
-    Ok(Json(asset))
+    // Assets were removed in CoinCync 1.0 — no per-asset data can exist.
+    Err(assets_gone())
 }
 
-/// GET /api/v1/assets — list all registered assets
+/// GET /api/v1/assets — the confidential-asset subsystem was removed in 1.0.
 async fn list_assets(
-    State(st): State<RestState>,
+    State(_st): State<RestState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let assets = jsonrpc_call(&st, "list_assets", Value::Array(vec![])).await?;
-    Ok(Json(assets))
+    Err(assets_gone())
+}
+
+/// 410 Gone for the removed asset endpoints. CoinCync 1.0 is single-asset CYNC
+/// (the confidential-asset stack was removed in the 2.0 → 1.0 trim), so these
+/// routes previously 500'd by calling a JSON-RPC method that no longer exists.
+/// 410 (not 501) is accurate: the resource existed and was deliberately removed.
+fn assets_gone() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::GONE,
+        Json(serde_json::json!({
+            "error": "removed",
+            "message": "The assets subsystem was removed in CoinCync 1.0. \
+                        This endpoint no longer serves data.",
+            "since": "1.0",
+        })),
+    )
 }
 
 // ══════════════════════════════���════════════════════════════════════════════════
@@ -1669,14 +1711,14 @@ pub async fn run_rest_api(
         .route("/api/v1/supply/max", get(get_supply_max))
         // ─── Blocks ──────────────────────────────────────────
         .route("/api/v1/blocks/recent", get(get_recent_blocks))
-        .route("/api/v1/block/hash/{hash}", get(get_block_by_hash))
-        .route("/api/v1/block/height/{height}", get(get_block_by_height))
+        .route("/api/v1/block/hash/:hash", get(get_block_by_hash))
+        .route("/api/v1/block/height/:height", get(get_block_by_height))
         .route(
-            "/api/v1/block/{height}/transactions",
+            "/api/v1/block/:height/transactions",
             get(get_block_transactions),
         )
         // ─── Transactions ────────────────────────────────────
-        .route("/api/v1/transaction/{hash}", get(get_transaction))
+        .route("/api/v1/transaction/:hash", get(get_transaction))
         .route("/api/v1/transaction/submit", post(submit_transaction))
         // ─── Mempool ─────────────────────────────────────────
         .route("/api/v1/mempool", get(get_mempool))
@@ -1693,7 +1735,7 @@ pub async fn run_rest_api(
         // ─── Events ──────────────────────────────────────────
         .route("/api/v1/events", get(get_chain_events))
         // ─── Assets ───────��──────────────────────────────────
-        .route("/api/v1/asset/{id}", get(get_asset))
+        .route("/api/v1/asset/:id", get(get_asset))
         .route("/api/v1/assets", get(list_assets))
         // ─── WebSocket ───────────────────────────────────────
         .route("/api/v1/ws", get(ws_upgrade))
@@ -1811,6 +1853,54 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// Regression guard for the axum route-syntax bug (#2): axum 0.7 matches
+    /// path params with `:name`; axum 0.8 uses `{name}`. When the two diverge,
+    /// a real value stops matching and every parameterized endpoint silently
+    /// 404s (block/tx/asset lookups over REST). This registers the SAME five
+    /// `:param` route strings the production router uses and asserts each one
+    /// MATCHES a concrete value — i.e. does NOT return axum's empty-body 404
+    /// for an unrouted path. (The JSON-RPC backend isn't running, so a matched
+    /// route returns a handler error, not 404 — anything but 404 proves the
+    /// route matched.) If the crate's axum major and these route strings ever
+    /// diverge again, this test fails loudly instead of shipping dead routes.
+    #[tokio::test]
+    async fn param_routes_match_real_values_not_404() {
+        let state = RestState {
+            jsonrpc_addr: "127.0.0.1:19099".parse().unwrap(),
+            client: reqwest::Client::new(),
+            rpc_bearer: None,
+        };
+        let app = Router::new()
+            .route("/api/v1/block/hash/:hash", get(get_block_by_hash))
+            .route("/api/v1/block/height/:height", get(get_block_by_height))
+            .route(
+                "/api/v1/block/:height/transactions",
+                get(get_block_transactions),
+            )
+            .route("/api/v1/transaction/:hash", get(get_transaction))
+            .route("/api/v1/asset/:id", get(get_asset))
+            .with_state(state);
+
+        for path in [
+            "/api/v1/block/hash/deadbeef",
+            "/api/v1/block/height/1",
+            "/api/v1/block/1/transactions",
+            "/api/v1/transaction/deadbeef",
+            "/api/v1/asset/x",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_ne!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "param route {path} did not match — axum :param/{{param}} route-syntax regression (#2)"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_health_live_returns_200_regardless_of_backend() {
         // Liveness only proves the REST process is up. It does NOT
@@ -1903,8 +1993,8 @@ mod tests {
             "get_block_by_height",
             "get_block",
             "get_peers",
-            "get_transaction", // NotImplemented stub but still allowlisted
-            "get_asset_info",  // NotImplemented stub but still allowlisted
+            "get_transaction", // wired (real implementation in server.rs)
+            "get_asset_info",  // returns -32601 by design (asset layer removed in 1.0)
         ] {
             assert!(
                 RPC_ALLOWED_METHODS.contains(&method),

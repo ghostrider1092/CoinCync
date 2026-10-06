@@ -447,11 +447,15 @@ pub fn prove_action(stmt: &ActionStatement, witness: &ActionWitness) -> Result<P
 
 /// Verify an Action proof against its public inputs.
 ///
-/// Today: verifies the empty-constraint proof against an empty
-/// instance vector. When the constraint roadmap lands public
-/// inputs, this function will pack `stmt` fields into the
-/// instance shape `&[&[&[Fr]]]` (one inner vec per instance
-/// column declared in `Config`).
+/// FAIL-CLOSED (#220): [`ActionCircuit::synthesize`] has ZERO constraints, so a
+/// Halo2 proof over it verifies for ANY statement — `verify_action` would accept
+/// anything. Until the constraint roadmap lands, this function therefore REFUSES
+/// every proof, so no integrator can mistake it for a working verifier. The
+/// Halo2 verify call still runs below (exercising key/transcript/packing wiring),
+/// but a passing result is deliberately turned into an error. `prove_action`
+/// remains available for circuit bring-up; proofs it produces will NOT verify
+/// here by design. When real constraints exist, remove the final `Err` and
+/// return the verify result.
 pub fn verify_action(proof: &Proof, stmt: &ActionStatement) -> Result<()> {
     let params = action_params();
     let vk = action_vk()?;
@@ -467,7 +471,13 @@ pub fn verify_action(proof: &Proof, stmt: &ActionStatement) -> Result<()> {
     let instances = pack_statement(stmt);
     verify_proof(params, vk, strategy, &[&[&instances]], &mut transcript)
         .map_err(|e| Error::InvalidProof(format!("verify_proof: {e:?}")))?;
-    Ok(())
+    // #220 FAIL-CLOSED: a passing verify means nothing here — the circuit has no
+    // constraints, so ANY statement passes. Refuse until real constraints land.
+    Err(Error::InvalidProof(
+        "ActionCircuit has no constraints; verify_action is unsound and fails \
+         closed until the constraint roadmap lands (issue #220)"
+            .into(),
+    ))
 }
 
 // ── Roadmap (documentation marker) ───────────────────────────────────
@@ -579,22 +589,23 @@ mod tests {
     }
 
     #[test]
-    fn end_to_end_trivial_proof_verifies() {
-        // The load-bearing test for this skeleton slice: prove +
-        // verify a circuit with zero constraints. This exercises
-        // every piece of the halo2 wiring — params generation,
-        // keygen, transcript, IPA polynomial commitments — and
-        // pins the API contract for future constraint slices.
+    fn end_to_end_proof_is_rejected_fail_closed() {
+        // The load-bearing test for this skeleton slice: prove a circuit with
+        // zero constraints (exercising every piece of the halo2 wiring — params,
+        // keygen, transcript, IPA commitments) and confirm the verifier FAILS
+        // CLOSED. Because the circuit has no constraints a halo2 proof would
+        // verify for any statement, so verify_action deliberately rejects until
+        // real constraints land (#220).
         //
         // Slow first call (~hundreds of ms for params + keygen),
-        // sub-millisecond on warm OnceLock cache. Marked with the
-        // `ignore = "slow"` attribute would be reasonable for CI
-        // but we keep it active here so the wiring is verified on
-        // every test run.
+        // sub-millisecond on warm OnceLock cache.
         let stmt = make_dummy_statement();
         let witness = make_dummy_witness();
         let proof = prove_action(&stmt, &witness).expect("prove");
-        verify_action(&proof, &stmt).expect("verify");
+        assert!(
+            verify_action(&proof, &stmt).is_err(),
+            "verify_action must fail closed until real constraints land (#220)"
+        );
 
         // Sanity: the proof envelope carries the OrchardHalo2 tag
         // when it crosses the bridge.
@@ -621,7 +632,8 @@ mod tests {
         let _ = prove_action(&stmt, &witness).expect("warm-up prove");
         // Second call uses the cached keys.
         let proof2 = prove_action(&stmt, &witness).expect("warm prove");
-        verify_action(&proof2, &stmt).expect("warm verify");
+        // #220: fail-closed — the warm path rejects too.
+        assert!(verify_action(&proof2, &stmt).is_err());
     }
 
     #[test]
@@ -652,15 +664,18 @@ mod tests {
     }
 
     #[test]
-    fn prove_then_verify_with_packed_instances() {
-        // The e2e test extended: prove + verify now flow real
-        // public inputs through the instance column. With zero
-        // constraints the verifier still accepts anything, but
-        // the packing API contract is exercised end-to-end.
+    fn prove_then_verify_fails_closed_with_packed_instances() {
+        // The e2e test extended: prove flows real public inputs through the
+        // instance column (exercising the packing API contract). With zero
+        // constraints the verifier would accept anything, so verify_action fails
+        // closed (#220) — assert the rejection, then cross-check the packing.
         let stmt = make_dummy_statement();
         let witness = make_dummy_witness();
         let proof = prove_action(&stmt, &witness).expect("prove");
-        verify_action(&proof, &stmt).expect("verify with same statement");
+        assert!(
+            verify_action(&proof, &stmt).is_err(),
+            "verify_action must fail closed until real constraints land (#220)"
+        );
 
         // Cross-check: a DIFFERENT statement packs into different
         // instance values. Sanity for the packing helper.

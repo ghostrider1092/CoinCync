@@ -1,0 +1,15 @@
+{
+  "_description": "Local fresh-chain (d2240fea) testnet fleet for coincync-tick. Only RPC-reachable nodes belong here — probe_peer dials http://{ip}:{rpc_port} per entry. The remote seed 2.29.34.197 is intentionally NOT listed: its RPC is loopback/firewalled (unreachable from this box), so listing it would only manufacture a false partition signal. Add a node here only once its RPC is reachable from wherever the tick runs.",
+  "_last_changed": "2026-09-07 — created for the local Act-host demo; single reachable node (local miner) at 127.0.0.1.",
+  "network": "testnet",
+  "p2p_port": 28080,
+  "rpc_port": 28081,
+  "nodes": {
+    "local-miner": {
+      "ip": "127.0.0.1",
+      "rpc_bind": "127.0.0.1",
+      "role": "seed",
+      "notes": "The local synced miner node on this box (fresh d2240fea chain). The one RPC endpoint reachable from here; gives the forager a real peer to score and tip/health real numbers."
+    }
+  }
+}

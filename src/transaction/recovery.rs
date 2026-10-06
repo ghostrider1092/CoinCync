@@ -281,4 +281,96 @@ mod tests {
     fn empty_extra_is_valid() {
         assert!(validate_recovery_extra(&[], 2).is_ok());
     }
+
+    #[test]
+    fn decode_slice_too_short_returns_none() {
+        // A slice shorter than one full entry cannot be decoded.
+        let short = vec![RECOVERY_TAG; RECOVERY_ENTRY_SIZE - 1];
+        assert!(RecoveryMeta::decode(&short).is_none());
+        assert!(RecoveryMeta::decode(&[]).is_none());
+    }
+
+    #[test]
+    fn decode_wrong_tag_returns_none() {
+        let mut bytes = make_recovery().encode();
+        bytes[0] = 0x00; // clobber the recovery tag
+        assert!(RecoveryMeta::decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn decode_all_skips_interleaved_junk() {
+        let meta1 = RecoveryMeta {
+            output_index: 0,
+            recovery_address: [0xAA; 32],
+            timeout_blocks: 1000,
+        };
+        let meta2 = RecoveryMeta {
+            output_index: 1,
+            recovery_address: [0xBB; 32],
+            timeout_blocks: 2000,
+        };
+        // Non-recovery bytes lead and separate the two valid entries; the
+        // scanner must skip the junk (pos += 1) and still recover both.
+        let mut extra = vec![0x00, 0x01, 0x02];
+        extra.extend_from_slice(&meta1.encode());
+        extra.push(0xFF);
+        extra.extend_from_slice(&meta2.encode());
+        let decoded = RecoveryMeta::decode_all(&extra);
+        assert_eq!(decoded, vec![meta1, meta2]);
+    }
+
+    #[test]
+    fn decode_all_ignores_truncated_final_entry() {
+        let meta = make_recovery();
+        let mut extra = meta.encode();
+        // A trailing tag byte with fewer than RECOVERY_ENTRY_SIZE bytes behind
+        // it must not be decoded and must not panic (the `pos + SIZE <= len`
+        // guard).
+        extra.extend_from_slice(&[RECOVERY_TAG, 0x01, 0x02, 0x03]);
+        let decoded = RecoveryMeta::decode_all(&extra);
+        assert_eq!(decoded, vec![meta]);
+    }
+
+    #[test]
+    fn decode_all_does_not_misparse_tag_inside_entry() {
+        // The recovery tag byte (0xDE) appears inside the first entry's address
+        // and timeout. Because decode_all advances by a fixed entry size, the
+        // embedded 0xDE must not be mistaken for a new entry boundary.
+        let meta1 = RecoveryMeta {
+            output_index: 0,
+            recovery_address: [RECOVERY_TAG; 32],
+            timeout_blocks: 0xDEDE_DEDE,
+        };
+        let meta2 = RecoveryMeta {
+            output_index: 1,
+            recovery_address: [0x11; 32],
+            timeout_blocks: 5000,
+        };
+        let extra = RecoveryMeta::encode_all(&[meta1.clone(), meta2.clone()]);
+        let decoded = RecoveryMeta::decode_all(&extra);
+        assert_eq!(decoded, vec![meta1, meta2]);
+    }
+
+    #[test]
+    fn validate_accepts_min_and_max_timeout_boundary() {
+        let mut meta = make_recovery();
+        meta.timeout_blocks = MIN_RECOVERY_TIMEOUT; // exactly the minimum
+        assert!(meta.validate(2).is_ok());
+        meta.timeout_blocks = MAX_RECOVERY_TIMEOUT; // exactly the maximum
+        assert!(meta.validate(2).is_ok());
+    }
+
+    #[test]
+    fn recovery_eligibility_reorg_saturating_sub() {
+        // creation_height > current_height (a reorg rolled the tip back): the
+        // saturating_sub floors the age at 0, so the output is not eligible and
+        // nothing panics.
+        let meta = RecoveryMeta {
+            output_index: 0,
+            recovery_address: [0xCC; 32],
+            timeout_blocks: 1000,
+        };
+        assert!(!meta.is_recovery_eligible(500, 100));
+        assert!(!meta.is_recovery_eligible(u64::MAX, 0));
+    }
 }

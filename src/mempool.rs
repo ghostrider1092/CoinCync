@@ -31,6 +31,67 @@ impl ShadowEvictChain for crate::chain::Blockchain {
     }
 }
 
+/// #149: whether the mempool needs a FULL `shadow_evict_invalid` revalidation
+/// after applying a block at `new_height`.
+///
+/// `remove_confirmed` already drops mined txs + key-image shadow-conflicts. The
+/// O(mempool) full sweep is only needed when a remaining tx's consensus VALIDITY
+/// can change WITHOUT a key-image collision — exactly the two cases the
+/// `shadow_evict_invalid` doc lists:
+/// 1. a **reorg** (`is_reorg`) — the UTXO set / member heights change under
+///    already-admitted txs; and
+/// 2. crossing the **output-age hard-fork** height — age-gated inputs that were
+///    valid become invalid.
+///
+/// On a normal tip extension neither holds (the UTXO set only grows, ring
+/// members only age up, spends surface as key-image conflicts), so the sweep is
+/// skipped. On current networks the age fork is at genesis (mainnet) or never
+/// (testnet/regtest), so this reduces to `is_reorg` today; the age check is a
+/// forward-safe guard for any network that sets a finite mid-chain fork height.
+/// A FUTURE fork that gates mempool-tx validity MUST be added here.
+pub fn needs_full_revalidation_after_block(
+    is_reorg: bool,
+    net: crate::config::NetworkType,
+    new_height: u64,
+) -> bool {
+    is_reorg
+        || net.min_output_age(new_height) != net.min_output_age(new_height.saturating_sub(1))
+}
+
+#[cfg(test)]
+mod revalidation_gate_tests {
+    use super::needs_full_revalidation_after_block;
+    use crate::config::NetworkType;
+
+    #[test]
+    fn needs_full_revalidation_after_block_149() {
+        // A reorg ALWAYS needs the full sweep (UTXO set changes under txs).
+        for net in [NetworkType::Testnet, NetworkType::Regtest, NetworkType::Mainnet] {
+            assert!(
+                needs_full_revalidation_after_block(true, net, 1_000),
+                "reorg must force a full mempool revalidation"
+            );
+        }
+        // A NORMAL tip extension (no reorg) skips the sweep at every non-boundary
+        // height. On testnet the output-age fork never activates, so a normal
+        // extend never needs the sweep.
+        let net = NetworkType::Testnet;
+        for h in [1u64, 100, 10_000, 1_000_000] {
+            assert!(
+                !needs_full_revalidation_after_block(false, net, h),
+                "normal tip extension at height {h} must skip the O(mempool) sweep"
+            );
+        }
+        // The predicate keys the boundary off `min_output_age` changing between
+        // h-1 and h: a network with a finite mid-chain output-age fork flips this
+        // true at the crossing height even without a reorg.
+        assert_eq!(
+            needs_full_revalidation_after_block(false, net, 5),
+            net.min_output_age(5) != net.min_output_age(4),
+        );
+    }
+}
+
 const MAX_CHAIN_GENERATION_ATTEMPTS: usize = 4;
 
 trait GenerationSource {
@@ -158,25 +219,12 @@ impl AuditEvent {
 }
 
 fn unix_now() -> u64 {
-    // Monotonic-max fallback: SystemTime::duration_since(UNIX_EPOCH) can
-    // theoretically fail (system clock set before 1970, which doesn't
-    // happen on a running system) or step backwards (NTP correction).
-    // The original `unwrap_or(0)` would mark fresh mempool entries as
-    // 56 years old, triggering immediate eviction by the TTL sweep.
-    // Track the last good value and return max(now, last) so a clock
-    // hiccup never produces an artificially-ancient timestamp. Costs
-    // one relaxed atomic CAS per call — negligible vs the syscall.
-    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let last = LAST.load(std::sync::atomic::Ordering::Relaxed);
-    let out = now.max(last);
-    if out > last {
-        LAST.store(out, std::sync::atomic::Ordering::Relaxed);
-    }
-    out
+    // Single source of truth (E1): monotonic-nondecreasing unix time so an NTP
+    // backwards step never marks a fresh mempool entry as ancient (which would
+    // trigger immediate TTL eviction). The monotonic-max logic now lives in the
+    // canonical clock, which is also override-aware for the simulator. See
+    // src/clock.rs.
+    crate::clock::unix_now_monotonic()
 }
 
 /// A transaction in the mempool with metadata
@@ -189,6 +237,20 @@ pub struct MempoolEntry {
     pub size: usize,
     pub added_time: u64,
     pub height_added: u64,
+}
+
+/// A lightweight mempool transaction summary built from cached `MempoolEntry`
+/// metadata (hash, fee, size) plus cheap-by-reference reads (type, in/out counts)
+/// — for RPC listings that need only summary fields, avoiding a full
+/// `Transaction` clone and hash/size recomputation. See issue #118.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxSummary {
+    pub hash: Hash,
+    pub tx_type: crate::transaction::TxType,
+    pub inputs: usize,
+    pub outputs: usize,
+    pub fee: Amount,
+    pub size: usize,
 }
 
 impl MempoolEntry {
@@ -376,6 +438,21 @@ impl Mempool {
             reason: err.to_string(),
             timestamp: unix_now(),
         });
+        // Enterprise metric: count rejections by a STABLE, low-cardinality
+        // reason label (never the raw error string — that would explode
+        // Prometheus label cardinality).
+        let reason: &'static str = match &err {
+            Error::MempoolFull => "mempool_full",
+            Error::InvalidTransaction(_) => "invalid_transaction",
+            Error::InvalidState(_) => "invalid_state",
+            Error::InvalidMessage(_) => "invalid_message",
+            Error::SerializationError(_) => "serialization",
+            Error::CryptoError(_)
+            | Error::SparkVerifyFailed
+            | Error::MwCutthroughVerifyFailed => "crypto",
+            _ => "other",
+        };
+        crate::metrics::record_mempool_reject(reason);
         err
     }
 
@@ -646,12 +723,22 @@ impl Mempool {
             let mut simulated = self.current_size.saturating_sub(replaced_freed);
             if simulated + size > self.max_size {
                 let mut attempts = 0usize;
-                for (_, cand_hash) in self.by_fee.iter() {
+                for (&(cand_fee_rate, _), cand_hash) in self.by_fee.iter() {
                     if simulated + size <= self.max_size || attempts >= MAX_EVICTION_ATTEMPTS {
                         break;
                     }
                     if to_replace.contains(cand_hash) {
                         continue; // already counted in replaced_freed above
+                    }
+                    // #88 fix: never evict a resident whose fee rate is >= the
+                    // incoming tx's. `by_fee` is ascending, so once a candidate's
+                    // rate reaches the incoming rate, no cheaper candidate
+                    // remains — stop, and let the fit check below reject if we
+                    // still can't make room. Without this, a tx that merely meets
+                    // the fullness-based dynamic minimum could evict strictly
+                    // higher-fee-rate transactions, degrading mempool fee quality.
+                    if cand_fee_rate >= new_fee_rate {
+                        break;
                     }
                     if let Some(e) = self.transactions.get(cand_hash) {
                         simulated = simulated.saturating_sub(e.size);
@@ -697,7 +784,20 @@ impl Mempool {
             // deduplication so throttling is unnecessary there — that
             // specific claim about LogPrintf's dedup behaviour was not
             // re-verified this session and is dropped.
-            if self.current_size >= prev_size || eviction_attempts >= MAX_EVICTION_ATTEMPTS {
+            // H8 (off-by-one griefing fix): only enforce the attempt cap when
+            // the incoming tx STILL doesn't fit. Previously the cap was checked
+            // before re-testing fit, so a tx that fit exactly after the 100th
+            // eviction was rejected — having already dropped 100 honest resident
+            // txs. The admission SIMULATION above permits up to
+            // MAX_EVICTION_ATTEMPTS evictions and then admits if it fits, so the
+            // real loop must too, or an attacker can tune a valid tx to need
+            // exactly 100 evictions, drop 100 honest txs for free, be rejected,
+            // and repeat forever at zero cost. The no-progress guard
+            // (`current_size >= prev_size`) still rejects unconditionally.
+            let still_doesnt_fit = self.current_size + size > self.max_size;
+            if self.current_size >= prev_size
+                || (still_doesnt_fit && eviction_attempts >= MAX_EVICTION_ATTEMPTS)
+            {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static LAST_WARN_UNIX: AtomicU64 = AtomicU64::new(0);
                 const WARN_THROTTLE_SECS: u64 = 5;
@@ -981,6 +1081,51 @@ impl Mempool {
         result
     }
 
+    /// Lightweight summaries mirroring [`Mempool::get_block_transactions`]'s
+    /// selection (same fee-ordered, size-capped, key-image-deduped set), but
+    /// returning cached-metadata [`TxSummary`]s instead of cloning full
+    /// transactions or recomputing each hash/size. See issue #118.
+    pub fn get_transaction_summaries(
+        &self,
+        max_size: usize,
+        max_count: usize,
+    ) -> Vec<TxSummary> {
+        let mut result = Vec::new();
+        let mut total_size = 0;
+        let mut selected_key_images: HashSet<KeyImage> = HashSet::new();
+
+        for (_, tx_hash) in self.by_fee.iter().rev() {
+            if result.len() >= max_count {
+                break;
+            }
+            if let Some(entry) = self.transactions.get(tx_hash) {
+                if total_size + entry.size <= max_size {
+                    let tx_key_images = entry.tx.key_images();
+                    let has_conflict = tx_key_images
+                        .iter()
+                        .any(|ki| selected_key_images.contains(ki));
+                    if has_conflict {
+                        continue;
+                    }
+                    for ki in &tx_key_images {
+                        selected_key_images.insert(*ki);
+                    }
+                    result.push(TxSummary {
+                        hash: entry.tx_hash,
+                        tx_type: entry.tx.tx_type,
+                        inputs: entry.tx.input_count(),
+                        outputs: entry.tx.output_count(),
+                        fee: entry.fee,
+                        size: entry.size,
+                    });
+                    total_size += entry.size;
+                }
+            }
+        }
+
+        result
+    }
+
     /// Get all transaction hashes
     pub fn get_hashes(&self) -> Vec<Hash> {
         self.transactions.keys().copied().collect()
@@ -994,6 +1139,11 @@ impl Mempool {
     /// Get transaction count
     pub fn len(&self) -> usize {
         self.transactions.len()
+    }
+
+    /// The configured maximum mempool size in bytes (the eviction cap).
+    pub fn max_size(&self) -> usize {
+        self.max_size
     }
 
     /// Compute fee-per-byte percentiles from current mempool contents.
@@ -1450,6 +1600,17 @@ impl SharedMempool {
         self.read_lock().get_block_transactions(max_size, max_count)
     }
 
+    /// Cached-metadata summaries (issue #118) — see
+    /// [`Mempool::get_transaction_summaries`]. JSON is built by the caller after
+    /// this returns, so the read lock is released before serialization.
+    pub fn get_transaction_summaries(
+        &self,
+        max_size: usize,
+        max_count: usize,
+    ) -> Vec<TxSummary> {
+        self.read_lock().get_transaction_summaries(max_size, max_count)
+    }
+
     pub fn stats(&self) -> MempoolStats {
         self.read_lock().stats()
     }
@@ -1615,6 +1776,89 @@ impl SharedMempool {
         tokio::task::spawn_blocking(move || self.get_block_transactions(max_size, max_count))
             .await
             .unwrap_or_default()
+    }
+}
+
+/// Pure mempool-pressure signal (testable in isolation): what percent full the
+/// mempool is, and whether that reaches the warning threshold. Returns
+/// `Some((pct, message))` at/above the threshold.
+fn mempool_pressure(current_bytes: usize, max_bytes: usize, warn_pct: u64) -> Option<(u64, String)> {
+    if max_bytes == 0 {
+        return None;
+    }
+    let pct = (current_bytes as u128 * 100 / max_bytes as u128) as u64;
+    if pct >= warn_pct {
+        Some((pct, format!("mempool {pct}% full ({current_bytes}/{max_bytes} bytes)")))
+    } else {
+        None
+    }
+}
+
+/// A [`SecurityDetail`](crate::security::SecurityDetail) over the mempool — the
+/// flood/DoS surface. The mempool is node-LOCAL policy, not consensus, so every
+/// alert is **operational** (page, never halt): a false positive must not wedge
+/// the chain. Read-only, O(1).
+pub struct MempoolSecurityDetail<'a> {
+    mempool: &'a Mempool,
+    warn_pct: u64,
+}
+
+impl<'a> MempoolSecurityDetail<'a> {
+    /// Warn when the mempool reaches this percent of its byte cap.
+    pub const DEFAULT_WARN_PCT: u64 = 90;
+
+    pub fn new(mempool: &'a Mempool) -> Self {
+        Self { mempool, warn_pct: Self::DEFAULT_WARN_PCT }
+    }
+
+    pub fn with_warn_pct(mempool: &'a Mempool, warn_pct: u64) -> Self {
+        Self { mempool, warn_pct }
+    }
+}
+
+impl crate::security::SecurityDetail for MempoolSecurityDetail<'_> {
+    fn label(&self) -> &'static str {
+        "mempool"
+    }
+
+    fn sweep(&self) -> crate::security::SecurityReport {
+        use crate::security::{SecurityReport, Severity};
+        let mut r = SecurityReport::clean();
+        if let Some((pct, msg)) =
+            mempool_pressure(self.mempool.size(), self.mempool.max_size(), self.warn_pct)
+        {
+            // Operational only — the mempool is not consensus state.
+            let sev = if pct >= 100 { Severity::Critical } else { Severity::Warning };
+            r.raise_operational("mempool", sev, "mempool-pressure", msg);
+        }
+        r
+    }
+}
+
+#[cfg(test)]
+mod security_detail_tests {
+    use super::*;
+
+    #[test]
+    fn mempool_pressure_pure_signal() {
+        assert!(super::mempool_pressure(270, 300, 90).is_some(), "90% full warns");
+        assert!(super::mempool_pressure(100, 300, 90).is_none(), "33% full is quiet");
+        assert!(super::mempool_pressure(0, 0, 90).is_none(), "empty cap → no divide-by-zero");
+        let (pct, _) = super::mempool_pressure(300, 300, 90).unwrap();
+        assert_eq!(pct, 100);
+    }
+
+    #[test]
+    fn mempool_detail_is_operational_never_consensus() {
+        use crate::security::SecurityDetail;
+        // A tiny cap with nothing in it → clean.
+        let mp = Mempool::with_max_size(1000);
+        let report = MempoolSecurityDetail::new(&mp).sweep();
+        assert!(report.is_clean());
+        // Even a full mempool (simulated via warn_pct 0) is operational, never a
+        // consensus halt — the mempool is node-local.
+        let report2 = MempoolSecurityDetail::with_warn_pct(&mp, 0).sweep();
+        assert!(!report2.has_consensus_halt(), "mempool alerts never halt consensus");
     }
 }
 
@@ -1895,5 +2139,91 @@ mod load_from_disk_tests {
             "empty mempool.dat must load zero txs without error"
         );
         assert!(!path.exists(), "file is removed after successful read");
+    }
+}
+
+// Live in-crate unit tests for PRIVATE mempool helpers not reachable from
+// `tests/` (the fee-per-byte scaling math, the monotonic clock clamp, and
+// the generation-guard's None/yield branch). Added 2026-09-11 to fill the
+// `src/mempool.rs` gaps in docs/audit/test-plan/mempool.md. This is a FRESH
+// module — deliberately NOT the dead `#[cfg(any())] mod tests` above, which
+// relies on the removed `AssetIssuance` type.
+#[cfg(test)]
+mod extra_tests {
+    use super::{
+        retry_stable_admission, scaled_fee_per_byte, unix_now, AdmissionAttempt, GenerationSource,
+    };
+    use crate::error::Result;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // ── scaled_fee_per_byte / MempoolEntry fee math ─────────────────────────
+
+    #[test]
+    fn scaled_fee_per_byte_typical_value() {
+        // fee=1000 atomic over 100 bytes -> (1000 * 1e6) / 100 = 10_000_000
+        // micro-syncs per byte.
+        assert_eq!(scaled_fee_per_byte(1_000, 100), 10_000_000);
+    }
+
+    #[test]
+    fn scaled_fee_per_byte_zero_size_is_clamped_no_divide_by_zero() {
+        // size 0 is clamped to size.max(1); no panic, divides by 1.
+        assert_eq!(scaled_fee_per_byte(50, 0), 50 * 1_000_000);
+    }
+
+    #[test]
+    fn scaled_fee_per_byte_small_fee_retains_micro_precision() {
+        // The documented A5 scenario: 50 syncs / 100 bytes would truncate to 0
+        // without scaling; scaled it is (50 * 1e6) / 100 = 500_000.
+        assert_eq!(scaled_fee_per_byte(50, 100), 500_000);
+    }
+
+    #[test]
+    fn scaled_fee_per_byte_extreme_fee_clamps_to_u64_max_no_wraparound() {
+        // A5-MEM-01: u64::MAX fee must clamp to u64::MAX, never wrap to a
+        // near-zero value that would make a high-fee tx look cheap.
+        assert_eq!(scaled_fee_per_byte(u64::MAX, 1), u64::MAX);
+        // Even a large-but-not-max fee stays monotone and does not wrap.
+        assert!(scaled_fee_per_byte(u64::MAX, 2) > 0);
+    }
+
+    // ── unix_now monotonic clamp ────────────────────────────────────────────
+
+    #[test]
+    fn unix_now_is_monotonic_nondecreasing() {
+        // The clamp guarantees successive reads never step backwards, so a
+        // clock hiccup can't mark fresh entries as ancient. (We can't inject
+        // an NTP step-back here, but the non-decreasing property is the
+        // observable contract.)
+        let a = unix_now();
+        let b = unix_now();
+        assert!(b >= a, "unix_now must be non-decreasing: {} then {}", a, b);
+    }
+
+    // ── retry_stable_admission: None -> yield & continue, then complete ──────
+
+    struct NoneThenStable {
+        calls: AtomicUsize,
+    }
+    impl GenerationSource for NoneThenStable {
+        fn stable_generation(&self) -> Option<u64> {
+            // First observation: chain is updating (None) -> caller must yield
+            // and retry. Subsequent observations: stable at generation 1.
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                None
+            } else {
+                Some(1)
+            }
+        }
+    }
+
+    #[test]
+    fn retry_stable_admission_yields_on_none_then_completes() {
+        let chain = NoneThenStable {
+            calls: AtomicUsize::new(0),
+        };
+        let result: Result<u64> =
+            retry_stable_admission(&chain, |generation| AdmissionAttempt::Complete(Ok(generation)));
+        assert_eq!(result.expect("should complete after the updating window"), 1);
     }
 }

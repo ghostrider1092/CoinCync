@@ -198,6 +198,117 @@ impl NetworkType {
         self.params().data_dir_name
     }
 
+    // ── Consensus activation heights (runtime-network-resolved) ──────────
+    //
+    // These heights differ per network. They MUST be resolved from the
+    // *runtime* network (this enum), never from a compile-time `#[cfg(feature)]`
+    // constant: the daemon selects its network at runtime via `--network`, so a
+    // binary compiled for one network but run as another — or a node and miner
+    // built with different features — would otherwise silently disagree and
+    // fork. Regtest mirrors testnet's schedule (regtest is a local test
+    // network). The compile-time consts in `constants.rs` are kept only as the
+    // compiled-network convenience/default; a `const _` drift-guard there pins
+    // each to the matching value below.
+
+    /// Height at which the miner/burn fee split is enforced. Before it, the
+    /// coinbase may claim all fees. (constants::FEE_DISTRIBUTION_HEIGHT)
+    pub const fn fee_distribution_height(&self) -> u64 {
+        match self {
+            NetworkType::Mainnet => 0,
+            NetworkType::Testnet | NetworkType::Regtest => 525,
+        }
+    }
+
+    /// Height of the `MIN_OUTPUT_AGE` 10→100 hard fork. `u64::MAX` means the
+    /// fork never activates (output age stays 10).
+    /// (constants::MIN_OUTPUT_AGE_HARDFORK_HEIGHT)
+    pub const fn min_output_age_hardfork_height(&self) -> u64 {
+        match self {
+            NetworkType::Mainnet => 0,
+            NetworkType::Testnet | NetworkType::Regtest => u64::MAX,
+        }
+    }
+
+    /// Height at which rolling-finality attestations begin being recorded.
+    /// (constants::ROLLING_FINALITY_ENABLE_HEIGHT)
+    pub const fn rolling_finality_enable_height(&self) -> u64 {
+        match self {
+            NetworkType::Mainnet => 25_000,
+            NetworkType::Testnet | NetworkType::Regtest => 50_000,
+        }
+    }
+
+    /// Height at which the rolling-finality reorg rule is enforced.
+    /// (constants::ROLLING_FINALITY_ENFORCE_HEIGHT)
+    pub const fn rolling_finality_enforce_height(&self) -> u64 {
+        match self {
+            NetworkType::Mainnet => 50_000,
+            NetworkType::Testnet | NetworkType::Regtest => 75_000,
+        }
+    }
+
+    /// Height at which `BlockHeader.supply_commitment` begins being PRODUCED
+    /// (non-zero) and ENFORCED (validated). Below this height the field stays
+    /// `[0u8; 32]` and is not checked, so pre-fork chains are unaffected — this
+    /// is a hard fork (see `docs/design/cip-supply-commitment-enforcement.md`).
+    ///
+    /// GATED OFF on every network (`u64::MAX`) until an activation height is
+    /// explicitly cleared: producing/validating is a pure no-op until then, so
+    /// the rule can land, build, and be tested without changing any live chain.
+    /// Mirrors the shielded-activation "finite under clearance, else u64::MAX"
+    /// pattern. Do NOT set a finite height without audit-gate clearance —
+    /// activating a new consensus rule on testnet is a coordinated hard fork.
+    /// Mirrored by `constants::SUPPLY_COMMITMENT_ENFORCE_HEIGHT` with a
+    /// compile-time drift-guard, matching the other activation heights.
+    pub const fn supply_commitment_enforce_height(&self) -> u64 {
+        match self {
+            NetworkType::Mainnet => u64::MAX,
+            NetworkType::Testnet | NetworkType::Regtest => u64::MAX,
+        }
+    }
+
+    /// Minimum age (in blocks) a ring-member/decoy output must have, resolved
+    /// from the runtime network. Mirrors `constants::min_output_age_at_height`
+    /// but keyed on this network's hard-fork height rather than the compile-time
+    /// one, so a node and miner built with different features agree.
+    pub const fn min_output_age(&self, height: u64) -> u64 {
+        if height < self.min_output_age_hardfork_height() {
+            crate::constants::MIN_OUTPUT_AGE
+        } else {
+            crate::constants::MIN_OUTPUT_AGE_POST_FORK
+        }
+    }
+
+    /// The consensus-checkpoint set for this network, as `(height, hash_bytes)`
+    /// ordered by height (genesis first).
+    ///
+    /// This is the **single source of truth** for hardcoded checkpoints. It
+    /// resolves from the canonical per-network functions — `mainnet_checkpoints()`
+    /// / `testnet_checkpoints()`, which both prepend genesis and (for testnet)
+    /// expand `TESTNET_CHECKPOINT_LIST`. Every consumer — the two block-validation
+    /// paths, the consensus fingerprint, `snapshot-import`, light-wallet auth and
+    /// the RPC checkpoint view — goes through here (directly or via
+    /// `constants::expected_checkpoint_hash`), so a checkpoint added to the
+    /// canonical list is reflected everywhere at once. Previously the fingerprint
+    /// and `expected_checkpoint_hash` read a *separate* empty constant table, so a
+    /// populated testnet list was silently invisible to them (issue #173).
+    ///
+    /// Resolved at runtime from the RUNTIME network, so a binary built for one
+    /// network but run as another uses the correct checkpoints. Regtest reuses
+    /// testnet's.
+    pub fn consensus_checkpoints(&self) -> Vec<(u64, [u8; 32])> {
+        match self {
+            NetworkType::Mainnet => crate::mainnet::mainnet_checkpoints()
+                .into_iter()
+                .map(|c| (c.height, *c.hash.as_bytes()))
+                .collect(),
+            NetworkType::Testnet | NetworkType::Regtest => crate::testnet::testnet_checkpoints()
+                .into_iter()
+                .map(|c| (c.height, *c.hash.as_bytes()))
+                .collect(),
+        }
+    }
+
     /// 4-byte magic identifier stamped into every P2P message and block header.
     /// Different per network so testnet blocks/messages are rejected instantly
     /// on mainnet (and vice versa) before any expensive validation.
@@ -249,7 +360,20 @@ impl std::fmt::Display for NetworkType {
     }
 }
 
-/// Node configuration
+/// Node configuration.
+///
+/// ⚠️ **DEAD / NOT WIRED (as of 2026-08-22).** No binary constructs or loads
+/// this. The `coincync-node` daemon drives everything from clap flags plus
+/// `network::node::NodeConfig` defaults, and RPC uses `rpc::server::RpcConfig`
+/// — NOT this tree. This whole config-file struct hierarchy (`NodeConfig` and
+/// the sub-configs it owns: `PersonalConfig`, `ChainParams`, `P2PConfig`,
+/// `P2PEncryptionConfig`, `RpcConfig`, `DatabaseConfig`, `MiningConfig`,
+/// `PruningConfig`, `WalletConfig`, `NodeConfigBuilder`) is unreachable in the
+/// production build. The `--config` node flag that would have loaded it was
+/// removed. Do not add callers; if a real TOML config system is wanted, design
+/// it deliberately rather than reviving this. Kept (labeled) rather than excised
+/// only because it is interleaved with live types (`NetworkType`, `ProxyConfig`)
+/// in this file; a focused removal pass is tracked separately.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
     /// Network type

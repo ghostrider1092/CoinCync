@@ -1,8 +1,68 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `normalize_noise_record`/`denormalize_noise_record`** — INVARIANT:
+//!   a decrypted Noise record is accepted only at a canonical traffic-shaper
+//!   bucket size; non-bucket sizes are rejected rather than silently accepted.
+//!   THREAT: a malformed/padded record slipping through as valid plaintext,
+//!   or a covert channel via off-bucket sizes.
+//!   TESTS: `noise_record_rejects_noncanonical_wire_size`,
+//!   `normalized_noise_record_round_trip_uses_bucket_size`.
+//! - **§2 `noise_bridge`/`noise_bridge_reader`/`noise_bridge_writer`** —
+//!   INVARIANT: encrypt and decrypt directions run as two independent tasks,
+//!   never inside one `select!`, because `read_encrypted`'s two sequential
+//!   `read_exact` calls are not cancellation-safe.
+//!   THREAT: a cancelled read mid-handshake permanently desyncs the AEAD
+//!   nonce, silently breaking all subsequent decryption for the peer.
+//!   TESTS: (gap — no test drives a mid-read cancellation of the reader task
+//!   to confirm the writer task is unaffected).
+//! - **§3 `cleanup_connection`** — INVARIANT: a peer/sender map entry is only
+//!   removed by the connection task that still owns it (matched via
+//!   `connection_token` / `same_channel`); a superseding reconnection is
+//!   never evicted by its predecessor's teardown.
+//!   THREAT: a slow-closing stale connection racing a fresh reconnect could
+//!   delete the live peer's state and desync `PeerDisconnected` events.
+//!   TESTS: `cleanup_removes_the_connection_that_owns_the_entries`,
+//!   `stale_cleanup_preserves_a_replacement_connection`,
+//!   `cleanup_identity_does_not_keep_the_send_channel_open`.
+//! - **§4 `handle_connection` Noise handshake + trusted-peer allowlist** —
+//!   INVARIANT: when `trusted_peers` is configured, only a Noise-authenticated
+//!   remote static key present in that allowlist may complete the connection;
+//!   plaintext is rejected outright in that mode.
+//!   THREAT: encryption bypass or impersonation of a trusted static key would
+//!   let an unauthenticated attacker to reach a peer meant to be closed-set.
+//!   TESTS: (gap — no unit/integration test drives the trusted-peer
+//!   allowlist rejection path; it requires a real Noise_XX handshake).
+//! - **§5 `handle_connection` canonical peer_id resolution** — INVARIANT:
+//!   once a Noise handshake succeeds, `peer_id` is replaced by the
+//!   authenticated remote static key everywhere (`info.id`, `peers`,
+//!   `senders`) so `pick_scored_peer` and map lookups can't split identity.
+//!   THREAT: a TCP-level id surviving alongside the Noise-derived id would
+//!   let one physical peer register twice, subverting per-peer accounting
+//!   (bans, eclipse slots, tx-absence scoping).
+//!   TESTS: (gap — no test asserts `info.id`/map-key convergence after a
+//!   successful handshake).
+//! - **§6 `handle_connection` connection loop backpressure** — INVARIANT: the
+//!   read side always uses the inactivity-timed `read_budgeted_message_timeout`
+//!   (never a bare read) so a peer trickling partial frames cannot pin the
+//!   slot forever; writes never bypass `MessageFramer`'s framing/size checks.
+//!   THREAT: A Slowloris-style partial-frame peer starving connection slots.
+//!   TESTS: (gap — Slowloris timeout behavior is asserted only by comment
+//!   here; size-cap enforcement is exercised in framing.rs, not this file).
+//! - **§7 WIRETRACE instrumentation (`COINCYNC_WIRE_TRACE`)** — INVARIANT:
+//!   the env-gated per-packet trace line is purely observational — it must
+//!   never alter what is sent or change control flow when disabled or enabled.
+//!   THREAT: a tracing hook accidentally gating or delaying real traffic would
+//!   corrupt propagation timing it is meant only to observe.
+//!   TESTS: (gap — no test asserts wire-trace emission is a no-op on the
+//!   send path).
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tokio::net::TcpStream;
+use crate::network::transport::NetStream;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, info, warn};
@@ -19,7 +79,7 @@ use super::super::noise::{
 use super::super::peer::{PeerId, PeerInfo};
 use super::super::protocol::{Message, MessageType};
 use super::super::traffic_shaping::TrafficShaper;
-use super::constants::PEER_QUEUE_SIZE;
+use super::constants::{PEER_QUEUE_SIZE, WRITE_TIMEOUT};
 use super::types::NodeEvent;
 use super::PeerMessage;
 
@@ -58,14 +118,17 @@ impl Drop for AbortOnDrop {
 /// it makes two sequential read_exact calls with a nonce increment between
 /// them. If a select! arm cancels the future mid-read, the nonce gets
 /// permanently desynced and all subsequent decryptions fail.
-async fn noise_bridge(
+async fn noise_bridge<R, W>(
     transport: NoiseTransport,
-    tcp_reader: tokio::net::tcp::OwnedReadHalf,
-    tcp_writer: tokio::net::tcp::OwnedWriteHalf,
+    tcp_reader: R,
+    tcp_writer: W,
     from_app: tokio::io::DuplexStream, // plaintext from MessageFramer
     to_app: tokio::io::DuplexStream,   // plaintext to MessageFramer
     traffic_shaper: Arc<TrafficShaper>,
-) {
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     // Split the transport into send and recv halves so each direction can
     // run in its own task without interfering with the other's nonce state.
     let (send_state, recv_state) = transport.split_into_send_recv();
@@ -89,12 +152,14 @@ async fn noise_bridge(
     while directions.join_next().await.is_some() {}
 }
 
-async fn noise_bridge_reader(
+async fn noise_bridge_reader<R>(
     state: NoiseRecvState,
-    mut tcp_reader: tokio::net::tcp::OwnedReadHalf,
+    mut tcp_reader: R,
     mut to_app: tokio::io::DuplexStream,
     traffic_shaper: Arc<TrafficShaper>,
-) {
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
     use tokio::io::AsyncWriteExt;
     loop {
         let record = {
@@ -226,9 +291,28 @@ fn cleanup_connection(
     removed
 }
 
+/// #190 duplicate-connection tie-break. When two nodes open connections to each
+/// other's authenticated static key at once, exactly one must survive and BOTH
+/// ends must pick the same physical connection — otherwise each keeps its own
+/// direction and drops the other's, killing both (the ~40s replace loop).
+///
+/// Rule: the connection INITIATED BY THE PEER WITH THE LARGER STATIC KEY wins.
+/// `outbound` means WE initiated this connection, so its initiator is our key;
+/// an inbound connection's initiator is the remote key. Both ends know both keys
+/// and both directions, so they compute the same survivor. Equal keys (a
+/// self-connection, which the connector already prevents) never "win" either
+/// side, so the connection is dropped — the safe default.
+fn connection_wins_duplicate_tiebreak(outbound: bool, our_key: &[u8; 32], their_key: &[u8; 32]) -> bool {
+    if outbound {
+        our_key > their_key
+    } else {
+        their_key > our_key
+    }
+}
+
 /// Handle a new connection (inbound or outbound) with proper message framing
 pub(super) async fn handle_connection(
-    stream: TcpStream,
+    stream: NetStream,
     peer_id: PeerId,
     outbound: bool,
     magic: [u8; 4],
@@ -382,7 +466,7 @@ pub(super) async fn handle_connection(
         DynWrite,
         Option<tokio::task::JoinHandle<()>>,
     ) = if let Some((transport, _remote_id)) = noise_result {
-        let (tcp_reader, tcp_writer) = stream.into_split();
+        let (tcp_reader, tcp_writer) = tokio::io::split(stream);
         let (app_read, bridge_write) = tokio::io::duplex(64 * 1024);
         let (bridge_read, app_write) = tokio::io::duplex(64 * 1024);
 
@@ -398,7 +482,7 @@ pub(super) async fn handle_connection(
 
         (Box::new(app_read), Box::new(app_write), Some(handle))
     } else {
-        let (tcp_reader, tcp_writer) = stream.into_split();
+        let (tcp_reader, tcp_writer) = tokio::io::split(stream);
         (Box::new(tcp_reader), Box::new(tcp_writer), None)
     };
     let _noise_bridge_guard = noise_bridge_handle.map(AbortOnDrop);
@@ -417,6 +501,42 @@ pub(super) async fn handle_connection(
         .write_message(MessageType::Version as u8, &version_bytes[HEADER_SIZE..])
         .await?;
     info.bytes_sent = info.bytes_sent.saturating_add(version_bytes.len() as u64);
+
+    // #190: converge on exactly ONE connection per remote static key. Two nodes
+    // that --addnode each other complete BOTH a dial and an accept to the same
+    // authenticated key; the second handshake used to overwrite the first in
+    // `peers`, orphaning the live connection, so the link was torn down and
+    // replaced every ~40s on both sides forever. When a connection to this key
+    // already exists, keep the one INITIATED BY THE PEER WITH THE LARGER STATIC
+    // KEY. Both ends know both keys and both directions, so they compute the
+    // SAME survivor and converge — unlike "first wins", where each end can keep
+    // its own direction and drop the other's, killing both. The loser direction
+    // returns Err here (and, outbound, backs off via record_connect_backoff).
+    if info.encrypted {
+        let is_duplicate = peers
+            .get(&peer_id)
+            .is_some_and(|existing| !Arc::ptr_eq(&existing.connection_token, &info.connection_token));
+        if is_duplicate {
+            let our_key = *identity.public_bytes();
+            let their_key = peer_id; // == remote static key for encrypted peers
+            let keep_this = connection_wins_duplicate_tiebreak(outbound, &our_key, &their_key);
+            if !keep_this {
+                debug!(
+                    "#190: duplicate {} connection to key {} — keeping existing per tie-break",
+                    if outbound { "outbound" } else { "inbound" },
+                    hex::encode(&peer_id[..8]),
+                );
+                return Err(Error::NoiseHandshakeFailed(
+                    "duplicate connection to peer".into(),
+                ));
+            }
+            debug!(
+                "#190: duplicate {} connection to key {} wins tie-break — replacing existing",
+                if outbound { "outbound" } else { "inbound" },
+                hex::encode(&peer_id[..8]),
+            );
+        }
+    }
 
     // Failed initial handshakes must never be visible as live peers.
     peers.insert(peer_id, info);
@@ -495,9 +615,28 @@ pub(super) async fn handle_connection(
                         }
                     }
                     let payload = &data[HEADER_SIZE..];
-                    if let Err(e) = framer.write_message(msg_type, payload).await {
-                        debug!("Write error to peer {:?}: {}", &peer_id[..4], e);
-                        break;
+                    // C2: bound the write. A peer that stops reading fills its TCP
+                    // receive window; without a timeout this `.await` blocks the
+                    // write arm forever, the send queue fills, and the shared
+                    // processor then blocks on `send_to_peer`. Drop a stalled peer.
+                    match tokio::time::timeout(
+                        WRITE_TIMEOUT,
+                        framer.write_message(msg_type, payload),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            debug!("Write error to peer {:?}: {}", &peer_id[..4], e);
+                            break;
+                        }
+                        Err(_) => {
+                            debug!(
+                                "Write timeout to peer {:?}; dropping stalled peer",
+                                &peer_id[..4]
+                            );
+                            break;
+                        }
                     }
                     // Track outbound bytes for telemetry (get_peers RPC, sync diagnostics).
                     // Without this, bytes_sent stays at 0 forever — masking real propagation
@@ -528,6 +667,44 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// #190: the duplicate tie-break must make BOTH ends keep the SAME physical
+    /// connection. Model the two directions (A→B outbound on A / inbound on B,
+    /// and B→A outbound on B / inbound on A) and assert exactly one survives and
+    /// it is identical on both nodes, for either key ordering.
+    #[test]
+    fn duplicate_tiebreak_converges_on_one_connection_both_ends_190() {
+        for (ka, kb) in [([9u8; 32], [1u8; 32]), ([1u8; 32], [9u8; 32])] {
+            assert_ne!(ka, kb);
+            // Node A's view: A→B is outbound, B→A is inbound (their_key = kb).
+            let a_keeps_ab = connection_wins_duplicate_tiebreak(true, &ka, &kb);
+            let a_keeps_ba = connection_wins_duplicate_tiebreak(false, &ka, &kb);
+            // Node B's view: B→A is outbound, A→B is inbound (their_key = ka).
+            let b_keeps_ba = connection_wins_duplicate_tiebreak(true, &kb, &ka);
+            let b_keeps_ab = connection_wins_duplicate_tiebreak(false, &kb, &ka);
+
+            // Each node keeps exactly one of the two directions.
+            assert!(a_keeps_ab ^ a_keeps_ba, "node A must keep exactly one direction");
+            assert!(b_keeps_ab ^ b_keeps_ba, "node B must keep exactly one direction");
+            // And both nodes agree on WHICH physical connection survives.
+            assert_eq!(a_keeps_ab, b_keeps_ab, "both ends must keep A→B or neither");
+            assert_eq!(a_keeps_ba, b_keeps_ba, "both ends must keep B→A or neither");
+            // The survivor is the connection initiated by the larger key.
+            if ka > kb {
+                assert!(a_keeps_ab && b_keeps_ab, "larger key ka → A→B survives");
+            } else {
+                assert!(a_keeps_ba && b_keeps_ba, "larger key kb → B→A survives");
+            }
+        }
+    }
+
+    /// Equal keys (self-connection) must not "win" either side → dropped.
+    #[test]
+    fn duplicate_tiebreak_drops_equal_keys_190() {
+        let k = [5u8; 32];
+        assert!(!connection_wins_duplicate_tiebreak(true, &k, &k));
+        assert!(!connection_wins_duplicate_tiebreak(false, &k, &k));
+    }
 
     fn peer(peer_id: PeerId) -> PeerInfo {
         let addr: SocketAddr = "127.0.0.1:28080".parse().unwrap();

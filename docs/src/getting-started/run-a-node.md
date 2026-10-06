@@ -30,15 +30,10 @@ chmod +x coincync-node
 
 ```bash
 ./coincync-node --network testnet --data-dir ~/.coincync \
-    --addnode 66.135.23.193:28080 \
-    --addnode 140.82.57.168:28080 \
-    --addnode 207.148.111.76:28080 \
-    --addnode 207.148.6.50:28080 \
-    --addnode 95.179.165.225:28080 \
-    --addnode 192.248.151.16:28080
+    --addnode 2.29.34.197:28080
 ```
 
-The `--addnode` flags are the project's 6 fleet IPs (5 Vultr + 1 London seed for EU operators) — explicit fallbacks for the case where DNS seed resolution silently fails. **Use them for first sync.** Without peers reachable, your node starts at genesis (height 0), mines its own divergent chain, then hits the hardcoded checkpoint mismatch at ~height 250 and rejects its own blocks ("WARN block submit rejected ... reason=Hardcoded checkpoint mismatch"). Once your node is fully synced to the public tip, you can drop the addnode flags on subsequent restarts and rely on DNS.
+The `--addnode` flag points at the public testnet seed (Hetzner, Falkenstein DE — `2.29.34.197:28080`), an explicit fallback for the case where DNS seed resolution fails. **Use it for first sync.** Without a reachable peer, your node starts at genesis (height 0), mines its own divergent chain, and rejects its own blocks once it diverges from the public tip. Once fully synced, you can drop the `--addnode` flag on subsequent restarts and rely on DNS (`seed1.coincync.network`). Add more `--addnode` peers as the community brings up additional seeds.
 
 That's it. The node will:
 
@@ -48,7 +43,7 @@ That's it. The node will:
 4. Start the JSON-RPC server on `127.0.0.1:28081`
 5. Connect to the explicit seed IPs (and DNS seeds if those resolve), then begin syncing
 
-Sync from genesis takes 30-60 min depending on bandwidth — public testnet tip is currently around height 13,700. Watch `journalctl -u coincync-node -f` or the stdout log for `Imported block at height N` lines climbing toward the tip.
+Sync from genesis is quick on the current testnet (reset to genesis on 2026-09-04, so the chain is still short). Watch `journalctl -u coincync-node -f` or the stdout log for `Imported block at height N` lines climbing toward the tip. Check the live tip any time with the `get_info` RPC (below).
 
 Stop the node with `Ctrl-C`. Restart it later — chain state is on disk; it picks up where it left off.
 
@@ -63,14 +58,9 @@ killall coincync-node coincync-rig 2>/dev/null
 # Wipe the local (wrong-fork) chain data — wallet at ~/.coincync/testnet/wallets/ stays
 rm -rf ~/.coincync/testnet/chain ~/.coincync/testnet/blocks
 
-# Restart with explicit peers, wait for sync to ~13,700+ before mining
+# Restart with the explicit peer, then wait until synced to the current tip before mining
 ./coincync-node --network testnet --data-dir ~/.coincync \
-    --addnode 66.135.23.193:28080 \
-    --addnode 140.82.57.168:28080 \
-    --addnode 207.148.111.76:28080 \
-    --addnode 207.148.6.50:28080 \
-    --addnode 95.179.165.225:28080 \
-    --addnode 192.248.151.16:28080
+    --addnode 2.29.34.197:28080
 ```
 
 ## What success looks like

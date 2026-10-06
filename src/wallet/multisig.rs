@@ -25,6 +25,55 @@
 //!   CLSAG (custom FROST ciphersuite, a v2 goal) replaces it. The wallet CLI
 //!   surfaces this to the operator at runtime. `clsag_multisig.rs` is the
 //!   design sketch for the future true-threshold path and is not wired.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `generate_shares`** — INVARIANT: keygen parameters are validated —
+//!   `threshold >= 2`, `total >= threshold`, `total <= 255` — so only a genuine
+//!   t-of-n scheme is produced.
+//!   THREAT: a degenerate `1-of-1` or `t > n` "multisig" would silently drop the
+//!   threshold guarantee. TESTS: `test_2_of_3_keygen`,
+//!   `generate_shares_rejects_threshold_greater_than_total`,
+//!   `generate_shares_rejects_threshold_below_two`.
+//! - **§2 `verify_shares`** — INVARIANT: every share must agree on the group
+//!   config; a tampered `group_public_key` is rejected.
+//!   THREAT: mismatched shares would build an unusable or attacker-substituted
+//!   group key. TESTS: `verify_shares_rejects_tampered_group_key`.
+//! - **§3 `signing_round1` / `signing_round2` / `aggregate_signature`** —
+//!   INVARIANT: a valid signature requires a full quorum of the threshold; a
+//!   below-threshold or duplicate-participant set does not yield a verifying
+//!   signature.
+//!   THREAT: partial/insufficient signatures forging a spend below quorum.
+//!   TESTS: `test_2_of_3_full_signing`, `aggregate_signature_fails_below_threshold`,
+//!   `aggregate_signature_rejects_duplicate_participant`.
+//! - **§4 `signing_round2` (nonce single-use)** — INVARIANT: `Round1Secret` is
+//!   consumed by value so FROST nonces are used at most once, and signing with a
+//!   mismatched round-1 secret never yields a valid group signature.
+//!   THREAT: nonce reuse leaks a participant's signing share (RFC 9591).
+//!   TESTS: `signing_round2_with_wrong_round1_secret_does_not_yield_valid_signature`.
+//! - **§5 `verify_signature`** — INVARIANT: a signature verifies only against the
+//!   exact message it signed.
+//!   THREAT: message malleability would let a signature authorize a different
+//!   transaction. TESTS: `verify_signature_rejects_different_message`.
+//! - **§6 `reconstruct_group_secret`** — INVARIANT: Lagrange interpolation over
+//!   any threshold-sized subset reconstructs the SAME secret (the discrete log of
+//!   the group key); signing shares must be exactly 32 bytes and duplicate
+//!   participant IDs are rejected.
+//!   THREAT: silent share truncation (C35) or a degenerate basis producing a
+//!   wrong key. TESTS: `reconstructed_secret_derives_the_group_public_key`,
+//!   `different_threshold_subsets_reconstruct_same_secret`,
+//!   `reconstruct_rejects_duplicate_participant_ids`,
+//!   `reconstruct_rejects_share_longer_than_32_bytes`,
+//!   `reconstruct_rejects_share_shorter_than_32_bytes`,
+//!   `reconstruct_accepts_exactly_32_byte_shares`.
+//! - **§7 `clsag_sign_multisig`** — INVARIANT: the reconstruct-sign-zeroize path
+//!   produces a standard CLSAG signature that verifies against the ring and
+//!   pseudo-output, indistinguishable from single-signer, and fails a different
+//!   message.
+//!   THREAT: a threshold spend that fails to verify (funds stuck) or leaks the
+//!   transiently-held group key. TESTS: `clsag_sign_multisig_produces_verifiable_signature`.
 
 use frost_ed25519 as frost;
 use rand::rngs::OsRng;
@@ -627,5 +676,315 @@ mod tests {
         // Reconstruct with the first `threshold` shares.
         let _secret = reconstruct_group_secret(&keygen.shares[..2])
             .expect("valid 32-byte shares must reconstruct");
+    }
+
+    // ── keygen parameter validation ────────────────────────────────────────
+
+    /// `generate_shares` must reject a threshold that exceeds the participant
+    /// total — a `t-of-n` scheme is nonsensical when `t > n`.
+    #[test]
+    fn generate_shares_rejects_threshold_greater_than_total() {
+        let err = generate_shares(3, 2).err().expect("threshold>total must be rejected");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("total must be >= threshold"),
+            "expected total>=threshold rejection, got: {}",
+            msg
+        );
+    }
+
+    /// Boundary: a threshold below 2 is rejected. This pins that a `0`
+    /// threshold and a degenerate `1-of-1` "multisig" are both refused — the
+    /// implementation requires a genuine ≥2 threshold.
+    #[test]
+    fn generate_shares_rejects_threshold_below_two() {
+        // threshold 0
+        let err0 = generate_shares(0, 3).err().expect("threshold 0 must be rejected");
+        assert!(
+            format!("{}", err0).contains("threshold must be >= 2"),
+            "threshold 0 must be rejected"
+        );
+        // 1-of-1 boundary
+        let err1 = generate_shares(1, 1).err().expect("1-of-1 must be rejected");
+        assert!(
+            format!("{}", err1).contains("threshold must be >= 2"),
+            "1-of-1 must be rejected"
+        );
+    }
+
+    // ── share / config integrity ───────────────────────────────────────────
+
+    /// `verify_shares` cross-checks that every share agrees on the group
+    /// config. A share whose `group_public_key` has been tampered must be
+    /// caught (the verifier is a consistency gate, not a per-share crypto
+    /// check).
+    #[test]
+    fn verify_shares_rejects_tampered_group_key() {
+        let keygen = generate_shares(2, 3).unwrap();
+        let mut shares = keygen.shares.clone();
+        // Flip a byte of one share's advertised group public key.
+        shares[1].config.group_public_key[0] ^= 0xFF;
+        let err = verify_shares(&shares).unwrap_err();
+        assert!(
+            format!("{}", err).contains("group key mismatch"),
+            "tampered group key must be rejected"
+        );
+    }
+
+    // ── signing failure modes ──────────────────────────────────────────────
+
+    /// A single participant (below the 2-of-3 threshold) cannot produce a
+    /// valid aggregate signature.
+    #[test]
+    fn aggregate_signature_fails_below_threshold() {
+        let keygen = generate_shares(2, 3).unwrap();
+        let message = b"below-threshold attempt";
+
+        let (r1_out_1, r1_secret_1) = signing_round1(&keygen.shares[0]).unwrap();
+        let all_commitments = vec![r1_out_1];
+
+        // Only one signer's material for a 2-of-3 group must NOT yield a
+        // verifiable signature. FROST enforces this at the earliest possible
+        // point — round2 refuses a below-threshold commitment set ("Incorrect
+        // number of commitments") — but the property also holds if it instead
+        // surfaces at aggregation or verification. Accept a rejection at any
+        // stage; only a verifying signature is a failure.
+        match signing_round2(&keygen.shares[0], r1_secret_1, &all_commitments, message) {
+            Err(_) => {}
+            Ok(r2_out_1) => {
+                match aggregate_signature(
+                    &all_commitments,
+                    &[r2_out_1],
+                    &keygen.config,
+                    &keygen.shares,
+                    message,
+                ) {
+                    Err(_) => {}
+                    Ok(sig) => assert!(
+                        verify_signature(&sig, message).is_err(),
+                        "a single-signer aggregate for a 2-of-3 group must not verify"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Feeding the same participant twice (duplicate id) must not fabricate a
+    /// quorum: the duplicate collapses to one signer, so the aggregate for a
+    /// 2-of-3 group cannot verify.
+    #[test]
+    fn aggregate_signature_rejects_duplicate_participant() {
+        let keygen = generate_shares(2, 3).unwrap();
+        let message = b"duplicate participant attempt";
+
+        let (r1_out_1, r1_secret_1) = signing_round1(&keygen.shares[0]).unwrap();
+
+        // Present participant 1's commitment (and share) twice to fake a
+        // 2-signer quorum. FROST must not be fooled: the duplicate is rejected
+        // at round2 or aggregation, or the resulting signature fails to verify —
+        // any of those is correct; only a verifying signature is a failure.
+        let dup_commitments = vec![r1_out_1.clone(), r1_out_1];
+        match signing_round2(&keygen.shares[0], r1_secret_1, &dup_commitments, message) {
+            Err(_) => {}
+            Ok(r2_out_1) => {
+                let dup_shares = vec![r2_out_1.clone(), r2_out_1];
+                match aggregate_signature(
+                    &dup_commitments,
+                    &dup_shares,
+                    &keygen.config,
+                    &keygen.shares,
+                    message,
+                ) {
+                    Err(_) => {}
+                    Ok(sig) => assert!(
+                        verify_signature(&sig, message).is_err(),
+                        "a duplicated single participant must not satisfy a 2-of-3 quorum"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// A completed signature must not verify against a message other than the
+    /// one it signed.
+    #[test]
+    fn verify_signature_rejects_different_message() {
+        let keygen = generate_shares(2, 3).unwrap();
+        let signed_message = b"authorize payment #1";
+
+        let (o1, s1) = signing_round1(&keygen.shares[0]).unwrap();
+        let (o2, s2) = signing_round1(&keygen.shares[1]).unwrap();
+        let all_commitments = vec![o1.clone(), o2.clone()];
+        let r2_1 = signing_round2(&keygen.shares[0], s1, &all_commitments, signed_message).unwrap();
+        let r2_2 = signing_round2(&keygen.shares[1], s2, &all_commitments, signed_message).unwrap();
+        let sig = aggregate_signature(
+            &all_commitments,
+            &[r2_1, r2_2],
+            &keygen.config,
+            &keygen.shares,
+            signed_message,
+        )
+        .unwrap();
+
+        assert!(verify_signature(&sig, signed_message).unwrap());
+        // A different message must NOT verify (returns Err on the failed check).
+        assert!(
+            verify_signature(&sig, b"authorize payment #2").is_err(),
+            "signature over a different message must not verify"
+        );
+    }
+
+    /// Round 2 must be driven by the SAME Round-1 secret whose commitment is in
+    /// the signing package. Signing with a mismatched (unrelated) Round-1
+    /// secret must never yield a valid group signature — either round 2 rejects
+    /// it, aggregation fails, or the result fails to verify.
+    #[test]
+    fn signing_round2_with_wrong_round1_secret_does_not_yield_valid_signature() {
+        let keygen = generate_shares(2, 3).unwrap();
+        let message = b"nonce/commitment mismatch";
+
+        let (o1, _s1) = signing_round1(&keygen.shares[0]).unwrap();
+        let (o2, s2) = signing_round1(&keygen.shares[1]).unwrap();
+        // A SECOND, unrelated round-1 secret for participant 1 whose commitment
+        // is deliberately NOT the one placed in the signing package.
+        let (_o1b, s1b) = signing_round1(&keygen.shares[0]).unwrap();
+        let all_commitments = vec![o1.clone(), o2.clone()];
+
+        let bad = signing_round2(&keygen.shares[0], s1b, &all_commitments, message);
+        let good2 =
+            signing_round2(&keygen.shares[1], s2, &all_commitments, message).unwrap();
+
+        match bad {
+            // Rejected outright at round 2 — acceptable.
+            Err(_) => {}
+            Ok(bad1) => {
+                let agg = aggregate_signature(
+                    &all_commitments,
+                    &[bad1, good2],
+                    &keygen.config,
+                    &keygen.shares,
+                    message,
+                );
+                match agg {
+                    Err(_) => {}
+                    Ok(sig) => assert!(
+                        verify_signature(&sig, message).is_err(),
+                        "a signature built from a mismatched round-1 secret must not verify"
+                    ),
+                }
+            }
+        }
+    }
+
+    // ── secret reconstruction properties ───────────────────────────────────
+
+    /// The reconstructed group secret must be the discrete log of the group
+    /// public key: `s · B_ed25519 == group_public_key`. FROST-ed25519 shares
+    /// are ed25519 scalars, so the Lagrange-interpolated secret times the
+    /// ed25519 basepoint must recover the serialized group verifying key.
+    #[test]
+    fn reconstructed_secret_derives_the_group_public_key() {
+        let keygen = generate_shares(2, 3).unwrap();
+        let secret = reconstruct_group_secret(&keygen.shares[..2]).unwrap();
+
+        let s_bytes = secret.to_bytes();
+        let s: Scalar = Option::<Scalar>::from(Scalar::from_canonical_bytes(s_bytes))
+            .expect("reconstructed group secret must be a canonical scalar");
+        let derived = (curve25519_dalek::constants::ED25519_BASEPOINT_POINT * s)
+            .compress()
+            .to_bytes();
+        assert_eq!(
+            derived, keygen.config.group_public_key,
+            "reconstructed secret must derive the group public key"
+        );
+    }
+
+    /// Any valid threshold-sized subset of shares must reconstruct the SAME
+    /// group secret. Shares {1,2} and {2,3} of a 2-of-3 group both interpolate
+    /// to the identical secret.
+    #[test]
+    fn different_threshold_subsets_reconstruct_same_secret() {
+        let keygen = generate_shares(2, 3).unwrap();
+        let s_12 = reconstruct_group_secret(&keygen.shares[0..2]).unwrap();
+        let s_23 = reconstruct_group_secret(&keygen.shares[1..3]).unwrap();
+        assert_eq!(
+            s_12.to_bytes(),
+            s_23.to_bytes(),
+            "distinct threshold subsets must reconstruct the same group secret"
+        );
+    }
+
+    /// A duplicated participant id inside a reconstruction set is a degenerate
+    /// Lagrange basis (a zero denominator) and must be rejected rather than
+    /// producing a wrong secret.
+    #[test]
+    fn reconstruct_rejects_duplicate_participant_ids() {
+        let keygen = generate_shares(2, 3).unwrap();
+        let dup = vec![keygen.shares[0].clone(), keygen.shares[0].clone()];
+        let err = reconstruct_group_secret(&dup).unwrap_err();
+        assert!(
+            format!("{}", err).contains("duplicate participant"),
+            "duplicate participant IDs must be rejected"
+        );
+    }
+
+    // ── CLSAG threshold signing ────────────────────────────────────────────
+
+    /// `clsag_sign_multisig` reconstructs the group secret and produces a
+    /// standard CLSAG signature that verifies against the ring, pseudo-output
+    /// and key image — and fails for a different message.
+    #[test]
+    fn clsag_sign_multisig_produces_verifiable_signature() {
+        use crate::crypto::{clsag_verify, ClsagRingMember, EcCommitment, SecretScalar};
+
+        let keygen = generate_shares(2, 3).unwrap();
+        // The real ring member's public key must be the group secret's public.
+        let group_secret = reconstruct_group_secret(&keygen.shares[..2]).unwrap();
+        let group_public = group_secret.to_public();
+
+        let value = 1000u64;
+        let z_real = SecretScalar::random(&mut OsRng);
+        let real_commitment = EcCommitment::commit(value, &z_real);
+        let z_pseudo = SecretScalar::random(&mut OsRng);
+        let pseudo_output = EcCommitment::commit(value, &z_pseudo);
+        let blinding_diff =
+            SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
+
+        let decoy1 = SecretScalar::random(&mut OsRng);
+        let decoy2 = SecretScalar::random(&mut OsRng);
+        let ring = vec![
+            ClsagRingMember::new(group_public, real_commitment),
+            ClsagRingMember::new(
+                decoy1.to_public(),
+                EcCommitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+            ClsagRingMember::new(
+                decoy2.to_public(),
+                EcCommitment::commit(value, &SecretScalar::random(&mut OsRng)),
+            ),
+        ];
+
+        let message = b"CoinCync threshold CLSAG spend";
+        let sig = clsag_sign_multisig(
+            message,
+            &ring,
+            0, // real index
+            &keygen.shares[..2],
+            &blinding_diff,
+            &pseudo_output,
+        )
+        .unwrap();
+
+        // Verifies against the correct ring / pseudo-output / key image.
+        assert!(
+            clsag_verify(message, &ring, &pseudo_output, &sig),
+            "threshold CLSAG signature must verify"
+        );
+        // Key image is a well-formed (non-identity) point — clsag_verify checks
+        // this, so a wrong message must fail.
+        assert!(
+            !clsag_verify(b"different message", &ring, &pseudo_output, &sig),
+            "threshold CLSAG signature must not verify a different message"
+        );
     }
 }

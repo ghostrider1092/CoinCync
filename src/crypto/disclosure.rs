@@ -11,6 +11,110 @@
 //! - Non-interactive (Fiat-Shamir transform)
 //! - Domain-separated (no cross-proof forgery)
 //! - Self-contained (verifier only needs proof + public chain data)
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `create_balance_proof`** — INVARIANT: the Schnorr nonce `k` and the
+//!   blinding difference `d = r - r'` never outlive their use — both are wiped
+//!   (R-18/R-19), so no secret material is left on the stack; refuses to prove
+//!   when `value < threshold`.
+//!   THREAT: nonce leakage recovers the blinding/private key (BIP-340 "any
+//!   leakage of k is fatal"; Sony PS3 / MtGox ECDSA nonce disasters).
+//!   TESTS: `test_balance_proof_valid`, `test_balance_proof_exact_threshold`,
+//!   `test_balance_proof_insufficient`.
+//! - **§2 `verify_balance_proof`** — INVARIANT: accepts iff the Schnorr blinding-
+//!   difference proof AND the range proof on `C'` both hold; Schnorr R is decoded
+//!   canonically and non-identity, `s` is a canonical scalar (no mod-order
+//!   reduction), and the final compare is constant-time (C11-FIX).
+//!   THREAT: forged/tampered commitment, non-canonical or identity R nonce, or a
+//!   timing side-channel accepting a value below threshold (SEC 2026-09-07).
+//!   TESTS: `test_balance_proof_wrong_commitment`,
+//!   `balance_verify_rejects_noncanonical_and_identity_schnorr_r`.
+//! - **§3 `create_ownership_proof`** — INVARIANT: rejects a secret that does not
+//!   match the stealth address; the challenge binds `tx_hash`, `output_index`,
+//!   stealth address and `message`.
+//!   THREAT: replay of the bearer token (M1 — freshness rests entirely on a
+//!   verifier-chosen `message`), or attempting to prove under a wrong key.
+//!   TESTS: `test_ownership_proof_valid`, `test_ownership_proof_wrong_key`.
+//! - **§4 `verify_ownership_proof`** — INVARIANT: the Schnorr identity `s*G == R +
+//!   c*P` holds only if the prover knows the one-time secret; R must be
+//!   non-identity; `s` canonically decoded; compare is constant-time (C11-FIX).
+//!   THREAT: a tampered message (challenge changes) or an identity R nonce
+//!   (SEC 2026-09-07) forging ownership.
+//!   TESTS: `test_ownership_proof_different_message`,
+//!   `ownership_verify_rejects_identity_r`.
+//! - **§5 `create_sum_proof`** — INVARIANT: the total is a checked (no-overflow)
+//!   sum, output refs are unique, the height range is well-ordered, and the
+//!   transcript challenge binds every field.
+//!   THREAT: R-20 — `sum_blinding` (r_sum) is transmitted in cleartext, so a
+//!   duplicate output or silent overflow could let a prover misstate a total or
+//!   double-count an output.
+//!   TESTS: `test_sum_proof_valid`,
+//!   `create_sum_proof_rejects_empty_outputs_and_bad_height_range`,
+//!   `test_sum_proof_rejects_duplicate_outputs_and_ref_tampering`.
+//! - **§6 `verify_sum_proof`** — INVARIANT: accepts iff `sum(C_i) ==
+//!   commit(claimed_total, r_sum)` (homomorphic opening) AND the transcript is
+//!   valid (version, ordered height range, unique refs, matching challenge);
+//!   constant-time compare.
+//!   THREAT: a tampered claimed total, mismatched/reordered commitments, or
+//!   duplicate output refs inflating the sum.
+//!   TESTS: `test_sum_proof_wrong_total`, `test_sum_proof_wrong_commitments`.
+//! - **§7 `create_source_proof`** — INVARIANT: rejects unless `P = x*G` AND the
+//!   key image `I = x*H_p(P)` both derive from the given secret; the challenge
+//!   binds R1, R2, P, I and `message`.
+//!   THREAT: producing a source proof for a key image not derived from the
+//!   prover's own key, or an M1 replay of the bearer token.
+//!   TESTS: `test_source_proof_valid`, `test_source_proof_wrong_key`.
+//! - **§8 `verify_source_proof`** — INVARIANT: the dual-base checks `s*G + c*P ==
+//!   R1` AND `s*H_p(P) + c*I == R2` are both constant-time and ANDed WITHOUT
+//!   short-circuit (R-21), proving one secret `x` underlies both P and I; R1/R2
+//!   must be non-identity.
+//!   THREAT: a tampered message, an identity R1/R2 nonce, or a timing leak
+//!   distinguishing which check failed (R-21 / SEC 2026-09-07).
+//!   TESTS: `test_source_proof_tampered_message`,
+//!   `source_verify_rejects_identity_r1_or_r2`.
+//! - **§9 `verify_balance_proof_anchored`** — INVARIANT: returns `Valid` only when
+//!   the crypto holds AND the proof's `original_commitment` equals a `ChainAnchor`
+//!   commitment the verifier resolved from its own trusted chain view.
+//!   THREAT: H1 (issues #252/#253) — a prover produces a sound range proof over a
+//!   commitment they invented; unanchored acceptance is not a sound trust
+//!   decision. Forgery (`CryptoInvalid`) is distinguished from `AnchorMismatch`.
+//!   TESTS: `test_balance_anchored_valid`,
+//!   `test_balance_anchored_mismatch_is_the_253_attack`,
+//!   `test_balance_anchored_crypto_invalid`.
+//! - **§10 `verify_ownership_proof_anchored`** — INVARIANT: returns `Valid` only
+//!   when the crypto holds AND the proof's output ref AND stealth address both
+//!   equal the trusted on-chain anchor.
+//!   THREAT: H1 (#252/#253) — a valid proof for a key the prover controls but that
+//!   was never the on-chain stealth address of that output, or a wrong output ref.
+//!   TESTS: `test_ownership_anchored_valid`,
+//!   `test_ownership_anchored_mismatch_is_the_253_attack`,
+//!   `test_ownership_anchored_rejects_wrong_output_ref`.
+//! - **§11 `verify_sum_proof_anchored`** — INVARIANT: every output ref must
+//!   uniquely resolve to an anchor whose height falls in the declared range and
+//!   whose commitment is a valid curve point, before the homomorphic sum is
+//!   checked against those anchors.
+//!   THREAT: H1 (#252/#253) — a cryptographically sound sum over outputs never
+//!   mined, a missing/duplicate ref, or an out-of-range height.
+//!   TESTS: `test_sum_anchored_valid_and_mismatch`,
+//!   `test_sum_proof_rejects_duplicate_outputs_and_ref_tampering`.
+//! - **§12 `verify_source_proof_anchored`** — INVARIANT: returns `Valid` only if
+//!   the crypto holds AND the key image is actually in the chain's spent set.
+//!   THREAT: H1 (#252/#253) — the prover proved they *could* generate a key image,
+//!   not that a real spend on chain ever used it.
+//!   TESTS: `test_source_anchored_valid_and_mismatch`.
+//! - **§13 `verify_internal_consistency`** — INVARIANT: the deprecated unanchored
+//!   `verify()` entry point hard-fails to force callers onto an anchored verifier;
+//!   `verify_internal_consistency` performs only the offline crypto check and
+//!   errors for Sum (needs on-chain commitments); expiry is advisory only.
+//!   THREAT: H1/H2 — treating unanchored consistency as a trust decision, or
+//!   relying on unauthenticated `expires_at` container metadata as a control.
+//!   TESTS: `disclosure_verify_unanchored_hard_fails`,
+//!   `internal_consistency_errors_for_sum_type`, `test_disclosure_serialization`,
+//!   `test_disclosure_expiry`, `test_proofs_domain_separated`,
+//!   `test_expired_proof_rejected`.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use curve25519_dalek::{ristretto::CompressedRistretto, scalar::Scalar};
@@ -24,6 +128,17 @@ use crate::crypto::{
     create_range_proof, hash_to_point, hash_to_scalar, verify_range_proof, BlindingFactor,
     KeyImage, PedersenCommitment, PublicPoint, RangeProof, SecretScalar,
 };
+
+// Unlinkable solvency rests on the (unaudited) Groth-Kohlweiss one-of-many, which
+// is only compiled under `sketch-gk-proof`, so the feature is gated identically.
+#[cfg(feature = "sketch-gk-proof")]
+use crate::crypto::bulletproofs::{blinding_generator, value_generator};
+#[cfg(feature = "sketch-gk-proof")]
+use crate::crypto::groth_kohlweiss::{
+    prove_one_of_many_gen_ctx, verify_one_of_many_gen_ctx, GkOneOfManyProof,
+};
+#[cfg(feature = "sketch-gk-proof")]
+use curve25519_dalek::ristretto::RistrettoPoint;
 use crate::error::{Error, Result};
 use crate::primitives::{hash_domain, Hash, PublicKey, SecretKey};
 use subtle::ConstantTimeEq;
@@ -204,9 +319,12 @@ pub fn verify_balance_proof(proof: &BalanceProof) -> Result<bool> {
         .decompress()
         .ok_or_else(|| Error::CryptoError("Invalid adjusted commitment".into()))?;
 
-    let r_point = CompressedRistretto(proof.schnorr_r)
-        .decompress()
-        .ok_or_else(|| Error::CryptoError("Invalid Schnorr R point".into()))?;
+    // SEC (2026-09-07): reject non-canonical AND identity R (defense in depth —
+    // identity nonce points have no legitimate use in these Fiat-Shamir Schnorr
+    // proofs). Matches the scalar-side PeerScalar migration.
+    let r_point = *crate::crypto::PeerPoint::decode_non_identity(proof.schnorr_r)
+        .map_err(|_| Error::CryptoError("Invalid Schnorr R point (non-canonical or identity)".into()))?
+        .as_point();
 
     // Compute delta = C - threshold*H
     // H is the value generator (generator_h in our convention)
@@ -257,6 +375,416 @@ pub fn verify_balance_proof(proof: &BalanceProof) -> Result<bool> {
 }
 
 // =============================================================================
+// 1b. UNLINKABLE SOLVENCY PROOF - "one of these outputs is mine and holds >= X"
+// =============================================================================
+
+/// Proof that **one** on-chain output in an anonymity set holds `value >=
+/// threshold`, **without revealing which** — so an org can prove treasury
+/// solvency without exposing which UTXO is the treasury.
+///
+/// Construction (all in the transparent Pedersen basis `C = v·H + r·G`):
+/// - `V = value·H + value_blinding·G` — a fresh commitment to the treasury value.
+/// - **membership**: a Groth-Kohlweiss one-of-many over `{Cᵢ − V}` with blinding
+///   generator `G` (via [`prove_one_of_many_gen_ctx`]). It succeeds only at the
+///   hidden `l` where `Cₗ − V ∈ ⟨G⟩`, i.e. `Cₗ` and `V` commit to the **same
+///   value** (the `H` component cancels ⟺ `vₗ = value`).
+/// - **balance**: the existing range proof over `V` proving `value >= threshold`.
+///
+/// Together: some real output has value ≥ threshold, hidden which. SOUNDNESS
+/// note: this is only a trust decision once every `anonymity_set` member is
+/// confirmed to be a real on-chain commitment (the anchored/compliance layer);
+/// on its own it proves a statement about a *caller-supplied* set.
+#[cfg(feature = "sketch-gk-proof")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UnlinkableSolvencyProof {
+    /// The candidate on-chain output commitments (power-of-two count), the
+    /// treasury hidden at one index.
+    pub anonymity_set: Vec<[u8; 32]>,
+    /// `V = value·H + value_blinding·G`.
+    pub value_commitment: [u8; 32],
+    /// One-of-many over `{Cᵢ − V}` (blinding generator `G`).
+    pub membership: GkOneOfManyProof,
+    /// Range proof over `V` proving `value >= threshold`.
+    pub balance: BalanceProof,
+    /// The disclosed lower bound.
+    pub threshold: u64,
+    /// Chain height the proof is asserted "as of" (bound into the challenge).
+    /// The claim is that some anonymity-set member **held** `>= threshold` at
+    /// this height — NOT that it is currently unspent. The auditor should treat
+    /// a stale height with suspicion (a freshness policy) and remember that a
+    /// current-unspent guarantee is impossible without revealing the treasury's
+    /// key image (which would break unlinkability).
+    pub as_of_height: u64,
+}
+
+/// Domain-separated Fiat-Shamir context binding `V` and the threshold into the
+/// membership proof (the set itself is bound via the GK challenge).
+#[cfg(feature = "sketch-gk-proof")]
+fn unlinkable_solvency_ctx(v_bytes: &[u8; 32], threshold: u64, as_of_height: u64) -> Vec<u8> {
+    let mut c = Vec::with_capacity(72);
+    c.extend_from_slice(b"COINCYNC_UNLINKABLE_SOLVENCY_v1");
+    c.extend_from_slice(v_bytes);
+    c.extend_from_slice(&threshold.to_le_bytes());
+    c.extend_from_slice(&as_of_height.to_le_bytes());
+    c
+}
+
+/// Build an [`UnlinkableSolvencyProof`]. `treasury_blinding` is the blinding of
+/// the on-chain treasury commitment `anonymity_set[l]`; `value` is its amount.
+/// The set size must be a power of two ≥ 2.
+#[cfg(feature = "sketch-gk-proof")]
+pub fn create_unlinkable_solvency_proof(
+    value: u64,
+    treasury_blinding: &BlindingFactor,
+    anonymity_set: &[[u8; 32]],
+    l: usize,
+    threshold: u64,
+    as_of_height: u64,
+) -> Result<UnlinkableSolvencyProof> {
+    let n = anonymity_set.len();
+    if n < 2 || !n.is_power_of_two() {
+        return Err(Error::CryptoError(
+            "unlinkable solvency: anonymity set size must be a power of two >= 2".into(),
+        ));
+    }
+    if l >= n {
+        return Err(Error::CryptoError(
+            "unlinkable solvency: treasury index out of range".into(),
+        ));
+    }
+    if value < threshold {
+        return Err(Error::CryptoError(
+            "unlinkable solvency: value is below the threshold".into(),
+        ));
+    }
+
+    // The caller's opening must match the on-chain treasury commitment.
+    let expected_cl = PedersenCommitment::commit(value, treasury_blinding);
+    if expected_cl.to_bytes() != anonymity_set[l] {
+        return Err(Error::CryptoError(
+            "unlinkable solvency: (value, blinding) does not open anonymity_set[l]".into(),
+        ));
+    }
+
+    // Decompress the candidate set.
+    let mut set_points = Vec::with_capacity(n);
+    for c in anonymity_set {
+        let p = CompressedRistretto(*c).decompress().ok_or_else(|| {
+            Error::CryptoError("unlinkable solvency: non-canonical commitment in set".into())
+        })?;
+        set_points.push(p);
+    }
+
+    // V and its point.
+    let mut rng = OsRng;
+    let value_blinding = BlindingFactor::random(&mut rng);
+    let v_commitment = PedersenCommitment::commit(value, &value_blinding);
+    let v_point = v_commitment
+        .as_point()
+        .decompress()
+        .ok_or_else(|| Error::CryptoError("unlinkable solvency: V decompress failed".into()))?;
+
+    // W_i = C_i − V ; at l, W_l = (r_l − value_blinding)·G.
+    let shifted: Vec<RistrettoPoint> = set_points.iter().map(|c| *c - v_point).collect();
+    let witness = treasury_blinding.as_scalar() - value_blinding.as_scalar();
+    let ctx = unlinkable_solvency_ctx(&v_commitment.to_bytes(), threshold, as_of_height);
+    let membership = prove_one_of_many_gen_ctx(
+        &shifted,
+        l,
+        &witness,
+        value_generator(),
+        blinding_generator(),
+        &ctx,
+        &mut rng,
+    )?;
+
+    // Range/threshold proof over V.
+    let balance = create_balance_proof(value, &value_blinding, &v_commitment, threshold)?;
+
+    Ok(UnlinkableSolvencyProof {
+        anonymity_set: anonymity_set.to_vec(),
+        value_commitment: v_commitment.to_bytes(),
+        membership,
+        balance,
+        threshold,
+        as_of_height,
+    })
+}
+
+/// Verify an [`UnlinkableSolvencyProof`]: some member of `anonymity_set` holds
+/// `value >= threshold`, hidden which. Fail-closed. **Trust caveat:** the
+/// caller must independently confirm every `anonymity_set` member is a real
+/// on-chain commitment (the anchored layer) — this checks only the crypto over
+/// the supplied set.
+#[cfg(feature = "sketch-gk-proof")]
+pub fn verify_unlinkable_solvency_proof(proof: &UnlinkableSolvencyProof) -> Result<bool> {
+    let n = proof.anonymity_set.len();
+    if n < 2 || !n.is_power_of_two() {
+        return Ok(false);
+    }
+    // V and the balance proof must be about the same commitment + threshold.
+    if proof.balance.original_commitment != proof.value_commitment
+        || proof.balance.threshold != proof.threshold
+    {
+        return Ok(false);
+    }
+
+    let v_point = match CompressedRistretto(proof.value_commitment).decompress() {
+        Some(p) => p,
+        None => return Ok(false),
+    };
+    let mut shifted = Vec::with_capacity(n);
+    for c in &proof.anonymity_set {
+        match CompressedRistretto(*c).decompress() {
+            Some(p) => shifted.push(p - v_point),
+            None => return Ok(false),
+        }
+    }
+
+    let ctx = unlinkable_solvency_ctx(&proof.value_commitment, proof.threshold, proof.as_of_height);
+    if verify_one_of_many_gen_ctx(
+        &shifted,
+        &proof.membership,
+        value_generator(),
+        blinding_generator(),
+        &ctx,
+    )
+    .is_err()
+    {
+        return Ok(false);
+    }
+
+    // Range proof: V hides value >= threshold.
+    verify_balance_proof(&proof.balance)
+}
+
+// =============================================================================
+// 1c. MULTI-OUTPUT UNLINKABLE SOLVENCY - "K hidden outputs sum to >= X"
+// =============================================================================
+
+/// One hidden treasury output: its anonymity set, the value commitment `Vᵢ`, and
+/// the one-of-many binding `Vᵢ` to a real member of the set.
+#[cfg(feature = "sketch-gk-proof")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UnlinkableMember {
+    pub anonymity_set: Vec<[u8; 32]>,
+    pub value_commitment: [u8; 32],
+    pub membership: GkOneOfManyProof,
+}
+
+/// Proof that the **sum** of `K` hidden treasury outputs is `>= threshold`, each
+/// output hidden in its own anonymity set.
+///
+/// ## Double-count soundness
+/// The `K` anonymity sets are required to be **pairwise disjoint**. Combined with
+/// the per-member one-of-many (which needs the *opening* of a real set member to
+/// forge), this forces the `K` proven outputs to be **distinct**: a prover who
+/// owns one output cannot count it as several, because a second member would
+/// need an output in a disjoint set it does not own. So `K` valid members ⟹ `K`
+/// distinct real outputs whose values sum over the balance commitment.
+#[cfg(feature = "sketch-gk-proof")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MultiUnlinkableSolvencyProof {
+    pub members: Vec<UnlinkableMember>,
+    /// Range proof over `V = Σ Vᵢ` proving `Σ value >= threshold`.
+    pub balance: BalanceProof,
+    pub threshold: u64,
+    pub as_of_height: u64,
+}
+
+#[cfg(feature = "sketch-gk-proof")]
+fn multi_unlinkable_ctx(
+    v_bytes: &[u8; 32],
+    member_index: usize,
+    threshold: u64,
+    as_of_height: u64,
+) -> Vec<u8> {
+    let mut c = Vec::with_capacity(96);
+    c.extend_from_slice(b"COINCYNC_MULTI_UNLINKABLE_SOLVENCY_v1");
+    c.extend_from_slice(v_bytes);
+    c.extend_from_slice(&(member_index as u64).to_le_bytes());
+    c.extend_from_slice(&threshold.to_le_bytes());
+    c.extend_from_slice(&as_of_height.to_le_bytes());
+    c
+}
+
+/// Reject overlapping anonymity sets (the double-count guard): every commitment
+/// must appear in at most one member's set.
+#[cfg(feature = "sketch-gk-proof")]
+fn sets_are_pairwise_disjoint<'a>(sets: impl Iterator<Item = &'a Vec<[u8; 32]>>) -> bool {
+    let mut seen = HashSet::new();
+    for set in sets {
+        for c in set {
+            if !seen.insert(*c) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Build a [`MultiUnlinkableSolvencyProof`]. Each `treasury_*[i]` describes one
+/// owned output and its (disjoint) anonymity set.
+#[cfg(feature = "sketch-gk-proof")]
+pub fn create_multi_unlinkable_solvency_proof(
+    treasury_values: &[u64],
+    treasury_blindings: &[BlindingFactor],
+    anonymity_sets: &[Vec<[u8; 32]>],
+    treasury_indices: &[usize],
+    threshold: u64,
+    as_of_height: u64,
+) -> Result<MultiUnlinkableSolvencyProof> {
+    let k = treasury_values.len();
+    if k == 0 {
+        return Err(Error::CryptoError("multi solvency: no treasury outputs".into()));
+    }
+    if treasury_blindings.len() != k || anonymity_sets.len() != k || treasury_indices.len() != k {
+        return Err(Error::CryptoError("multi solvency: mismatched input lengths".into()));
+    }
+    let total: u128 = treasury_values.iter().map(|v| *v as u128).sum();
+    if total < threshold as u128 {
+        return Err(Error::CryptoError("multi solvency: sum is below the threshold".into()));
+    }
+    if !sets_are_pairwise_disjoint(anonymity_sets.iter()) {
+        return Err(Error::CryptoError(
+            "multi solvency: anonymity sets must be pairwise disjoint (double-count guard)".into(),
+        ));
+    }
+
+    let mut rng = OsRng;
+    let mut members = Vec::with_capacity(k);
+    let mut v_sum = RistrettoPoint::default();
+    let mut value_sum: u64 = 0;
+    let mut vb_sum = BlindingFactor::zero();
+
+    for i in 0..k {
+        let v = treasury_values[i];
+        let tb = &treasury_blindings[i];
+        let set = &anonymity_sets[i];
+        let l = treasury_indices[i];
+        let n = set.len();
+        if n < 2 || !n.is_power_of_two() {
+            return Err(Error::CryptoError(
+                "multi solvency: each anonymity set size must be a power of two >= 2".into(),
+            ));
+        }
+        if l >= n {
+            return Err(Error::CryptoError("multi solvency: treasury index out of range".into()));
+        }
+        if PedersenCommitment::commit(v, tb).to_bytes() != set[l] {
+            return Err(Error::CryptoError(
+                "multi solvency: (value, blinding) does not open anonymity_set[i][l]".into(),
+            ));
+        }
+
+        let vb = BlindingFactor::random(&mut rng);
+        let v_commit = PedersenCommitment::commit(v, &vb);
+        let v_point = v_commit
+            .as_point()
+            .decompress()
+            .ok_or_else(|| Error::CryptoError("multi solvency: V decompress".into()))?;
+
+        let mut shifted = Vec::with_capacity(n);
+        for c in set {
+            let p = CompressedRistretto(*c).decompress().ok_or_else(|| {
+                Error::CryptoError("multi solvency: non-canonical commitment in set".into())
+            })?;
+            shifted.push(p - v_point);
+        }
+        let witness = tb.as_scalar() - vb.as_scalar();
+        let ctx = multi_unlinkable_ctx(&v_commit.to_bytes(), i, threshold, as_of_height);
+        let membership = prove_one_of_many_gen_ctx(
+            &shifted,
+            l,
+            &witness,
+            value_generator(),
+            blinding_generator(),
+            &ctx,
+            &mut rng,
+        )?;
+
+        v_sum += v_point;
+        value_sum = value_sum
+            .checked_add(v)
+            .ok_or_else(|| Error::CryptoError("multi solvency: value sum overflow".into()))?;
+        vb_sum = vb_sum.add(&vb);
+        members.push(UnlinkableMember {
+            anonymity_set: set.clone(),
+            value_commitment: v_commit.to_bytes(),
+            membership,
+        });
+    }
+
+    // Balance proof over V = Σ Vᵢ = value_sum·H + vb_sum·G.
+    let v_total = PedersenCommitment::from_bytes_unchecked(v_sum.compress().to_bytes());
+    let balance = create_balance_proof(value_sum, &vb_sum, &v_total, threshold)?;
+
+    Ok(MultiUnlinkableSolvencyProof {
+        members,
+        balance,
+        threshold,
+        as_of_height,
+    })
+}
+
+/// Verify a [`MultiUnlinkableSolvencyProof`]: disjoint sets, each member binds a
+/// value commitment to a real set member, and the sum meets the threshold.
+/// Fail-closed. The caller still anchors every set member on-chain.
+#[cfg(feature = "sketch-gk-proof")]
+pub fn verify_multi_unlinkable_solvency_proof(
+    proof: &MultiUnlinkableSolvencyProof,
+) -> Result<bool> {
+    if proof.members.is_empty() {
+        return Ok(false);
+    }
+    for m in &proof.members {
+        let n = m.anonymity_set.len();
+        if n < 2 || !n.is_power_of_two() {
+            return Ok(false);
+        }
+    }
+    // Double-count guard: the K sets must be pairwise disjoint.
+    if !sets_are_pairwise_disjoint(proof.members.iter().map(|m| &m.anonymity_set)) {
+        return Ok(false);
+    }
+
+    let mut v_sum = RistrettoPoint::default();
+    for (i, m) in proof.members.iter().enumerate() {
+        let v_point = match CompressedRistretto(m.value_commitment).decompress() {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+        let mut shifted = Vec::with_capacity(m.anonymity_set.len());
+        for c in &m.anonymity_set {
+            match CompressedRistretto(*c).decompress() {
+                Some(p) => shifted.push(p - v_point),
+                None => return Ok(false),
+            }
+        }
+        let ctx = multi_unlinkable_ctx(&m.value_commitment, i, proof.threshold, proof.as_of_height);
+        if verify_one_of_many_gen_ctx(
+            &shifted,
+            &m.membership,
+            value_generator(),
+            blinding_generator(),
+            &ctx,
+        )
+        .is_err()
+        {
+            return Ok(false);
+        }
+        v_sum += v_point;
+    }
+
+    if proof.balance.original_commitment != v_sum.compress().to_bytes()
+        || proof.balance.threshold != proof.threshold
+    {
+        return Ok(false);
+    }
+    verify_balance_proof(&proof.balance)
+}
+
+// =============================================================================
 // 2. OWNERSHIP PROOF - "I own this output"
 // =============================================================================
 
@@ -289,12 +817,19 @@ pub struct OwnershipProof {
 
 /// Create a proof of ownership for a transaction output.
 ///
+/// SECURITY — anti-replay (M1): this proof is a transferable bearer token. Its
+/// only freshness binding is `message`. For any interactive/authorization use,
+/// the VERIFIER must supply a unique, unpredictable challenge as `message` and
+/// reject a proof that doesn't carry it — otherwise a captured proof can be
+/// replayed to another verifier (or re-presented later) for the same output.
+/// A constant or prover-chosen `message` provides no replay protection.
+///
 /// # Arguments
 /// * `tx_hash` - Hash of the transaction containing the output
 /// * `output_index` - Index of the output
 /// * `stealth_address` - The on-chain stealth address (public key)
 /// * `one_time_secret` - The secret key for this stealth address
-/// * `message` - Challenge message (binds proof to a specific context)
+/// * `message` - Verifier-chosen fresh challenge (see the anti-replay note above)
 pub fn create_ownership_proof(
     tx_hash: &Hash,
     output_index: u8,
@@ -358,6 +893,11 @@ pub fn verify_ownership_proof(proof: &OwnershipProof) -> Result<bool> {
     // Decompress points
     let r_point = PublicPoint::from_bytes(proof.schnorr_r)
         .ok_or_else(|| Error::CryptoError("Invalid Schnorr R point".into()))?;
+    // SEC (2026-09-07): reject identity R (defense in depth — an identity nonce
+    // point has no legitimate use in this Fiat-Shamir Schnorr proof).
+    if r_point.is_identity() {
+        return Err(Error::CryptoError("Schnorr R point is identity".into()));
+    }
 
     let p_point = PublicPoint::from_bytes(*proof.stealth_address.as_bytes())
         .ok_or_else(|| Error::CryptoError("Invalid stealth address point".into()))?;
@@ -655,11 +1195,17 @@ pub struct SourceProof {
 
 /// Create a proof that a key image was generated from your secret key.
 ///
+/// SECURITY — anti-replay (M1): like the ownership proof, this is a
+/// transferable bearer token whose only freshness binding is `message`. For
+/// interactive/authorization use the VERIFIER must supply a unique,
+/// unpredictable challenge as `message` and reject any proof not carrying it;
+/// a constant or prover-chosen `message` gives no replay protection.
+///
 /// # Arguments
 /// * `secret_key` - The secret key x
 /// * `public_key` - The corresponding public key P = x*G
 /// * `key_image` - The key image I = x*H_p(P)
-/// * `message` - Context-binding message
+/// * `message` - Verifier-chosen fresh challenge (see the anti-replay note above)
 pub fn create_source_proof(
     secret_key: &SecretKey,
     public_key: &PublicKey,
@@ -739,6 +1285,10 @@ pub fn verify_source_proof(proof: &SourceProof) -> Result<bool> {
         .ok_or_else(|| Error::CryptoError("Invalid R1 point".into()))?;
     let r2 = PublicPoint::from_bytes(proof.r2)
         .ok_or_else(|| Error::CryptoError("Invalid R2 point".into()))?;
+    // SEC (2026-09-07): reject identity nonce points R1/R2 (defense in depth).
+    if r1.is_identity() || r2.is_identity() {
+        return Err(Error::CryptoError("Schnorr R1/R2 point is identity".into()));
+    }
     let p = PublicPoint::from_bytes(*proof.public_key.as_bytes())
         .ok_or_else(|| Error::CryptoError("Invalid public key point".into()))?;
     let i = PublicPoint::from_bytes(proof.key_image.to_bytes())
@@ -903,8 +1453,23 @@ impl DisclosureProof {
         }
     }
 
-    /// Verify the contained proof (dispatches to the appropriate verifier)
-    pub fn verify(&self) -> Result<bool> {
+    /// Verify ONLY that the contained proof is internally cryptographically
+    /// consistent — the range-proof math holds and the Schnorr/DLEQ signatures
+    /// verify.
+    ///
+    /// SECURITY (issues #252 / #253 — H1): this does **not** prove the
+    /// referenced commitment / stealth address / key image is a real output in
+    /// CoinCync's canonical chain. Every such reference is read from
+    /// prover-supplied data, so a prover can produce an internally-consistent
+    /// proof over a commitment they invented. **Never use this result as a
+    /// compliance or trust decision.** For a sound decision, resolve a
+    /// [`ChainAnchor`] from your own trusted chain view and use the
+    /// `verify_*_anchored` functions (or [`DisclosureProof::verify_anchored`]).
+    ///
+    /// The expiry gate below is an advisory convenience only: `expires_at` is
+    /// unauthenticated container metadata (H2) and MUST NOT be relied on as a
+    /// security control.
+    pub fn verify_internal_consistency(&self) -> Result<bool> {
         if self.is_expired() {
             return Ok(false);
         }
@@ -932,6 +1497,32 @@ impl DisclosureProof {
                 verify_source_proof(&inner)
             }
         }
+    }
+
+    /// Fail-closed verification entry point.
+    ///
+    /// SECURITY (H1): the previous `verify()` returned an *unanchored* result —
+    /// it would return `Ok(true)` for a cryptographically-consistent proof over
+    /// a commitment / key the prover invented, which is not a sound trust
+    /// decision (issues #252 / #253). To make that footgun unreachable through
+    /// the obvious entry point, this now hard-fails and directs the caller to an
+    /// anchored verifier. If you genuinely only need the offline crypto check,
+    /// call [`DisclosureProof::verify_internal_consistency`] explicitly.
+    #[deprecated(
+        note = "unanchored verification is not a sound trust decision (H1); \
+                use verify_*_anchored with a ChainAnchor, or \
+                verify_internal_consistency() for the offline check only"
+    )]
+    pub fn verify(&self) -> Result<bool> {
+        Err(Error::CryptoError(
+            "DisclosureProof::verify() is unanchored and is not a sound trust \
+             decision (H1, issues #252/#253): a prover can pass it with a \
+             commitment/key they invented. Resolve a ChainAnchor from your own \
+             trusted chain view and use verify_*_anchored, or call \
+             verify_internal_consistency() if you explicitly only need the \
+             offline cryptographic check."
+                .into(),
+        ))
     }
 }
 
@@ -1145,6 +1736,227 @@ mod tests {
         let sk = SecretKey::from_bytes(secret.to_bytes());
         let pk = PublicKey::from_bytes(public.to_bytes());
         (sk, pk)
+    }
+
+    // ---- Unlinkable Solvency Proof ----
+
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn unlinkable_solvency_proves_hidden_output_over_threshold_and_is_fail_closed() {
+        // A 4-output anonymity set; the treasury (value 5_000_000) is hidden at
+        // index 2, the others are unrelated outputs of varying value.
+        let vals = [1_000_000u64, 250_000, 5_000_000, 900_000];
+        let blindings: Vec<BlindingFactor> =
+            (0..4).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+        let set: Vec<[u8; 32]> = vals
+            .iter()
+            .zip(&blindings)
+            .map(|(v, b)| PedersenCommitment::commit(*v, b).to_bytes())
+            .collect();
+        let l = 2usize;
+        let threshold = 3_000_000u64;
+
+        let proof =
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, l, threshold, 1000).unwrap();
+        assert!(
+            verify_unlinkable_solvency_proof(&proof).unwrap(),
+            "honest unlinkable solvency proof must verify"
+        );
+        // The proof reveals the threshold but not which output is the treasury.
+        assert_eq!(proof.threshold, threshold);
+        assert_eq!(proof.anonymity_set.len(), 4);
+
+        // Can't prove a threshold above the actual value.
+        assert!(
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, l, 6_000_000, 1000).is_err(),
+            "threshold above value must be refused"
+        );
+        // Can't claim the treasury is an output you don't open (wrong index).
+        assert!(
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, 0, threshold, 1000).is_err(),
+            "opening must match anonymity_set[l]"
+        );
+
+        // Swapping in a different anonymity set breaks membership (V no longer
+        // matches any member) — a proof is bound to its exact set.
+        let mut foreign = proof.clone();
+        foreign.anonymity_set[l] =
+            PedersenCommitment::commit(5_000_000, &BlindingFactor::random(&mut OsRng)).to_bytes();
+        assert!(
+            !verify_unlinkable_solvency_proof(&foreign).unwrap(),
+            "a mismatched anonymity set must be rejected"
+        );
+
+        // Tampering with the range proof's threshold binding fails.
+        let mut bad = proof.clone();
+        bad.threshold = 1_000_000;
+        assert!(
+            !verify_unlinkable_solvency_proof(&bad).unwrap(),
+            "threshold/balance mismatch must be rejected"
+        );
+
+        // A non-power-of-two set is refused at creation.
+        assert!(
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set[..3], l.min(2), threshold, 1000)
+                .is_err(),
+            "non-power-of-two set refused"
+        );
+    }
+
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn unlinkable_solvency_adversarial_attacks() {
+        let n = 8usize;
+        let l = 3usize;
+        let threshold = 5_000_000u64;
+        let mk = |treasury_val: u64| {
+            let vals: Vec<u64> = (0..n)
+                .map(|i| if i == l { treasury_val } else { 1_000_000 + (i as u64) * 111 })
+                .collect();
+            let bs: Vec<BlindingFactor> = (0..n).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+            let set: Vec<[u8; 32]> = vals
+                .iter()
+                .zip(&bs)
+                .map(|(v, b)| PedersenCommitment::commit(*v, b).to_bytes())
+                .collect();
+            (vals, bs, set)
+        };
+        let (vals, bs, set) = mk(8_000_000);
+        let proof = create_unlinkable_solvency_proof(vals[l], &bs[l], &set, l, threshold, 1000).unwrap();
+        assert!(verify_unlinkable_solvency_proof(&proof).unwrap());
+
+        // A second, independent proof over a different set — for splicing attacks.
+        let (v2, b2, set2) = mk(7_000_000);
+        let proof2 = create_unlinkable_solvency_proof(v2[l], &b2[l], &set2, l, threshold, 1000).unwrap();
+
+        // (a) Inflate the claimed threshold above the real value: the range proof
+        // and the membership context both no longer hold.
+        let mut hi = proof.clone();
+        hi.threshold = 9_000_000;
+        hi.balance.threshold = 9_000_000;
+        assert!(!verify_unlinkable_solvency_proof(&hi).unwrap(), "cannot inflate threshold");
+
+        // (b) Threshold/balance mismatch.
+        let mut mm = proof.clone();
+        mm.threshold = 4_000_000;
+        assert!(!verify_unlinkable_solvency_proof(&mm).unwrap(), "threshold mismatch rejected");
+
+        // (c) Splice a foreign membership proof onto this V/set.
+        let mut spliced = proof.clone();
+        spliced.membership = proof2.membership.clone();
+        assert!(!verify_unlinkable_solvency_proof(&spliced).unwrap(), "spliced membership rejected");
+
+        // (d) Swap the value commitment V from another proof.
+        let mut swapv = proof.clone();
+        swapv.value_commitment = proof2.value_commitment;
+        assert!(!verify_unlinkable_solvency_proof(&swapv).unwrap(), "swapped V rejected");
+
+        // (e) Verify a valid proof against a foreign anonymity set.
+        let mut foreign = proof.clone();
+        foreign.anonymity_set = set2.clone();
+        assert!(!verify_unlinkable_solvency_proof(&foreign).unwrap(), "foreign set rejected");
+
+        // (f) A non-canonical set member (cannot decompress).
+        let mut malformed = proof.clone();
+        malformed.anonymity_set[0] = [0xFFu8; 32];
+        assert!(!verify_unlinkable_solvency_proof(&malformed).unwrap(), "malformed member rejected");
+
+        // (i) The "as of" height is bound into the challenge — changing it breaks
+        // the membership proof (a stale claim cannot be re-dated).
+        let mut redated = proof.clone();
+        redated.as_of_height += 1;
+        assert!(!verify_unlinkable_solvency_proof(&redated).unwrap(), "re-dated height rejected");
+
+        // (g) Cannot create a proof claiming more than the treasury holds.
+        assert!(
+            create_unlinkable_solvency_proof(vals[l], &bs[l], &set, l, 8_000_001, 1000).is_err(),
+            "threshold above value refused at creation"
+        );
+        // (h) Cannot create a proof whose (value, blinding) do not open set[l].
+        assert!(
+            create_unlinkable_solvency_proof(vals[l] + 1, &bs[l], &set, l, threshold, 1000).is_err(),
+            "opening must match the on-chain commitment"
+        );
+    }
+
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn multi_unlinkable_solvency_sums_and_blocks_double_count() {
+        let n = 4usize;
+        // Build one owned output hidden in its own 4-set. `base` keeps the sets
+        // disjoint (distinct decoy values => distinct commitments).
+        let mk = |treasury_val: u64, base: u64, tl: usize| {
+            let vals: Vec<u64> = (0..n)
+                .map(|i| if i == tl { treasury_val } else { base + i as u64 })
+                .collect();
+            let bs: Vec<BlindingFactor> = (0..n).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+            let set: Vec<[u8; 32]> = vals
+                .iter()
+                .zip(&bs)
+                .map(|(v, b)| PedersenCommitment::commit(*v, b).to_bytes())
+                .collect();
+            (vals[tl], bs[tl].clone(), set, tl)
+        };
+        let (v0, b0, set0, l0) = mk(3_000_000, 10, 1);
+        let (v1, b1, set1, l1) = mk(4_000_000, 5000, 2);
+        let threshold = 5_000_000u64; // 3M + 4M = 7M >= 5M
+
+        let proof = create_multi_unlinkable_solvency_proof(
+            &[v0, v1],
+            &[b0.clone(), b1.clone()],
+            &[set0.clone(), set1.clone()],
+            &[l0, l1],
+            threshold,
+            1000,
+        )
+        .unwrap();
+        assert!(
+            verify_multi_unlinkable_solvency_proof(&proof).unwrap(),
+            "honest 2-output sum verifies"
+        );
+
+        // Double-count: reuse the SAME output/set twice -> overlapping sets ->
+        // refused at creation (the core soundness guard).
+        assert!(
+            create_multi_unlinkable_solvency_proof(
+                &[v0, v0],
+                &[b0.clone(), b0.clone()],
+                &[set0.clone(), set0.clone()],
+                &[l0, l0],
+                threshold,
+                1000,
+            )
+            .is_err(),
+            "overlapping sets (double-count) refused"
+        );
+
+        // Threshold above the true sum.
+        assert!(
+            create_multi_unlinkable_solvency_proof(
+                &[v0, v1],
+                &[b0, b1],
+                &[set0.clone(), set1.clone()],
+                &[l0, l1],
+                8_000_000,
+                1000,
+            )
+            .is_err(),
+            "threshold above the sum refused"
+        );
+
+        // Inflating the claimed threshold after the fact.
+        let mut hi = proof.clone();
+        hi.threshold = 8_000_000;
+        hi.balance.threshold = 8_000_000;
+        assert!(!verify_multi_unlinkable_solvency_proof(&hi).unwrap(), "inflated threshold rejected");
+
+        // Making two sets overlap after the fact is rejected at verify.
+        let mut overlap = proof.clone();
+        overlap.members[1].anonymity_set[0] = overlap.members[0].anonymity_set[0];
+        assert!(
+            !verify_multi_unlinkable_solvency_proof(&overlap).unwrap(),
+            "post-hoc overlapping sets rejected"
+        );
     }
 
     // ---- Balance Proof ----
@@ -1366,8 +2178,8 @@ mod tests {
         assert_eq!(recovered.proof_type, DisclosureType::Ownership);
         assert_eq!(recovered.prover_label, "test proof");
 
-        // Verify recovered proof
-        assert!(recovered.verify().unwrap());
+        // Verify recovered proof (offline internal-consistency check)
+        assert!(recovered.verify_internal_consistency().unwrap());
     }
 
     #[test]
@@ -1381,7 +2193,7 @@ mod tests {
         let container = DisclosureProof::from_ownership(&ownership, "expired", Some(1)).unwrap();
 
         assert!(container.is_expired());
-        assert!(!container.verify().unwrap());
+        assert!(!container.verify_internal_consistency().unwrap());
     }
 
     #[test]
@@ -1398,7 +2210,7 @@ mod tests {
         tampered.proof_type = DisclosureType::Source;
 
         // Should fail because the inner data is an OwnershipProof, not a SourceProof
-        let result = tampered.verify();
+        let result = tampered.verify_internal_consistency();
         assert!(result.is_err() || !result.unwrap());
     }
 
@@ -1418,7 +2230,7 @@ mod tests {
             "Proof with timestamp=1 should be expired"
         );
         assert!(
-            !container.verify().unwrap(),
+            !container.verify_internal_consistency().unwrap(),
             "Expired proof must fail verification"
         );
 
@@ -1431,7 +2243,7 @@ mod tests {
         let valid_container =
             DisclosureProof::from_ownership(&ownership, "valid", Some(future_ts)).unwrap();
         assert!(!valid_container.is_expired());
-        assert!(valid_container.verify().unwrap());
+        assert!(valid_container.verify_internal_consistency().unwrap());
     }
 
     // ---- Chain anchoring (issues #252 / #253) ----
@@ -1708,6 +2520,124 @@ mod tests {
         assert_eq!(
             verify_source_proof_anchored(&proof, false).unwrap(),
             AnchorVerdict::AnchorMismatch
+        );
+    }
+
+    // ---- Identity / non-canonical nonce rejects (SEC 2026-09-07) ----
+
+    /// verify_balance_proof must reject a non-canonical OR identity Schnorr R
+    /// (decode_non_identity fails closed for both).
+    #[test]
+    fn balance_verify_rejects_noncanonical_and_identity_schnorr_r() {
+        let value = 1_000_000u64;
+        let blinding = BlindingFactor::random(&mut OsRng);
+        let commitment = PedersenCommitment::commit(value, &blinding);
+        let proof = create_balance_proof(value, &blinding, &commitment, 500_000).unwrap();
+
+        // Non-canonical R: 0xFF..FF does not decompress.
+        let mut noncanon = proof.clone();
+        noncanon.schnorr_r = [0xFFu8; 32];
+        assert!(
+            verify_balance_proof(&noncanon).is_err(),
+            "non-canonical Schnorr R must be rejected"
+        );
+
+        // Identity R: the all-zero Ristretto encoding is the identity point.
+        let mut identity = proof;
+        identity.schnorr_r = [0u8; 32];
+        assert!(
+            verify_balance_proof(&identity).is_err(),
+            "identity Schnorr R must be rejected"
+        );
+    }
+
+    /// verify_ownership_proof must reject an identity Schnorr R point.
+    #[test]
+    fn ownership_verify_rejects_identity_r() {
+        let (sk, pk) = make_test_keys();
+        let tx_hash = Hash::from_bytes([1u8; 32]);
+        let mut proof = create_ownership_proof(&tx_hash, 0, &pk, &sk, b"audit").unwrap();
+
+        proof.schnorr_r = [0u8; 32];
+        assert!(
+            verify_ownership_proof(&proof).is_err(),
+            "identity Schnorr R must be rejected"
+        );
+    }
+
+    /// verify_source_proof must reject identity R1 or identity R2.
+    #[test]
+    fn source_verify_rejects_identity_r1_or_r2() {
+        let secret = CurveSecretScalar::random(&mut OsRng);
+        let public = secret.to_public();
+        let ki = CurveKeyImage::from_secret(&secret);
+        let sk = SecretKey::from_bytes(secret.to_bytes());
+        let pk = PublicKey::from_bytes(public.to_bytes());
+        let proof = create_source_proof(&sk, &pk, &ki, b"compliance").unwrap();
+
+        let mut bad_r1 = proof.clone();
+        bad_r1.r1 = [0u8; 32];
+        assert!(
+            verify_source_proof(&bad_r1).is_err(),
+            "identity R1 must be rejected"
+        );
+
+        let mut bad_r2 = proof;
+        bad_r2.r2 = [0u8; 32];
+        assert!(
+            verify_source_proof(&bad_r2).is_err(),
+            "identity R2 must be rejected"
+        );
+    }
+
+    // ---- create_sum_proof input validation ----
+
+    /// create_sum_proof rejects an empty output set and an inverted height range.
+    #[test]
+    fn create_sum_proof_rejects_empty_outputs_and_bad_height_range() {
+        assert!(
+            create_sum_proof(&[], (0, 100)).is_err(),
+            "empty outputs must be rejected"
+        );
+
+        let b1 = BlindingFactor::random(&mut OsRng);
+        let outputs = vec![(100_000u64, b1, Hash::from_bytes([1u8; 32]), 0u8)];
+        assert!(
+            create_sum_proof(&outputs, (100, 0)).is_err(),
+            "inverted height range (start > end) must be rejected"
+        );
+    }
+
+    // ---- Container hard-fail / consistency ----
+
+    /// The deprecated unanchored `verify()` entry point must hard-fail (Err),
+    /// steering callers to the anchored verifiers.
+    #[test]
+    #[allow(deprecated)]
+    fn disclosure_verify_unanchored_hard_fails() {
+        let (sk, pk) = make_test_keys();
+        let tx_hash = Hash::from_bytes([1u8; 32]);
+        let ownership = create_ownership_proof(&tx_hash, 0, &pk, &sk, b"audit").unwrap();
+        let container = DisclosureProof::from_ownership(&ownership, "test", None).unwrap();
+
+        assert!(
+            container.verify().is_err(),
+            "unanchored verify() must hard-fail"
+        );
+    }
+
+    /// verify_internal_consistency for a Sum proof must Err — sum proofs require
+    /// on-chain commitments and cannot be checked standalone.
+    #[test]
+    fn internal_consistency_errors_for_sum_type() {
+        let b1 = BlindingFactor::random(&mut OsRng);
+        let outputs = vec![(100_000u64, b1, Hash::from_bytes([1u8; 32]), 0u8)];
+        let sum = create_sum_proof(&outputs, (0, 100)).unwrap();
+        let container = DisclosureProof::from_sum(&sum, "sum", None).unwrap();
+
+        assert!(
+            container.verify_internal_consistency().is_err(),
+            "Sum type must Err from verify_internal_consistency (needs commitments)"
         );
     }
 }

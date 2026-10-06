@@ -155,6 +155,38 @@ fn test_eviction_at_capacity() {
     );
 }
 
+/// Regression for #88 (junbyjun1238): a transaction that only clears the
+/// fullness-based dynamic minimum must NOT be admitted by evicting strictly
+/// higher-fee-rate residents. It should be rejected instead — the mirror image
+/// of `test_eviction_at_capacity` (where a *higher*-fee tx legitimately evicts).
+#[test]
+fn low_fee_tx_does_not_evict_higher_fee_resident_issue_88() {
+    let s = make_tx(1, 100_000_000, 1).size();
+    let base_min = s as u64 * MIN_FEE_PER_BYTE;
+    // Two residents fill the pool to >=75% (→ 8x dynamic-fee multiplier); a
+    // third admission then needs eviction to fit.
+    let mut pool = Mempool::with_max_size(2 * s + 100);
+
+    // High-fee residents: 50x the base floor.
+    let r1 = pool.add_skip_crypto(make_tx(10, 50 * base_min, 1)).unwrap();
+    let r2 = pool.add_skip_crypto(make_tx(11, 50 * base_min, 1)).unwrap();
+    assert_eq!(pool.len(), 2);
+
+    // Incoming pays 8x the base floor: it clears the dynamic minimum (the
+    // multiplier maxes at 8x) yet is a strictly lower fee rate than the 50x
+    // residents. It must be rejected, not admitted by evicting a higher-fee tx.
+    let low = make_tx(12, 8 * base_min, 1);
+    assert!(
+        pool.add_skip_crypto(low).is_err(),
+        "a lower-fee-rate tx meeting the dynamic minimum must be rejected (#88)"
+    );
+    assert!(
+        pool.contains(&r1) && pool.contains(&r2),
+        "higher-fee residents must survive the rejected admission (#88)"
+    );
+    assert_eq!(pool.len(), 2);
+}
+
 // ---------------------------------------------------------------------------
 // TEST 3: Duplicate key image rejection
 // ---------------------------------------------------------------------------

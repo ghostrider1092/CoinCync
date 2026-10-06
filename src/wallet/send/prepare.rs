@@ -1,3 +1,39 @@
+//! # Privacy transaction preparation
+//!
+//! Selects inputs, classifies the transfer shape, and settles the fee so the
+//! resulting `PreparedPrivacyTransaction` balances before assembly/signing.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `prepare_privacy_transaction_with_options`** — INVARIANT: the positional-arg
+//!   shim builds an equivalent `SendRequest` and delegates unchanged.
+//!   THREAT: shim drift silently changes send semantics for legacy callers.
+//!   TESTS: (gap — covered only transitively; no direct test of the shim).
+//! - **§2 `prepare_privacy_transaction` (balance)** — INVARIANT: on success
+//!   `sum(inputs) == total_send + change_amount + estimated_fee` exactly.
+//!   THREAT: value created or destroyed before signing → fund loss / inflation.
+//!   TESTS: `prepare_uniform_standard_satisfies_inputs_equal_payments_plus_change_plus_fee`,
+//!   `prepare_change_below_min_still_balances_inputs_equal_payments_plus_change_plus_fee`.
+//! - **§3 shape classification / output_count** — INVARIANT: the transfer shape fixes the
+//!   output count (uniform ⇒ standard count; legacy ⇒ `payments + padding`).
+//!   THREAT: wrong shape → wrong fee/output layout → rejected or de-anonymised tx.
+//!   TESTS: `build_prepared_uniform_drip_pair_emits_two_outputs_no_change`.
+//! - **§4 fee-multiplier handling** — INVARIANT: a NaN multiplier warns and falls back to
+//!   the neutral 1.0 before selection.
+//!   THREAT: NaN multiplier yields a zero/absurd fee → rejection.
+//!   TESTS: `fee_multiplier_nan_falls_back_to_neutral_one`.
+//! - **§5 fee-growth re-selection loop** — INVARIANT: the loop re-selects and grows `required`
+//!   until `input_sum ≥ total_send + fee`, so the added-input fee is always covered.
+//!   THREAT: settling with inputs that under-cover the grown fee → rejected tx.
+//!   TESTS: `prepare_uniform_standard_satisfies_inputs_equal_payments_plus_change_plus_fee`.
+//! - **§6 overflow / reservation safety** — INVARIANT: a saturating `total_send + fee` never
+//!   wraps to a satisfiable target, and prepare never writes a balance reservation.
+//!   THREAT: wrap-around funds a tx that should fail; stray reservation locks funds.
+//!   TESTS: `prepare_saturating_total_plus_fee_does_not_wrap_into_satisfiable_required`,
+//!   `prepare_insufficient_funds_errors_without_reserving`.
+
 use super::fee::{scaled_fee, FeeMultiplier};
 use super::inputs::prepare_input;
 use super::selection::{ensure_spendable, select_utxos, select_utxos_uniform};

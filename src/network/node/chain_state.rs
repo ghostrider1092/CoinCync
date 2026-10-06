@@ -1,3 +1,32 @@
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `ChainShadow`** — INVARIANT: `seq` is the sole authority for
+//!   acceptance ordering, not `height`, because a legitimate heavier-chain
+//!   reorg may lower height (issue #249).
+//!   THREAT: ordering updates by height alone would let a stale, still-taller
+//!   pre-reorg snapshot win over the correct post-reorg one.
+//!   TESTS: `rejects_stale_updates_and_accepts_lower_height_reorg`.
+//! - **§2 `ChainState::update`** — INVARIANT: an update is applied only if
+//!   `seq > shadow.seq`; equal or lower sequences are rejected and leave the
+//!   shadow untouched.
+//!   THREAT: an out-of-order or duplicate publication (e.g. a delayed task)
+//!   could regress the shared chain-tip view seen by sync and peer handshakes.
+//!   TESTS: `rejects_stale_updates_and_accepts_lower_height_reorg`.
+//! - **§3 `ChainState::next_sequence`** — INVARIANT: sequence numbers are
+//!   monotonically increasing per node instance via an atomic fetch-add,
+//!   starting after 0.
+//!   THREAT: a non-atomic or reused counter could hand out duplicate
+//!   sequence numbers, defeating the ordering guarantee in §2.
+//!   TESTS: `rejects_stale_updates_and_accepts_lower_height_reorg`.
+//! - **§4 `ChainStateReader::snapshot`** — INVARIANT: readers observe the
+//!   same `(height, tip)` pair the writer last committed, never a torn
+//!   read across the two fields.
+//!   THREAT: a torn read could hand a consumer (e.g. handshake code) a tip
+//!   hash that doesn't correspond to the reported height.
+//!   TESTS: `rejects_stale_updates_and_accepts_lower_height_reorg`.
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 

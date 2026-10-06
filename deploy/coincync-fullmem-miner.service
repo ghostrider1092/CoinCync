@@ -1,0 +1,39 @@
+[Unit]
+Description=CoinCync testnet miner (full-memory RandomX, dedicated box)
+After=network-online.target coincync-node.service
+Wants=network-online.target coincync-node.service
+
+[Service]
+EnvironmentFile=/etc/coincync/coincync.env
+# Full-memory RandomX (~2.3 GB dataset) = the fast path (roughly 10x light
+# mode per core). This box has 8 GB and dedicated cores, so the dataset fits
+# alongside the co-located node. NO COINCYNC_RANDOMX_LIGHT_MODE here on purpose.
+Type=simple
+User=coincync
+Group=coincync
+# --threads 1: mine on one core, leave the other for the co-located node
+# (this is a 2-core CCX13). Mines to the env address against the loopback node.
+ExecStart=/usr/local/bin/coincync-rig run-solo \
+    --node http://127.0.0.1:28081 \
+    --address ${BASELINE_MINER_ADDRESS} \
+    --network testnet \
+    --threads 1 \
+    --poll-interval-secs 60
+
+Restart=always
+RestartSec=3
+TimeoutStartSec=180
+TimeoutStopSec=30
+# Full-mem RandomX mlocks the dataset / uses hugepages when reserved.
+LimitMEMLOCK=infinity
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/coincync
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

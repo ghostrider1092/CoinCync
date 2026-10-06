@@ -2,6 +2,89 @@
 //!
 //! Implementation of the Stratum protocol for pool mining.
 //! Allows miners to connect and submit shares.
+//!
+//! ## Audit map
+//! Each `§` is a code section below; it states the INVARIANT it guarantees, the
+//! THREAT it defends, and the TESTS that prove it.
+//!
+//! - **§1 `validate_stratum_exposure_policy` / `build_stratum_tls_acceptor`** —
+//!   INVARIANT: a public bind is refused unless native TLS is configured or an
+//!   explicit encrypted-transport / TLS-proxy ack is present (fail-closed).
+//!   THREAT: plaintext miner credentials and shares exposed on a public interface.
+//!   TESTS: `test_public_bind_policy_requires_encrypted_transport_ack_or_native_tls`,
+//!   `test_public_bind_policy_accepts_tls_proxy_ack`,
+//!   `public_bind_policy_without_password_is_refused`, `test_stratum_config_default`.
+//! - **§2 `Worker::verify` / `nbits_to_target` / `effective_share_difficulty`** —
+//!   INVARIANT: a submission is classified valid-block vs below-target against the
+//!   block target; nbits decoding rejects a negative compact and clamps an
+//!   over-wide one to easiest; requested difficulty clamps to the block target.
+//!   THREAT: a below-work or malformed-target share is credited as valid. TESTS:
+//!   `share_verify_classifies_valid_block_invalid_by_target`,
+//!   `test_nbits_to_target_rejects_negative_compact`,
+//!   `test_nbits_to_target_overwide_clamps_to_easiest`,
+//!   `effective_share_difficulty_clamps_to_block_target`.
+//! - **§3 `downgrade_stale_share`** — INVARIANT: a share solved against a rotated
+//!   (no-longer-current) job is downgraded to stale, never credited as valid.
+//!   THREAT: stale-job shares double-counted after a tip change. TESTS:
+//!   `downgrade_stale_share_treats_rotated_job_results_as_stale`.
+//! - **§4 `claim_canonical_nonce` / `canonical_job_unchanged`** — INVARIANT: each
+//!   canonical nonce is claimed at most once across workers, a stale job id is
+//!   rejected WITHOUT clearing the ledger, and the ledger resets only on a genuine
+//!   job rotation. THREAT: two workers both credited for one block nonce, or a
+//!   stale claim wipes the accounting ledger. TESTS:
+//!   `claim_rejects_stale_job_id_without_clearing_ledger`,
+//!   `claim_dedups_same_nonce_across_workers`,
+//!   `claim_resets_on_canonical_job_rotation`, `canonical_job_unchanged_detects_rotation`.
+//! - **§5 `handle_stratum_message` (native cync login/submit)** — INVARIANT: native
+//!   submit rejects unauthenticated, bad-hex nonce, stale job, and duplicate nonce
+//!   BEFORE running PoW, plus below-difficulty shares; a wrong-password login
+//!   strikes and returns unauthorized. THREAT: unauthenticated or replayed
+//!   submissions accepted, or wasted PoW verification on junk. TESTS:
+//!   `native_submit_unauthenticated_rejected`, `native_submit_bad_nonce_hex_rejected`,
+//!   `native_submit_stale_job_rejected_before_pow`,
+//!   `native_submit_duplicate_nonce_rejected_before_pow`,
+//!   `native_submit_low_difficulty_share_rejected`,
+//!   `login_wrong_password_strikes_and_returns_unauthorized`,
+//!   `cync_login_and_submit_produces_block`.
+//! - **§6 `handle_stratum_message` (legacy Stratum V1)** — INVARIANT: `mining.subscribe`
+//!   returns the extranonce1 + notify tuple, `mining.authorize` with a wrong
+//!   password strikes/unauthorized, `mining.submit` rejects invalid-hex fields and
+//!   unauthorized workers, keepalive/extranonce.subscribe return ok, and an unknown
+//!   method returns the unknown-method error. THREAT: protocol confusion lets an
+//!   unauthorized worker submit. TESTS:
+//!   `mining_subscribe_returns_extranonce1_and_notify_tuple`,
+//!   `mining_authorize_wrong_password_strikes_and_unauthorized`,
+//!   `legacy_mining_submit_invalid_hex_fields_rejected`,
+//!   `legacy_mining_submit_unauthorized_worker_rejected`,
+//!   `keepalived_and_extranonce_subscribe_return_ok`,
+//!   `unknown_method_returns_unknown_method_error`, `stratum_submit_produces_block`.
+//! - **§7 `register_stratum_strike` / `load_banlist` / `persist_banlist` (abuse
+//!   control)** — INVARIANT: repeated invalid or throttled submits accrue strikes
+//!   to the ban threshold and can deauthorize; the banlist survives restart, a
+//!   corrupt file loads as empty, and a persist write failure never panics.
+//!   THREAT: an abusive miner is never banned, or a corrupt banlist crashes the
+//!   server. TESTS: `test_stratum_strike_progression_reaches_ban`,
+//!   `test_submit_throttle_increments_streak_and_can_deauthorize`,
+//!   `test_load_banlist_corrupt_json_is_safe_empty`,
+//!   `persist_banlist_write_failure_does_not_panic`.
+//! - **§8 `submit_and_broadcast`** — INVARIANT: a solved block is submitted through
+//!   the validated `block_builder` path and broadcast; with no candidate present it
+//!   returns `false` instead of submitting garbage. THREAT: a spurious/empty
+//!   submission, or a mined block that never reaches peers. TESTS:
+//!   `submit_and_broadcast_without_candidate_returns_false`, `stratum_submit_produces_block`.
+//! - **§9 `share_tally` / `spawn_job_updater`** — INVARIANT: `share_tally` weights
+//!   valid shares per login and skips empty logins; the job updater rotates jobs on
+//!   tip change. THREAT: mis-weighted payout accounting. TESTS:
+//!   `share_tally_weights_valid_shares_per_login_skips_empty`.
+//! - **§10 coinbase / merkle helpers (`create_coinbase_prefix` / `create_coinbase_suffix`
+//!   / `compute_merkle_branches` / `difficulty_to_nbits` / `format_mining_notify`)** —
+//!   INVARIANT: the coinbase prefix/suffix layout and merkle branches match the
+//!   Stratum V1 job the miner reassembles; difficulty→nbits guards zero and shift
+//!   overflow; an empty mempool yields empty branches. THREAT: a miner reassembles
+//!   a coinbase or root the validator rejects. TESTS: `test_coinbase_prefix`,
+//!   `coinbase_suffix_layout`, `merkle_branches_empty_mempool_is_empty`,
+//!   `test_difficulty_to_nbits`, `difficulty_to_nbits_zero_and_shift_guard`,
+//!   `test_mining_notify_format`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -254,6 +337,18 @@ pub enum ShareResult {
     Duplicate,
 }
 
+/// If the server's canonical job is no longer current (it rotated during the
+/// share's RandomX hashing), a Valid/Block result was computed against a stale
+/// template and must be treated as Stale — for BOTH stat accounting and block
+/// submission. Extracted as a pure function so the downgrade decision can be
+/// unit-tested without the async submit machinery. (audit #35, junbyjun1238)
+fn downgrade_stale_share(result: ShareResult, job_still_current: bool) -> ShareResult {
+    match result {
+        ShareResult::Valid | ShareResult::Block(_) if !job_still_current => ShareResult::Stale,
+        other => other,
+    }
+}
+
 impl Share {
     /// Verify a share meets the target difficulty
     ///
@@ -282,8 +377,11 @@ impl Share {
             Err(_) => return ShareResult::Invalid,
         };
 
-        // Must meet the per-worker share target.
-        let share_target = Hash::from_difficulty(share_difficulty);
+        // Must meet the per-worker share target — clamped so it is never harder
+        // than the block target (issue #44), otherwise a hash that IS a valid
+        // block could be rejected here as a low-difficulty share.
+        let share_target =
+            Hash::from_difficulty(effective_share_difficulty(share_difficulty, &job.target));
         if !pow_hash.meets_difficulty(&share_target) {
             return ShareResult::Invalid;
         }
@@ -360,16 +458,9 @@ struct Worker {
     /// Timestamp (ms) of last submit attempt.
     last_submit_ms: u64,
     /// Consecutive invalid/stale/duplicate submits.
-    invalid_streak: u32,
+    invalid_breaker: crate::colony::guard::breaker::CircuitBreaker,
     /// Last activity timestamp
     last_activity: u64,
-    /// Job id of the most recent submit accepted from this worker.
-    /// When a fresh submit's job_id differs, `submitted_shares` is
-    /// cleared — old job's share space no longer applies.
-    current_job_id: String,
-    /// Per-job submitted (nonce, extranonce2) pairs. Used to reject
-    /// duplicates within a single job. Bounded by job rotation cadence.
-    submitted_shares: std::collections::HashSet<(u32, Vec<u8>)>,
     /// Message sender
     tx: mpsc::Sender<String>,
 }
@@ -382,7 +473,13 @@ pub struct StratumStats {
     pub valid_shares: u64,
     pub stale_shares: u64,
     pub invalid_shares: u64,
+    /// Blocks accepted by the chain (issue #42: distinct from PoW solutions —
+    /// a solution that meets the block target but is not accepted, e.g. lost a
+    /// race or failed validation, is counted in `block_pow_hits` only).
     pub blocks_found: u64,
+    /// PoW solutions that met the block target and were submitted, regardless of
+    /// whether the chain accepted them.
+    pub block_pow_hits: u64,
     pub hashrate: f64,
 }
 
@@ -396,6 +493,9 @@ pub struct StratumServer {
     next_job_id: Arc<AtomicU64>,
     extranonce_counter: Arc<AtomicU64>,
     current_job: Arc<RwLock<Option<MiningJob>>>,
+    /// Server-owned per-canonical-job accepted-nonce ledger (share-replay
+    /// defense). Shared across all worker connections; see [`JobNonceLedger`].
+    nonce_dedup: Arc<RwLock<JobNonceLedger>>,
     /// Full candidate block backing each live job, keyed by job_id. A winning
     /// nonce is assembled from the candidate here and submitted to the chain.
     /// Only populated when payout keys are configured.
@@ -432,6 +532,7 @@ impl StratumServer {
             next_job_id: Arc::new(AtomicU64::new(1)),
             extranonce_counter: Arc::new(AtomicU64::new(1)),
             current_job: Arc::new(RwLock::new(None)),
+            nonce_dedup: Arc::new(RwLock::new(JobNonceLedger::default())),
             candidates: Arc::new(RwLock::new(HashMap::new())),
             job_broadcast,
             stats: Arc::new(RwLock::new(StratumStats::default())),
@@ -664,6 +765,7 @@ impl StratumServer {
         let extranonce1 = self.extranonce_counter.fetch_add(1, Ordering::SeqCst);
         let workers = self.workers.clone();
         let current_job = self.current_job.clone();
+        let nonce_dedup = self.nonce_dedup.clone();
         let mut job_rx = self.job_broadcast.subscribe();
         let stats = self.stats.clone();
         let chain = self.chain.clone();
@@ -694,10 +796,8 @@ impl StratumServer {
                 difficulty: share_difficulty,
                 authorized: false,
                 last_submit_ms: 0,
-                invalid_streak: 0,
+                invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
                 last_activity: timestamp_now(),
-                current_job_id: String::new(),
-                submitted_shares: std::collections::HashSet::new(),
                 tx: tx.clone(),
             };
 
@@ -720,10 +820,7 @@ impl StratumServer {
                         }
                         job = job_rx.recv() => {
                             if let Ok(job) = job {
-                                let notify = format_cync_job_notify(
-                                    &job,
-                                    &Hash::from_difficulty(share_difficulty),
-                                );
+                                let notify = format_cync_job_notify(&job, share_difficulty);
                                 if writer.write_all(notify.as_bytes()).await.is_err() {
                                     break;
                                 }
@@ -766,6 +863,7 @@ impl StratumServer {
                             worker_id,
                             &workers,
                             &current_job,
+                            &nonce_dedup,
                             &candidates,
                             &stats,
                             &chain,
@@ -797,6 +895,9 @@ impl StratumServer {
 /// Assemble the stored candidate for `job_id` with the winning `nonce`, submit
 /// it through the validated chain path, and broadcast on acceptance. Shared by
 /// the legacy and CoinCync-native submit paths.
+/// Submit a mined candidate and broadcast it if the chain accepts it. Returns
+/// `true` iff the block was accepted by the chain — the caller uses this to count
+/// chain-accepted blocks separately from PoW solutions (issue #42).
 async fn submit_and_broadcast(
     candidates: &Arc<RwLock<HashMap<String, CandidateBlock>>>,
     chain: &SharedBlockchain,
@@ -805,7 +906,7 @@ async fn submit_and_broadcast(
     job_id: &str,
     nonce: u64,
     worker_id: u64,
-) {
+) -> bool {
     let cand = candidates.read().await.get(job_id).cloned();
     match cand {
         Some(cand) => {
@@ -830,15 +931,22 @@ async fn submit_and_broadcast(
                             }
                         }
                     }
+                    accepted
                 }
-                Err(e) => warn!("stratum: block submit failed: {}", e),
+                Err(e) => {
+                    warn!("stratum: block submit failed: {}", e);
+                    false
+                }
             }
         }
-        None => warn!(
-            "stratum: block found for job {} but no candidate stored \
-             (shares-only pool, or the job was superseded)",
-            job_id
-        ),
+        None => {
+            warn!(
+                "stratum: block found for job {} but no candidate stored \
+                 (shares-only pool, or the job was superseded)",
+                job_id
+            );
+            false
+        }
     }
 }
 
@@ -848,31 +956,121 @@ async fn submit_and_broadcast(
 /// `target`. This is CoinCync's OWN protocol; it is not Monero/xmrig blob
 /// mining (our PoW folds the nonce through blake3, which xmrig does not do).
 ///
-/// `share_target` is the SHARE target the miner should aim for — easier than the
-/// block target, so miners submit "shares" at a steady rate. The server still
-/// checks every submitted share against the real block target and submits a
-/// block when one is met. For a solo/self-hosted pool, set `share_difficulty`
-/// low; for a public pool it's the (future vardiff-tuned) per-worker target.
-fn cync_job_json(job: &MiningJob, share_target: &Hash) -> serde_json::Value {
+/// The effective share difficulty for a job: the requested share difficulty,
+/// clamped so the share target is **never harder than the block target** (issue
+/// #44). Without the clamp a rig would skip nonces that meet the block target but
+/// not an over-hard share target — throwing away valid blocks.
+fn effective_share_difficulty(requested: u64, block_target: &Hash) -> u64 {
+    let block_difficulty = block_target.to_difficulty().max(1);
+    requested.min(block_difficulty).max(1)
+}
+
+/// The job as sent on the wire. Emits **distinct** `share_target` and
+/// `block_target` (issue #44) so the two meanings are never conflated; `target`
+/// is kept as an alias of `share_target` for older clients. The share target is
+/// the (clamped) threshold the miner aims for at a steady rate; the server still
+/// checks every share against `block_target` and submits a block when one is met.
+fn cync_job_json(job: &MiningJob, share_difficulty: u64) -> serde_json::Value {
+    let block_target = job.target;
+    let share_target =
+        Hash::from_difficulty(effective_share_difficulty(share_difficulty, &block_target));
     serde_json::json!({
         "job_id": job.job_id,
         "algo": "cync/rx",
         "anchor": hex::encode(job.anchor.as_bytes()),
         "tx_root": hex::encode(job.tx_root.as_bytes()),
         "seed_hash": hex::encode(job.seed_hash),
+        "share_target": hex::encode(share_target.as_bytes()),
+        "block_target": hex::encode(block_target.as_bytes()),
         "target": hex::encode(share_target.as_bytes()),
         "height": job.height,
     })
 }
 
 /// A pushed `job` notification (sent to a logged-in miner on a tip change).
-fn format_cync_job_notify(job: &MiningJob, share_target: &Hash) -> String {
+fn format_cync_job_notify(job: &MiningJob, share_difficulty: u64) -> String {
     serde_json::json!({
         "jsonrpc": "2.0",
         "method": "job",
-        "params": cync_job_json(job, share_target),
+        "params": cync_job_json(job, share_difficulty),
     })
     .to_string()
+}
+
+/// Server-owned, per-canonical-job accepted-nonce ledger.
+///
+/// SECURITY (share-replay): deduplication MUST be owned by the server and keyed
+/// by the *current canonical* job — never by per-worker state or a client-supplied
+/// `job_id`. Per-worker sets let the same PoW nonce be re-credited from a second
+/// connection (the extranonce fields are not part of the CoinCync PoW, which is
+/// `H(anchor, nonce, tx_root, height)`), and clearing the set on a client-supplied
+/// id lets a miner toggle a stale id to wipe the set and replay. This ledger holds
+/// the accepted nonces for exactly one canonical job and resets when the canonical
+/// job rotates.
+#[derive(Default)]
+struct JobNonceLedger {
+    /// The canonical job_id these nonces belong to (server-chosen).
+    job_id: String,
+    /// Nonces already credited under `job_id`. Keyed by `u64` to cover the
+    /// native path's 64-bit nonce; the legacy path widens its `u32` nonce.
+    nonces: std::collections::HashSet<u64>,
+}
+
+/// Outcome of trying to claim a `(job, nonce)` against the canonical ledger.
+#[derive(Debug, PartialEq, Eq)]
+enum NonceClaim {
+    /// First time this nonce is seen for the current canonical job.
+    Accepted,
+    /// The submitted job_id is not the current canonical job (checked before the
+    /// ledger is touched, so a stale id can never wipe the accepted set).
+    StaleJob,
+    /// This nonce was already credited under the current canonical job.
+    Duplicate,
+}
+
+/// Claim `(submitted_job_id, nonce)` against the server-owned canonical ledger.
+///
+/// Rejects a stale/non-current job id *before* modifying the ledger, resets the
+/// ledger when the canonical job rotates, and returns a clone of the canonical
+/// [`MiningJob`] so the caller hashes against the exact job it claimed. Dedup is
+/// on `nonce` alone — that is the only client-supplied input to the PoW.
+async fn claim_canonical_nonce(
+    current_job: &Arc<RwLock<Option<MiningJob>>>,
+    ledger: &Arc<RwLock<JobNonceLedger>>,
+    submitted_job_id: &str,
+    nonce: u64,
+) -> (NonceClaim, Option<MiningJob>) {
+    let job = match current_job.read().await.as_ref() {
+        Some(j) => j.clone(),
+        None => return (NonceClaim::StaleJob, None),
+    };
+    // Reject stale/non-current ids BEFORE touching the ledger — a stale id must
+    // never be able to clear the accepted-nonce set for the real job.
+    if job.job_id != submitted_job_id {
+        return (NonceClaim::StaleJob, Some(job));
+    }
+    let mut led = ledger.write().await;
+    if led.job_id != job.job_id {
+        // Canonical job rotated: this is the first submit for the new job.
+        led.job_id = job.job_id.clone();
+        led.nonces.clear();
+    }
+    if !led.nonces.insert(nonce) {
+        return (NonceClaim::Duplicate, Some(job));
+    }
+    (NonceClaim::Accepted, Some(job))
+}
+
+/// Re-read the canonical job and confirm it is still `expected_job_id`.
+///
+/// Called after RandomX hashing and before any share accounting or block
+/// submission: if the canonical job rotated during the hash, the result is stale
+/// and must not be credited or broadcast.
+async fn canonical_job_unchanged(
+    current_job: &Arc<RwLock<Option<MiningJob>>>,
+    expected_job_id: &str,
+) -> bool {
+    matches!(current_job.read().await.as_ref(), Some(j) if j.job_id == expected_job_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -881,6 +1079,7 @@ async fn handle_stratum_message(
     worker_id: u64,
     workers: &Arc<RwLock<HashMap<u64, Worker>>>,
     current_job: &Arc<RwLock<Option<MiningJob>>>,
+    nonce_dedup: &Arc<RwLock<JobNonceLedger>>,
     candidates: &Arc<RwLock<HashMap<String, CandidateBlock>>>,
     stats: &Arc<RwLock<StratumStats>>,
     chain: &SharedBlockchain,
@@ -929,12 +1128,11 @@ async fn handle_stratum_message(
                 }
             }
             info!("login: worker {} authorized as {}", worker_id, login_name);
-            let share_target = Hash::from_difficulty(share_difficulty);
             let job_val = current_job
                 .read()
                 .await
                 .as_ref()
-                .map(|j| cync_job_json(j, &share_target))
+                .map(|j| cync_job_json(j, share_difficulty))
                 .unwrap_or(serde_json::Value::Null);
             Some(
                 serde_json::json!({
@@ -991,19 +1189,33 @@ async fn handle_stratum_message(
                     w.last_activity = timestamp_now();
                 }
             }
-            // Snapshot the current job (drop the lock before hashing/submitting).
-            let job = {
-                let cur = current_job.read().await;
-                match cur.as_ref() {
-                    Some(j) if j.job_id == sub_job_id => j.clone(),
-                    _ => {
-                        return Some(
-                            serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
-                                "result": serde_json::Value::Null,
-                                "error": {"code": -1, "message": "stale job"}})
-                            .to_string(),
-                        )
+            // Server-owned per-canonical-job dedup. Rejects a stale/non-current
+            // job id BEFORE touching the ledger (so it can't wipe the accepted
+            // set) and rejects a replayed nonce before any PoW is recomputed.
+            // Returns the canonical job so we hash against exactly what we claimed.
+            let job = match claim_canonical_nonce(current_job, nonce_dedup, sub_job_id, nonce).await
+            {
+                (NonceClaim::Accepted, Some(j)) => j,
+                (NonceClaim::Duplicate, _) => {
+                    let mut wr = workers.write().await;
+                    if let Some(w) = wr.get_mut(&worker_id) {
+                        w.invalid_shares += 1;
+                        w.invalid_breaker.record_failure();
                     }
+                    return Some(
+                        serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                            "result": serde_json::Value::Null,
+                            "error": {"code": -1, "message": "duplicate share"}})
+                        .to_string(),
+                    );
+                }
+                _ => {
+                    return Some(
+                        serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                            "result": serde_json::Value::Null,
+                            "error": {"code": -1, "message": "stale job"}})
+                        .to_string(),
+                    )
                 }
             };
             let pow = match crate::consensus::compute_pow_hash(
@@ -1023,7 +1235,11 @@ async fn handle_stratum_message(
                     )
                 }
             };
-            if !pow.meets_difficulty(&Hash::from_difficulty(share_difficulty)) {
+            if !pow
+                .meets_difficulty(&Hash::from_difficulty(effective_share_difficulty(
+                    share_difficulty,
+                    &job.target,
+                ))) {
                 let mut wr = workers.write().await;
                 if let Some(w) = wr.get_mut(&worker_id) {
                     w.invalid_shares += 1;
@@ -1035,23 +1251,49 @@ async fn handle_stratum_message(
                     .to_string(),
                 );
             }
+            // Revalidate: if the canonical job rotated during RandomX hashing, this
+            // share is for a stale template — do not credit it or submit a block.
+            if !canonical_job_unchanged(current_job, &job.job_id).await {
+                let mut wr = workers.write().await;
+                if let Some(w) = wr.get_mut(&worker_id) {
+                    w.stale_shares += 1;
+                }
+                stats.write().await.stale_shares += 1;
+                return Some(
+                    serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                        "result": serde_json::Value::Null,
+                        "error": {"code": -1, "message": "stale job"}})
+                    .to_string(),
+                );
+            }
             {
                 let mut wr = workers.write().await;
                 if let Some(w) = wr.get_mut(&worker_id) {
                     w.valid_shares += 1;
-                    w.invalid_streak = 0;
+                    w.invalid_breaker.record_success();
                 }
                 let mut s = stats.write().await;
                 s.total_shares += 1;
                 s.valid_shares += 1;
             }
             if pow.meets_difficulty(&job.target) {
-                {
+                // A PoW solution is a "hit"; whether it becomes a chain-accepted
+                // block is reported separately (issue #42).
+                stats.write().await.block_pow_hits += 1;
+                info!("submit: PoW block solution by worker {} (job {})", worker_id, sub_job_id);
+                let accepted =
+                    submit_and_broadcast(candidates, chain, mempool, p2p, &job.job_id, nonce, worker_id)
+                        .await;
+                if accepted {
                     stats.write().await.blocks_found += 1;
                 }
-                info!("submit: BLOCK FOUND by worker {} (job {})", worker_id, sub_job_id);
-                submit_and_broadcast(candidates, chain, mempool, p2p, &job.job_id, nonce, worker_id)
-                    .await;
+                return Some(
+                    serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                        "result": {"status": "OK",
+                            "block": if accepted { "accepted" } else { "rejected" }},
+                        "error": serde_json::Value::Null})
+                    .to_string(),
+                );
             }
             Some(
                 serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
@@ -1165,8 +1407,8 @@ async fn handle_stratum_message(
                     if worker.last_submit_ms > 0
                         && now_ms.saturating_sub(worker.last_submit_ms) < MIN_SUBMIT_INTERVAL_MS
                     {
-                        worker.invalid_streak = worker.invalid_streak.saturating_add(1);
-                        if worker.invalid_streak >= MAX_INVALID_STREAK {
+                        worker.invalid_breaker.record_failure();
+                        if worker.invalid_breaker.is_open() {
                             worker.authorized = false;
                             warn!(
                                 "Worker {} hit submit-rate abuse threshold; deauthorizing",
@@ -1216,26 +1458,19 @@ async fn handle_stratum_message(
                 }
             };
 
-            // Get worker's extranonce1 + duplicate-share check.
-            // A repeated (job_id, nonce, extranonce2) tuple is a no-op
-            // for the chain (no double-counted reward) but corrupts
-            // pool-mode share accounting. Reject before verify so the
-            // attempted PoW work isn't wasted recomputing the hash.
-            let (extranonce1, is_duplicate) = {
-                let mut workers_write = workers.write().await;
-                if let Some(w) = workers_write.get_mut(&worker_id) {
-                    // New job → wipe the per-job dedup set. Old shares
-                    // are stale (they'd return Stale on verify anyway).
-                    if w.current_job_id != job_id {
-                        w.submitted_shares.clear();
-                        w.current_job_id = job_id.to_string();
-                    }
-                    let dup = !w.submitted_shares.insert((nonce, extranonce2.clone()));
-                    (w.extranonce1.clone(), dup)
-                } else {
-                    (Vec::new(), false)
-                }
+            // Worker's extranonce1 (for share verification only).
+            let extranonce1 = {
+                let wr = workers.read().await;
+                wr.get(&worker_id).map(|w| w.extranonce1.clone()).unwrap_or_default()
             };
+
+            // Server-owned per-canonical-job dedup. Rejects a stale/non-current
+            // job id BEFORE touching the ledger (so a stale id cannot wipe the
+            // accepted set) and rejects a replayed nonce across ALL worker
+            // connections before verify() recomputes the PoW. Dedup is on the
+            // PoW nonce — the extranonce fields are not part of the CoinCync PoW.
+            let (claim, canonical_job) =
+                claim_canonical_nonce(current_job, nonce_dedup, job_id, nonce as u64).await;
 
             // Build share struct
             let share = Share {
@@ -1246,24 +1481,27 @@ async fn handle_stratum_message(
                 nonce,
             };
 
-            // Verify share against current job.
-            // The duplicate gate runs first — a duplicate is rejected
-            // before paying for PoW recomputation in verify().
-            let current = current_job.read().await;
-            let share_result = if is_duplicate {
-                ShareResult::Duplicate
-            } else if let Some(job) = current.as_ref() {
-                if job.job_id != job_id {
-                    ShareResult::Stale
-                } else {
-                    share.verify(job, share_difficulty, &extranonce1)
-                }
-            } else {
-                ShareResult::Stale
+            // A duplicate/stale claim short-circuits before paying for PoW.
+            let share_result = match claim {
+                NonceClaim::StaleJob => ShareResult::Stale,
+                NonceClaim::Duplicate => ShareResult::Duplicate,
+                NonceClaim::Accepted => match canonical_job.as_ref() {
+                    Some(job) => share.verify(job, share_difficulty, &extranonce1),
+                    None => ShareResult::Stale,
+                },
             };
-            // Release the job read-guard before any chain work below, so the
-            // submit path never holds current_job while entering process_block.
-            drop(current);
+
+            // Revalidate the canonical job AFTER verify()'s (RandomX) hashing and
+            // BEFORE any accounting: if the server's canonical job rotated during
+            // the hash, a Valid/Block result was computed against a stale template
+            // and must not be credited to worker/pool stats (nor submitted). The
+            // native path already revalidates before crediting; the legacy path
+            // previously only revalidated before block submission, so a rotation
+            // during verify() still credited a stale share to stats. Downgrade to
+            // Stale here so both the stats blocks below and the submission guard
+            // see the corrected result. (audit #35, junbyjun1238)
+            let job_still_current = canonical_job_unchanged(current_job, job_id).await;
+            let share_result = downgrade_stale_share(share_result, job_still_current);
 
             // Update stats based on result
             let mut should_strike_for_invalid_streak = false;
@@ -1275,22 +1513,22 @@ async fn handle_stratum_message(
                     match &share_result {
                         ShareResult::Valid | ShareResult::Block(_) => {
                             worker.valid_shares += 1;
-                            worker.invalid_streak = 0;
+                            worker.invalid_breaker.record_success();
                         }
                         ShareResult::Stale => {
                             worker.stale_shares += 1;
-                            worker.invalid_streak = worker.invalid_streak.saturating_add(1);
+                            worker.invalid_breaker.record_failure();
                         }
                         ShareResult::Invalid | ShareResult::Duplicate => {
                             worker.invalid_shares += 1;
-                            worker.invalid_streak = worker.invalid_streak.saturating_add(1);
+                            worker.invalid_breaker.record_failure();
                         }
                     }
-                    if worker.invalid_streak >= MAX_INVALID_STREAK {
+                    if worker.invalid_breaker.is_open() {
                         worker.authorized = false;
                         warn!(
                             "Worker {} exceeded invalid share streak {}; deauthorizing",
-                            worker_id, worker.invalid_streak
+                            worker_id, worker.invalid_breaker.failures()
                         );
                         should_strike_for_invalid_streak = true;
                     }
@@ -1307,9 +1545,11 @@ async fn handle_stratum_message(
                     ShareResult::Valid => s.valid_shares += 1,
                     ShareResult::Block(hash) => {
                         s.valid_shares += 1;
-                        s.blocks_found += 1;
+                        // PoW solution; chain acceptance is counted after submit
+                        // (issue #42).
+                        s.block_pow_hits += 1;
                         info!(
-                            "BLOCK FOUND by worker {}! Hash: {}",
+                            "PoW block solution by worker {}! Hash: {}",
                             worker_id,
                             hex::encode(hash.as_bytes())
                         );
@@ -1320,18 +1560,30 @@ async fn handle_stratum_message(
             }
 
             // A real block was found — assemble the stored candidate with the
-            // winning nonce and submit + broadcast it.
+            // winning nonce and submit + broadcast it. Revalidate first: if the
+            // canonical job rotated during verify()'s hashing, the candidate is
+            // stale and must not be submitted or broadcast.
             if matches!(share_result, ShareResult::Block(_)) {
-                submit_and_broadcast(
-                    candidates,
-                    chain,
-                    mempool,
-                    p2p,
-                    job_id,
-                    share.nonce as u64,
-                    worker_id,
-                )
-                .await;
+                if canonical_job_unchanged(current_job, job_id).await {
+                    let accepted = submit_and_broadcast(
+                        candidates,
+                        chain,
+                        mempool,
+                        p2p,
+                        job_id,
+                        share.nonce as u64,
+                        worker_id,
+                    )
+                    .await;
+                    if accepted {
+                        stats.write().await.blocks_found += 1;
+                    }
+                } else {
+                    warn!(
+                        "submit: worker {} found a block for a rotated job {}; not broadcasting stale candidate",
+                        worker_id, job_id
+                    );
+                }
             }
 
             debug!(
@@ -1552,6 +1804,42 @@ async fn register_stratum_strike(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downgrade_stale_share_treats_rotated_job_results_as_stale() {
+        // audit #35: if the canonical job rotated during verify()'s hashing, a
+        // Valid/Block share is stale and must not be credited (nor submitted).
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Valid, false),
+            ShareResult::Stale
+        ));
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Block(Hash::zero()), false),
+            ShareResult::Stale
+        ));
+        // Job still current → pass through unchanged.
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Valid, true),
+            ShareResult::Valid
+        ));
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Block(Hash::zero()), true),
+            ShareResult::Block(_)
+        ));
+        // Non-valid results are never changed, regardless of job state.
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Invalid, false),
+            ShareResult::Invalid
+        ));
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Duplicate, false),
+            ShareResult::Duplicate
+        ));
+        assert!(matches!(
+            downgrade_stale_share(ShareResult::Stale, true),
+            ShareResult::Stale
+        ));
+    }
     use std::io::Write;
     use std::sync::{Mutex, OnceLock};
 
@@ -1706,10 +1994,8 @@ mod tests {
             authorized: true,
             // Force immediate throttle path.
             last_submit_ms: timestamp_now_ms(),
-            invalid_streak: MAX_INVALID_STREAK - 1,
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::preloaded("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64, (MAX_INVALID_STREAK - 1) as u64),
             last_activity: timestamp_now(),
-            current_job_id: String::new(),
-            submitted_shares: std::collections::HashSet::new(),
             tx,
         };
 
@@ -1732,6 +2018,7 @@ mod tests {
             clean_jobs: true,
         })));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
         let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
         let chain = Arc::new(crate::chain::Blockchain::new());
         let mempool = crate::mempool::SharedMempool::new();
@@ -1743,6 +2030,7 @@ mod tests {
             worker_id,
             &workers,
             &current_job,
+            &nonce_dedup,
             &candidates,
             &stats,
             &chain,
@@ -1853,15 +2141,14 @@ mod tests {
             difficulty: 1000,
             authorized: true,
             last_submit_ms: 0,
-            invalid_streak: 0,
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
             last_activity: timestamp_now(),
-            current_job_id: job_id.clone(),
-            submitted_shares: std::collections::HashSet::new(),
             tx,
         };
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
         workers.write().await.insert(worker_id, worker);
         let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
         let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
 
         // Submit the winning nonce through the real handler.
@@ -1874,6 +2161,7 @@ mod tests {
             worker_id,
             &workers,
             &current_job,
+            &nonce_dedup,
             &candidates,
             &stats,
             &chain,
@@ -1968,21 +2256,20 @@ mod tests {
             difficulty: 1000,
             authorized: false,
             last_submit_ms: 0,
-            invalid_streak: 0,
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
             last_activity: timestamp_now(),
-            current_job_id: String::new(),
-            submitted_shares: std::collections::HashSet::new(),
             tx,
         };
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
         workers.write().await.insert(worker_id, worker);
         let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
         let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
 
         // login
         let login = r#"{"id":1,"method":"login","params":{"login":"pool.w","pass":"","algo":["cync/rx"]}}"#;
         let resp = handle_stratum_message(
-            login, worker_id, &workers, &current_job, &candidates, &stats, &chain, &mempool, None,
+            login, worker_id, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool, None,
             1000, None, "127.0.0.1", &bans, None,
         )
         .await
@@ -1996,7 +2283,7 @@ mod tests {
             job_id, winning
         );
         let resp2 = handle_stratum_message(
-            &submit, worker_id, &workers, &current_job, &candidates, &stats, &chain, &mempool, None,
+            &submit, worker_id, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool, None,
             1000, None, "127.0.0.1", &bans, None,
         )
         .await
@@ -2004,5 +2291,687 @@ mod tests {
         assert!(resp2.contains("\"status\":\"OK\""), "submit OK: {resp2}");
         assert_eq!(chain.height(), 1, "native submit produced a block; tip advanced");
         assert_eq!(stats.read().await.blocks_found, 1, "one block found");
+    }
+
+    // ── Share-replay defense: server-owned per-canonical-job nonce ledger ──
+
+    fn mk_job(job_id: &str) -> MiningJob {
+        MiningJob {
+            job_id: job_id.to_string(),
+            anchor: Hash::zero(),
+            tx_root: Hash::zero(),
+            seed_hash: [0u8; 32],
+            target: Hash::from_difficulty(1000),
+            height: 1,
+            prev_hash: Hash::zero(),
+            coinbase1: vec![],
+            coinbase2: vec![],
+            merkle_branches: vec![],
+            version: 1,
+            nbits: 0x1d00ffff,
+            ntime: 1,
+            clean_jobs: true,
+        }
+    }
+
+    /// A stale/non-current job id must be rejected BEFORE the ledger is touched,
+    /// so it cannot be used to wipe the accepted-nonce set for the real job.
+    #[tokio::test]
+    async fn claim_rejects_stale_job_id_without_clearing_ledger() {
+        let cur = Arc::new(RwLock::new(Some(mk_job("aaaa"))));
+        let led = Arc::new(RwLock::new(JobNonceLedger::default()));
+
+        assert_eq!(
+            claim_canonical_nonce(&cur, &led, "aaaa", 7).await.0,
+            NonceClaim::Accepted
+        );
+        // Attacker toggles a stale id to try to clear the set.
+        assert_eq!(
+            claim_canonical_nonce(&cur, &led, "deadbeef", 7).await.0,
+            NonceClaim::StaleJob
+        );
+        // The ledger was untouched: the real (aaaa, 7) is still a duplicate.
+        assert_eq!(
+            claim_canonical_nonce(&cur, &led, "aaaa", 7).await.0,
+            NonceClaim::Duplicate
+        );
+    }
+
+    /// The ledger is server-owned (no worker identity), so the same nonce
+    /// replayed from a second connection for the same canonical job is a
+    /// duplicate — the extranonce fields are not part of the PoW.
+    #[tokio::test]
+    async fn claim_dedups_same_nonce_across_workers() {
+        let cur = Arc::new(RwLock::new(Some(mk_job("job1"))));
+        let led = Arc::new(RwLock::new(JobNonceLedger::default()));
+
+        // Worker A submits nonce 42.
+        assert_eq!(
+            claim_canonical_nonce(&cur, &led, "job1", 42).await.0,
+            NonceClaim::Accepted
+        );
+        // Worker B replays the SAME nonce for the same job → duplicate.
+        assert_eq!(
+            claim_canonical_nonce(&cur, &led, "job1", 42).await.0,
+            NonceClaim::Duplicate
+        );
+        // A different nonce is still creditable.
+        assert_eq!(
+            claim_canonical_nonce(&cur, &led, "job1", 43).await.0,
+            NonceClaim::Accepted
+        );
+    }
+
+    /// When the canonical job rotates the ledger resets, and a stale id for the
+    /// previous job is rejected.
+    #[tokio::test]
+    async fn claim_resets_on_canonical_job_rotation() {
+        let cur = Arc::new(RwLock::new(Some(mk_job("j1"))));
+        let led = Arc::new(RwLock::new(JobNonceLedger::default()));
+
+        assert_eq!(claim_canonical_nonce(&cur, &led, "j1", 1).await.0, NonceClaim::Accepted);
+        assert_eq!(claim_canonical_nonce(&cur, &led, "j1", 1).await.0, NonceClaim::Duplicate);
+
+        *cur.write().await = Some(mk_job("j2"));
+        // Same nonce, new canonical job → accepted again.
+        assert_eq!(claim_canonical_nonce(&cur, &led, "j2", 1).await.0, NonceClaim::Accepted);
+        // Stale id for the old job is rejected.
+        assert_eq!(claim_canonical_nonce(&cur, &led, "j1", 2).await.0, NonceClaim::StaleJob);
+    }
+
+    /// Post-hash revalidation catches a job that rotated during hashing.
+    #[tokio::test]
+    async fn canonical_job_unchanged_detects_rotation() {
+        let cur = Arc::new(RwLock::new(Some(mk_job("x"))));
+        assert!(canonical_job_unchanged(&cur, "x").await);
+        *cur.write().await = Some(mk_job("y"));
+        assert!(!canonical_job_unchanged(&cur, "x").await);
+        *cur.write().await = None;
+        assert!(!canonical_job_unchanged(&cur, "x").await);
+    }
+
+    // ── Additional coverage (audit test-plan MISSING items) ──────────────
+
+    /// Build a Worker with a live (unused) mpsc sender for handler tests.
+    fn mk_worker(authorized: bool, extranonce1: Vec<u8>) -> Worker {
+        let (tx, _rx) = mpsc::channel::<String>(8);
+        Worker {
+            name: "w".to_string(),
+            payout_login: "w".to_string(),
+            address: None,
+            extranonce1,
+            shares: 0,
+            valid_shares: 0,
+            stale_shares: 0,
+            invalid_shares: 0,
+            difficulty: 1000,
+            authorized,
+            last_submit_ms: 0,
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
+            last_activity: timestamp_now(),
+            tx,
+        }
+    }
+
+    /// A public bind that has the public-bind ack but NO worker password must be
+    /// refused: public Stratum must require worker authorization.
+    #[test]
+    fn public_bind_policy_without_password_is_refused() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("COINCYNC_STRATUM_PUBLIC_BIND_ACK", "1");
+        std::env::set_var("COINCYNC_STRATUM_TLS_PROXY_ACK", "1");
+        let mut cfg = StratumConfig::default();
+        cfg.bind_addr = "0.0.0.0:3333".parse().expect("socket");
+        cfg.auth_password = None;
+        cfg.tls_enabled = false;
+        assert!(validate_stratum_exposure_policy(&cfg).is_err());
+        std::env::remove_var("COINCYNC_STRATUM_PUBLIC_BIND_ACK");
+        std::env::remove_var("COINCYNC_STRATUM_TLS_PROXY_ACK");
+    }
+
+    /// difficulty 0 maps to Bitcoin's default nbits; difficulty >= 2^32 exercises
+    /// the shift>=24 mantissa guard (no panic/UB, mantissa collapses to 0).
+    #[test]
+    fn difficulty_to_nbits_zero_and_shift_guard() {
+        assert_eq!(difficulty_to_nbits(0), 0x1d00ffff);
+        // difficulty >= 2^32: shift_amount reaches 32 (>=24) so the mantissa
+        // mask must not be shifted out of range; it is forced to 0.
+        let nbits = difficulty_to_nbits(1u64 << 32);
+        assert_eq!(nbits & 0x00ff_ffff, 0, "over-wide difficulty zeroes mantissa");
+    }
+
+    /// The coinbase suffix layout: sequence, output-count, value, script-length,
+    /// locktime — exact byte positions.
+    #[test]
+    fn coinbase_suffix_layout() {
+        let s = create_coinbase_suffix();
+        assert_eq!(s.len(), 18);
+        assert_eq!(&s[0..4], &0xFFFF_FFFFu32.to_le_bytes(), "sequence");
+        assert_eq!(s[4], 1, "output count");
+        assert_eq!(&s[5..13], &0u64.to_le_bytes(), "output value placeholder");
+        assert_eq!(s[13], 0, "output script length");
+        assert_eq!(&s[14..18], &0u32.to_le_bytes(), "locktime");
+    }
+
+    /// An empty mempool yields no merkle branches.
+    #[test]
+    fn merkle_branches_empty_mempool_is_empty() {
+        let mempool = crate::mempool::SharedMempool::new();
+        assert!(compute_merkle_branches(&mempool).is_empty());
+    }
+
+    /// effective_share_difficulty clamps the share difficulty so the share target
+    /// is never HARDER than the block target (issue #44), floors at 1, and passes
+    /// an already-easy request through unchanged.
+    #[test]
+    fn effective_share_difficulty_clamps_to_block_target() {
+        let block_target = Hash::from_difficulty(1000);
+        let block_diff = block_target.to_difficulty().max(1);
+
+        // A wildly over-hard request is clamped down to the block difficulty.
+        let eff = effective_share_difficulty(u64::MAX, &block_target);
+        assert!(eff <= block_diff, "clamped to block difficulty");
+        // Resulting share target must be no harder than the block target
+        // (numerically >=): block_target.meets_difficulty(share) means
+        // block_target <= share_target.
+        let share_target = Hash::from_difficulty(eff);
+        assert!(
+            block_target.meets_difficulty(&share_target),
+            "share target never harder than block target"
+        );
+
+        // Floors at 1 (never 0), and passes an easy request through.
+        assert_eq!(effective_share_difficulty(0, &block_target), 1);
+        assert_eq!(effective_share_difficulty(1, &block_target), 1);
+    }
+
+    /// persist_banlist to an unwritable path (parent dir does not exist) logs the
+    /// failure and does NOT panic.
+    #[test]
+    fn persist_banlist_write_failure_does_not_panic() {
+        let missing_dir = std::env::temp_dir().join(format!(
+            "coincync-no-such-dir-{}-{}",
+            std::process::id(),
+            timestamp_now_ms()
+        ));
+        let path = missing_dir.join("bans.json");
+        let mut bans = HashMap::new();
+        bans.insert("203.0.113.9".to_string(), PersistedBanEntry::default());
+        // Must return normally even though the write fails.
+        persist_banlist(&path, &bans);
+        assert!(!path.exists(), "write to missing dir should have failed");
+    }
+
+    /// Native `login` with a wrong password (same length, exercising ct_eq) is
+    /// rejected as "unauthorized" and registers a strike against the client IP.
+    #[tokio::test]
+    async fn login_wrong_password_strikes_and_returns_unauthorized() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(1, mk_worker(false, vec![0, 0, 0, 0]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        // "sacred" and "secret" are the same length → forces the ct_eq compare.
+        let msg = r#"{"id":1,"method":"login","params":{"login":"pool.w","pass":"sacred"}}"#;
+        let resp = handle_stratum_message(
+            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
+            &mempool, None, 1000, Some("secret"), "198.51.100.10", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains("unauthorized"), "resp: {resp}");
+        assert!(
+            bans.read().await.get("198.51.100.10").is_some(),
+            "wrong password registers a strike"
+        );
+        // Worker must NOT be authorized after a failed login.
+        assert!(!workers.read().await.get(&1).unwrap().authorized);
+    }
+
+    /// Native `submit` from an unauthenticated worker is rejected before any
+    /// nonce parsing / PoW.
+    #[tokio::test]
+    async fn native_submit_unauthenticated_rejected() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(1, mk_worker(false, vec![0, 0, 0, 0]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        let msg = r#"{"id":1,"method":"submit","params":{"id":"s","job_id":"cur","nonce":"01"}}"#;
+        let resp = handle_stratum_message(
+            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
+            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains("unauthenticated"), "resp: {resp}");
+    }
+
+    /// Native `submit` with a non-hex nonce → "bad nonce", before dedup/PoW.
+    #[tokio::test]
+    async fn native_submit_bad_nonce_hex_rejected() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        let msg = r#"{"id":1,"method":"submit","params":{"id":"s","job_id":"cur","nonce":"zzzz"}}"#;
+        let resp = handle_stratum_message(
+            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
+            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains("bad nonce"), "resp: {resp}");
+    }
+
+    /// Native `submit` for a stale (non-current) job id is rejected as "stale job"
+    /// BEFORE any PoW is recomputed.
+    #[tokio::test]
+    async fn native_submit_stale_job_rejected_before_pow() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        // Canonical job is "cur"; the worker submits against the old "gone" id.
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        let msg = r#"{"id":1,"method":"submit","params":{"id":"s","job_id":"gone","nonce":"01"}}"#;
+        let resp = handle_stratum_message(
+            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
+            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains("stale job"), "resp: {resp}");
+    }
+
+    /// Native `submit` replaying a nonce already in the canonical ledger is
+    /// rejected as "duplicate share" BEFORE any PoW is recomputed.
+    #[tokio::test]
+    async fn native_submit_duplicate_nonce_rejected_before_pow() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        // Pre-seed the canonical ledger so nonce 5 is already credited for "cur".
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger {
+            job_id: "cur".to_string(),
+            nonces: std::collections::HashSet::from([5u64]),
+        }));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        let msg = r#"{"id":1,"method":"submit","params":{"id":"s","job_id":"cur","nonce":"5"}}"#;
+        let resp = handle_stratum_message(
+            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
+            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains("duplicate share"), "resp: {resp}");
+    }
+
+    /// Native `submit` of a below-target share returns "low difficulty share".
+    /// `#[ignore]` — reaches `compute_pow_hash` which requires the `randomx`
+    /// feature (CoinCync 1.0 is RandomX-only). Run:
+    ///   cargo test -p coincync --features "randomx testnet" --lib -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn native_submit_low_difficulty_share_rejected() {
+        std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+        crate::consensus::bind_randomx_genesis_for_network(crate::config::NetworkType::Testnet);
+
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        // Impossibly hard block target → the (clamped) share target is just as
+        // hard, so nonce 0 will not meet it.
+        let hard_diff = 1u64 << 40;
+        let mut job = mk_job("cur");
+        job.target = Hash::from_difficulty(hard_diff);
+        let current_job = Arc::new(RwLock::new(Some(job)));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        let msg = r#"{"id":1,"method":"submit","params":{"id":"s","job_id":"cur","nonce":"0"}}"#;
+        let resp = handle_stratum_message(
+            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
+            &mempool, None, hard_diff, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains("low difficulty share"), "resp: {resp}");
+    }
+
+    /// `mining.subscribe` returns the worker's extranonce1 alongside the
+    /// mining.notify / mining.set_difficulty subscription tuple.
+    #[tokio::test]
+    async fn mining_subscribe_returns_extranonce1_and_notify_tuple() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(false, vec![0xab, 0xcd, 0xef, 0x12]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        let msg = r#"{"id":7,"method":"mining.subscribe","params":[]}"#;
+        let resp = handle_stratum_message(
+            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
+            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains("mining.notify"), "resp: {resp}");
+        assert!(resp.contains("mining.set_difficulty"), "resp: {resp}");
+        assert!(resp.contains("abcdef12"), "extranonce1 echoed: {resp}");
+    }
+
+    /// `mining.authorize` with a wrong password → [24,"Unauthorized"] and a strike.
+    #[tokio::test]
+    async fn mining_authorize_wrong_password_strikes_and_unauthorized() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(1, mk_worker(false, vec![0, 0, 0, 0]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        let msg = r#"{"id":3,"method":"mining.authorize","params":["worker1","sacred"]}"#;
+        let resp = handle_stratum_message(
+            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
+            &mempool, None, 1000, Some("secret"), "198.51.100.20", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains("[24,\"Unauthorized\""), "resp: {resp}");
+        assert!(bans.read().await.get("198.51.100.20").is_some());
+        assert!(!workers.read().await.get(&1).unwrap().authorized);
+    }
+
+    /// Legacy `mining.submit` with malformed extranonce2 / ntime / nonce hex all
+    /// return the [20,...] error family.
+    #[tokio::test]
+    async fn legacy_mining_submit_invalid_hex_fields_rejected() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        async fn call(
+            msg: &str,
+            workers: &Arc<RwLock<HashMap<u64, Worker>>>,
+            current_job: &Arc<RwLock<Option<MiningJob>>>,
+            nonce_dedup: &Arc<RwLock<JobNonceLedger>>,
+            candidates: &Arc<RwLock<HashMap<String, CandidateBlock>>>,
+            stats: &Arc<RwLock<StratumStats>>,
+            chain: &SharedBlockchain,
+            mempool: &SharedMempool,
+            bans: &Arc<RwLock<HashMap<String, PersistedBanEntry>>>,
+        ) -> String {
+            // Reset the submit throttle so each call reaches the parse stage.
+            workers.write().await.get_mut(&1).unwrap().last_submit_ms = 0;
+            handle_stratum_message(
+                msg, 1, workers, current_job, nonce_dedup, candidates, stats, chain, mempool,
+                None, 1000, None, "127.0.0.1", bans, None,
+            )
+            .await
+            .expect("response")
+        }
+
+        // Bad extranonce2.
+        let r = call(
+            r#"{"id":1,"method":"mining.submit","params":["w","cur","zz","00000000","00000000"]}"#,
+            &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool, &bans,
+        )
+        .await;
+        assert!(r.contains("[20,\"Invalid extranonce2\""), "resp: {r}");
+
+        // Bad ntime (extranonce2 valid).
+        let r = call(
+            r#"{"id":1,"method":"mining.submit","params":["w","cur","00","zz","00000000"]}"#,
+            &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool, &bans,
+        )
+        .await;
+        assert!(r.contains("[20,\"Invalid ntime\""), "resp: {r}");
+
+        // Bad nonce (extranonce2 + ntime valid).
+        let r = call(
+            r#"{"id":1,"method":"mining.submit","params":["w","cur","00","00000000","zz"]}"#,
+            &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool, &bans,
+        )
+        .await;
+        assert!(r.contains("[20,\"Invalid nonce\""), "resp: {r}");
+    }
+
+    /// Legacy `mining.submit` from an unauthorized worker → [24,"Not authorized"].
+    #[tokio::test]
+    async fn legacy_mining_submit_unauthorized_worker_rejected() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(1, mk_worker(false, vec![0, 0, 0, 0]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        let msg = r#"{"id":1,"method":"mining.submit","params":["w","cur","00","00000000","00000000"]}"#;
+        let resp = handle_stratum_message(
+            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
+            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains("[24,\"Not authorized\""), "resp: {resp}");
+    }
+
+    /// `keepalived` and `mining.extranonce.subscribe` return OK responses.
+    #[tokio::test]
+    async fn keepalived_and_extranonce_subscribe_return_ok() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        let ka = handle_stratum_message(
+            r#"{"id":1,"method":"keepalived","params":{}}"#,
+            1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool,
+            None, 1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(ka.contains("KEEPALIVED"), "resp: {ka}");
+
+        let ex = handle_stratum_message(
+            r#"{"id":2,"method":"mining.extranonce.subscribe","params":[]}"#,
+            1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool,
+            None, 1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(ex.contains("\"result\":true"), "resp: {ex}");
+    }
+
+    /// An unknown method returns [20,"Unknown method"].
+    #[tokio::test]
+    async fn unknown_method_returns_unknown_method_error() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        let msg = r#"{"id":9,"method":"frobnicate","params":[]}"#;
+        let resp = handle_stratum_message(
+            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
+            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains("[20,\"Unknown method\""), "resp: {resp}");
+    }
+
+    /// submit_and_broadcast with no stored candidate (shares-only pool) returns
+    /// false and does not submit anything.
+    #[tokio::test]
+    async fn submit_and_broadcast_without_candidate_returns_false() {
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let accepted =
+            submit_and_broadcast(&candidates, &chain, &mempool, None, "no-such-job", 0, 1).await;
+        assert!(!accepted);
+    }
+
+    /// share_tally sums each login's valid shares weighted by difficulty and
+    /// skips workers with an empty payout login.
+    #[tokio::test]
+    async fn share_tally_weights_valid_shares_per_login_skips_empty() {
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let server = StratumServer::new(StratumConfig::default(), chain, mempool);
+
+        {
+            let mut w = server.workers.write().await;
+            let mut a = mk_worker(true, vec![0, 0, 0, 0]);
+            a.payout_login = "miner.a".to_string();
+            a.valid_shares = 2;
+            a.difficulty = 1000;
+            w.insert(1, a);
+
+            // Second worker on the same login (weights accumulate).
+            let mut a2 = mk_worker(true, vec![0, 0, 0, 0]);
+            a2.payout_login = "miner.a".to_string();
+            a2.valid_shares = 1;
+            a2.difficulty = 500;
+            w.insert(2, a2);
+
+            // Empty payout login → skipped entirely.
+            let mut anon = mk_worker(true, vec![0, 0, 0, 0]);
+            anon.payout_login = String::new();
+            anon.valid_shares = 99;
+            anon.difficulty = 9999;
+            w.insert(3, anon);
+        }
+
+        let tally = server.share_tally().await;
+        assert_eq!(tally.len(), 1, "only the non-empty login is present");
+        assert_eq!(tally.get("miner.a").copied(), Some(2 * 1000 + 1 * 500));
+    }
+
+    /// Share::verify classifies a share as Valid / Block / Invalid purely by
+    /// target. `#[ignore]` — computes real RandomX PoW (requires the `randomx`
+    /// feature). Run:
+    ///   cargo test -p coincync --features "randomx testnet" --lib -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn share_verify_classifies_valid_block_invalid_by_target() {
+        std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+        use crate::consensus::{compute_pow_hash, PowAlgorithm};
+        crate::consensus::bind_randomx_genesis_for_network(crate::config::NetworkType::Testnet);
+
+        // Block: max-easiest target (from_difficulty(1) = all-0xFF) — any hash
+        // meets both share and block target → Block.
+        let mut easy = mk_job("cur");
+        easy.target = Hash::from_difficulty(1);
+        let share = Share {
+            worker: "w".to_string(),
+            job_id: "cur".to_string(),
+            extranonce2: vec![],
+            ntime: 0,
+            nonce: 0,
+        };
+        assert!(
+            matches!(share.verify(&easy, 1, &[]), ShareResult::Block(_)),
+            "easy target → block"
+        );
+
+        // Invalid: impossibly hard target with an equally hard (clamped) share
+        // target → nonce 0 does not meet it.
+        let mut hard = mk_job("cur");
+        hard.target = Hash::from_difficulty(1u64 << 40);
+        assert!(
+            matches!(
+                share.verify(&hard, 1u64 << 40, &[]),
+                ShareResult::Invalid
+            ),
+            "hard share target → invalid"
+        );
+
+        // Valid: hard block target but an EASY requested share difficulty, so a
+        // hash that meets the (easy) share target but not the block target is
+        // Valid. Mine a nonce that meets the easy share target.
+        let share_diff = 2u64;
+        let share_target =
+            Hash::from_difficulty(effective_share_difficulty(share_diff, &hard.target));
+        let mut n: u32 = 0;
+        let winning = loop {
+            let h = compute_pow_hash(PowAlgorithm::RandomX, &hard.anchor, n as u64, &hard.tx_root, hard.height)
+                .expect("hash");
+            if h.meets_difficulty(&share_target) {
+                break n;
+            }
+            n = n.checked_add(1).expect("nonce found");
+        };
+        let vshare = Share {
+            worker: "w".to_string(),
+            job_id: "cur".to_string(),
+            extranonce2: vec![],
+            ntime: 0,
+            nonce: winning,
+        };
+        assert!(
+            matches!(vshare.verify(&hard, share_diff, &[]), ShareResult::Valid),
+            "easy share target, hard block target → valid"
+        );
     }
 }
