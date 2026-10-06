@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 pub const RECOVERY_TAG: u8 = 0xDE;
 
 /// Size of one recovery entry: tag(1) + index(1) + address(32) + timeout(8).
-const RECOVERY_ENTRY_SIZE: usize = 42;
+pub const RECOVERY_ENTRY_SIZE: usize = 42;
 
 /// Maximum reasonable timeout: ~2 years at 120-second block time.
 /// 525,960 blocks ≈ 365.25 days * 24 * 60 / 2 minutes.
@@ -117,6 +117,14 @@ impl RecoveryMeta {
                     results.push(meta);
                 }
                 pos += RECOVERY_ENTRY_SIZE;
+            } else if extra[pos] == crate::transaction::payment_id::PAYMENT_ID_TAG
+                && pos + 2 <= extra.len()
+            {
+                // Length-skip an encrypted payment-id entry so its (encrypted,
+                // possibly 0xDE-containing) bytes are never misread as a
+                // recovery entry. Coexistence is covered by payment_id tests.
+                let len = extra[pos + 1] as usize;
+                pos = (pos + 2 + len).min(extra.len());
             } else {
                 pos += 1;
             }
