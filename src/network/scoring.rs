@@ -106,7 +106,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use crate::clock::{mono_now, MonoInstant};
 
 /// SECURITY (H17-FIX): Per-behavior misbehavior types with specific penalties.
 /// Based on Bitcoin Core's `Misbehaving()` pattern in `net_processing.cpp`
@@ -410,9 +411,9 @@ pub struct PeerScore {
     /// Number of invalid transactions sent
     pub invalid_txs: u64,
     /// Time of last successful interaction
-    pub last_success: Option<Instant>,
+    pub last_success: Option<MonoInstant>,
     /// Time of last failure
-    pub last_failure: Option<Instant>,
+    pub last_failure: Option<MonoInstant>,
     /// Whether peer supports compact blocks
     pub supports_compact_blocks: bool,
     /// Whether peer has been validated (completed handshake)
@@ -436,7 +437,7 @@ pub struct PeerScore {
     /// If `Some`, this peer is banned from `GetBlocks` selection until the
     /// instant in the variant. Auto-expires (cleared by `is_get_blocks_banned`)
     /// so peers that recover from their own resync get another shot.
-    pub get_blocks_banned_until: Option<Instant>,
+    pub get_blocks_banned_until: Option<MonoInstant>,
 }
 
 impl Default for PeerScore {
@@ -495,7 +496,7 @@ pub struct PeerMessageRateTracker {
     /// (message_type_id, count) for the current window
     counts: HashMap<u8, u32>,
     /// Start of current measurement window
-    window_start: Instant,
+    window_start: MonoInstant,
     /// Window duration (default 10 seconds)
     window_secs: u64,
 }
@@ -566,15 +567,15 @@ impl PeerMessageRateTracker {
     pub fn new() -> Self {
         PeerMessageRateTracker {
             counts: HashMap::new(),
-            window_start: Instant::now(),
+            window_start: mono_now(),
             window_secs: 10,
         }
     }
 
     /// Record a message and return true if the rate limit is exceeded.
     pub fn record(&mut self, msg_type_id: u8) -> bool {
-        let now = Instant::now();
-        if now.duration_since(self.window_start).as_secs() >= self.window_secs {
+        let now = mono_now();
+        if now.saturating_duration_since(self.window_start).as_secs() >= self.window_secs {
             self.counts.clear();
             self.window_start = now;
         }
@@ -611,7 +612,7 @@ pub const ORPHAN_FLOOD_WINDOW_SECS: u64 = 60;
 #[derive(Clone, Copy, Debug)]
 struct OrphanWindow {
     count: u32,
-    window_start: Instant,
+    window_start: MonoInstant,
     /// Have we already returned `true` for this window? Prevents a single
     /// flood from registering one misbehavior per orphan after threshold
     /// (which would ban within seconds and tarpit accidental floods too
@@ -638,14 +639,14 @@ impl OrphanFloodTracker {
     /// Record an orphan from this peer. Returns `true` exactly once per
     /// rolling window when the peer crosses the flood threshold.
     pub fn record(&mut self, peer_id: [u8; 32]) -> bool {
-        let now = Instant::now();
+        let now = mono_now();
         let entry = self.peers.entry(peer_id).or_insert(OrphanWindow {
             count: 0,
             window_start: now,
             flagged: false,
         });
 
-        if now.duration_since(entry.window_start).as_secs() >= ORPHAN_FLOOD_WINDOW_SECS {
+        if now.saturating_duration_since(entry.window_start).as_secs() >= ORPHAN_FLOOD_WINDOW_SECS {
             // Window expired — start a fresh count for this peer.
             entry.count = 1;
             entry.window_start = now;
@@ -718,7 +719,7 @@ impl PeerScore {
     /// that start sending blocks before the scorer sees the handshake event).
     pub fn record_block_success(&mut self, latency: Duration) {
         self.blocks_delivered += 1;
-        self.last_success = Some(Instant::now());
+        self.last_success = Some(mono_now());
         self.validated = true; // H-15 FIX: delivering valid block = validated
         self.consecutive_empty_blocks = 0; // a real delivery clears the wedge counter
         self.update_latency(latency);
@@ -729,7 +730,7 @@ impl PeerScore {
     /// Record a failed/invalid block
     pub fn record_block_failure(&mut self) {
         self.blocks_failed += 1;
-        self.last_failure = Some(Instant::now());
+        self.last_failure = Some(mono_now());
         self.update_validity_rate();
         self.adjust_reputation(-10);
     }
@@ -748,10 +749,10 @@ impl PeerScore {
     /// `Blocks` messages indefinitely, requiring manual `systemctl restart`.
     pub fn record_empty_blocks_response(&mut self) {
         self.consecutive_empty_blocks = self.consecutive_empty_blocks.saturating_add(1);
-        self.last_failure = Some(Instant::now());
+        self.last_failure = Some(mono_now());
         if self.consecutive_empty_blocks >= EMPTY_BLOCKS_BAN_THRESHOLD {
             self.get_blocks_banned_until =
-                Some(Instant::now() + Duration::from_secs(EMPTY_BLOCKS_BAN_DURATION_SECS));
+                Some(mono_now() + Duration::from_secs(EMPTY_BLOCKS_BAN_DURATION_SECS));
             // ECLIPSE FIX (pre-mainnet review #4, 2026-08-13): charge reputation
             // ONLY at/after the GetBlocks-ban threshold, never for the earlier
             // empties. An empty `Blocks` reply is not provable misbehavior — an
@@ -778,7 +779,7 @@ impl PeerScore {
     /// from a clean slate. Returns `true` only if the ban is still active.
     pub fn is_get_blocks_banned(&mut self) -> bool {
         match self.get_blocks_banned_until {
-            Some(until) if Instant::now() < until => true,
+            Some(until) if mono_now() < until => true,
             Some(_) => {
                 // Ban expired — give the peer another chance.
                 self.get_blocks_banned_until = None;
@@ -792,7 +793,7 @@ impl PeerScore {
     /// Record a successful transaction relay
     pub fn record_tx_success(&mut self) {
         self.txs_relayed += 1;
-        self.last_success = Some(Instant::now());
+        self.last_success = Some(mono_now());
         self.validated = true; // H-15 FIX: relaying valid tx = validated
         self.adjust_reputation(1);
     }
@@ -800,7 +801,7 @@ impl PeerScore {
     /// Record an invalid transaction
     pub fn record_invalid_tx(&mut self) {
         self.invalid_txs += 1;
-        self.last_failure = Some(Instant::now());
+        self.last_failure = Some(mono_now());
         self.update_validity_rate();
         self.adjust_reputation(-5);
     }
@@ -826,7 +827,7 @@ impl PeerScore {
     pub fn record_misbehavior(&mut self, offense: MisbehaviorType) {
         let penalty = offense.penalty();
         self.adjust_reputation(-penalty);
-        self.last_failure = Some(Instant::now());
+        self.last_failure = Some(mono_now());
         tracing::debug!(
             "Peer misbehavior: {:?} (penalty: -{}, reputation now: {})",
             offense,
@@ -889,7 +890,7 @@ pub struct PeerScorer {
     /// Scores by peer address
     scores: HashMap<SocketAddr, PeerScore>,
     /// Banned peers with ban expiry
-    banned: HashMap<SocketAddr, Instant>,
+    banned: HashMap<SocketAddr, MonoInstant>,
     /// Ban duration
     ban_duration: Duration,
     /// Minimum score to be considered for block download
@@ -965,7 +966,7 @@ impl PeerScorer {
     /// Check if peer is banned
     pub fn is_banned(&self, addr: &SocketAddr) -> bool {
         if let Some(expiry) = self.banned.get(addr) {
-            if Instant::now() < *expiry {
+            if mono_now() < *expiry {
                 return true;
             }
         }
@@ -991,7 +992,7 @@ impl PeerScorer {
     /// corrected to `SweepBanned()`.
     pub fn ban(&mut self, addr: SocketAddr) {
         self.cleanup_bans();
-        let expiry = Instant::now() + self.ban_duration;
+        let expiry = mono_now() + self.ban_duration;
         self.banned.insert(addr, expiry);
         self.scores.remove(&addr);
     }
@@ -1069,7 +1070,7 @@ impl PeerScorer {
 
     /// Clean up expired bans
     pub fn cleanup_bans(&mut self) {
-        let now = Instant::now();
+        let now = mono_now();
         self.banned.retain(|_, expiry| *expiry > now);
     }
 
@@ -1112,14 +1113,14 @@ struct BanEntry {
 impl PeerScorer {
     /// Save ban list to disk for persistence across restarts
     pub fn save_bans_to_file(&self, path: &std::path::Path) -> std::result::Result<(), String> {
-        let now = Instant::now();
+        let now = mono_now();
         let entries: Vec<BanEntry> = self
             .banned
             .iter()
             .filter(|(_, expiry)| **expiry > now)
             .map(|(addr, expiry)| BanEntry {
                 addr: addr.to_string(),
-                remaining_secs: expiry.duration_since(now).as_secs(),
+                remaining_secs: expiry.saturating_duration_since(now).as_secs(),
             })
             .collect();
 
@@ -1145,7 +1146,7 @@ impl PeerScorer {
         for entry in entries {
             if let Ok(addr) = entry.addr.parse::<std::net::SocketAddr>() {
                 if entry.remaining_secs > 0 {
-                    let expiry = Instant::now() + Duration::from_secs(entry.remaining_secs);
+                    let expiry = mono_now() + Duration::from_secs(entry.remaining_secs);
                     self.banned.insert(addr, expiry);
                     loaded += 1;
                 }
@@ -1237,7 +1238,7 @@ mod tests {
         // very GC we're testing.
         scorer
             .banned
-            .insert(stale, Instant::now() - Duration::from_secs(60));
+            .insert(stale, mono_now() - Duration::from_secs(60));
         assert!(
             scorer.banned.contains_key(&stale),
             "test setup: stale entry must be present before ban()"
@@ -1317,7 +1318,7 @@ mod tests {
         assert!(score.is_get_blocks_banned());
 
         // Force expiry by overwriting with a past instant.
-        score.get_blocks_banned_until = Some(Instant::now() - Duration::from_secs(1));
+        score.get_blocks_banned_until = Some(mono_now() - Duration::from_secs(1));
         assert!(!score.is_get_blocks_banned(), "expired ban auto-clears");
         assert_eq!(score.consecutive_empty_blocks, 0, "counter reset on expiry");
         assert!(

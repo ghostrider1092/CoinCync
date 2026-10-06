@@ -434,7 +434,7 @@ impl ChainAdapter for CoincyncAdapter {
         // is always at height > 100, so this branch is unreachable
         // in production — but we handle it correctly for
         // completeness and to match consensus exactly.
-        if header.height == 0 {
+        if header.height.as_u64() == 0 {
             return Ok(true);
         }
 
@@ -448,8 +448,8 @@ impl ChainAdapter for CoincyncAdapter {
         // - Err(other error) → propagate as TickError::Other
         match crate::consensus::pow::verify_pow(
             &header.prev_hash,
-            header.height,
-            header.timestamp,
+            header.height.as_u64(),
+            header.timestamp.as_secs(),
             header.nonce,
             &header.tx_root,
             &header.target,
@@ -850,7 +850,7 @@ fleet_config_path = "/etc/coincync/fleet.json"
         // attempting verify_pow (which would reject genesis since
         // genesis has no real PoW).
         let genesis = crate::testnet::testnet_genesis();
-        assert_eq!(genesis.header.height, 0, "test fixture assumption");
+        assert_eq!(genesis.header.height.as_u64(), 0, "test fixture assumption");
         let url = spawn_one_shot_json_rpc_result(mock_get_block_response(&genesis));
 
         let adapter = CoincyncAdapter::new(
@@ -885,7 +885,7 @@ fleet_config_path = "/etc/coincync/fleet.json"
         // is ACTIVELY lying about their chain (distinction matters
         // for RescueTick's alert severity).
         let mut spoofed = crate::testnet::testnet_genesis();
-        spoofed.header.height = 1; // move out of the height-0 exemption
+        spoofed.header.height = crate::primitives::Height::new(1); // move out of the height-0 exemption
         let url = spawn_one_shot_json_rpc_result(mock_get_block_response(&spoofed));
 
         let adapter = CoincyncAdapter::new(

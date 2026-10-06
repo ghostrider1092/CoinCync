@@ -51,7 +51,7 @@ impl Blockchain {
                 hash,
                 height: 0,
                 difficulty: 1,
-                timestamp: genesis.header.timestamp,
+                timestamp: genesis.header.timestamp.as_secs(),
             };
 
             inner.stats.height = 0;
@@ -83,6 +83,8 @@ impl Blockchain {
             db.blocks.insert(&genesis)?;
             db.blocks.set_height_hash(0, &hash)?;
             db.state.set_genesis_hash(&hash)?;
+            // Stamp which network created this data-dir (self-preflight marker).
+            db.state.set_network(self.network)?;
             let state = ChainStateData {
                 tip_hash: hash,
                 height: 0,
@@ -165,12 +167,27 @@ impl Blockchain {
                 )));
             }
 
+            // Self-preflight network marker: a data-dir explicitly stamped for a
+            // different network fails fast with a clear message; a legacy data-dir
+            // with no marker (written before this existed) is lazily stamped now.
+            match db.state.get_network()? {
+                Some(stored) if stored != self.network => {
+                    return Err(Error::DatabaseError(format!(
+                        "data-dir was created for the {} network but this node is running as {}; \
+                         refusing to start on a mismatched data-dir",
+                        stored, self.network,
+                    )));
+                }
+                Some(_) => {}
+                None => db.state.set_network(self.network)?,
+            }
+
             return match db.blocks.get(&state.tip_hash)? {
                 Some(tip_block) => {
-                    if tip_block.header.height != state.height {
+                    if tip_block.header.height.as_u64() != state.height {
                         return Err(Error::DatabaseError(format!(
                             "chain state height {} does not match tip block height {}",
-                            state.height, tip_block.header.height,
+                            state.height, tip_block.header.height.as_u64(),
                         )));
                     }
                     let difficulty = calculate_difficulty_from_target(&tip_block.header.target);
@@ -180,7 +197,7 @@ impl Blockchain {
                             hash: state.tip_hash,
                             height: state.height,
                             difficulty,
-                            timestamp: tip_block.header.timestamp,
+                            timestamp: tip_block.header.timestamp.as_secs(),
                         };
                         inner.stats.height = state.height;
                         inner.stats.total_supply = state.total_supply;

@@ -79,8 +79,8 @@ fn base_header(height: u64, timestamp: u64, prev_hash: Hash, magic: [u8; 4]) -> 
     BlockHeader {
         network_magic: magic,
         version: 1,
-        height,
-        timestamp,
+        height: coincync::primitives::Height::new(height),
+        timestamp: timestamp.into(),
         prev_hash,
         tx_root: Hash::zero(),
         anchor: Hash::zero(),
@@ -136,7 +136,7 @@ fn non_monotone_height_rejected() {
 
     let mut child_header = base_header(
         12,
-        parent_header.timestamp + 1,
+        parent_header.timestamp.as_secs() + 1,
         parent_header.hash(),
         expected_magic(),
     );
@@ -269,7 +269,7 @@ fn bad_prev_hash_on_child_rejected() {
     let parent_block = Block::new(parent_header.clone(), Vec::new());
 
     let wrong_prev = Hash::from_bytes([0xAA; 32]);
-    let child_header = base_header(6, parent_header.timestamp + 1, wrong_prev, expected_magic());
+    let child_header = base_header(6, parent_header.timestamp.as_secs() + 1, wrong_prev, expected_magic());
     let child_block = Block::new(child_header, Vec::new());
 
     let utxos = UtxoSet::new();
@@ -457,7 +457,7 @@ fn block_with_wrong_merkle_root_rejected() {
     };
     let mut child_header = base_header(
         11,
-        parent_header.timestamp + 120,
+        parent_header.timestamp.as_secs() + 120,
         parent_header.hash(),
         expected_magic(),
     );
@@ -491,7 +491,7 @@ fn block_with_no_transactions_rejected() {
 
     let child_header = base_header(
         11,
-        parent_header.timestamp + 120,
+        parent_header.timestamp.as_secs() + 120,
         parent_header.hash(),
         expected_magic(),
     );

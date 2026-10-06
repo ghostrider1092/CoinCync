@@ -24,7 +24,7 @@
 //!   Audit **Gap 2** (checkpoint *authentication*): a consumer must call
 //!   [`SyncCheckpoint::authenticate`] and only fast-skip on
 //!   [`CheckpointAuth::Authenticated`] — this validates a server-provided
-//!   checkpoint against the binary's hardcoded `CONSENSUS_CHECKPOINTS` set.
+//!   checkpoint against the binary's hardcoded consensus checkpoints.
 //!   Full miner-signed checkpoints remain the v1.0.1 solution; until then an
 //!   unhardcoded height is `Unverifiable` and must fall back to a full scan.
 //!
@@ -66,7 +66,7 @@
 //!   `scan_digests_parallel_advances_last_scanned_to_final_height`.
 //! - **§5 `SyncCheckpoint::authenticate` (audit Gap 2)** — INVARIANT: a
 //!   server checkpoint is trusted for fast-skip only when its hash matches a
-//!   hardcoded `CONSENSUS_CHECKPOINTS` entry (`Authenticated`); a mismatch is
+//!   hardcoded consensus-checkpoint entry (`Authenticated`); a mismatch is
 //!   `Forged` and an unknown height is `Unverifiable`, both of which must fall
 //!   back to a full scan. THREAT: a forged checkpoint making the wallet skip
 //!   real blocks and miss owned incoming txs. TESTS:
@@ -210,7 +210,7 @@ impl BlockDigest {
             height: block.height(),
             hash,
             prev_hash: block.header.prev_hash,
-            timestamp: block.header.timestamp,
+            timestamp: block.header.timestamp.as_secs(),
             output_count: outputs.len() as u16,
             outputs,
         }
@@ -276,7 +276,7 @@ impl SyncCheckpoint {
     }
 
     /// Authenticate this (server-provided) checkpoint against the binary's
-    /// hardcoded `CONSENSUS_CHECKPOINTS` set — the interim mitigation for
+    /// hardcoded consensus checkpoints — the interim mitigation for
     /// **audit Gap 2** (checkpoint authentication) until miner-signed
     /// checkpoints are wired (v1.0.1).
     ///
@@ -289,10 +289,9 @@ impl SyncCheckpoint {
     /// and [`Forged`](CheckpointAuth::Forged) must both fall back to a normal
     /// scan (and `Forged` should additionally distrust the peer).
     pub fn authenticate(&self, network: crate::config::NetworkType) -> CheckpointAuth {
-        self.authenticate_against(crate::constants::expected_checkpoint_hash(
-            network,
-            self.height,
-        ))
+        self.authenticate_against(
+            crate::constants::expected_checkpoint_hash(network, self.height).as_ref(),
+        )
     }
 
     /// Core of [`authenticate`](Self::authenticate), split out so the
@@ -1043,8 +1042,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
-            timestamp: 1000,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx_hash,
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1088,8 +1087,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
-            timestamp: 1000,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1140,8 +1139,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
-            timestamp: 1000,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1194,8 +1193,8 @@ mod tests {
             let header = BlockHeader {
                 network_magic: test_magic(),
                 version: 1,
-                height: h,
-                timestamp: 1000 + h * 30,
+                height: crate::primitives::Height::new(h),
+                timestamp: crate::primitives::Timestamp::from_secs(1000 + h * 30),
                 prev_hash,
                 tx_root: tx.hash(),
                 anchor: Hash::from_bytes([0u8; 32]),
@@ -1248,8 +1247,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height,
-            timestamp: 1000 + height * 30,
+            height: crate::primitives::Height::new(height),
+            timestamp: crate::primitives::Timestamp::from_secs(1000 + height * 30),
             prev_hash,
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1460,8 +1459,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
-            timestamp: 1000,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1521,8 +1520,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height,
-            timestamp: 1000 + height,
+            height: crate::primitives::Height::new(height),
+            timestamp: crate::primitives::Timestamp::from_secs(1000 + height),
             prev_hash,
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),

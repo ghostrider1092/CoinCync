@@ -50,6 +50,68 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── get_shielded_cover_set ────────────────────────────────
+    // A wallet fetches the anchored Spark cover set to build a shielded
+    // spend: the ordered coins {C_i} the Grootle one-of-many proof hides
+    // the real coin among, each with its serial context (needed to
+    // identify + spend an owned coin) and outpoint. The array position is
+    // the coin's spend index for a proof anchored at
+    // (cover_set_id, anchor_height) — the same set + order the verifier
+    // resolves. Params: [cover_set_id, anchor_height]. Read-only.
+    //
+    // Gated: the pool store exists only in a `sketch-gk-proof` build, and
+    // shielded is activation-gated OFF until the audit, so on a live node
+    // this set is empty. This is the wallet-facing counterpart to
+    // get_decoy_distribution (transparent ring members) for the shielded
+    // pool.
+    #[cfg(feature = "sketch-gk-proof")]
+    module
+        .register_method("get_shielded_cover_set", |params, state, _ext| {
+            let (cover_set_id, anchor_height): (u64, u64) =
+                params.parse().map_err(|e: ErrorObjectOwned| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("bad params (expected [cover_set_id, anchor_height]): {e}"),
+                        None::<()>,
+                    )
+                })?;
+            let entries = state.chain.spark_pool_cover_entries(cover_set_id, anchor_height);
+            // Defensive cap: never serialize an unbounded response. The pool is
+            // naturally bounded by the Grootle set size; pagination is a
+            // follow-up if a group ever exceeds this.
+            const MAX_COVER_COINS: usize = 100_000;
+            if entries.len() > MAX_COVER_COINS {
+                return Err(ErrorObjectOwned::owned(
+                    -32000,
+                    format!(
+                        "cover set too large ({} coins > {MAX_COVER_COINS}); pagination unimplemented",
+                        entries.len()
+                    ),
+                    None::<()>,
+                ));
+            }
+            let coins: Vec<Value> = entries
+                .into_iter()
+                .enumerate()
+                .map(|(index, (outpoint, coin, ctx, height))| {
+                    json!({
+                        "index": index,
+                        "outpoint": hex::encode(outpoint),
+                        "coin": hex::encode(coin),
+                        "serial_context": hex::encode(ctx),
+                        "height": height,
+                    })
+                })
+                .collect();
+            Ok::<_, ErrorObjectOwned>(json!({
+                "cover_set_id": cover_set_id,
+                "anchor_height": anchor_height,
+                "count": coins.len(),
+                "coins": coins,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── is_nullifier_spent ────────────────────────────────────
     // Wallet calls before building a shielded spend to make sure it
     // won't be rejected as a double-spend.

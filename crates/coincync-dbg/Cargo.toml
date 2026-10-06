@@ -1,0 +1,24 @@
+[package]
+name         = "coincync-dbg"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.75"
+description  = "Debug Adapter Protocol (DAP) server for CoinCync — step and set semantic breakpoints on real consensus state in any IDE. Vertical slice: difficulty-retarget replay with a difficulty-floor breakpoint (the #191 collapse)."
+license      = "MIT"
+
+[lib]
+name = "coincync_dbg"
+path = "src/lib.rs"
+
+[[bin]]
+name = "coincync-dbg"
+path = "src/main.rs"
+
+[dependencies]
+# The REAL consensus engine — the debugger steps actual chain behaviour, not a
+# reimplementation. Build with the `testnet` feature set the rest of the
+# workspace uses: with no features, trait resolution in tari_bulletproofs_plus
+# 0.4 overflows coincync's recursion_limit = 1024 (the HRTB issue documented in
+# rust-toolchain.toml). `testnet` keeps it within the limit and matches the gate.
+coincync   = { path = "../..", default-features = false, features = ["testnet"] }
+serde_json = "1"

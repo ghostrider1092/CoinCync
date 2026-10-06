@@ -85,13 +85,13 @@ impl Block {
         self.header.hash()
     }
     pub fn height(&self) -> u64 {
-        self.header.height
+        self.header.height.as_u64()
     }
     pub fn tx_count(&self) -> usize {
         self.transactions.len()
     }
     pub fn is_genesis(&self) -> bool {
-        self.header.height == 0
+        self.header.height.as_u64() == 0
     }
 
     /// The coinbase transaction (first transaction).
@@ -129,13 +129,24 @@ impl Block {
 
     /// Approximate serialized size in bytes.
     pub fn size(&self) -> usize {
-        let tx_sizes: usize = self
-            .transactions
-            .iter()
-            .map(|tx| tx.size())
-            .fold(0usize, |acc, s| acc.saturating_add(s));
-        200usize.saturating_add(tx_sizes)
+        block_size_from_txs(self.transactions.iter())
     }
+}
+
+/// Approximate serialized header size used by the block-size estimate.
+pub const BLOCK_HEADER_SIZE_ESTIMATE: usize = 200;
+
+/// The canonical block-size formula: the header estimate plus every
+/// transaction's serialized size. Single-sourced so the miner (sizing a
+/// candidate block to compute the coinbase fee claim, see
+/// `mining::block_builder`) and the validator ([`Block::size`], used for
+/// congestion + `fee_market::distribute_fee`) compute it identically and cannot
+/// drift — a drift would make the miner mis-claim fees and its own block would
+/// be rejected. `saturating_add` keeps a pathological tx-size sum from wrapping.
+pub fn block_size_from_txs<'a>(txs: impl IntoIterator<Item = &'a Transaction>) -> usize {
+    txs.into_iter()
+        .map(|tx| tx.size())
+        .fold(BLOCK_HEADER_SIZE_ESTIMATE, |acc, s| acc.saturating_add(s))
 }
 
 #[cfg(test)]
@@ -233,8 +244,8 @@ mod tests {
         BlockHeader {
             network_magic: [0, 0, 0, 0],
             version: 1,
-            height: 1,
-            timestamp: 1,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1),
             prev_hash: Hash::zero(),
             tx_root,
             anchor: Hash::zero(),
@@ -455,7 +466,7 @@ mod tests {
     #[test]
     fn test_is_genesis_true_at_height_zero() {
         let mut header = mk_header(Hash::zero());
-        header.height = 0;
+        header.height = crate::primitives::Height::new(0);
         let block = Block::new(header, vec![]);
         assert!(block.is_genesis());
     }

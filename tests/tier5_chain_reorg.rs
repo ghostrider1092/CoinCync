@@ -21,8 +21,8 @@ fn make_header(height: u64, prev_hash: Hash, tx_root: Hash, seed: u8) -> BlockHe
     BlockHeader {
         network_magic: *b"CYNC",
         version: 1,
-        height,
-        timestamp: 1700000000 + height * 120,
+        height: coincync::primitives::Height::new(height),
+        timestamp: coincync::primitives::Timestamp::from_secs(1700000000 + height * 120),
         prev_hash,
         tx_root,
         anchor: Hash::zero(),

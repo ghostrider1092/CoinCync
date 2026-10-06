@@ -79,6 +79,7 @@ impl BatchVerifyResult {
 }
 
 /// Signature data for batch verification
+#[derive(Clone)]
 pub struct SignatureData {
     /// Message being signed
     pub message: Vec<u8>,
@@ -287,6 +288,48 @@ impl Default for BatchVerifier {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Differential verification of the optimized ring-signature path against a
+/// fresh, uncached, serial reference. Returns the indices where the two
+/// verdicts DISAGREE (empty ⇒ full agreement).
+///
+/// - **reference:** a fresh [`BatchVerifier::verify_single`] per signature — no
+///   cache, no parallelism, no early-out reuse (ground truth for the current
+///   verifier).
+/// - **optimized:** [`BatchVerifier::verify_all`] — the production path with the
+///   verification cache and rayon parallelism.
+///
+/// This is a differential over the **optimization/caching layer**, which is
+/// where implementation bugs actually hide once the core `clsag_verify` is
+/// shared by both paths: a poisoned or mis-keyed verification cache returning a
+/// verdict that fresh verification contradicts (a cached "valid" for an invalid
+/// signature is an inflation vector), a parallel index/order bug, or a cache
+/// key that fails to bind the full statement. Any non-empty result is an
+/// implementation bug in that layer.
+///
+/// It does **NOT** establish the soundness of CLSAG itself or of the proof
+/// system — both paths call the same `clsag_verify`, so a bug *inside* it, or a
+/// spec-level break, is invisible here. That residual is the external audit's
+/// domain (see `docs/design/cip-security-threat-model.md`). Usable at runtime
+/// as a defense-in-depth cross-check (reject a block whose signatures the two
+/// paths disagree on) as well as in the differential test corpus below.
+pub fn differential_ring_sig_check(sigs: &[SignatureData]) -> Vec<usize> {
+    // Ground truth: fresh, uncached, serial verdicts.
+    let reference: Vec<bool> = sigs.iter().map(BatchVerifier::verify_single).collect();
+
+    // Optimized path: verification cache + rayon parallelism.
+    let mut bv = BatchVerifier::new();
+    bv.add_all(sigs.to_vec());
+    let result = bv.verify_all();
+    let mut optimized = vec![true; sigs.len()];
+    for i in result.invalid_indices {
+        optimized[i] = false;
+    }
+
+    (0..sigs.len())
+        .filter(|&i| reference[i] != optimized[i])
+        .collect()
 }
 
 /// Parallel transaction validator.
@@ -586,6 +629,121 @@ mod tests {
         let mut identity_pseudo = valid_signature_data();
         identity_pseudo.pseudo_output = [0u8; 32];
         assert!(!BatchVerifier::verify_single(&identity_pseudo));
+    }
+
+    /// Deterministic (seeded) valid signature, so a differential failure is
+    /// reproducible from the seed.
+    fn seeded_valid_sig(seed: u64) -> SignatureData {
+        use crate::crypto::clsag::{clsag_sign, RingMember};
+        use crate::crypto::curve::{Commitment, SecretScalar};
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let mut rng = StdRng::seed_from_u64(seed);
+        let secret = SecretScalar::random(&mut rng);
+        let real_blinding = SecretScalar::random(&mut rng);
+        let pseudo_blinding = SecretScalar::random(&mut rng);
+        let real_commitment = Commitment::commit(1_000, &real_blinding);
+        let pseudo_output = Commitment::commit(1_000, &pseudo_blinding);
+        let blinding_diff =
+            SecretScalar::from_scalar(real_blinding.as_scalar() - pseudo_blinding.as_scalar());
+        let ring = vec![
+            RingMember::new(secret.to_public(), real_commitment),
+            RingMember::new(
+                SecretScalar::random(&mut rng).to_public(),
+                Commitment::commit(1_000, &SecretScalar::random(&mut rng)),
+            ),
+        ];
+        let message = format!("differential-corpus-{seed}").into_bytes();
+        let signature = clsag_sign(
+            &message,
+            &ring,
+            0,
+            &secret,
+            &blinding_diff,
+            &pseudo_output,
+            &mut rng,
+        )
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+
+        SignatureData {
+            message,
+            signature,
+            ring_data: borsh::to_vec(&ring).unwrap(),
+            pseudo_output: pseudo_output.to_bytes(),
+        }
+    }
+
+    #[test]
+    fn differential_corpus_is_non_vacuous() {
+        // Guard against a test that trivially passes because everything is
+        // accepted (or everything rejected): the corpus must contain BOTH a
+        // signature the reference accepts and one it rejects.
+        let good = seeded_valid_sig(21);
+        assert!(BatchVerifier::verify_single(&good), "a seeded valid sig must verify");
+        let mut bad = seeded_valid_sig(22);
+        bad.signature[0] ^= 0xFF;
+        assert!(!BatchVerifier::verify_single(&bad), "a mutated sig must fail");
+    }
+
+    #[test]
+    fn differential_optimized_path_agrees_with_fresh_serial() {
+        // A mixed corpus of valid + adversarially-mutated signatures. The
+        // optimized path (cache + parallel, above the parallel_threshold of 4)
+        // must return exactly the same per-index verdicts as fresh, uncached,
+        // serial verification. Any disagreement is a cache/parallel/early-out
+        // implementation bug.
+        let mut corpus: Vec<SignatureData> = Vec::new();
+        // 5 valid (distinct statements).
+        for s in [1u64, 2, 3, 4, 5] {
+            corpus.push(seeded_valid_sig(s));
+        }
+        // Tampered signature bytes.
+        let mut bad_sig = seeded_valid_sig(6);
+        bad_sig.signature[0] ^= 0xFF;
+        corpus.push(bad_sig);
+        // Wrong pseudo-output (breaks the balance term).
+        let mut bad_pseudo = seeded_valid_sig(7);
+        bad_pseudo.pseudo_output[0] ^= 0xFF;
+        corpus.push(bad_pseudo);
+        // Identity pseudo-output (R-29 early-out surface — the exact place the
+        // optimized path could diverge from raw verification).
+        let mut identity_pseudo = seeded_valid_sig(8);
+        identity_pseudo.pseudo_output = [0u8; 32];
+        corpus.push(identity_pseudo);
+        // Structurally garbage input.
+        corpus.push(SignatureData {
+            message: vec![1, 2, 3],
+            signature: vec![0u8; 64],
+            ring_data: vec![0u8; 32],
+            pseudo_output: [0u8; 32],
+        });
+
+        let disagree = differential_ring_sig_check(&corpus);
+        assert!(
+            disagree.is_empty(),
+            "optimized path diverged from fresh serial verification at indices {disagree:?}"
+        );
+    }
+
+    #[test]
+    fn differential_holds_after_cache_warmup() {
+        // Warm the global verification cache, then run the differential: the
+        // optimized path now takes the CACHED branch, and it must still agree
+        // with fresh recomputation (guards against cache poisoning / stale
+        // verdicts surviving into a later verification).
+        let corpus = vec![seeded_valid_sig(11), seeded_valid_sig(12)];
+        let mut warm = BatchVerifier::new();
+        warm.add_all(corpus.clone());
+        let first = warm.verify_all();
+        assert!(first.all_valid(), "warmup corpus must be valid");
+
+        assert!(
+            differential_ring_sig_check(&corpus).is_empty(),
+            "cached optimized verdicts must still match fresh serial verification"
+        );
     }
 
     #[test]

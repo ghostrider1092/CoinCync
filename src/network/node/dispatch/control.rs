@@ -66,7 +66,8 @@ use crate::error::Result;
 use crate::network::dandelion::DandelionRouter;
 use crate::network::peer::{PeerId, PeerInfo, PeerState};
 use crate::network::protocol::{
-    ChainWorkMessage, FlareMessage, Message, MessageType, VersionMessage,
+    ChainWorkMessage, ConsensusFingerprintMessage, FlareMessage, Message, MessageType,
+    VersionMessage,
 };
 use crate::network::scoring::PeerScorer;
 use crate::network::sync::{build_locator, ChainSync};
@@ -176,6 +177,20 @@ pub(super) async fn handle_version(
             senders.remove(&peer_id);
             let _ = event_tx.send(NodeEvent::PeerDisconnected(peer_id));
             return Ok(());
+        }
+
+        // Network-adjusted time (M-4): record this peer's clock offset for the
+        // consensus future-block cap. Placed HERE deliberately — AFTER the
+        // self-connection-nonce check and version.validate() above — so a VERSION
+        // that is later rejected never feeds the time state. Sampled only for
+        // OUTBOUND peers (ones we dialed; inbound peers are attacker-chosen), and
+        // net_time keys by netgroup so a flood from one /16 counts once. See
+        // net_time.rs and PR #59's review.
+        if let Some(addr) = peers.get(&peer_id).filter(|p| p.outbound).map(|p| p.addr) {
+            if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                let local = d.as_secs() as i64;
+                crate::net_time::record_offset(&addr, version.timestamp as i64 - local);
+            }
         }
 
         // Clone before awaiting so a full queue cannot hold a map guard.
@@ -294,6 +309,30 @@ pub(super) async fn handle_flare(
                         }
                     }
                 }
+                // Consensus-fingerprint: if the peer supports it, advertise our
+                // consensus-rules fingerprint so it can detect divergence early.
+                // Advisory only — nothing here disconnects.
+                if crate::network::firework::has_cap(
+                    flare.capabilities,
+                    crate::network::firework::CAP_CONSENSUS_FINGERPRINT,
+                ) {
+                    let sender = senders.get(&peer_id).map(|s| s.value().clone());
+                    if let Some(sender) = sender {
+                        let fp = crate::consensus::fingerprint::consensus_fingerprint_bytes(
+                            chain.network(),
+                        );
+                        match Message::consensus_fingerprint(magic, fp).and_then(|m| m.to_bytes()) {
+                            Ok(bytes) => {
+                                let _ = sender.send(bytes).await;
+                            }
+                            Err(e) => warn!(
+                                "Flare: failed to build ConsensusFingerprint for peer {:?}: {}",
+                                &peer_id[..4],
+                                e
+                            ),
+                        }
+                    }
+                }
             }
             Err(e) => {
                 trace!(
@@ -303,6 +342,57 @@ pub(super) async fn handle_flare(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// Advisory consensus-rules fingerprint from a peer (Firework
+/// `CAP_CONSENSUS_FINGERPRINT`). Records the peer's fingerprint on its PeerInfo
+/// and logs when it diverges from ours — early warning that the peer runs
+/// different consensus rules and could fork at a future activation height.
+/// ADVISORY: an oversized/malformed payload is dropped silently, and a mismatch
+/// is NEVER a disconnect (a staged consensus upgrade must not partition the
+/// network before the activation height it schedules).
+pub(super) async fn handle_consensus_fingerprint(
+    peer_id: PeerId,
+    payload: &[u8],
+    peers: &DashMap<PeerId, PeerInfo>,
+    chain: &SharedBlockchain,
+) -> Result<()> {
+    const MAX_FP_MSG_SIZE: usize = 64;
+    if payload.len() > MAX_FP_MSG_SIZE {
+        trace!(
+            "Oversized ConsensusFingerprint ({} bytes) from peer {:?}, ignoring",
+            payload.len(),
+            &peer_id[..4]
+        );
+        return Ok(());
+    }
+    let msg = match borsh::from_slice::<ConsensusFingerprintMessage>(payload) {
+        Ok(m) => m,
+        Err(e) => {
+            trace!(
+                "Malformed ConsensusFingerprint from peer {:?}: {} (ignoring)",
+                &peer_id[..4],
+                e
+            );
+            return Ok(());
+        }
+    };
+    if let Some(mut peer) = peers.get_mut(&peer_id) {
+        peer.consensus_fingerprint = Some(msg.fingerprint);
+    }
+    let local = crate::consensus::fingerprint::consensus_fingerprint_bytes(chain.network());
+    if msg.fingerprint != local {
+        warn!(
+            "Peer {:?} consensus-fingerprint MISMATCH: peer={} local={} — peer may run divergent \
+             consensus rules (advisory; not disconnecting)",
+            &peer_id[..4],
+            hex::encode(msg.fingerprint),
+            hex::encode(local),
+        );
+    } else {
+        trace!("Peer {:?} consensus-fingerprint matches ours", &peer_id[..4]);
     }
     Ok(())
 }
@@ -803,6 +893,81 @@ mod handler_tests {
         assert!(srx.try_recv().is_err());
     }
 
+    // ─── handle_consensus_fingerprint ─────────────────────────────────
+
+    #[tokio::test]
+    async fn flare_with_fingerprint_cap_triggers_fingerprint_send() {
+        let peer_id = [20u8; 32];
+        let peers = peers_with(peer_id, addr_for(30020), false);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let chain = genesis_chain();
+
+        let payload = borsh::to_vec(&FlareMessage {
+            capabilities: crate::network::firework::CAP_CONSENSUS_FINGERPRINT,
+        })
+        .unwrap();
+        handle_flare(peer_id, &payload, MAGIC, &peers, &senders, &chain)
+            .await
+            .unwrap();
+
+        // A ConsensusFingerprint message was sent to the capable peer.
+        assert!(srx.try_recv().is_ok(), "fingerprint sent to capable peer");
+    }
+
+    #[tokio::test]
+    async fn handle_consensus_fingerprint_stores_matching_fingerprint() {
+        let peer_id = [21u8; 32];
+        let peers = peers_with(peer_id, addr_for(30021), false);
+        let chain = genesis_chain();
+
+        let local = crate::consensus::fingerprint::consensus_fingerprint_bytes(chain.network());
+        let payload = borsh::to_vec(&ConsensusFingerprintMessage { fingerprint: local }).unwrap();
+        handle_consensus_fingerprint(peer_id, &payload, &peers, &chain)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            peers.get(&peer_id).unwrap().consensus_fingerprint,
+            Some(local)
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_consensus_fingerprint_mismatch_is_advisory_not_disconnect() {
+        let peer_id = [22u8; 32];
+        let peers = peers_with(peer_id, addr_for(30022), false);
+        let chain = genesis_chain();
+
+        let bogus = [0xABu8; 32];
+        let payload = borsh::to_vec(&ConsensusFingerprintMessage { fingerprint: bogus }).unwrap();
+        handle_consensus_fingerprint(peer_id, &payload, &peers, &chain)
+            .await
+            .unwrap();
+
+        // Recorded, and the peer is NOT removed (advisory, never a disconnect).
+        assert_eq!(
+            peers.get(&peer_id).unwrap().consensus_fingerprint,
+            Some(bogus)
+        );
+        assert!(peers.contains_key(&peer_id));
+    }
+
+    #[tokio::test]
+    async fn handle_consensus_fingerprint_oversized_is_ignored() {
+        let peer_id = [23u8; 32];
+        let peers = peers_with(peer_id, addr_for(30023), false);
+        let chain = genesis_chain();
+
+        let payload = vec![0u8; 128]; // > MAX_FP_MSG_SIZE
+        handle_consensus_fingerprint(peer_id, &payload, &peers, &chain)
+            .await
+            .unwrap();
+
+        assert_eq!(peers.get(&peer_id).unwrap().consensus_fingerprint, None);
+    }
+
     // ─── handle_chain_work ───────────────────────────────────────────
 
     #[tokio::test]
@@ -918,8 +1083,10 @@ mod handler_tests {
         assert!(srx.try_recv().is_ok(), "GetHeaders sent");
         assert!(srx.try_recv().is_err());
 
-        // Replay: a request is already in flight, so begin_headers_request
-        // returns None and no second GetHeaders is issued (no sync wedge).
+        // Replay: the peer is already Connected, so handle_verack early-returns
+        // (the Verack-replay IBD wedge fix) — it does NOT re-run the GetAddr /
+        // GetHeaders / slot logic. Nothing is re-sent and the in-flight headers
+        // request is left untouched.
         handle_verack(peer_id, MAGIC, &peers, &senders, &dand, &sync, &chain)
             .await
             .unwrap();

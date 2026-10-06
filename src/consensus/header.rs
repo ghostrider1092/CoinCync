@@ -48,7 +48,7 @@
 //!   strictly-greater fails. THREAT: off-by-one at the target boundary
 //!   accepting/rejecting a block wrongly. TESTS: `meets_target_boundary_semantics`.
 
-use crate::primitives::{hash_concat, Hash, PublicKey};
+use crate::primitives::{hash_concat, Hash, Height, PublicKey, Timestamp};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -57,8 +57,8 @@ pub struct BlockHeader {
     /// Network magic bytes — FIRST field, checked before any crypto validation.
     pub network_magic: [u8; 4],
     pub version: u8,
-    pub height: u64,
-    pub timestamp: u64,
+    pub height: Height,
+    pub timestamp: Timestamp,
     pub prev_hash: Hash,
     pub tx_root: Hash,
     pub anchor: Hash,
@@ -110,8 +110,8 @@ impl BlockHeader {
         // Network magic is hashed next — binds every block to its network.
         data.extend_from_slice(&self.network_magic);
         data.push(self.version);
-        data.extend_from_slice(&self.height.to_le_bytes());
-        data.extend_from_slice(&self.timestamp.to_le_bytes());
+        data.extend_from_slice(&self.height.as_u64().to_le_bytes());
+        data.extend_from_slice(&self.timestamp.as_secs().to_le_bytes());
         data.extend_from_slice(self.prev_hash.as_bytes());
         data.extend_from_slice(self.tx_root.as_bytes());
         data.extend_from_slice(self.anchor.as_bytes());
@@ -182,8 +182,8 @@ mod tests {
         BlockHeader {
             network_magic: [1, 2, 3, 4],
             version: 1,
-            height: 42,
-            timestamp: 1_700_000_000,
+            height: crate::primitives::Height::new(42),
+            timestamp: crate::primitives::Timestamp::from_secs(1_700_000_000),
             prev_hash: Hash::from_bytes([7u8; 32]),
             tx_root: Hash::from_bytes([8u8; 32]),
             anchor: Hash::from_bytes([9u8; 32]),
@@ -261,8 +261,9 @@ mod tests {
 
         assert_field_bound!("network_magic", |h| h.network_magic = [9, 9, 9, 9]);
         assert_field_bound!("version", |h| h.version ^= 1);
-        assert_field_bound!("height", |h| h.height ^= 1);
-        assert_field_bound!("timestamp", |h| h.timestamp ^= 1);
+        assert_field_bound!("height", |h| h.height =
+            crate::primitives::Height::new(h.height.as_u64() ^ 1));
+        assert_field_bound!("timestamp", |h| h.timestamp = crate::primitives::Timestamp::from_secs(h.timestamp.as_secs() ^ 1));
         assert_field_bound!("prev_hash", |h| h.prev_hash = Hash::from_bytes([0x11; 32]));
         assert_field_bound!("tx_root", |h| h.tx_root = Hash::from_bytes([0x22; 32]));
         assert_field_bound!("anchor", |h| h.anchor = Hash::from_bytes([0x33; 32]));

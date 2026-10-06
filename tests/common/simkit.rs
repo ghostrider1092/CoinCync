@@ -109,7 +109,7 @@ impl Sim {
             chain.init_genesis().expect("genesis");
             let genesis = chain.get_block_by_height(0).expect("genesis block");
             chain.restore_state(0, genesis.hash(), 1).expect("seed base");
-            base_ts = genesis.header.timestamp;
+            base_ts = genesis.header.timestamp.as_secs();
             let (_s, spend_pub) = generate_keypair();
             let (_v, view_pub) = generate_keypair();
             nodes.push(SimNode {
@@ -217,7 +217,7 @@ impl Sim {
                     continue;
                 }
                 let mut blocks = self.nodes[src].known.clone();
-                blocks.sort_by_key(|b| b.header.height);
+                blocks.sort_by_key(|b| b.header.height.as_u64());
                 for blk in blocks {
                     match self.nodes[dst].chain.add_block(blk.clone()) {
                         Ok(BlockStatus::Accepted)

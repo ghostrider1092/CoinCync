@@ -92,7 +92,10 @@ use super::super::relay_score::RelayScoreMap;
 use super::super::scoring::{OrphanFloodTracker, PeerScorer};
 use super::super::sync::ChainSync;
 use super::chain_state::ChainStateReader;
-use super::constants::{PEER_TIMEOUT, PING_INTERVAL, TIP_REBROADCAST_INTERVAL_SECS};
+use super::constants::{
+    MESH_FLOOR_PEERS, MESH_FLOOR_SUSTAIN_TICKS, PEER_TIMEOUT, PING_INTERVAL,
+    TIP_REBROADCAST_INTERVAL_SECS,
+};
 use super::runtime::wait_for_shutdown;
 use super::types::NodeEvent;
 use super::TxAbsenceCache;
@@ -113,6 +116,8 @@ pub(super) struct MaintenanceContext {
     pub chain_state: ChainStateReader,
     pub broadcast_rx: mpsc::Receiver<Transaction>,
     pub magic: [u8; 4],
+    /// Sustained mesh-floor flag, updated by the heartbeat tick.
+    pub mesh_degraded: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct CleanupTick<'a> {
@@ -149,6 +154,7 @@ pub(super) fn spawn_maintenance(
         chain_state: maint_chain_state,
         mut broadcast_rx,
         magic,
+        mesh_degraded: maint_mesh_degraded,
     } = context;
 
     // Spawn the maintenance task with panic supervision. Previously
@@ -209,6 +215,8 @@ pub(super) fn spawn_maintenance(
         // level for similar reason. Cheap: one log line per 30 s.
         let mut heartbeat_interval = interval(Duration::from_secs(30));
         let mut heartbeat_ticks: u64 = 0;
+        // Consecutive heartbeats with connected peers below MESH_FLOOR_PEERS.
+        let mut mesh_below_streak: u32 = 0;
         // 2026-06-27 gossip-bug fix: periodic InvBlock re-announce of our
         // current tip to all peers. See TIP_REBROADCAST_INTERVAL_SECS docs
         // (from PR #123).
@@ -275,6 +283,7 @@ pub(super) fn spawn_maintenance(
                 _ = heartbeat_interval.tick() => {
                     heartbeat_ticks = heartbeat_ticks.saturating_add(1);
                     emit_heartbeat(&maint_peers, heartbeat_ticks);
+                    update_mesh_floor(&maint_peers, &maint_mesh_degraded, &mut mesh_below_streak);
                 }
             }
         }
@@ -499,6 +508,48 @@ async fn flush_ban_list(scorer: &RwLock<PeerScorer>, path: &std::path::Path) {
     }
 }
 
+/// Track the sustained mesh-floor state with hysteresis. Increments a
+/// below-floor streak each heartbeat that connected peers are under
+/// `MESH_FLOOR_PEERS`; once the streak reaches `MESH_FLOOR_SUSTAIN_TICKS` the
+/// `mesh_degraded` flag is set. Any heartbeat at/above the floor resets the
+/// streak and clears the flag immediately (slow to enter, fast to recover).
+///
+/// This is observational — it does not itself change mining or peering
+/// behavior. Enforcement (e.g. pausing mining while degraded) is opt-in; see
+/// docs/design/runtime-mesh-floor.md.
+fn update_mesh_floor(
+    peers: &DashMap<PeerId, PeerInfo>,
+    mesh_degraded: &std::sync::atomic::AtomicBool,
+    below_streak: &mut u32,
+) {
+    use std::sync::atomic::Ordering;
+    let connected = peers
+        .iter()
+        .filter(|peer| peer.state == PeerState::Connected)
+        .count();
+    if connected < MESH_FLOOR_PEERS {
+        *below_streak = below_streak.saturating_add(1);
+        if *below_streak >= MESH_FLOOR_SUSTAIN_TICKS
+            && !mesh_degraded.swap(true, Ordering::Relaxed)
+        {
+            warn!(
+                target: "node::heartbeat",
+                "mesh-floor: connected peers={} below floor={} for {} ticks — entering mesh_degraded",
+                connected, MESH_FLOOR_PEERS, below_streak,
+            );
+        }
+    } else {
+        *below_streak = 0;
+        if mesh_degraded.swap(false, Ordering::Relaxed) {
+            info!(
+                target: "node::heartbeat",
+                "mesh-floor: connected peers={} at/above floor={} — clearing mesh_degraded",
+                connected, MESH_FLOOR_PEERS,
+            );
+        }
+    }
+}
+
 fn emit_heartbeat(peers: &DashMap<PeerId, PeerInfo>, tick: u64) {
     let outbound = peers
         .iter()
@@ -551,5 +602,64 @@ async fn evaporate_relay_scores(relay_scores: &RwLock<RelayScoreMap>) {
             "inbound relay-score: {} peers currently scored",
             scores.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod mesh_floor_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn connected_outbound(n: u8) -> (PeerId, PeerInfo) {
+        let id = [n; 32];
+        let addr = format!("127.0.0.1:{}", 20000 + n as u16).parse().unwrap();
+        let mut p = PeerInfo::new(id, addr, true);
+        p.state = PeerState::Connected;
+        (id, p)
+    }
+
+    #[test]
+    fn enters_after_sustained_ticks_and_recovers_immediately() {
+        let peers = DashMap::new();
+        // One connected peer — below MESH_FLOOR_PEERS (3).
+        let (id, p) = connected_outbound(1);
+        peers.insert(id, p);
+        let degraded = AtomicBool::new(false);
+        let mut streak = 0u32;
+
+        // Below floor for SUSTAIN-1 ticks: not yet degraded (hysteresis).
+        for _ in 0..(MESH_FLOOR_SUSTAIN_TICKS - 1) {
+            update_mesh_floor(&peers, &degraded, &mut streak);
+            assert!(!degraded.load(Ordering::Relaxed));
+        }
+        // The SUSTAIN-th consecutive sub-floor tick flips it on.
+        update_mesh_floor(&peers, &degraded, &mut streak);
+        assert!(degraded.load(Ordering::Relaxed));
+
+        // Reach the floor (3 connected) — immediate recovery, streak reset.
+        for n in 2..=3u8 {
+            let (i, pp) = connected_outbound(n);
+            peers.insert(i, pp);
+        }
+        update_mesh_floor(&peers, &degraded, &mut streak);
+        assert!(!degraded.load(Ordering::Relaxed));
+        assert_eq!(streak, 0);
+    }
+
+    #[test]
+    fn non_connected_peers_do_not_count_toward_floor() {
+        let peers = DashMap::new();
+        // Three peers present but only handshaking (not Connected) => below floor.
+        for n in 1..=3u8 {
+            let id = [n; 32];
+            let addr = format!("127.0.0.1:{}", 21000 + n as u16).parse().unwrap();
+            peers.insert(id, PeerInfo::new(id, addr, true)); // default state != Connected
+        }
+        let degraded = AtomicBool::new(false);
+        let mut streak = 0u32;
+        for _ in 0..MESH_FLOOR_SUSTAIN_TICKS {
+            update_mesh_floor(&peers, &degraded, &mut streak);
+        }
+        assert!(degraded.load(Ordering::Relaxed));
     }
 }

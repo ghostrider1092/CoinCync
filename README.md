@@ -193,7 +193,9 @@ toolchain (`build-essential cmake` on Debian/Ubuntu; `base-devel cmake` on Arch;
 **Clone and build:**
 
 ```bash
-git clone https://github.com/Coincync-sys/Coincync-Testnet-.git coincync
+# --depth 1 is a shallow clone (latest snapshot only, no history) — much faster
+# to download. Drop it if you need the full git history.
+git clone --depth 1 https://github.com/ghostrider1092/CoinCync.git coincync
 cd coincync
 cargo build --release --features randomx
 ```
@@ -250,17 +252,21 @@ curl -s http://127.0.0.1:28081/rpc/testnet \
 # Expect: peer_count >= 3, height climbing toward the current tip
 ```
 
-If DNS is blocked on your network, the binary falls back to hardcoded seed IPs
-automatically; you can also pass them explicitly:
+If DNS is blocked on your network, the binary falls back to the hardcoded seed
+IP automatically; you can also pass it explicitly:
 
 ```bash
 ./coincync-node --network testnet \
-  --addnode 66.135.23.193:28080 \
-  --addnode 140.82.57.168:28080 \
-  --addnode 45.32.251.6:28080 \
-  --addnode 207.148.6.50:28080 \
-  --addnode 173.199.93.21:28080
+  --addnode 2.29.34.197:28080   # public testnet seed (Hetzner, EU)
 ```
+
+> The current public testnet runs a single stable seed (`2.29.34.197:28080`),
+> which is also what `seed2`/`seed3.coincync.network` resolve to. The older
+> multi-host Vultr fleet (`66.135.23.193`, `140.82.57.168`, `45.32.251.6`,
+> `207.148.6.50`, `173.199.93.21`) was decommissioned on 2026-07-27 — do not
+> `--addnode` those IPs; they no longer accept connections. Additional
+> independently-operated seeds are tracked in
+> [ghostrider1092/CoinCync#148](https://github.com/ghostrider1092/CoinCync/issues/148).
 
 `--addnode` accepts either `IP:port` or a `hostname:port`; hostname resolution is
 refused under `--proxy`/`--tor` to avoid a DNS leak.
@@ -291,6 +297,15 @@ cores recommended. A $5–10/mo VPS or a spare home machine works.
 
 `coincync-rig` logs `BLOCK FOUND, submitting` when it solves a block. Say hi in
 Discord `#mining` once you're up so operators can prioritize your node.
+
+**The rig requires at least 3 connected peers before it will mine.** This is a
+deliberate anti-fork guard: a node that mines while isolated (or barely
+connected) risks extending a minority fork that the network later reorgs away,
+wasting the work. If the rig logs that it is waiting for peers, check your node's
+`peer_count` with the `get_info` call above and confirm outbound port `28080` is
+not firewalled. With only one public seed today, a seed outage can leave new
+nodes unable to reach the 3-peer floor until it recovers (see
+[ghostrider1092/CoinCync#148](https://github.com/ghostrider1092/CoinCync/issues/148)).
 
 ## Using Tor
 
