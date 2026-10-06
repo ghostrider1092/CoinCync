@@ -103,6 +103,7 @@ sketch-cut-through        = []   # CIP-003 (also see existing src/crypto/mw_cutt
 sketch-block-aggregation  = []   # CIP-003 (pairs with cut-through)
 sketch-kernel-offsets     = []   # CIP-004
 sketch-lelantus-spark     = []   # CIP-005 (gates src/crypto/lelantus_spark.rs)
+sketch-privacy-manifold   = []   # Underground manifold — uniform-face tx envelope (gates src/crypto/privacy_manifold.rs)
 sketch-gk-proof           = []   # CIP-Shielded 2c#1 (gates src/crypto/groth_kohlweiss.rs)
 shielded-soak-stub        = []   # CIP-Shielded: inert prover/verifier for the assembly-line soak (NEVER production)
 # CIP-Shielded: use the vendored Firo libspark FFI backend as the shielded engine.

@@ -4404,6 +4404,42 @@ mod tests {
     }
 
     #[test]
+    fn fresh_and_reloaded_genesis_agree_on_total_difficulty() {
+        // Regression lock: a freshly genesis-initialised node MUST advertise
+        // the same cumulative work as the identical node after a restart.
+        // `init_genesis` previously left `inner.stats.total_difficulty` at the
+        // ChainStats::default() of 0 while persisting `total_difficulty: 1` to
+        // the DB, so a fresh node reported 0 but reloaded as 1 — a disagreement
+        // that leaks into ChainWorkMessage and the peer `work_behind` veto until
+        // the first block or a reload self-heals it.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        chain.init_genesis().unwrap();
+
+        // Fresh-init node: the canonical genesis base, matching the saved DB
+        // state and recompute_total_difficulty(0).
+        assert_eq!(
+            chain.stats().total_difficulty,
+            1,
+            "fresh genesis-init node must report total_difficulty == 1"
+        );
+        assert_eq!(chain.recompute_total_difficulty(0), Some(1));
+
+        // Same node after a restart: must agree with the fresh-init value.
+        let reloaded = Blockchain::with_database(db, NetworkType::Testnet);
+        assert_eq!(
+            reloaded.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Loaded
+        );
+        assert_eq!(
+            reloaded.stats().total_difficulty,
+            chain.stats().total_difficulty,
+            "reloaded node must match fresh-init total_difficulty"
+        );
+    }
+
+    #[test]
     fn mtp_uses_fork_lineage_not_active_chain_by_height() {
         // R-1 regression: Median-Time-Past for a competing-fork block must be
         // computed from the FORK's own ancestors (walk prev_hash), not the
