@@ -138,8 +138,9 @@ Mainnet target: 2026-10-01.
    ./target/release/coincync-node --network testnet
 
    The node auto-discovers peers via DNS seeds:
-     seed1.coincync.network  (66.135.23.193)
-     seed2.coincync.network  (140.82.57.168)
+     seed2.coincync.network  (2.29.34.197)  <- live
+     seed3.coincync.network  (2.29.34.197)  <- live
+     seed1.coincync.network  (dead host 68.8.46.247 - do not rely on it, #148)
      seed3.coincync.network  (207.148.111.76)
 
 3. Watch sync progress (in another terminal):
@@ -163,7 +164,7 @@ CURRENT STATE
 
 TROUBLESHOOTING
 • Stuck at height 0 → check that port 28080 outbound isn't firewalled
-• 0 peers → `dig seed1.coincync.network` to confirm DNS resolves
+• 0 peers → `dig seed2.coincync.network` (or seed3) to confirm DNS resolves to the live seed 2.29.34.197
 • Anything else → post here with the last 50 lines of node logs and your `get_info` output
 ```
 

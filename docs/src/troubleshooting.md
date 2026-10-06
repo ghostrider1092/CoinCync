@@ -109,9 +109,9 @@ need to either:
 Three things to check, in order:
 
 1. **Outbound port 28080**:
-   `nc -zv 66.135.23.193 28080` should connect.
+   `nc -zv 2.29.34.197 28080` should connect (the live public seed).
 2. **DNS seed resolution**:
-   `dig seed1.coincync.network` returns a valid A record.
+   `dig seed2.coincync.network` (or `seed3`) returns a valid A record — these resolve to the live seed `2.29.34.197`. (`seed1.coincync.network` currently resolves to a dead host, #148.)
 3. **Peer count**: in the node's `get_info`, `peer_count` should be
    ≥ 1 within a minute of startup. Zero peers means firewalls or
    seed-discovery problems.
