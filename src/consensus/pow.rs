@@ -501,6 +501,26 @@ mod randomx_cache {
     /// callers near the boundary never spawn duplicate builders.
     static PREWARM_INFLIGHT: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 
+    /// #235 STOPGAP — background prewarm + boundary promotion are DISABLED.
+    ///
+    /// A full-mem dataset built on the background prewarm thread (while the
+    /// miner was hashing on the current epoch's dataset) was observed to
+    /// produce WRONG hashes once promoted at the epoch boundary: on the rig at
+    /// boundary 12288, the local node rejected ~87% of found blocks with
+    /// "Hash doesn't meet target" for ~10.5h, until a `systemctl restart`
+    /// rebuilt the SAME epoch's dataset SYNCHRONOUSLY and it hashed correctly
+    /// again. The key derivation is correct (same seed), so the fault is in the
+    /// background-built `DatasetEntry` itself, not the key. Root cause is not
+    /// yet pinned (randomx_rs dataset init racing the live mining VMs is the
+    /// leading suspect). Until it is, we never promote a prewarmed dataset: we
+    /// discard it and build synchronously via `create_dataset_entry` — the
+    /// known-good path the restart uses. This reintroduces the one-time
+    /// ~30-60s build stall at each epoch boundary (acceptable; it is what every
+    /// boundary did before prewarm existed) in exchange for correct hashes.
+    /// Flip back to `true` only once a prewarmed-vs-synchronous hash check
+    /// proves the background build is byte-identical. See issue #235.
+    const PREWARM_PROMOTION_ENABLED: bool = false;
+
     thread_local! {
         /// Per-thread RandomX VM. Each thread builds its own VM from
         /// the shared `DatasetEntry` on first hash (or on epoch
@@ -723,15 +743,28 @@ mod randomx_cache {
             let mut pw = PREWARM_CACHE.write();
             let matches = pw.as_ref().map(|e| e.key == *seed).unwrap_or(false);
             if matches {
-                let entry = pw.take().expect("checked Some above");
-                let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
-                *guard = Some(entry);
-                *RETRY_UNTIL.lock() = None; // #142: init succeeded — clear backoff
-                tracing::info!(
-                    "RandomX epoch dataset promoted from prewarm (no build stall), key={}...",
-                    hex::encode(&seed[..4])
-                );
-                return Ok(triple);
+                if PREWARM_PROMOTION_ENABLED {
+                    let entry = pw.take().expect("checked Some above");
+                    let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
+                    *guard = Some(entry);
+                    *RETRY_UNTIL.lock() = None; // #142: init succeeded — clear backoff
+                    tracing::info!(
+                        "RandomX epoch dataset promoted from prewarm (no build stall), key={}...",
+                        hex::encode(&seed[..4])
+                    );
+                    return Ok(triple);
+                } else {
+                    // #235 STOPGAP: a prewarmed entry exists but promotion is
+                    // disabled (background-built datasets produced wrong hashes
+                    // after a boundary). Discard it and fall through to a
+                    // synchronous build — the known-good path.
+                    pw.take();
+                    tracing::warn!(
+                        "RandomX #235 stopgap: discarding prewarmed dataset for key={}..., \
+                         rebuilding synchronously (prewarm promotion disabled until #235 fixed)",
+                        hex::encode(&seed[..4])
+                    );
+                }
             }
         }
 
@@ -760,6 +793,13 @@ mod randomx_cache {
     /// epoch boundary): it no-ops if `seed` is already the live dataset,
     /// already prewarmed, or a prewarm is already in flight.
     pub fn prewarm_seed(seed: [u8; 32]) {
+        // #235 STOPGAP: background prewarm is disabled (its promoted datasets
+        // produced wrong hashes after a boundary). No-op so we never build a
+        // 2 GB dataset on a background thread that ensure_dataset would only
+        // discard; the boundary builds synchronously instead. See #235.
+        if !PREWARM_PROMOTION_ENABLED {
+            return;
+        }
         // Already the live dataset? nothing to do.
         if DATASET_CACHE
             .read()
@@ -1095,6 +1135,13 @@ mod randomx_cache {
         #[test]
         #[ignore]
         fn prewarm_lands_and_promotes() {
+            // #235 STOPGAP: background prewarm + promotion are disabled, so
+            // this plumbing test cannot run as written (prewarm_seed no-ops and
+            // nothing lands in PREWARM_CACHE). Skip until promotion is
+            // re-enabled; the plumbing it exercises is intact behind the flag.
+            if !PREWARM_PROMOTION_ENABLED {
+                return;
+            }
             // Force light mode so the build is ~2s, not a 2 GB dataset.
             std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
             let seed = [0x5Au8; 32];
