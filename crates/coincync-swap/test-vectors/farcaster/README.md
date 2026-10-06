@@ -12,7 +12,7 @@
 - `SCHEMA.md` — JSON schema each vector file conforms to (one vector per file).
 - `btc-adaptor/*.json` — BIP-340 Schnorr adaptor signature vectors (parallel to Comit's, lets us cross-check both reference impls match each other).
 - `ed25519-adaptor/*.json` — Monero-style ed25519 adaptor sig vectors. Our impl uses Ristretto255 (the strictly stronger prime-order sibling); these vectors validate the underlying scalar/point arithmetic even though our group representation differs.
-- `dleq-cross-curve/*.json` — Cross-curve DLEQ vectors.
+- `dleq-cross-curve/*.json` — Cross-curve DLEQ vectors. **Not replayable as-is:** our v2 proof uses Ristretto points, its own NUMS generators and transcript, so vendor proofs cannot match byte-for-byte; `tests/external_vectors.rs` rejects `dleq-cross-curve` vectors until a dedicated verify-only harness exists.
 - `wire-protocol/*.json` — Protocol message format vectors (deferred; lower-priority than crypto).
 
 ## Why these vectors in addition to Comit's

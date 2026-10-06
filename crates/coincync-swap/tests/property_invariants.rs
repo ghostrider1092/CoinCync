@@ -61,9 +61,11 @@ use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 use coincync_swap::adaptor::{
     create_pre_sig_bip340, cync_adaptor_point, cync_create_pre_sig, cync_decrypt_adaptor,
-    cync_recover_secret, cync_verify_pre_sig, decrypt_btc_adaptor, prove_cross_curve,
-    recover_secret_from_btc_sig, verify_cross_curve_proof, verify_pre_sig, AdaptorSecret,
+    cync_recover_secret, cync_verify_pre_sig, decrypt_btc_adaptor, recover_secret_from_btc_sig,
+    verify_pre_sig, AdaptorSecret,
 };
+use coincync_swap::cross_curve_dleq::{prove, verify, CrossCurveProof, CrossCurveStatement};
+use rand::SeedableRng;
 
 // ─── Strategies ───────────────────────────────────────────────
 
@@ -262,21 +264,35 @@ proptest! {
             "CYNC adaptor extraction returned a different secret than was used to decrypt"
         );
     }
+}
 
-    /// **Cross-curve DLEQ roundtrip:** for any valid (adaptor secret,
-    /// nonce), the proof
-    ///
-    ///   prove_cross_curve(secret, T_btc, T_cync, k)
-    ///   → verify_cross_curve_proof(proof, T_btc, T_cync)
-    ///
-    /// must verify. This invariant ensures the swap state machine
-    /// always accepts proofs the protocol actually produced. A
-    /// regression here would silently break every CYNC↔BTC swap (the
-    /// state machine refuses to lock if the DLEQ doesn't verify).
+/// A cross-curve adaptor secret: `0 < t < 2^252` (the v2 proof's bound).
+fn arb_cross_curve_secret() -> impl Strategy<Value = AdaptorSecret> {
+    arb_adaptor_secret().prop_filter("0 < t < 2^252", |secret| {
+        let le = secret.ristretto_bytes();
+        le[31] & 0xf0 == 0 && le != [0u8; 32]
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        // Each case is a full v2 proof: 252 joint bit proofs to prove
+        // and to verify. Raise via `PROPTEST_CASES` when budget allows.
+        cases: 16,
+        .. ProptestConfig::default()
+    })]
+
+    /// **Cross-curve DLEQ roundtrip:** for any valid adaptor secret,
+    /// RNG seed and session context, `prove` → encode → decode →
+    /// `verify` succeeds, and the same proof fails under another
+    /// context. A regression here would silently break every CYNC↔BTC
+    /// swap (the state machine refuses to lock if the DLEQ doesn't
+    /// verify) or let a proof be replayed across sessions.
     #[test]
     fn dleq_roundtrip(
-        secret in arb_adaptor_secret(),
-        nonce_k_bytes in arb_ristretto_canonical_bytes(),
+        secret in arb_cross_curve_secret(),
+        seed in any::<u64>(),
+        context in proptest::collection::vec(any::<u8>(), 0..64),
     ) {
         let secp = Secp256k1::new();
 
@@ -287,10 +303,21 @@ proptest! {
         let t_cync_bytes: [u8; 32] = cync_adaptor_point(&secret)
             .expect("adaptor point derivation");
 
-        let proof = prove_cross_curve(&secret, &t_btc_bytes, &t_cync_bytes, &nonce_k_bytes)
+        let statement = CrossCurveStatement::new(&t_btc_bytes, &t_cync_bytes, &context)
+            .expect("valid statement");
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let proof = prove(&secret, &statement, &mut rng)
             .expect("honest DLEQ proof construction must succeed");
+        let decoded = CrossCurveProof::from_bytes(&proof.to_bytes())
+            .expect("own encoding must decode");
 
-        verify_cross_curve_proof(&proof, &t_btc_bytes, &t_cync_bytes)
+        verify(&decoded, &statement)
             .expect("honestly-constructed DLEQ proof must verify against its inputs");
+
+        let mut other_context = context.clone();
+        other_context.push(0);
+        let other = CrossCurveStatement::new(&t_btc_bytes, &t_cync_bytes, &other_context)
+            .expect("valid statement");
+        prop_assert!(verify(&decoded, &other).is_err());
     }
 }

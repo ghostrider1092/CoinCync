@@ -19,8 +19,7 @@
 | --- | --- | --- | --- |
 | BTC-side adaptor | [`adaptor.rs`](../crates/coincync-swap/src/adaptor.rs) (BIP-340 Schnorr) | Comit + Farcaster | Identical construction |
 | CYNC-side adaptor | [`adaptor.rs`](../crates/coincync-swap/src/adaptor.rs) (Schnorr over Ristretto255) | Farcaster (ed25519 / Monero CryptoNote variant) | Same family; **Ristretto255 is the cleaner prime-order sibling of ed25519** — no cofactor issues. Comit/Farcaster use Monero-flavored ed25519 because Monero's chain demands it; CYNC's design lets us use the strictly stronger Ristretto255. |
-| Cross-curve DLEQ (default) | [`adaptor.rs`](../crates/coincync-swap/src/adaptor.rs) (Maxwell-Poelstra) | Comit | Identical construction |
-| Cross-curve DLEQ (strict) | [`strict_dleq.rs`](../crates/coincync-swap/src/strict_dleq.rs) (Noether 2018) | Neither (audit-only hardening) | Stricter than the reference impls; feature-flagged |
+| Cross-curve DLEQ (v2) | [`cross_curve_dleq.rs`](../crates/coincync-swap/src/cross_curve_dleq.rs) | COMIT (via sigma_fun `dl_secp256k1_ed25519_eq`) | Same composition, adapted from Edwards to Ristretto points with our own NUMS generators and transcript; not byte-compatible with COMIT proofs |
 | BTC chain integration | [`btc.rs`](../crates/coincync-swap/src/btc.rs) (`bitcoin = 0.32`, `secp256k1 = 0.29`) | Comit (similar versions) | Aligned |
 | Curve25519 primitives | `curve25519-dalek = 4.1` | Same crate, same major version | Aligned |
 | Noise transport | [`coordinator.rs`](../crates/coincync-swap/src/coordinator.rs) (`snow = 0.9`, Noise XX pattern) | Comit / Farcaster | Aligned (cipher suite: `Noise_XX_25519_ChaChaPoly_BLAKE2s`) |
@@ -148,7 +147,7 @@ Farcaster's BIP-340 adaptor vectors through our implementation; build fails
 on any byte-level mismatch.
 ```
 
-Do this for each of: BIP-340 Schnorr adaptor (BTC), Schnorr adaptor over Ristretto255 (CYNC), Maxwell-Poelstra DLEQ (default cross-curve binding), Noether 2018 strict DLEQ (audit-hardened option), HMAC-SHA256 state integrity, Noise XX coordinator transport.
+Do this for each of: BIP-340 Schnorr adaptor (BTC), Schnorr adaptor over Ristretto255 (CYNC), cross-curve DLEQ v2 (sigma_fun composition over Ristretto; differential testing needs a verify-only harness because proofs are not byte-compatible), HMAC-SHA256 state integrity, Noise XX coordinator transport.
 
 **Effort:** ~2-3 days of focused citation work.
 
@@ -187,7 +186,7 @@ For each, document:
 
 | Dimension | Before alignment | After alignment |
 | --- | --- | --- |
-| Auditor's mental model | "New cross-curve swap design" | "Cyncswap = Comit + Farcaster + (Ristretto255 + Noether strict DLEQ + HMAC state) deltas" |
+| Auditor's mental model | "New cross-curve swap design" | "Cyncswap = Comit + Farcaster + (Ristretto255 + Ristretto adaptation of the sigma_fun cross-curve DLEQ + HMAC state) deltas" |
 | Test-vector coverage | Internal vectors only | Internal + Comit + Farcaster reference vectors |
 | Test-vector enforcement | Manual review | CI fails on bit-level mismatch |
 | Audit precedent reuse | None | Kudelski 2021 (Comit) + academic peer review (Farcaster) |

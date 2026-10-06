@@ -69,7 +69,7 @@ If any criterion is not met by the target month, **v1.0 mainnet slips**. The cri
 
 **Headline:** Trustless CYNC↔BTC atomic swaps with the 6-layer user-safety stack. **Ships after v1.0 mainnet is stable** and cyncswap has cleared its own dedicated audit.
 **Target:** 3-6 months after v1.0 mainnet (currently estimated Q1-Q2 2027; specific month locked when the cyncswap audit is scheduled).
-**Status:** ~95% implemented (346 tests pass with `--features strict-dleq`), audit prep complete at [docs/cyncswap-audit-prep.md](cyncswap-audit-prep.md). Audit outreach to Cypher Stack / OSTIF / Teserakt pending NLnet grant outcome.
+**Status:** ~95% implemented (cross-curve DLEQ replaced by v2 on 2026-10-03; test counts being re-measured), audit prep complete at [docs/cyncswap-audit-prep.md](cyncswap-audit-prep.md). Audit outreach to Cypher Stack / OSTIF / Teserakt pending NLnet grant outcome.
 
 **Why this is the v1.1 headline:**
 

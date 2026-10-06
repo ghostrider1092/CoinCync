@@ -34,8 +34,8 @@ use serde_json::Value;
 
 use coincync_swap::adaptor::{
     create_pre_sig_bip340, cync_adaptor_point, cync_create_pre_sig, cync_decrypt_adaptor,
-    cync_recover_secret, decrypt_btc_adaptor, prove_cross_curve, recover_secret_from_btc_sig,
-    verify_pre_sig, AdaptorSecret,
+    cync_recover_secret, decrypt_btc_adaptor, recover_secret_from_btc_sig, verify_pre_sig,
+    AdaptorSecret,
 };
 
 /// Root of the vendor vector tree, relative to the workspace member dir.
@@ -235,51 +235,6 @@ fn run_ristretto_adaptor(vec_path: &Path, json: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn run_dleq(vec_path: &Path, json: &Value) -> Result<(), String> {
-    let adaptor_secret_bytes: [u8; 32] =
-        array(hex_field(json, &["inputs", "adaptor_secret_ristretto"])?)?;
-    let nonce_k_bytes: [u8; 32] = array(hex_field(json, &["inputs", "nonce_k_ristretto"])?)?;
-
-    let expected_t_btc: [u8; 33] = array(hex_field(json, &["expected", "t_btc_compressed"])?)?;
-    let expected_t_cync: [u8; 32] = array(hex_field(json, &["expected", "t_cync_ristretto"])?)?;
-    let expected_a_btc = hex_field(json, &["expected", "proof_a_btc"])?;
-    let expected_a_cync = hex_field(json, &["expected", "proof_a_cync"])?;
-    let expected_s_btc = hex_field(json, &["expected", "proof_s_btc"])?;
-    let expected_s_cync = hex_field(json, &["expected", "proof_s_cync"])?;
-
-    let secret = AdaptorSecret::from_ristretto_bytes(adaptor_secret_bytes)
-        .map_err(|e| format!("adaptor secret: {e:?}"))?;
-    let secp = Secp256k1::new();
-    let t_sk =
-        SecretKey::from_slice(&secret.secp256k1_bytes()).map_err(|e| format!("t_sk: {e}"))?;
-    let t_btc_bytes = PublicKey::from_secret_key(&secp, &t_sk).serialize();
-    if t_btc_bytes != expected_t_btc {
-        return Err(format!("{}: t_btc mismatch", vec_path.display()));
-    }
-    let t_cync_bytes =
-        cync_adaptor_point(&secret).map_err(|e| format!("cync_adaptor_point: {e:?}"))?;
-    if t_cync_bytes != expected_t_cync {
-        return Err(format!("{}: t_cync mismatch", vec_path.display()));
-    }
-
-    let proof = prove_cross_curve(&secret, &t_btc_bytes, &t_cync_bytes, &nonce_k_bytes)
-        .map_err(|e| format!("prove_cross_curve: {e:?}"))?;
-
-    if proof.a_btc.to_vec() != expected_a_btc {
-        return Err(format!("{}: dleq a_btc mismatch", vec_path.display()));
-    }
-    if proof.a_cync.to_vec() != expected_a_cync {
-        return Err(format!("{}: dleq a_cync mismatch", vec_path.display()));
-    }
-    if proof.s_btc.to_vec() != expected_s_btc {
-        return Err(format!("{}: dleq s_btc mismatch", vec_path.display()));
-    }
-    if proof.s_cync.to_vec() != expected_s_cync {
-        return Err(format!("{}: dleq s_cync mismatch", vec_path.display()));
-    }
-    Ok(())
-}
-
 // ─── Dispatch ──────────────────────────────────────────────────
 
 fn run_vector(vector_path: &Path, vector_json: &Value) -> Result<(), String> {
@@ -291,7 +246,13 @@ fn run_vector(vector_path: &Path, vector_json: &Value) -> Result<(), String> {
     match primitive {
         "btc-adaptor" => run_btc_adaptor(vector_path, vector_json),
         "ristretto-adaptor" | "ed25519-adaptor" => run_ristretto_adaptor(vector_path, vector_json),
-        "dleq-cross-curve" => run_dleq(vector_path, vector_json),
+        // v1 vectors recorded the shared-nonce proof that leaked the
+        // secret; it is gone, and the v2 proof has no fixed-nonce form.
+        // Fail loudly rather than skip, so nobody assumes coverage.
+        "dleq-cross-curve" => Err(format!(
+            "{}: v1 cross-curve DLEQ vectors are retired; see cross_curve_dleq tests",
+            vector_path.display()
+        )),
         other => Err(format!(
             "{}: unknown primitive `{}` — extend run_vector() match arms",
             vector_path.display(),

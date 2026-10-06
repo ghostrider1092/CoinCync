@@ -51,7 +51,7 @@
 //! exercises both paths to confirm the transparent conversion
 //! works end-to-end.
 
-use coincync_swap::adaptor::{self, prove_cross_curve, verify_cross_curve_proof, AdaptorSecret};
+use coincync_swap::adaptor::{self, AdaptorSecret};
 use coincync_swap::btc::{
     self, build_claim_tx, build_lock_tx, claim_sighash, BtcChain, BtcConfig, ClaimTxBase,
     FundingUtxo, LockTxRequest, MockBtcChain, RefundBranch, Txid,
@@ -124,14 +124,30 @@ async fn happy_path_full_swap_composes_end_to_end() {
     // The DLEQ proof reads the secret's `ristretto_bytes()`
     // internally — the AdaptorSecret's encoding handling makes
     // this transparent regardless of how the secret was
-    // constructed.
-    let nonce_k = ristretto_canonical_bytes(0xBB, 0x02);
-    let dleq_proof = prove_cross_curve(&adaptor_secret, &t_btc_pub, &t_cync_bytes, &nonce_k)
-        .expect("DLEQ prove");
+    // constructed. Both sides bind the same session context; the
+    // proof crosses the wire as its fixed-length v2 encoding.
+    let dleq_context = b"e2e-happy-path/swap-0001";
+    let dleq_bytes = {
+        use coincync_swap::cross_curve_dleq::{prove, CrossCurveStatement};
+        use rand::SeedableRng;
+        let statement = CrossCurveStatement::new(&t_btc_pub, &t_cync_bytes, dleq_context)
+            .expect("Alice's DLEQ statement");
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0xBB02);
+        prove(&adaptor_secret, &statement, &mut rng)
+            .expect("DLEQ prove")
+            .to_bytes()
+    };
 
-    // Bob verifies. Without this passing, Bob has no proof T_btc and
-    // T_cync are bound — would refuse to commit funds in production.
-    verify_cross_curve_proof(&dleq_proof, &t_btc_pub, &t_cync_bytes).expect("DLEQ verify");
+    // Bob verifies against the points and context HE expects. Without
+    // this passing, Bob has no proof T_btc and T_cync share one secret
+    // and would refuse to commit funds in production.
+    {
+        use coincync_swap::cross_curve_dleq::{verify, CrossCurveProof, CrossCurveStatement};
+        let statement = CrossCurveStatement::new(&t_btc_pub, &t_cync_bytes, dleq_context)
+            .expect("Bob's DLEQ statement");
+        let proof = CrossCurveProof::from_bytes(&dleq_bytes).expect("DLEQ decode");
+        verify(&proof, &statement).expect("DLEQ verify");
+    }
 
     // ── Step 5: Compute Alice's CYNC swap recipient pubkey ───────
     //

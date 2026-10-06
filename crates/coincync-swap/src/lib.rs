@@ -7,8 +7,9 @@
 //! This crate is NO LONGER a skeleton — the protocol is substantially
 //! complete (~16.5k LOC: adaptor signatures on both curves, cross-curve
 //! DLEQ binding, the BTC HTLC/CSV path, the Noise/Tor transport, and the
-//! full state machine), with ~350 passing tests (`--features strict-dleq`)
-//! and ~97% coverage. It is nonetheless **deliberately gated OFF** for this
+//! full state machine). The cross-curve proof was replaced in v2 (see
+//! [`cross_curve_dleq`]); coverage and test counts predating that change
+//! are stale. It is nonetheless **deliberately gated OFF** for this
 //! release: `is_implemented()` returns `false`. Swap is reachable only via this
 //! crate's own standalone `cyncswap` binary — the main `coincync` wallet has
 //! **no `coincync-swap` dependency and no swap subcommand**, so there is no
@@ -48,8 +49,9 @@
 //! - [`adaptor`] — adaptor-signature primitives shared by both sides.
 //!                 **BTC-side primitives (BIP-340 Schnorr adaptors)
 //!                 are real as of the 2026-05-17 slice — see the
-//!                 module docs.** CYNC adaptor + cross-curve DL
-//!                 proof are still stubs.
+//!                 module docs.**
+//! - [`cross_curve_dleq`] — proof that the BTC and CYNC adaptor points
+//!                 share one secret (v2 joint bit-decomposition proof).
 //! - [`btc`]      — Bitcoin-side: HTLC construction, broadcasting, watching (stub)
 //! - [`cync`]     — CoinCync-side: tx construction with adaptor binding (stub)
 //! - [`coordinator`] — peer-to-peer messaging skeleton between Alice / Bob (stub)
@@ -66,20 +68,11 @@
 pub mod adaptor;
 pub mod btc;
 pub mod coordinator;
+pub mod cross_curve_dleq;
 pub mod cync;
 pub mod error;
 pub mod protocol;
 pub mod state;
-
-/// Strict-binding cross-curve DLEQ (Noether 2018). **Opt-in** via the
-/// `strict-dleq` Cargo feature. The default fast-floor proof in
-/// [`adaptor`] is operationally sufficient for the atomic-swap
-/// protocol; the strict variant is here for audit-team-requested
-/// cryptographic-level same-secret binding. See `Cargo.toml`'s
-/// `[features]` section and `docs/cip/CIP-001-atomic-swap.md`
-/// §"Pre-audit hardening" for the rationale.
-#[cfg(feature = "strict-dleq")]
-pub mod strict_dleq;
 
 pub use error::Error;
 pub use state::{StateError, SwapStore, STATE_VERSION};
