@@ -71,6 +71,10 @@ pub mod emission;
 pub mod chain;
 pub mod mempool;
 pub mod metrics;
+/// Network-adjusted time (audit M-4) for the future-block timestamp cap, with
+/// clock-poisoning defenses (per-netgroup dedup, sample-after-validate,
+/// out-of-range→0). See `src/net_time.rs`.
+pub mod net_time;
 /// Portable, versioned chain-vitals health schema (`get_vitals`). Observability
 /// only, no consensus impact. See `docs/design/chain-vitals-schema.md`.
 pub mod vitals;

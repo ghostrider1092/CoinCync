@@ -179,6 +179,20 @@ pub(super) async fn handle_version(
             return Ok(());
         }
 
+        // Network-adjusted time (M-4): record this peer's clock offset for the
+        // consensus future-block cap. Placed HERE deliberately — AFTER the
+        // self-connection-nonce check and version.validate() above — so a VERSION
+        // that is later rejected never feeds the time state. Sampled only for
+        // OUTBOUND peers (ones we dialed; inbound peers are attacker-chosen), and
+        // net_time keys by netgroup so a flood from one /16 counts once. See
+        // net_time.rs and PR #59's review.
+        if let Some(addr) = peers.get(&peer_id).filter(|p| p.outbound).map(|p| p.addr) {
+            if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                let local = d.as_secs() as i64;
+                crate::net_time::record_offset(&addr, version.timestamp as i64 - local);
+            }
+        }
+
         // Clone before awaiting so a full queue cannot hold a map guard.
         let sender = senders.get(&peer_id).map(|s| s.value().clone());
         if let Some(sender) = sender {
