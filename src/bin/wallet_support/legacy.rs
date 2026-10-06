@@ -213,6 +213,24 @@ enum Command {
         /// + report — no node needed.
         #[arg(long)]
         demo: bool,
+        /// WATCH-ONLY: scan with an exported view key `<s1hex>:<p2hex>` (see
+        /// `shielded-view-key`) instead of unlocking this wallet's seed. Reports
+        /// balance without any spend authority; no password needed.
+        #[arg(long)]
+        view_key: Option<String>,
+        /// Wallet password. Use `-` to read from stdin. Reads
+        /// `COINCYNC_WALLET_PASSWORD` env if neither flag nor stdin is provided.
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+    },
+
+    /// Export this wallet's WATCH-ONLY shielded view key as `<s1hex>:<p2hex>`.
+    ///
+    /// The holder can scan/report shielded balance (`shielded-balance
+    /// --view-key`) but CANNOT spend. EXPERIMENTAL / regtest-gated; present only
+    /// in a `sketch-gk-proof + libspark-ffi` build.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    ShieldedViewKey {
         /// Wallet password. Use `-` to read from stdin. Reads
         /// `COINCYNC_WALLET_PASSWORD` env if neither flag nor stdin is provided.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
@@ -830,8 +848,14 @@ async fn main() {
             password,
         } => cmd_shielded_send(&wallet_path, password, &cli.node, to, amount, demo).await,
         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-        Command::ShieldedBalance { demo, password } => {
-            cmd_shielded_balance(&wallet_path, password, &cli.node, demo).await
+        Command::ShieldedBalance {
+            demo,
+            view_key,
+            password,
+        } => cmd_shielded_balance(&wallet_path, password, &cli.node, demo, view_key).await,
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        Command::ShieldedViewKey { password } => {
+            cmd_shielded_view_key(&wallet_path, password).await
         }
         Command::Send {
             password,
@@ -1948,11 +1972,27 @@ async fn cmd_shielded_send(
         load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {e}"))?;
     let seed = data.seed;
 
+    // The mole notice: this transaction is about to burrow underground (into the
+    // shielded pool), leaving no transparent trace of sender/recipient/amount.
+    mole_notice(amount);
+
     if demo {
         shielded_send_demo(&seed, &to, amount)
     } else {
         shielded_send_live(&seed, node, &to, amount).await
     }
+}
+
+/// The "mole" notice: announce that a transaction is going UNDERGROUND (shielded).
+/// Printed to stderr so it never pollutes machine-readable stdout. ASCII only —
+/// the Windows console mangles non-ASCII.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+fn mole_notice(amount: u64) {
+    eprintln!("=====================================================");
+    eprintln!(" [MOLE] The mole has started.");
+    eprintln!("        {amount} atomic is burrowing underground (shielded)");
+    eprintln!("        - no transparent trace of sender, recipient, or amount.");
+    eprintln!("=====================================================");
 }
 
 /// Self-contained REGTEST run: bootstrap a local pool, fund this wallet, build +
@@ -2081,13 +2121,14 @@ fn report_built_transfer(
 /// it for this wallet's notes. Returns `(anchor_height, ordered cover coins,
 /// owned notes as (spend_index, value, serial_context))`. Shared by
 /// `shielded-send` (live) and `shielded-balance` (live).
+/// Fetch + parse the node's anchored cover set: returns `(anchor_height,
+/// entries[(index, coin, ctx)], cover_coins)` in canonical order. Shared by the
+/// seed scan and the watch-only view-key scan.
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-async fn scan_live_cover_set(
-    seed: &[u8],
+async fn fetch_live_cover_set(
     node: &str,
-) -> Result<(u64, Vec<spark_connector::CoinBytes>, Vec<(usize, u64, Vec<u8>)>), String> {
-    use spark_connector::ffi::LibsparkBackend;
-    use spark_connector::{CoinBytes, SparkBackend};
+) -> Result<(u64, Vec<(usize, Vec<u8>, Vec<u8>)>, Vec<spark_connector::CoinBytes>), String> {
+    use spark_connector::CoinBytes;
 
     // Anchor at the node's current tip.
     let info = rpc_call(node, "get_info", serde_json::json!([]))
@@ -2113,7 +2154,6 @@ async fn scan_live_cover_set(
         .cloned()
         .unwrap_or_default();
 
-    // Rebuild the ordered cover set + per-coin serial contexts from the response.
     let mut entries: Vec<(usize, Vec<u8>, Vec<u8>)> = Vec::with_capacity(arr.len());
     for e in &arr {
         let index = e
@@ -2132,8 +2172,19 @@ async fn scan_live_cover_set(
     }
     entries.sort_by_key(|(i, _, _)| *i);
     let cover_coins: Vec<CoinBytes> = entries.iter().map(|(_, c, _)| CoinBytes(c.clone())).collect();
+    Ok((anchor_height, entries, cover_coins))
+}
 
-    // Scan the fetched set for coins this wallet owns.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+async fn scan_live_cover_set(
+    seed: &[u8],
+    node: &str,
+) -> Result<(u64, Vec<spark_connector::CoinBytes>, Vec<(usize, u64, Vec<u8>)>), String> {
+    use spark_connector::ffi::LibsparkBackend;
+    use spark_connector::{CoinBytes, SparkBackend};
+
+    let (anchor_height, entries, cover_coins) = fetch_live_cover_set(node).await?;
+    // Scan the fetched set for coins this wallet owns (seed-based).
     let backend = LibsparkBackend;
     let mut owned: Vec<(usize, u64, Vec<u8>)> = Vec::new(); // (spend_index, value, ctx)
     for (pos, (_, coin, ctx)) in entries.iter().enumerate() {
@@ -2144,13 +2195,77 @@ async fn scan_live_cover_set(
     Ok((anchor_height, cover_coins, owned))
 }
 
+/// Parse a `<s1hex>:<p2hex>` view key string into its exported material.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+fn parse_view_key(s: &str) -> Result<spark_connector::ffi::IncomingViewKeyBytes, String> {
+    let (s1_hex, p2_hex) = s
+        .split_once(':')
+        .ok_or("view key must be <s1hex>:<p2hex> (see `shielded-view-key`)")?;
+    let s1 = hex::decode(s1_hex.trim()).map_err(|e| format!("bad s1 hex: {e}"))?;
+    let p2 = hex::decode(p2_hex.trim()).map_err(|e| format!("bad p2 hex: {e}"))?;
+    if s1.len() != 32 || p2.len() != 34 {
+        return Err(format!(
+            "view key wrong size (s1={} bytes need 32, p2={} bytes need 34)",
+            s1.len(),
+            p2.len()
+        ));
+    }
+    Ok(spark_connector::ffi::IncomingViewKeyBytes { s1, p2 })
+}
+
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+async fn cmd_shielded_view_key(path: &PathBuf, password: Option<String>) -> Result<(), String> {
+    use spark_connector::ffi::export_incoming_view_key;
+
+    let password = resolve_password(password, false)?;
+    let data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {e}"))?;
+    let vk = export_incoming_view_key(&data.seed).ok_or("view key export failed")?;
+    // <s1hex>:<p2hex> — share this to let a watch-only wallet report balance.
+    // It carries NO spend authority.
+    println!("{}:{}", hex::encode(&vk.s1), hex::encode(&vk.p2));
+    Ok(())
+}
+
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
 async fn cmd_shielded_balance(
     path: &PathBuf,
     password: Option<String>,
     node: &str,
     demo: bool,
+    view_key: Option<String>,
 ) -> Result<(), String> {
+    // Watch-only path: scan the live cover set with an exported view key — no
+    // wallet unlock, no seed, no spend authority.
+    if let Some(vk_str) = view_key {
+        if demo {
+            return Err("--view-key cannot be combined with --demo".into());
+        }
+        let vk = parse_view_key(&vk_str)?;
+        let (anchor_height, entries, _cover) = fetch_live_cover_set(node).await?;
+        let mut total = 0u64;
+        let mut vals = Vec::new();
+        for (_, coin, ctx) in &entries {
+            if let Ok(Some(id)) =
+                spark_connector::ffi::identify_view_only(&vk, &spark_connector::CoinBytes(coin.clone()), ctx)
+            {
+                total += id.value;
+                vals.push(id.value);
+            }
+        }
+        vals.sort_unstable();
+        println!("Shielded balance [watch-only] (anchor height {anchor_height}):");
+        println!("  Cover set:     {} coin(s)", entries.len());
+        println!("  Owned notes:   {}", vals.len());
+        println!("  Balance:       {total} atomic");
+        if !vals.is_empty() {
+            println!("  Note values:   {vals:?}");
+        } else {
+            println!("  (no owned notes at this anchor — shielded pool is empty until activation)");
+        }
+        return Ok(());
+    }
+
     let password = resolve_password(password, false)?;
     let data =
         load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {e}"))?;

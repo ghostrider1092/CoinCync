@@ -452,6 +452,68 @@ int spark_ffi_identify(const unsigned char* seed, int seed_len,
     }
 }
 
+// Export the WATCH-ONLY incoming view key material (s1, P2) for the wallet
+// derived from `seed`: s1 is a 32-byte scalar, P2 a 34-byte group element. A
+// holder of (s1, P2) can scan/identify owned coins (spark_ffi_identify_view_only)
+// but CANNOT spend — there is no spend key in this material. Returns 1 on
+// success, 0 on error (incl. undersized buffers).
+int spark_ffi_export_incoming_view_key(const unsigned char* seed, int seed_len,
+                                       unsigned char* out_s1, int s1_cap, int* out_s1_len,
+                                       unsigned char* out_p2, int p2_cap, int* out_p2_len) {
+    try {
+        if (s1_cap < 32 || p2_cap < 34) return 0;
+        const spark::Params* params = spark::Params::get_test();
+        spark::SpendKey spend(params, seed_to_r(seed, seed_len));
+        spark::FullViewKey full(spend);
+        spark::IncomingViewKey incoming(full);
+        incoming.get_s1().serialize(out_s1);
+        *out_s1_len = 32;
+        incoming.get_P2().serialize(out_p2);
+        *out_p2_len = 34;
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+// WATCH-ONLY identify: reconstruct an IncomingViewKey from exported (s1, P2) via
+// the CoinCync reconstruction ctor, set the coin's serial context, and identify.
+// Returns 1 + value/memo if the coin is owned by that view key, 0 if not ours or
+// malformed. Uses NO seed or spend key — it cannot spend.
+int spark_ffi_identify_view_only(const unsigned char* s1_ptr, int s1_len,
+                                 const unsigned char* p2_ptr, int p2_len,
+                                 const unsigned char* coin_ptr, int coin_len,
+                                 const unsigned char* ctx_ptr, int ctx_len,
+                                 uint64_t* out_value,
+                                 unsigned char* out_memo, int memo_cap, int* out_memo_len) {
+    try {
+        if (s1_len != 32 || p2_len != 34) return 0;
+        const spark::Params* params = spark::Params::get_test();
+        secp_primitives::Scalar s1;
+        s1.deserialize(s1_ptr);
+        secp_primitives::GroupElement P2;
+        P2.deserialize(p2_ptr);
+        spark::IncomingViewKey incoming(params, s1, P2);
+
+        spark::Coin coin(params);
+        CDataStream in((const char*)coin_ptr, (const char*)coin_ptr + coin_len, SER_NETWORK, PROTOCOL_VERSION);
+        in >> coin;
+        coin.setParams(params);
+        std::vector<unsigned char> serial_context(ctx_ptr, ctx_ptr + ctx_len);
+        coin.setSerialContext(serial_context);
+
+        spark::IdentifiedCoinData id = coin.identify(incoming); // throws if not ours
+        *out_value = id.v;
+        int mlen = (int)id.memo.size();
+        if (mlen > memo_cap) mlen = memo_cap;
+        std::copy(id.memo.begin(), id.memo.begin() + mlen, out_memo);
+        *out_memo_len = mlen;
+        return 1;
+    } catch (...) {
+        return 0; // not ours / malformed
+    }
+}
+
 // Self-contained create->recover round-trip: generate a wallet, create a coin to
 // its own address for `value`, then identify (incoming view) + recover (full
 // view) and check the recovered value. Writes the recovered value to

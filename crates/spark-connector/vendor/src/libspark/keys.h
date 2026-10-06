@@ -61,6 +61,11 @@ public:
 	IncomingViewKey();
     IncomingViewKey(const Params* params);
 	IncomingViewKey(const FullViewKey& full_view_key);
+	// CoinCync addition: reconstruct a WATCH-ONLY incoming view key from its
+	// exported material (s1, P2) — no spend key or seed required. Coin::identify
+	// uses only s1 and P2, so this is sufficient to scan/recover owned coins
+	// without any spend authority.
+	IncomingViewKey(const Params* params, const Scalar& s1, const GroupElement& P2);
 	const Params* get_params() const;
 	const Scalar& get_s1() const;
 	const GroupElement& get_P2() const;
