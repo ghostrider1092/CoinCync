@@ -554,8 +554,8 @@ mod v2_support_tests {
             panic!("expected Send");
         };
         assert_eq!(password.as_deref(), Some("s3cret"));
-        assert_eq!(to_spend, HEX32);
-        assert_eq!(to_view, HEX32);
+        assert_eq!(to_spend.as_deref(), Some(HEX32));
+        assert_eq!(to_view.as_deref(), Some(HEX32));
         assert_eq!(amount, 4242);
         assert_eq!(fee_multiplier, 2.5);
         assert!(!split_output);
