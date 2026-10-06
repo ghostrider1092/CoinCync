@@ -1,5 +1,7 @@
 # JSON-RPC 2.0
 
+> ⚠️ **The public `api.coincync.network` / `explorer.coincync.network` endpoints are temporarily unavailable** while the front-end hosting is being brought up. Until then, **use your own local node's RPC at `http://127.0.0.1:28081`** (run one via [Run a node](../getting-started/run-a-node.md); connect it to the P2P seed `2.29.34.197:28080`). The `https://…` public-proxy URLs below describe the intended production surface and will work once the proxy is restored.
+
 CoinCync's primary programmatic interface. Spoken by the `coincync-node` daemon's jsonrpsee server (default `127.0.0.1:28081` on testnet, `127.0.0.1:19081` on mainnet) and by the public reverse proxies in front of the production fleet.
 
 This page covers the protocol envelope, transports, and the read-only / write split. The full method inventory with parameters and return values is in [Method reference](./methods.md).
