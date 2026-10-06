@@ -620,39 +620,52 @@ mod tests {
     fn verify_kernel_set_rejects_value_inflation_and_stray_blinding() {
         use crate::crypto::curve::generator_h;
         let h = generator_h();
-        let mk = |pt: RistrettoPoint, fee: u64| MwKernel {
+        let fee = 7u64;
+        // Unsigned helper for the inflation case: under the signed-kernel model
+        // (#49) an inflated excess has P = excess - fee*H with a residual H
+        // component, which is NOT a multiple of G, so no valid kernel signature
+        // can exist — inflation is unprovable, not merely detectable.
+        let unsigned = |pt: RistrettoPoint, fee: u64| MwKernel {
             excess: pt.compress().to_bytes(),
             signature: vec![],
             fee,
             height: 1,
         };
-        let fee = 7u64;
-        // Balanced baseline verifies.
-        assert!(CutThroughEngine::verify_kernel_set(&[mk(h * Scalar::from(fee), fee)]).is_ok());
 
-        // Inflation: excess encodes fee+1 units of value but declares only `fee`.
+        // Balanced baseline: x = 0, excess = fee*H, properly signed -> verifies.
         assert!(
-            CutThroughEngine::verify_kernel_set(&[mk(h * Scalar::from(fee + 1), fee)]).is_err(),
+            CutThroughEngine::verify_kernel_set(&[build_signed_kernel(&[], &[], fee, 1)]).is_ok()
+        );
+
+        // Inflation: excess encodes fee+1 units but declares only `fee`. P = H
+        // is not a multiple of G, so it cannot be signed -> rejected.
+        assert!(
+            CutThroughEngine::verify_kernel_set(&[unsigned(h * Scalar::from(fee + 1), fee)])
+                .is_err(),
             "excess encoding more value than the declared fee must be rejected (inflation)"
         );
 
-        // Stray blinding: excess = fee·H + 3·G — a nonzero G component that does
-        // not cancel, so the excess no longer equals fee·H.
+        // Stray blinding: a VALIDLY SIGNED kernel (x = 3) whose excess carries a
+        // nonzero G component that does not cancel, so the aggregate excess no
+        // longer equals Σfee*H -> rejected by the value-balance check (the
+        // per-kernel signature passes; the set-level balance check catches it).
         assert!(
-            CutThroughEngine::verify_kernel_set(&[mk(
-                h * Scalar::from(fee) + G * Scalar::from(3u64),
-                fee
+            CutThroughEngine::verify_kernel_set(&[build_signed_kernel(
+                &[Scalar::from(3u64)],
+                &[],
+                fee,
+                1
             )])
             .is_err(),
             "an unbalanced blinding component on the excess must be rejected"
         );
 
-        // A balanced MULTI-kernel set still verifies (aggregate excess == Σfee·H).
+        // A balanced MULTI-kernel set still verifies (each signed, aggregate excess == Σfee·H).
         let (f1, f2) = (3u64, 5u64);
         assert!(
             CutThroughEngine::verify_kernel_set(&[
-                mk(h * Scalar::from(f1), f1),
-                mk(h * Scalar::from(f2), f2),
+                build_signed_kernel(&[], &[], f1, 1),
+                build_signed_kernel(&[], &[], f2, 1),
             ])
             .is_ok(),
             "a balanced multi-kernel set must verify"
