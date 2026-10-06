@@ -449,7 +449,7 @@ mod tests {
         // (legacy), so the genesis check remains the hard guarantee.
         state_db
             .state
-            .insert(StateDb::KEY_NETWORK, b"martian-net".as_ref())
+            .insert(StateDb::KEY_NETWORK, &b"martian-net"[..])
             .unwrap();
         assert_eq!(state_db.get_network().unwrap(), None);
     }

@@ -27,6 +27,8 @@ pub mod send;
 pub mod shielded_notes;
 pub mod spend;
 pub mod subaddress;
+#[cfg(feature = "cyncswap")]
+pub mod swap;
 pub mod sync_checkpoint_signing;
 pub mod wallet_keys;
 // `lightsync` is the SPV path. Network handler for `GetOutputDigests`

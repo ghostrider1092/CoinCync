@@ -1162,8 +1162,8 @@ pub fn verify_linear_combination_cync(
 /// Complete cross-curve discrete-log-equality proof with strict
 /// same-secret binding (Noether 2018 construction). Drop-in
 /// replacement for the [`CrossCurveDlProof`] used by the swap
-/// protocol — verifier accepts either variant, gated by Cargo
-/// feature `strict-dleq` (planned).
+/// protocol. It is compiled by the default `strict-dleq` feature and required
+/// by the pre-CYNC-lock safety gate.
 ///
 /// Wire format ≈ 81 KB at the [`STRICT_BIT_COUNT`] = 252 budget. The
 /// bandwidth is acceptable: a swap exchanges this proof at most once
@@ -1234,6 +1234,77 @@ impl CrossCurveDlProofStrict {
         use sha2::Digest;
         let bytes = self.canonical_bytes();
         sha2::Sha256::digest(&bytes).into()
+    }
+
+    /// Decode the stable fixed-length wire form produced by
+    /// [`canonical_bytes`](Self::canonical_bytes).
+    ///
+    /// The decoder reconstructs fields without accepting alternate encodings.
+    /// Point/scalar validity and all proof equations remain the responsibility
+    /// of [`verify_cross_curve_strict`], which callers must run before using a
+    /// decoded proof.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != Self::CANONICAL_LEN {
+            return Err(Error::Verification(
+                "strict-DLEQ proof has wrong canonical length",
+            ));
+        }
+
+        let fast_len = crate::adaptor::CrossCurveDlProof::CANONICAL_LEN;
+        let fast = crate::adaptor::CrossCurveDlProof::from_canonical_bytes(&bytes[..fast_len])?;
+        let mut offset = fast_len;
+        let mut bits = Vec::with_capacity(STRICT_BIT_COUNT);
+
+        for _ in 0..STRICT_BIT_COUNT {
+            let mut take = |len: usize| {
+                let start = offset;
+                offset += len;
+                &bytes[start..offset]
+            };
+            let mut c_btc = [0u8; 33];
+            let mut c_cync = [0u8; 32];
+            c_btc.copy_from_slice(take(33));
+            c_cync.copy_from_slice(take(32));
+
+            let mut scalar = || {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(take(32));
+                out
+            };
+            let btc = BitOrProofBtc {
+                e_0: scalar(),
+                e_1: scalar(),
+                s_0: scalar(),
+                s_1: scalar(),
+            };
+            let cync = BitOrProofCync {
+                e_0: scalar(),
+                e_1: scalar(),
+                s_0: scalar(),
+                s_1: scalar(),
+            };
+            bits.push(BitProofPair {
+                c_btc,
+                c_cync,
+                btc,
+                cync,
+            });
+        }
+
+        let mut r_btc_sum = [0u8; 32];
+        let mut r_cync_sum = [0u8; 32];
+        r_btc_sum.copy_from_slice(&bytes[offset..offset + 32]);
+        offset += 32;
+        r_cync_sum.copy_from_slice(&bytes[offset..offset + 32]);
+        offset += 32;
+        debug_assert_eq!(offset, Self::CANONICAL_LEN);
+
+        Ok(Self {
+            fast,
+            bits,
+            r_btc_sum,
+            r_cync_sum,
+        })
     }
 }
 
