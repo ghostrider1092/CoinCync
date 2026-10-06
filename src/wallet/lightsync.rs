@@ -798,6 +798,7 @@ fn detect_coinbase_digest(output: &OutputDigest, keys: &ScanKeys) -> Option<Decr
         shared_secret: [0u8; 32],
         key_epoch: keys.epoch,
         subaddress_index: None, // coinbase always to the primary address
+        payment_id: None,       // coinbase carries no integrated-address payment ID
     })
 }
 
