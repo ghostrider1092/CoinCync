@@ -91,6 +91,7 @@ fn mature_utxo(amount: u64, tag: u8, out_index: u8, loc_height: u64) -> UTXO {
         lock_height: None,
         subaddress_account: None,
         subaddress_index: None,
+        payment_id: None,
     }
 }
 
