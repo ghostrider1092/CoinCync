@@ -249,8 +249,8 @@ fn mine_block(
     let mut header = BlockHeader {
         network_magic: magic,
         version: block_version_at_height(height),
-        height,
-        timestamp,
+        height: coincync::primitives::Height::new(height),
+        timestamp: timestamp.into(),
         prev_hash,
         tx_root,
         anchor: Hash::from_bytes([0u8; 32]),
@@ -286,8 +286,8 @@ fn mine_block(
 
 fn diff_block(b: &Block) -> DifficultyBlock {
     DifficultyBlock {
-        height: b.header.height,
-        timestamp: b.header.timestamp,
+        height: b.header.height.as_u64(),
+        timestamp: b.header.timestamp.as_secs(),
         target: b.header.target,
     }
 }
@@ -322,7 +322,7 @@ fn accepted_reorg_reapplies_real_txs_and_conserves_state() {
     chain
         .restore_state(0, genesis.hash(), 1)
         .expect("seed cumulative-work genesis base = 1");
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
 
     let mut chain_blocks: Vec<Block> = vec![genesis.clone()];
     let mut stealths: Vec<Option<StealthAddress>> = vec![None; 5]; // index by height 1..4
@@ -599,7 +599,7 @@ fn failed_reorg_rollback_leaves_no_stale_height_mapping_above_old_tip_h3() {
     chain
         .restore_state(0, genesis.hash(), 1)
         .expect("seed cumulative-work genesis base = 1");
-    let base_ts = genesis.header.timestamp;
+    let base_ts = genesis.header.timestamp.as_secs();
 
     // ── Heavy main chain: genesis + B1..B11, TIGHT spacing so ASERT ramps the
     //    per-block difficulty above the MIN_DIFFICULTY floor. This is what lets
@@ -674,7 +674,7 @@ fn failed_reorg_rollback_leaves_no_stale_height_mapping_above_old_tip_h3() {
     //    fork-aware difficulty check on add AND inside the reorg loop).
     let fork_point = 2u64;
     let fork_spacing = 3600u64; // loose → ASERT eases to the MIN_DIFFICULTY floor
-    let fork_base_ts = main_blocks[fork_point as usize].header.timestamp;
+    let fork_base_ts = main_blocks[fork_point as usize].header.timestamp.as_secs();
     let mut fork_diff: Vec<DifficultyBlock> = vec![
         diff_block(&main_blocks[0]),
         diff_block(&main_blocks[1]),

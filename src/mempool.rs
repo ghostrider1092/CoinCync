@@ -31,6 +31,67 @@ impl ShadowEvictChain for crate::chain::Blockchain {
     }
 }
 
+/// #149: whether the mempool needs a FULL `shadow_evict_invalid` revalidation
+/// after applying a block at `new_height`.
+///
+/// `remove_confirmed` already drops mined txs + key-image shadow-conflicts. The
+/// O(mempool) full sweep is only needed when a remaining tx's consensus VALIDITY
+/// can change WITHOUT a key-image collision — exactly the two cases the
+/// `shadow_evict_invalid` doc lists:
+/// 1. a **reorg** (`is_reorg`) — the UTXO set / member heights change under
+///    already-admitted txs; and
+/// 2. crossing the **output-age hard-fork** height — age-gated inputs that were
+///    valid become invalid.
+///
+/// On a normal tip extension neither holds (the UTXO set only grows, ring
+/// members only age up, spends surface as key-image conflicts), so the sweep is
+/// skipped. On current networks the age fork is at genesis (mainnet) or never
+/// (testnet/regtest), so this reduces to `is_reorg` today; the age check is a
+/// forward-safe guard for any network that sets a finite mid-chain fork height.
+/// A FUTURE fork that gates mempool-tx validity MUST be added here.
+pub fn needs_full_revalidation_after_block(
+    is_reorg: bool,
+    net: crate::config::NetworkType,
+    new_height: u64,
+) -> bool {
+    is_reorg
+        || net.min_output_age(new_height) != net.min_output_age(new_height.saturating_sub(1))
+}
+
+#[cfg(test)]
+mod revalidation_gate_tests {
+    use super::needs_full_revalidation_after_block;
+    use crate::config::NetworkType;
+
+    #[test]
+    fn needs_full_revalidation_after_block_149() {
+        // A reorg ALWAYS needs the full sweep (UTXO set changes under txs).
+        for net in [NetworkType::Testnet, NetworkType::Regtest, NetworkType::Mainnet] {
+            assert!(
+                needs_full_revalidation_after_block(true, net, 1_000),
+                "reorg must force a full mempool revalidation"
+            );
+        }
+        // A NORMAL tip extension (no reorg) skips the sweep at every non-boundary
+        // height. On testnet the output-age fork never activates, so a normal
+        // extend never needs the sweep.
+        let net = NetworkType::Testnet;
+        for h in [1u64, 100, 10_000, 1_000_000] {
+            assert!(
+                !needs_full_revalidation_after_block(false, net, h),
+                "normal tip extension at height {h} must skip the O(mempool) sweep"
+            );
+        }
+        // The predicate keys the boundary off `min_output_age` changing between
+        // h-1 and h: a network with a finite mid-chain output-age fork flips this
+        // true at the crossing height even without a reorg.
+        assert_eq!(
+            needs_full_revalidation_after_block(false, net, 5),
+            net.min_output_age(5) != net.min_output_age(4),
+        );
+    }
+}
+
 const MAX_CHAIN_GENERATION_ATTEMPTS: usize = 4;
 
 trait GenerationSource {
@@ -158,25 +219,12 @@ impl AuditEvent {
 }
 
 fn unix_now() -> u64 {
-    // Monotonic-max fallback: SystemTime::duration_since(UNIX_EPOCH) can
-    // theoretically fail (system clock set before 1970, which doesn't
-    // happen on a running system) or step backwards (NTP correction).
-    // The original `unwrap_or(0)` would mark fresh mempool entries as
-    // 56 years old, triggering immediate eviction by the TTL sweep.
-    // Track the last good value and return max(now, last) so a clock
-    // hiccup never produces an artificially-ancient timestamp. Costs
-    // one relaxed atomic CAS per call — negligible vs the syscall.
-    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let last = LAST.load(std::sync::atomic::Ordering::Relaxed);
-    let out = now.max(last);
-    if out > last {
-        LAST.store(out, std::sync::atomic::Ordering::Relaxed);
-    }
-    out
+    // Single source of truth (E1): monotonic-nondecreasing unix time so an NTP
+    // backwards step never marks a fresh mempool entry as ancient (which would
+    // trigger immediate TTL eviction). The monotonic-max logic now lives in the
+    // canonical clock, which is also override-aware for the simulator. See
+    // src/clock.rs.
+    crate::clock::unix_now_monotonic()
 }
 
 /// A transaction in the mempool with metadata
@@ -1093,6 +1141,11 @@ impl Mempool {
         self.transactions.len()
     }
 
+    /// The configured maximum mempool size in bytes (the eviction cap).
+    pub fn max_size(&self) -> usize {
+        self.max_size
+    }
+
     /// Compute fee-per-byte percentiles from current mempool contents.
     ///
     /// Returns a map of percentile → fee_per_byte (e.g., p25, p50, p75, p90).
@@ -1723,6 +1776,89 @@ impl SharedMempool {
         tokio::task::spawn_blocking(move || self.get_block_transactions(max_size, max_count))
             .await
             .unwrap_or_default()
+    }
+}
+
+/// Pure mempool-pressure signal (testable in isolation): what percent full the
+/// mempool is, and whether that reaches the warning threshold. Returns
+/// `Some((pct, message))` at/above the threshold.
+fn mempool_pressure(current_bytes: usize, max_bytes: usize, warn_pct: u64) -> Option<(u64, String)> {
+    if max_bytes == 0 {
+        return None;
+    }
+    let pct = (current_bytes as u128 * 100 / max_bytes as u128) as u64;
+    if pct >= warn_pct {
+        Some((pct, format!("mempool {pct}% full ({current_bytes}/{max_bytes} bytes)")))
+    } else {
+        None
+    }
+}
+
+/// A [`SecurityDetail`](crate::security::SecurityDetail) over the mempool — the
+/// flood/DoS surface. The mempool is node-LOCAL policy, not consensus, so every
+/// alert is **operational** (page, never halt): a false positive must not wedge
+/// the chain. Read-only, O(1).
+pub struct MempoolSecurityDetail<'a> {
+    mempool: &'a Mempool,
+    warn_pct: u64,
+}
+
+impl<'a> MempoolSecurityDetail<'a> {
+    /// Warn when the mempool reaches this percent of its byte cap.
+    pub const DEFAULT_WARN_PCT: u64 = 90;
+
+    pub fn new(mempool: &'a Mempool) -> Self {
+        Self { mempool, warn_pct: Self::DEFAULT_WARN_PCT }
+    }
+
+    pub fn with_warn_pct(mempool: &'a Mempool, warn_pct: u64) -> Self {
+        Self { mempool, warn_pct }
+    }
+}
+
+impl crate::security::SecurityDetail for MempoolSecurityDetail<'_> {
+    fn label(&self) -> &'static str {
+        "mempool"
+    }
+
+    fn sweep(&self) -> crate::security::SecurityReport {
+        use crate::security::{SecurityReport, Severity};
+        let mut r = SecurityReport::clean();
+        if let Some((pct, msg)) =
+            mempool_pressure(self.mempool.size(), self.mempool.max_size(), self.warn_pct)
+        {
+            // Operational only — the mempool is not consensus state.
+            let sev = if pct >= 100 { Severity::Critical } else { Severity::Warning };
+            r.raise_operational("mempool", sev, "mempool-pressure", msg);
+        }
+        r
+    }
+}
+
+#[cfg(test)]
+mod security_detail_tests {
+    use super::*;
+
+    #[test]
+    fn mempool_pressure_pure_signal() {
+        assert!(super::mempool_pressure(270, 300, 90).is_some(), "90% full warns");
+        assert!(super::mempool_pressure(100, 300, 90).is_none(), "33% full is quiet");
+        assert!(super::mempool_pressure(0, 0, 90).is_none(), "empty cap → no divide-by-zero");
+        let (pct, _) = super::mempool_pressure(300, 300, 90).unwrap();
+        assert_eq!(pct, 100);
+    }
+
+    #[test]
+    fn mempool_detail_is_operational_never_consensus() {
+        use crate::security::SecurityDetail;
+        // A tiny cap with nothing in it → clean.
+        let mp = Mempool::with_max_size(1000);
+        let report = MempoolSecurityDetail::new(&mp).sweep();
+        assert!(report.is_clean());
+        // Even a full mempool (simulated via warn_pct 0) is operational, never a
+        // consensus halt — the mempool is node-local.
+        let report2 = MempoolSecurityDetail::with_warn_pct(&mp, 0).sweep();
+        assert!(!report2.has_consensus_halt(), "mempool alerts never halt consensus");
     }
 }
 

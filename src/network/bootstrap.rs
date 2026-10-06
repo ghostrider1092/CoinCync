@@ -78,7 +78,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::path::PathBuf;
 use std::time::Duration;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use tokio::time::timeout;
 use tracing::{info, warn};
 
@@ -203,11 +205,31 @@ impl Bootstrapper {
     ) -> Vec<SocketAddr> {
         let mut peers = HashSet::new();
         let force_disable_dns = env_bool("COINCYNC_BOOTSTRAP_DISABLE_DNS");
+        // Manifest-only mode: trust ONLY the operator-provided signed manifest
+        // (skip DNS discovery). Hardcoded seeds / addnodes still apply.
+        let manifest_only = env_bool("COINCYNC_BOOTSTRAP_MANIFEST_ONLY");
         let allowlist = seed_allowlist();
 
         // Add hardcoded seeds first
         for addr in &self.config.seed_nodes {
             peers.insert(*addr);
+        }
+
+        // Ed25519-signed bootstrap manifest: an operator points
+        // COINCYNC_BOOTSTRAP_SIGNED_MANIFEST at a JSON seed list and
+        // COINCYNC_BOOTSTRAP_SIGNING_PUBKEY at the 32-byte hex key that must
+        // have signed it (domain-separated, size-bounded). This is the
+        // anti-seed-poisoning path: peers whose provenance is cryptographically
+        // verified, independent of DNS/hardcoded trust. Invalid/absent → empty.
+        let mut manifest_peers = load_signed_manifest_peers(self.config.p2p_port);
+        if !manifest_peers.is_empty() {
+            info!(
+                "Bootstrap: loaded {} signed-manifest peers",
+                manifest_peers.len()
+            );
+            for addr in manifest_peers.drain(..) {
+                peers.insert(addr);
+            }
         }
 
         // DNS routing decision tree:
@@ -221,10 +243,15 @@ impl Bootstrapper {
         //     a proxy reference     → skip DNS (legacy callers; same
         //                             posture as before #9 fix).
         //   plain clearnet          → OS resolver (hickory).
-        let use_proxy_dns = proxy.map(|p| p.is_active()).unwrap_or(false) && !force_disable_dns;
+        let use_proxy_dns =
+            proxy.map(|p| p.is_active()).unwrap_or(false) && !force_disable_dns && !manifest_only;
 
-        if force_disable_dns {
-            info!("Bootstrap DNS disabled via COINCYNC_BOOTSTRAP_DISABLE_DNS=1");
+        if force_disable_dns || manifest_only {
+            if manifest_only {
+                info!("Bootstrap DNS disabled: COINCYNC_BOOTSTRAP_MANIFEST_ONLY=1 (signed-manifest peers only)");
+            } else {
+                info!("Bootstrap DNS disabled via COINCYNC_BOOTSTRAP_DISABLE_DNS=1");
+            }
         } else if use_proxy_dns {
             let proxy = proxy.expect("use_proxy_dns implies Some(proxy)");
             info!(
@@ -386,6 +413,14 @@ pub struct AddressManager {
     tried: HashSet<SocketAddr>,
     /// Tried addresses ordered from least to most recently failed.
     tried_order: VecDeque<SocketAddr>,
+    /// GOOD/"tried"-table (Bitcoin new/tried model): addresses we have
+    /// successfully connected to at least once (populated by `mark_success`).
+    /// `get_next` prefers these over never-connected ("new") gossip, so an
+    /// address-book eclipse — flooding the book with attacker-controlled
+    /// untried addresses — cannot starve dialing of proven-good peers. A subset
+    /// of the book (`known_addrs`); pruned alongside book eviction/purge.
+    /// See docs/design/addrman-new-tried.md.
+    good: HashSet<SocketAddr>,
     /// Self-addresses (detected via nonce match) — never connect to these
     self_addresses: HashSet<SocketAddr>,
     /// ANCHORS (Bitcoin Core model): our known-good outbound peers from the
@@ -424,6 +459,7 @@ impl AddressManager {
             known_addrs: HashSet::new(),
             tried: HashSet::new(),
             tried_order: VecDeque::new(),
+            good: HashSet::new(),
             self_addresses: HashSet::new(),
             anchors: Vec::new(),
             failures: HashMap::new(),
@@ -517,6 +553,7 @@ impl AddressManager {
                 .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
             if let Some(evicted) = self.addresses.pop() {
                 self.known_addrs.remove(&evicted.addr);
+                self.good.remove(&evicted.addr);
             }
         }
 
@@ -545,6 +582,33 @@ impl AddressManager {
         // Also remove from the address list entirely
         self.addresses.retain(|a| a.addr != addr);
         self.known_addrs.remove(&addr);
+        self.good.remove(&addr);
+    }
+
+    /// Select a feeler-probe candidate: a NEW (never-connected) address to
+    /// test-connect so it can be promoted into the GOOD table before we need
+    /// it, keeping the book fresh even when all outbound slots are full. Returns
+    /// a not-yet-good, not-currently-tried, non-self, non-manual/anchor address
+    /// (feelers exist to validate the *unproven* pool). `None` when every book
+    /// address is already good or tried. Most-recently-seen first.
+    pub fn select_feeler_candidate(&mut self) -> Option<SocketAddr> {
+        self.addresses
+            .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
+        self.addresses
+            .iter()
+            .map(|a| a.addr)
+            .find(|addr| {
+                !self.good.contains(addr)
+                    && !self.tried.contains(addr)
+                    && !self.self_addresses.contains(addr)
+                    && !self.manual.contains(addr)
+                    && !self.anchors.contains(addr)
+            })
+    }
+
+    /// Number of proven-good ("tried"-table) addresses. Observability/tests.
+    pub fn good_count(&self) -> usize {
+        self.good.len()
     }
 
     /// Get next address to try connecting
@@ -574,7 +638,23 @@ impl AddressManager {
         self.addresses
             .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
 
-        // Find first address not in tried set and not a self-address
+        // GOOD/"tried" TABLE NEXT (new/tried anti-eclipse): before any
+        // never-connected ("new") address, prefer an address we have
+        // successfully connected to before. This is what stops an address-book
+        // eclipse — a flood of attacker-controlled untried gossip cannot crowd
+        // proven-good peers out of the dialer, because good peers are always
+        // tried first. Skipped once tried this cycle (re-prioritized when the
+        // tried set clears below).
+        for addr in &self.addresses {
+            if self.good.contains(&addr.addr)
+                && !self.tried.contains(&addr.addr)
+                && !self.self_addresses.contains(&addr.addr)
+            {
+                return Some(addr.addr);
+            }
+        }
+
+        // Then a NEW (never-connected) address not in tried set and not a self-address
         for addr in &self.addresses {
             if !self.tried.contains(&addr.addr) && !self.self_addresses.contains(&addr.addr) {
                 return Some(addr.addr);
@@ -643,6 +723,7 @@ impl AddressManager {
             self.tried.remove(&addr);
             self.tried_order.retain(|candidate| *candidate != addr);
             self.failures.remove(&addr);
+            self.good.remove(&addr);
         }
     }
 
@@ -652,6 +733,13 @@ impl AddressManager {
         self.tried_order.retain(|candidate| *candidate != addr);
         // Reset failure count — a successful connect proves the address is alive.
         self.failures.remove(&addr);
+        // Promote into the GOOD/"tried" table: a proven-reachable peer that
+        // get_next prefers over never-connected gossip (new/tried anti-eclipse).
+        // Only track addresses that are (or can be) in the book, so `good` stays
+        // a subset bounded by max_addresses.
+        if self.known_addrs.contains(&addr) || self.manual.contains(&addr) {
+            self.good.insert(addr);
+        }
 
         // Update last_seen
         if let Some(peer) = self.addresses.iter_mut().find(|a| a.addr == addr) {
@@ -819,6 +907,62 @@ pub async fn setup_upnp(internal_port: u16, external_port: u16) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_manifest_verifies_and_parses() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let vk = sk.verifying_key();
+        let manifest = br#"{"peers":["1.2.3.4:28080","5.6.7.8"]}"#;
+        let mut msg = Vec::new();
+        msg.extend_from_slice(BOOTSTRAP_MANIFEST_DOMAIN);
+        msg.extend_from_slice(manifest);
+        let sig = sk.sign(&msg);
+        let peers = verify_and_parse_manifest(manifest, &sig, &vk, 28080)
+            .expect("a correctly-signed manifest must verify");
+        assert_eq!(
+            peers,
+            vec![
+                "1.2.3.4:28080".parse().unwrap(),
+                // Port defaulted from the manifest entry with no ':port'.
+                "5.6.7.8:28080".parse().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn signed_manifest_rejects_tampered_bytes() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[9u8; 32]);
+        let vk = sk.verifying_key();
+        let manifest = br#"{"peers":["1.2.3.4:28080"]}"#;
+        let mut msg = Vec::new();
+        msg.extend_from_slice(BOOTSTRAP_MANIFEST_DOMAIN);
+        msg.extend_from_slice(manifest);
+        let sig = sk.sign(&msg);
+        // A different manifest than what was signed must not verify.
+        let tampered = br#"{"peers":["6.6.6.6:28080"]}"#;
+        assert!(
+            verify_and_parse_manifest(tampered, &sig, &vk, 28080).is_none(),
+            "a tampered manifest must fail signature verification (no peers returned)"
+        );
+    }
+
+    #[test]
+    fn signed_manifest_rejects_cross_context_signature_replay() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[3u8; 32]);
+        let vk = sk.verifying_key();
+        let manifest = br#"{"peers":["1.2.3.4:28080"]}"#;
+        // Sign the raw bytes WITHOUT the domain tag — simulates replaying a
+        // signature made over some other CoinCync payload. Domain separation
+        // must reject it.
+        let sig = sk.sign(manifest);
+        assert!(
+            verify_and_parse_manifest(manifest, &sig, &vk, 28080).is_none(),
+            "a signature lacking the manifest domain tag must not verify as a manifest"
+        );
+    }
 
     #[test]
     fn address_book_netgroup_quota_bounds_flooding() {
@@ -1355,6 +1499,62 @@ mod tests {
     /// manual (--addnode) first, then anchors, then the discovered book (by
     /// last_seen). Each tier is skipped once tried this cycle.
     #[test]
+    fn good_addresses_are_preferred_over_new_after_anchors() {
+        let mut mgr = AddressManager::new(100);
+        let new_addr: SocketAddr = "203.0.113.10:28080".parse().unwrap();
+        let good_addr: SocketAddr = "203.0.113.20:28080".parse().unwrap();
+        mgr.add(PeerAddress::new(new_addr));
+        mgr.add(PeerAddress::new(good_addr));
+        mgr.mark_success(good_addr); // promote into the GOOD/"tried" table
+        assert_eq!(mgr.good_count(), 1);
+        assert_eq!(
+            mgr.get_next(),
+            Some(good_addr),
+            "proven-good peer must be dialed before a never-connected one"
+        );
+    }
+
+    #[test]
+    fn a_flood_of_new_addresses_cannot_starve_a_good_peer() {
+        // Address-book eclipse simulation: one proven-good peer, then a flood of
+        // diverse never-connected addresses. The good peer must still be dialed
+        // first — new gossip cannot crowd the tried table out of the dialer.
+        let mut mgr = AddressManager::new(1000);
+        let good_addr: SocketAddr = "203.0.113.20:28080".parse().unwrap();
+        mgr.add(PeerAddress::new(good_addr));
+        mgr.mark_success(good_addr);
+        for o in 0..60u16 {
+            let a: SocketAddr = format!("198.{o}.0.1:28080").parse().unwrap();
+            mgr.add(PeerAddress::new(a));
+        }
+        assert_eq!(mgr.get_next(), Some(good_addr));
+    }
+
+    #[test]
+    fn feeler_candidate_is_an_unproven_address() {
+        let mut mgr = AddressManager::new(100);
+        let good_addr: SocketAddr = "203.0.113.20:28080".parse().unwrap();
+        let new_addr: SocketAddr = "203.0.113.30:28080".parse().unwrap();
+        mgr.add(PeerAddress::new(good_addr));
+        mgr.add(PeerAddress::new(new_addr));
+        mgr.mark_success(good_addr);
+        assert_eq!(
+            mgr.select_feeler_candidate(),
+            Some(new_addr),
+            "feeler probes the unproven pool, never a good peer"
+        );
+
+        let mut only_good = AddressManager::new(100);
+        only_good.add(PeerAddress::new(good_addr));
+        only_good.mark_success(good_addr);
+        assert_eq!(
+            only_good.select_feeler_candidate(),
+            None,
+            "nothing to feel when every address is already good"
+        );
+    }
+
+    #[test]
     fn get_next_priority_order_manual_then_anchors_then_book() {
         let mut mgr = AddressManager::new(100);
         let book: SocketAddr = "198.51.100.5:28080".parse().unwrap();
@@ -1466,13 +1666,182 @@ mod tests {
 // ── Bootstrap env helpers ─────────────────────────────────────────
 // Shared by `Bootstrapper::get_peers_with_proxy` above.
 //
-// NOTE (2026-08-16 dead-code sweep): removed the second, unused bootstrap
-// path that lived here — `initial_peers` (+ `load_signed_manifest_peers`,
-// `hex_to_32`, `load_signature`, `SignedSeedManifest`,
-// `BOOTSTRAP_MANIFEST_DOMAIN`, and the `MAINNET_NODES` / `TESTNET_NODES`
-// hardcoded lists). Nothing called `initial_peers` at runtime; the live
-// bootstrap path is `Bootstrapper::get_peers`. The signed-manifest tooling
-// still lives in `src/bin/bootstrap_manifest_tool.rs`.
+// NOTE (2026-09-26): the Ed25519-signed bootstrap manifest loader was removed
+// on 2026-08-16 as "dead code" (only the then-unused `initial_peers` called
+// it), but the hardening guardrail (`scripts/check_insecure_defaults.py`),
+// `scripts/preflight_bootstrap_manifest.py`, and the signing tool
+// (`src/bin/bootstrap_manifest_tool.rs`) all still expect it. Restored and
+// WIRED into the live bootstrap path (`get_peers_with_proxy` above), so an
+// operator can bootstrap from a cryptographically-verified seed list — it is no
+// longer dead code.
+
+/// Domain-separation tag for the Ed25519-signed bootstrap manifest. The signed
+/// message is this tag followed by the raw manifest bytes, so a signature over
+/// some other CoinCync payload can never be replayed as a manifest signature.
+const BOOTSTRAP_MANIFEST_DOMAIN: &[u8] = b"coincync/bootstrap-manifest/v1";
+
+/// Size ceiling for a signed manifest file — otherwise a misconfigured operator
+/// could point `COINCYNC_BOOTSTRAP_SIGNED_MANIFEST` at a huge file and OOM the
+/// node at startup. Real manifests are a few KB; 10 MB is ~1000× headroom.
+const MAX_MANIFEST_BYTES: u64 = 10 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct SignedSeedManifest {
+    peers: Vec<String>,
+}
+
+fn hex_to_32(hex_str: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(hex_str.trim()).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Some(out)
+}
+
+fn load_signature(path: &PathBuf) -> Option<[u8; 64]> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() == 64 {
+        let mut out = [0u8; 64];
+        out.copy_from_slice(&bytes);
+        return Some(out);
+    }
+    // Also accept a hex-encoded signature file.
+    let as_text = std::str::from_utf8(&bytes).ok()?.trim();
+    let decoded = hex::decode(as_text).ok()?;
+    if decoded.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 64];
+    out.copy_from_slice(&decoded);
+    Some(out)
+}
+
+/// Pure core: verify the domain-separated Ed25519 signature over the manifest
+/// bytes and, on success, parse the JSON seed list into socket addresses
+/// (defaulting the port to `default_port` when an entry omits one). Returns
+/// `None` when the signature fails or the JSON is invalid — never a partial or
+/// unverified list. Factored out of the env/file IO so it is deterministically
+/// testable without touching process env vars or the filesystem.
+fn verify_and_parse_manifest(
+    manifest_bytes: &[u8],
+    signature: &Signature,
+    verify_key: &VerifyingKey,
+    default_port: u16,
+) -> Option<Vec<SocketAddr>> {
+    let mut msg = Vec::with_capacity(BOOTSTRAP_MANIFEST_DOMAIN.len() + manifest_bytes.len());
+    msg.extend_from_slice(BOOTSTRAP_MANIFEST_DOMAIN);
+    msg.extend_from_slice(manifest_bytes);
+    if verify_key.verify(&msg, signature).is_err() {
+        return None;
+    }
+    let parsed: SignedSeedManifest = serde_json::from_slice(manifest_bytes).ok()?;
+    let mut out = Vec::new();
+    for raw in parsed.peers {
+        let with_port = if raw.contains(':') {
+            raw
+        } else {
+            format!("{}:{}", raw, default_port)
+        };
+        match with_port.parse::<SocketAddr>() {
+            Ok(addr) => out.push(addr),
+            Err(_) => warn!("Skipping invalid manifest peer '{}'", with_port),
+        }
+    }
+    Some(out)
+}
+
+/// Load bootstrap peers from an Ed25519-signed manifest, if configured via env:
+/// `COINCYNC_BOOTSTRAP_SIGNED_MANIFEST` (manifest path),
+/// `COINCYNC_BOOTSTRAP_SIGNING_PUBKEY` (32-byte hex key that must have signed
+/// it), and optionally `COINCYNC_BOOTSTRAP_SIGNED_MANIFEST_SIG` (signature path,
+/// default `<manifest>.sig`). Any misconfiguration or verification failure logs
+/// and returns an empty list — never an unverified peer. The read is bounded
+/// (TOCTOU-safe: single open + capped `Read::take`) to prevent a startup OOM.
+fn load_signed_manifest_peers(default_port: u16) -> Vec<SocketAddr> {
+    let manifest_path = match std::env::var("COINCYNC_BOOTSTRAP_SIGNED_MANIFEST") {
+        Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
+        _ => return Vec::new(),
+    };
+    let pubkey_hex = match std::env::var("COINCYNC_BOOTSTRAP_SIGNING_PUBKEY") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => {
+            warn!("Signed bootstrap manifest requested but COINCYNC_BOOTSTRAP_SIGNING_PUBKEY is missing");
+            return Vec::new();
+        }
+    };
+    let pubkey_bytes = match hex_to_32(&pubkey_hex) {
+        Some(v) => v,
+        None => {
+            warn!("Invalid COINCYNC_BOOTSTRAP_SIGNING_PUBKEY (expected 32-byte hex)");
+            return Vec::new();
+        }
+    };
+    let verify_key = match VerifyingKey::from_bytes(&pubkey_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Invalid bootstrap signing key: {}", e);
+            return Vec::new();
+        }
+    };
+    let sig_path = std::env::var("COINCYNC_BOOTSTRAP_SIGNED_MANIFEST_SIG")
+        .ok()
+        .map(|v| PathBuf::from(v.trim()))
+        .unwrap_or_else(|| PathBuf::from(format!("{}.sig", manifest_path.display())));
+    let signature = match load_signature(&sig_path) {
+        Some(v) => Signature::from_bytes(&v),
+        None => {
+            warn!(
+                "Unable to read bootstrap manifest signature at {}",
+                sig_path.display()
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut file = match std::fs::File::open(&manifest_path) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(
+                "Unable to open bootstrap manifest {}: {}",
+                manifest_path.display(),
+                e
+            );
+            return Vec::new();
+        }
+    };
+    let mut manifest_bytes = Vec::with_capacity(64 * 1024);
+    use std::io::Read;
+    let read_cap = MAX_MANIFEST_BYTES.saturating_add(1);
+    if let Err(e) = (&mut file).take(read_cap).read_to_end(&mut manifest_bytes) {
+        warn!(
+            "Unable to read bootstrap manifest {}: {}",
+            manifest_path.display(),
+            e
+        );
+        return Vec::new();
+    }
+    if manifest_bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        warn!(
+            "Bootstrap manifest {} is over the {} MB ceiling; refusing to load",
+            manifest_path.display(),
+            MAX_MANIFEST_BYTES / (1024 * 1024)
+        );
+        return Vec::new();
+    }
+
+    match verify_and_parse_manifest(&manifest_bytes, &signature, &verify_key, default_port) {
+        Some(peers) => peers,
+        None => {
+            warn!(
+                "Bootstrap manifest signature/JSON verification failed for {}",
+                manifest_path.display()
+            );
+            Vec::new()
+        }
+    }
+}
 
 fn env_bool(name: &str) -> bool {
     std::env::var(name)

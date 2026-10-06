@@ -1,4 +1,14 @@
-//! # Spark Store
+//! # Spark Store — LEGACY (one-pool consolidation)
+//!
+//! **DEPRECATED / legacy — superseded by `SparkPoolStore` (`storage::spark_pool`).**
+//! This is the native pre-FFI sketch accumulator (32-byte commitments +
+//! 32-byte serials). The shielded design has homogenized on the
+//! libspark-aligned `SparkPoolStore` (variable-length `CoinBytes`, 34-byte VRF
+//! linking tags — the exact shapes the audited libspark spend path needs); this
+//! store's fixed-shape model does not match it. Retained (gated off), not
+//! deleted, pending the libspark external audit — see
+//! `docs/design/cip-shielded-one-pool-consolidation.md`. New shielded work
+//! targets `SparkPoolStore`.
 //!
 //! Persistent storage for the Lelantus Spark accumulator and the set of
 //! spent serial tags. When constructed via [`SparkStore::open_with_db`]
@@ -473,6 +483,17 @@ impl SparkStore {
     /// Current accumulator root, to be committed in `BlockHeader::spark_set_root`.
     pub fn current_root(&self) -> [u8; 32] {
         *self.root.read()
+    }
+
+    /// Independently recompute the accumulator root from the retained coin
+    /// vector, bypassing the cached [`current_root`](Self::current_root). Equal
+    /// to `current_root()` for an honest store; a mismatch means the cached
+    /// root drifted from the coins it summarizes (a maintenance bug, a partial
+    /// rewind that truncated the coins without recomputing the root, or memory
+    /// corruption). Used by the Phase-2 root-integrity guard. O(n) in the coin
+    /// count — run off the block-apply hot path.
+    pub fn recomputed_root(&self) -> [u8; 32] {
+        Self::compute_root(&self.coins.read())
     }
 }
 

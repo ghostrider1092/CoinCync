@@ -57,6 +57,93 @@ fn real_identity(locator: OutputLocator) -> RealOutputIdentity {
 }
 
 #[test]
+fn empirical_sampler_tracks_supplied_output_histogram() {
+    // A non-uniform histogram: one "heavy" height holds most of the outputs.
+    // The empirical sampler must pick heights in proportion to their output
+    // count, so the heavy height dominates — whereas a uniform-by-height law
+    // would give each of the 5 heights only ~20%.
+    let heights = vec![
+        HeightOutputCount { height: 0, count: 2 },
+        HeightOutputCount { height: 1, count: 2 },
+        HeightOutputCount { height: 2, count: 100 }, // heavy: 100 of 108
+        HeightOutputCount { height: 3, count: 2 },
+        HeightOutputCount { height: 4, count: 2 },
+    ];
+    let raw = DecoyDistributionSnapshot {
+        snapshot_height: 4,
+        snapshot_hash: Hash::from_bytes([7; 32]),
+        policy_version: DECOY_LOCATOR_POLICY_VERSION,
+        heights,
+    };
+    let snap = ValidatedDecoySnapshot::try_from(raw).unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(42);
+    let excluded: HashSet<OutputLocator> = HashSet::new();
+
+    let trials = 5000usize;
+    let mut heavy_hits = 0usize;
+    for _ in 0..trials {
+        let picked =
+            sample_candidate_locators_empirical(&snap, 0, 1, &excluded, &mut rng).unwrap();
+        assert_eq!(picked.len(), 1);
+        if picked[0].height == 2 {
+            heavy_hits += 1;
+        }
+    }
+    let heavy_share = heavy_hits as f64 / trials as f64;
+    // Output density of the heavy height is 100/108 ≈ 0.926. Require it to
+    // clearly dominate (a uniform-by-height sampler would sit near 0.20).
+    assert!(
+        heavy_share > 0.80,
+        "empirical sampler heavy-height share {heavy_share} should track its ~0.93 output density"
+    );
+}
+
+#[test]
+fn empirical_sampler_respects_min_age_and_uniqueness() {
+    // 6 heights, plenty of outputs; ask for several unique decoys with a
+    // min_age floor and assert they are distinct and all old enough.
+    let snap = snapshot(20, 5); // heights 0..=20, 5 outputs each
+    let mut rng = ChaCha20Rng::seed_from_u64(7);
+    let excluded: HashSet<OutputLocator> = HashSet::new();
+    let min_age = 3;
+    let picked = sample_candidate_locators_empirical(&snap, min_age, 10, &excluded, &mut rng)
+        .expect("enough eligible outputs");
+    assert_eq!(picked.len(), 10);
+    let unique: HashSet<_> = picked.iter().collect();
+    assert_eq!(unique.len(), 10, "decoys must be unique");
+    let spend_height = snap.spend_height();
+    for locator in &picked {
+        assert!(
+            spend_height - locator.height >= min_age,
+            "decoy at height {} younger than min_age {} (spend_height {})",
+            locator.height,
+            min_age,
+            spend_height
+        );
+    }
+}
+
+#[test]
+fn ring_audit_flags_clustered_ages_and_passes_spread() {
+    // Clustered ring: every decoy age is in the same order of magnitude
+    // (ages 100..500 for spend_height 10_000) → flagged as weak.
+    let clustered = vec![9900u64, 9850, 9800, 9700, 9500];
+    let a = audit_ring_ages(&clustered, 10_000);
+    assert!(!a.ok, "clustered ring should be flagged");
+    assert_eq!(a.distinct_age_decades, 1);
+    assert!(a.reason.is_some());
+
+    // Well-spread ring: ages span several orders of magnitude → OK.
+    let spread = vec![9995u64, 9900, 9000, 5000, 1]; // ages 5,100,1000,5000,9999
+    let b = audit_ring_ages(&spread, 10_000);
+    assert!(b.ok, "spread ring should pass");
+    assert!(b.distinct_age_decades >= 2);
+
+    // Rings smaller than 3 are treated as OK (bootstrap).
+    assert!(audit_ring_ages(&[9990u64, 9980], 10_000).ok);
+}
+
+#[test]
 fn validated_snapshot_rejects_unsupported_policy() {
     let mut raw = raw_snapshot(10, 1);
     raw.policy_version += 1;

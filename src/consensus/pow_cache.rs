@@ -152,6 +152,7 @@ pub fn pow_hash_cached(
 ) -> Result<Hash> {
     let anchor = compute_full_anchor(prev_hash, height, timestamp, binding)?;
     if anchor.mixed_hash != *claimed_anchor {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_POW_002, "RandomX anchor mismatch");
         return Err(Error::PowValidation(
             PowVerifyError::AnchorMismatch {
                 expected: anchor.mixed_hash,
@@ -161,6 +162,7 @@ pub fn pow_hash_cached(
         ));
     }
     if anchor.algorithm as u8 != claimed_algo {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_POW_003, "PoW algorithm mismatch");
         return Err(Error::PowValidation(
             PowVerifyError::AlgorithmMismatch {
                 expected: anchor.algorithm as u8,

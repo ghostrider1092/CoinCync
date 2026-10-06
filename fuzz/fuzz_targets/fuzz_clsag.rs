@@ -51,8 +51,17 @@ fuzz_target!(|input: ClsagFuzzInput| {
             commitment_bytes.copy_from_slice(&input.ring_data[offset + 32..offset + 64]);
 
             // Create ring member with potentially invalid point data
-            let pk = coincync::crypto::curve::PublicPoint::from_bytes(pk_bytes);
-            let commitment = coincync::crypto::curve::Commitment::from_bytes(commitment_bytes);
+            // from_bytes is fallible (rejects non-canonical point encodings);
+            // a malformed point simply means this fuzz input isn't a valid ring
+            // — skip it rather than fabricate a member.
+            let pk = match coincync::crypto::PublicPoint::from_bytes(pk_bytes) {
+                Some(p) => p,
+                None => return,
+            };
+            let commitment = match coincync::crypto::EcCommitment::from_bytes(commitment_bytes) {
+                Some(c) => c,
+                None => return,
+            };
             ring.push(coincync::crypto::ClsagRingMember::new(pk, commitment));
         }
 
@@ -64,7 +73,10 @@ fuzz_target!(|input: ClsagFuzzInput| {
         } else {
             [0u8; 32]
         };
-        let pseudo = coincync::crypto::curve::Commitment::from_bytes(pseudo_bytes);
+        let pseudo = match coincync::crypto::EcCommitment::from_bytes(pseudo_bytes) {
+            Some(c) => c,
+            None => return,
+        };
 
         // This should not panic regardless of input
         let _ = coincync::crypto::clsag_verify(&input.message, &ring, &pseudo, &sig);

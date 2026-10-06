@@ -29,13 +29,14 @@
 //!   THREAT: a prune that removed live entries would defeat §1's per-peer
 //!   scoping (nothing left to consult); a prune that never removes anything
 //!   would defeat §3's memory bound between hard-cap hits.
-//!   TESTS: (gap — no test drives `prune` via elapsed TTL directly; it is
-//!   only exercised indirectly through the hard-cap path in
-//!   `evicts_oldest_entry_at_the_hard_cap`, which does not wait out the TTL).
+//!   TESTS: `prune_removes_exactly_the_ttl_expired_entries` drives `prune`
+//!   directly by advancing the virtual monotonic clock (E1) past the TTL — no
+//!   real sleep — so the elapsed-TTL path is covered deterministically.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use crate::clock::{mono_now, MonoInstant};
 use crate::network::peer::PeerId;
 use crate::primitives::Hash;
 
@@ -56,7 +57,7 @@ const DEFAULT_MAX_SIZE: usize = 10_000;
 /// us, while we still fetch X from any honest peer that advertises it. This
 /// also matches the stated intent — "a peer recently said they don't have".
 pub struct TxAbsenceCache {
-    inner: HashMap<(PeerId, Hash), Instant>,
+    inner: HashMap<(PeerId, Hash), MonoInstant>,
     ttl: Duration,
     max_size: usize,
 }
@@ -85,7 +86,7 @@ impl TxAbsenceCache {
             }
         }
 
-        self.inner.insert((peer, hash), Instant::now());
+        self.inner.insert((peer, hash), mono_now());
     }
 
     pub fn is_known_absent(&self, peer: &PeerId, hash: &Hash) -> bool {
@@ -174,5 +175,34 @@ mod tests {
         let mut bytes = [0; 32];
         bytes[..4].copy_from_slice(&counter.to_be_bytes());
         Hash::from_bytes(bytes)
+    }
+
+    #[test]
+    fn prune_removes_exactly_the_ttl_expired_entries() {
+        // §4 coverage: drive `prune` through real elapsed-TTL by advancing the
+        // VIRTUAL monotonic clock (E1) — deterministic, no sleep. A live entry
+        // added after the advance must survive; the expired one must go.
+        let _clock = crate::clock::override_scope(1_000_000); // resets mono to 0
+        let mut cache = TxAbsenceCache::new();
+        let p = peer(5);
+        let old = Hash::from_bytes([1; 32]);
+
+        cache.mark_absent(p, old); // inserted at mono t=0
+        assert!(cache.is_known_absent(&p, &old));
+
+        // Advance virtual elapsed-time past the 60s TTL, then add a fresh entry.
+        crate::clock::advance_sim_mono(DEFAULT_TTL + Duration::from_secs(1));
+        let fresh = Hash::from_bytes([2; 32]);
+        cache.mark_absent(p, fresh); // inserted "now", still live
+
+        // The old entry is now TTL-expired; is_known_absent reflects it.
+        assert!(!cache.is_known_absent(&p, &old));
+        assert!(cache.is_known_absent(&p, &fresh));
+
+        // prune removes exactly the one expired entry and reports the count.
+        let removed = cache.prune();
+        assert_eq!(removed, 1, "prune should remove exactly the expired entry");
+        assert_eq!(cache.len(), 1);
+        assert!(cache.is_known_absent(&p, &fresh), "live entry must survive prune");
     }
 }

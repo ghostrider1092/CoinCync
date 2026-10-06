@@ -101,9 +101,11 @@
 //!   (256), so a crafted compression-pointer cycle cannot loop forever.
 //!   THREAT: a malicious response with a self-referential/cyclic
 //!   compression pointer hanging the resolver-response parser (DoS).
-//!   TESTS: (gap — no test constructs a compression-pointer cycle to drive
-//!   `skip_name`'s step-counter bound directly; covered only incidentally
-//!   by the RDATA/header truncation tests above).
+//!   TESTS: `skip_name_bounds_a_runaway_label_chain`,
+//!   `skip_name_accepts_a_terminated_name_and_stops_at_a_pointer`,
+//!   `skip_name_rejects_truncated_pointer_and_buffer_overrun`. (Note: `skip_name`
+//!   returns at the first pointer rather than following it, so the bound proven
+//!   is the step/buffer guard on a runaway label walk, not pointer-cycle following.)
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -507,6 +509,39 @@ fn resolver_list() -> Vec<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // §7: an unterminated label chain cannot loop forever — the 256-step guard
+    // (and the buffer bound) trips first. `skip_name` returns at the first
+    // compression pointer rather than following it, so the runaway it guards
+    // against is a long label walk, which this proves is bounded.
+    #[test]
+    fn skip_name_bounds_a_runaway_label_chain() {
+        // 300 one-byte labels, no null terminator: pos advances 2/step, so the
+        // 256-step guard is reached well before the 600-byte buffer end.
+        let mut buf = Vec::new();
+        for _ in 0..300 {
+            buf.push(1u8); // label length 1
+            buf.push(b'a');
+        }
+        assert!(
+            skip_name(&buf, 0).is_err(),
+            "a 300-label unterminated chain must be rejected by the step/buffer guard"
+        );
+    }
+
+    #[test]
+    fn skip_name_accepts_a_terminated_name_and_stops_at_a_pointer() {
+        let name = [3u8, b'f', b'o', b'o', 0u8]; // "foo" + null
+        assert_eq!(skip_name(&name, 0).unwrap(), name.len());
+        let ptr = [0xC0u8, 0x0C]; // compression pointer ends the name in 2 bytes
+        assert_eq!(skip_name(&ptr, 0).unwrap(), 2);
+    }
+
+    #[test]
+    fn skip_name_rejects_truncated_pointer_and_buffer_overrun() {
+        assert!(skip_name(&[0xC0u8], 0).is_err(), "lone pointer high-byte is truncated");
+        assert!(skip_name(&[3u8, b'a'], 0).is_err(), "label claims 3 bytes, only 1 present");
+    }
 
     #[test]
     fn build_query_a_record_shape() {

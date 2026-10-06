@@ -8,7 +8,9 @@
 //! refused whenever the node is already *at or below* the floor, so the colony
 //! can never be the thing that pushes an eclipse-vulnerable node over the edge.
 
-use super::{ColonyAction, ColonyActionKind};
+use super::ColonyAction;
+#[cfg(test)]
+use super::ColonyActionKind;
 
 /// A snapshot of the node's current outbound diversity. `Default` is 0/0 — the
 /// conservative "no diversity" census, under which the floor denies every

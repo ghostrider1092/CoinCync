@@ -25,8 +25,8 @@
 //!    own `last_checkpoint` (`CHECKPOINT_INTERVAL = 144` in
 //!    [`crate::constants`]).
 //! 5. **Hardcoded consensus checkpoints** (CIP-009 Path B, shipped
-//!    2026-05-08): `CONSENSUS_CHECKPOINTS` table in [`crate::constants`],
-//!    populated post-launch via the release process.
+//!    2026-05-08): resolved via `NetworkType::consensus_checkpoints()` from the
+//!    canonical `*_checkpoints()` functions, populated per the release process.
 //! 6. **Miner-signed rolling finality** (CIP-009.D, queued post-launch):
 //!    feature-gated in [`crate::consensus::rolling_finality`]; not
 //!    consensus-gating today.

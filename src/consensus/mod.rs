@@ -18,10 +18,30 @@
 
 pub mod block;
 pub mod difficulty;
+/// Shielded (Spark) transaction payload + apply path (CIP-Shielded Increment 2;
+/// gated off, fail-closed). See docs/design/cip-shielded-txtype.md.
+pub mod shielded;
+/// The shielded-transaction assembly line: the typed seams ("connectors") the
+/// prover and verifier plug into — anon-set resolution, the spend transcript
+/// rail, serial-tag derivation, and the fail-closed [`shielded_pipeline::SpendVerifier`]
+/// activation slot. Non-gated scaffolding; production verifier rejects all.
+pub mod shielded_pipeline;
+pub mod shielded_connector; // bridge to the isolated spark-connector crate
+/// The libspark Spark block format (v2 payload) + the pool feed logic.
+/// Gated + inert; see `docs/design/cip-spark-block-format.md`.
+#[cfg(feature = "sketch-gk-proof")]
+pub mod spark_payload;
+/// Consensus-rules fingerprint advertised in the handshake (advisory divergence
+/// detection). See docs/design/consensus-fingerprint.md.
+pub mod fingerprint;
+/// Non-consensus difficulty / block-interval telemetry (kept out of the
+/// hash-locked difficulty.rs). See docs/design/difficulty-health-telemetry.md.
+pub mod telemetry;
 pub mod fee_market;
 pub mod finality;
 pub mod fork_signal;
 pub mod header;
+pub mod invariants;
 pub mod pow;
 pub mod pow_cache;
 pub mod privacy_policy;

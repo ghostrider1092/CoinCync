@@ -112,7 +112,7 @@ impl CandidateBlock {
     /// The RandomX hashing inputs a miner needs: (anchor, tx_root, height).
     /// The PoW input is `hash_concat(anchor, nonce_le, tx_root)`.
     pub fn pow_inputs(&self) -> (Hash, Hash, u64) {
-        (self.header.anchor, self.header.tx_root, self.header.height)
+        (self.header.anchor, self.header.tx_root, self.header.height.as_u64())
     }
 
     /// Finalize into a submittable [`Block`](crate::consensus::block::Block)
@@ -334,8 +334,8 @@ pub fn build_block_from_template(
     let mut header = BlockHeader {
         network_magic,
         version: block_version_at_height(height),
-        height,
-        timestamp,
+        height: crate::primitives::Height::new(height),
+        timestamp: crate::primitives::Timestamp::from_secs(timestamp),
         prev_hash,
         tx_root,
         // Placeholder — set below once the binding-derived anchor is computed.
@@ -343,12 +343,64 @@ pub fn build_block_from_template(
         algorithm: 0,
         nonce: 0,
         target,
-        miner_pubkey: *payout_spend_pub,
+        // #222: the header's miner_pubkey has NO consensus role — it is only
+        // folded into hash()/pow_binding() (so a PoW solution can't be replayed
+        // with a mutated header); no validator reads its VALUE. Publishing the
+        // payout address's spend public key here linked every block a miner
+        // found to their wallet (and its public coinbase amount) and linked all
+        // of one miner's blocks to each other, defeating the one-time-output
+        // goal. Write all-zero — the value genesis and every other construction
+        // site already use (mainnet.rs, block.rs, chain.rs, compact_blocks.rs) —
+        // so the field leaks nothing and patched miners are indistinguishable
+        // from stock ones.
+        miner_pubkey: PublicKey::from_bytes([0u8; 32]),
         supply_commitment: [0u8; 32],
         checkpoint_vote: None,
         spark_set_root: [0u8; 32],
         mw_kernel_root: [0u8; 32],
     };
+
+    // #supply-commitment: bind the block's RESULTING cumulative supply into the
+    // header, BEFORE pow_binding below, so the PoW commits to it. GATED OFF
+    // (enforce_height = u64::MAX) → stays [0u8;32], the historical value, so
+    // nothing changes until an activation height is cleared.
+    //
+    // Correctness (no honest-block self-reject): the burn is computed with the
+    // SAME `chain::block_fee_burn` the validator uses, on a temp block carrying
+    // this exact tx set. The 32-byte `supply_commitment` field does not change
+    // the serialized block size, so the burn computed here (with the [0;32]
+    // placeholder still in `header`) equals the burn the validator computes on
+    // the received block — and emission is deterministic from height. The parent
+    // cumulative totals come from the node's template (u128, as strings).
+    if height >= fallback_network.supply_commitment_enforce_height() {
+        let parse_u128 = |k: &str| -> Result<u128> {
+            template[k]
+                .as_str()
+                .and_then(|s| s.parse::<u128>().ok())
+                .or_else(|| template[k].as_u64().map(|v| v as u128))
+                .ok_or_else(|| {
+                    Error::Internal(format!(
+                        "supply_commitment enforced at height {height} but template lacks \
+                         u128 '{k}' (node getblocktemplate must supply it)"
+                    ))
+                })
+        };
+        let parent_emitted = parse_u128("total_supply")?;
+        let parent_burned = parse_u128("total_burned")?;
+        let tmp_block = crate::consensus::block::Block {
+            header: header.clone(),
+            transactions: all_txs.clone(),
+        };
+        let burn = crate::chain::block_fee_burn(fallback_network, &tmp_block);
+        let emission = crate::emission::calculate_block_reward(height).as_atomic() as u128;
+        let post_emitted = parent_emitted.saturating_add(emission);
+        let post_burned = parent_burned.saturating_add(burn);
+        header.supply_commitment = crate::emission::supply::supply_commitment_consensus(
+            post_emitted,
+            post_burned,
+            crate::constants::MAX_SUPPLY.saturating_sub(post_emitted),
+        );
+    }
 
     // audit §1: derive the anchor from the header binding so every consensus
     // field is committed to by the PoW. The validator recomputes the SAME
@@ -412,15 +464,14 @@ pub fn claimable_fees_for_block_size(
         .as_atomic()
 }
 
-/// The validator's block-size formula, so the builder can size a candidate the
-/// exact same way: 200-byte header + every transaction (coinbase included).
-/// Mirrors `Block::size()` in `consensus/block.rs`.
+/// Size a candidate block exactly the way the validator does, by calling the
+/// single-sourced [`crate::consensus::block::block_size_from_txs`] over the
+/// coinbase + mempool txs — no local re-implementation, so the builder and
+/// `Block::size()` can never drift.
 fn assembled_block_size(coinbase: &Transaction, mempool_txs: &[Transaction]) -> usize {
-    let tx_sizes = std::iter::once(coinbase)
-        .chain(mempool_txs.iter())
-        .map(|tx| tx.size())
-        .fold(0usize, |acc, s| acc.saturating_add(s));
-    200usize.saturating_add(tx_sizes)
+    crate::consensus::block::block_size_from_txs(
+        std::iter::once(coinbase).chain(mempool_txs.iter()),
+    )
 }
 
 /// Build the coinbase tx — emission reward + claimable fees, paid to a fresh
@@ -545,10 +596,17 @@ mod tests {
         .expect("build candidate");
 
         // Header basics.
-        assert_eq!(candidate.header.height, height);
+        assert_eq!(candidate.header.height.as_u64(), height);
         assert_eq!(candidate.header.nonce, 0, "candidate leaves nonce for the miner");
         assert_eq!(candidate.header.prev_hash, Hash::from_bytes([0x11u8; 32]));
-        assert_eq!(candidate.header.miner_pubkey, spend);
+        // #222: miner_pubkey must be zeroed, NEVER the payout spend key (`spend`,
+        // passed above) — it has no consensus role and publishing it
+        // deanonymizes the miner.
+        assert_eq!(
+            candidate.header.miner_pubkey,
+            PublicKey::from_bytes([0u8; 32]),
+            "#222: header must not carry the payout spend key"
+        );
 
         // Exactly one tx (coinbase) since the template had no mempool txs.
         assert_eq!(candidate.transactions.len(), 1);
@@ -571,7 +629,7 @@ mod tests {
         let anchor = compute_full_anchor(
             &candidate.header.prev_hash,
             height,
-            candidate.header.timestamp,
+            candidate.header.timestamp.as_secs(),
             &candidate.header.pow_binding(),
         )
         .expect("anchor");

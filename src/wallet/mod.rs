@@ -21,6 +21,10 @@ pub mod node_rpc;
 pub mod persistence;
 pub mod scanner;
 pub mod send;
+// Shielded (Spark) wallet note tracking — receive-scan + spend-select. Gated to
+// the shielded consensus regime; never in a production build. See module docs.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+pub mod shielded_notes;
 pub mod spend;
 pub mod subaddress;
 pub mod sync_checkpoint_signing;

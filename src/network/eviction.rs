@@ -132,7 +132,7 @@ const MIN_AGE_BEFORE_EVICT: std::time::Duration = std::time::Duration::from_secs
 /// current shape in upstream. (CoinCync doesn't route Tor/I2P-aware
 /// grouping yet, so we treat them as their underlying transport's
 /// netgroup.)
-fn netgroup(addr: SocketAddr) -> u64 {
+pub(crate) fn netgroup(addr: SocketAddr) -> u64 {
     match addr.ip() {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -315,6 +315,7 @@ mod tests {
             encrypted,
             remote_static_key: None,
             capabilities: 0,
+            consensus_fingerprint: None,
             consecutive_full: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             connection_token: std::sync::Arc::new(()),
             eclipse_slot: None,

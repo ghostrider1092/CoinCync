@@ -373,6 +373,17 @@ impl KernelStore {
     pub fn current_root(&self) -> [u8; 32] {
         *self.root.read()
     }
+
+    /// Independently recompute the kernel-set root from the retained kernel
+    /// vector, bypassing the cached [`current_root`](Self::current_root). Equal
+    /// to `current_root()` for an honest store; a mismatch means the cached
+    /// root drifted from the kernels it summarizes (a maintenance bug, a
+    /// partial rewind that truncated the vector without recomputing the root,
+    /// or memory corruption). Used by the Phase-2 root-integrity guard. O(n) in
+    /// the kernel count — run off the block-apply hot path.
+    pub fn recomputed_root(&self) -> [u8; 32] {
+        Self::compute_root(&self.kernels.read())
+    }
 }
 
 impl Default for KernelStore {

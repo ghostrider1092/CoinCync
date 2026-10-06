@@ -194,6 +194,13 @@ pub struct BlockValidation {
     pub valid: bool,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
+    /// Diagnostic codes (`CYNC-*`) for errors raised via [`add_error_coded`], in
+    /// the order raised — the machine-readable companion to `errors` (F3). Lets a
+    /// consumer map a rejection to its catalog entry without string-matching, and
+    /// is the hook the deterministic-simulation harness checks against.
+    ///
+    /// [`add_error_coded`]: BlockValidation::add_error_coded
+    pub codes: Vec<&'static str>,
 }
 
 impl BlockValidation {
@@ -202,6 +209,7 @@ impl BlockValidation {
             valid: true,
             errors: vec![],
             warnings: vec![],
+            codes: vec![],
         }
     }
 
@@ -210,6 +218,7 @@ impl BlockValidation {
             valid: false,
             errors: vec![msg.into()],
             warnings: vec![],
+            codes: vec![],
         }
     }
 
@@ -220,6 +229,29 @@ impl BlockValidation {
 
     pub fn add_warning(&mut self, msg: impl Into<String>) {
         self.warnings.push(msg.into());
+    }
+
+    /// Record a rejection that breaches a registered consensus invariant (F3).
+    ///
+    /// Pushes `msg` to `errors` exactly like [`add_error`] — so existing consumers
+    /// and message assertions are unaffected — AND records the invariant's
+    /// `CYNC-*` code in `codes`, giving a machine-readable mapping from the
+    /// rejection to its diagnostic-catalog entry. `code` must be a `CYNC_*`
+    /// catalog constant (debug-asserted).
+    ///
+    /// [`add_error`]: BlockValidation::add_error
+    pub fn add_error_coded(&mut self, code: &'static str, msg: impl Into<String>) {
+        debug_assert!(
+            crate::diagnostics::lookup(code).is_some(),
+            "add_error_coded: unknown diagnostic code {code}"
+        );
+        let msg = msg.into();
+        // F5: record every coded validation failure into the flight recorder so a
+        // fault dump shows the lead-up, not just the final error.
+        crate::flight_recorder::record(code, msg.clone());
+        self.errors.push(msg);
+        self.codes.push(code);
+        self.valid = false;
     }
 }
 
@@ -263,7 +295,7 @@ pub fn validate_block(
 #[tracing::instrument(
     skip(block, prev_block, utxos),
     fields(
-        height = block.header.height,
+        height = block.header.height.as_u64(),
         tx_count = block.transactions.len(),
     )
 )]
@@ -358,6 +390,22 @@ pub fn validate_block_ctx(
     // Validate header
     validate_header(&block.header, prev_block.map(|b| &b.header), &mut result);
 
+    // Shielded accumulator-root gate (CIP-Shielded). While shielded txs are
+    // inactive at this height, the PoW-bound `spark_set_root` header field MUST
+    // be zero — this controls the field before the shielded hard fork so a
+    // producer cannot stuff arbitrary bytes or pre-commit an accumulator state.
+    // Every current producer writes zero (genesis included), so this rejects no
+    // existing block. When shielded activates, the root is instead bound to the
+    // post-apply accumulator state (see chain.rs / CIP Increment 2c#3b).
+    if !shielded_root_permitted(&block.header.spark_set_root, expected_network, block.height()) {
+        result.add_error(format!(
+            "spark_set_root must be zero while shielded transactions are inactive \
+             (non-zero at height {})",
+            block.height()
+        ));
+        return Ok(result);
+    }
+
     // §3  CRITICAL SECURITY: Validate Proof of Work
     // Skip PoW verification for genesis block (height 0)
     if block.height() > 0 {
@@ -399,7 +447,7 @@ pub fn validate_block_ctx(
                 match verify_pow(
                     &prev.header.hash(),
                     block.height(),
-                    block.header.timestamp,
+                    block.header.timestamp.as_secs(),
                     block.header.nonce,
                     &block.header.tx_root,
                     &block.header.target,
@@ -411,7 +459,11 @@ pub fn validate_block_ctx(
                         tracing::debug!("Block {} PoW verified successfully", block.height());
                     }
                     Err(e) => {
-                        result.add_error(format!("Proof of work validation error: {}", e));
+                        // F3: a PoW-target failure is a registered invariant.
+                        result.add_error_coded(
+                            crate::diagnostics::CYNC_CONS_001,
+                            format!("Proof of work validation error: {}", e),
+                        );
                     }
                 }
             }
@@ -948,7 +1000,7 @@ fn check_block_consensus_checkpoint(
     if let Some(expected_hash) = crate::constants::expected_checkpoint_hash(network, block.height())
     {
         let actual_hash = block.hash();
-        if actual_hash.as_bytes() != expected_hash {
+        if actual_hash.as_bytes() != &expected_hash {
             result.add_error(format!(
                 "consensus checkpoint mismatch at height {}: \
                  expected {} but got {} — refusing to accept reorg \
@@ -1086,12 +1138,17 @@ fn check_block_tail_supply(block: &Block, expected_reward: Amount, result: &mut 
     // absolute maximum any block may legitimately carry.
     let genesis_reward = calculate_block_reward(0).as_atomic();
     if reward > genesis_reward {
-        result.add_error(format!(
-            "Emission reward {} exceeds the height-0 maximum {} at height {} (emission curve must be non-increasing)",
-            reward,
-            genesis_reward,
-            block.height()
-        ));
+        // F3: a supply-ceiling breach is a registered invariant — record its
+        // CYNC-EMIT-001 code alongside the (unchanged) message.
+        result.add_error_coded(
+            crate::diagnostics::CYNC_EMIT_001,
+            format!(
+                "Emission reward {} exceeds the height-0 maximum {} at height {} (emission curve must be non-increasing)",
+                reward,
+                genesis_reward,
+                block.height()
+            ),
+        );
     }
 }
 
@@ -1123,7 +1180,11 @@ fn check_block_duplicate_key_images(block: &Block, result: &mut BlockValidation)
     for tx in &block.transactions {
         for input in &tx.inputs {
             if !seen.insert(&input.key_image) {
-                result.add_error(format!("Duplicate key image in block: {}", input.key_image));
+                // F3: in-block double-spend is a registered invariant.
+                result.add_error_coded(
+                    crate::diagnostics::CYNC_CONS_002,
+                    format!("Duplicate key image in block: {}", input.key_image),
+                );
             }
         }
     }
@@ -1156,7 +1217,7 @@ fn validate_header(
 /// version >= min allows smooth activation; downgrades are still
 /// rejected via `check_header_vs_prev`.
 fn check_header_version_min(header: &BlockHeader, result: &mut BlockValidation) {
-    let min_version = block_version_at_height(header.height);
+    let min_version = block_version_at_height(header.height.as_u64());
     if header.version < min_version {
         result.add_error(format!(
             "Block version {} below minimum {} for height {}",
@@ -1197,7 +1258,7 @@ fn check_header_vs_prev(
     result: &mut BlockValidation,
 ) {
     let Some(prev) = prev_header else {
-        if header.height != 0 {
+        if header.height.as_u64() != 0 {
             result.add_error("Non-genesis block without parent");
         }
         return;
@@ -1219,7 +1280,10 @@ fn check_header_vs_prev(
         result.add_error("Previous hash mismatch");
     }
     if header.timestamp <= prev.timestamp {
-        result.add_error("Timestamp not greater than previous block");
+        result.add_error_coded(
+            crate::diagnostics::CYNC_CONS_005,
+            "Timestamp not greater than previous block",
+        );
     }
 }
 
@@ -1229,7 +1293,7 @@ fn check_header_vs_prev(
 /// bug or an attack.
 fn check_header_checkpoint_vote(header: &BlockHeader, result: &mut BlockValidation) {
     if let Some((cp_height, _cp_hash)) = &header.checkpoint_vote {
-        if *cp_height >= header.height {
+        if *cp_height >= header.height.as_u64() {
             result.add_error(format!(
                 "checkpoint_vote references future height {} (block height {})",
                 cp_height, header.height
@@ -1263,23 +1327,42 @@ fn check_header_checkpoint_vote(header: &BlockHeader, result: &mut BlockValidati
 /// nodes on badly-configured hosts still process blocks (validation of
 /// crypto and consensus rules is orthogonal to wall-clock).
 fn check_header_future_timestamp(header: &BlockHeader, result: &mut BlockValidation) {
-    let current_time = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_secs(),
-        Err(e) => {
-            result.add_error(format!(
-                "System clock error: {}. Cannot validate block timestamps.",
-                e
-            ));
-            return;
-        }
-    };
-    // Sanity: current time should be reasonably recent (after 2020).
+    // Single source of truth (E1): the future-block cap reads wall time through
+    // the canonical clock, so the deterministic-simulation harness can drive it
+    // (clock-poisoning scenarios). With no override installed this is the real
+    // system clock — production behaviour is unchanged. A broken real clock
+    // (before the Unix epoch) still yields 0 here; preserve the explicit
+    // "cannot validate timestamps" error for that host-misconfiguration case,
+    // but never when a virtual clock is installed (0 can be a valid sim time).
+    let local_time = crate::clock::unix_now();
+    if local_time == 0 && !crate::clock::is_overridden() {
+        result.add_error(
+            "System clock error: time is before the Unix epoch. Cannot validate block timestamps."
+                .to_string(),
+        );
+        return;
+    }
+    // Sanity: the local clock should be reasonably recent (after 2020).
     const MIN_REASONABLE_TIME: u64 = 1577836800; // 2020-01-01 00:00:00 UTC
-    if current_time < MIN_REASONABLE_TIME {
+    if local_time < MIN_REASONABLE_TIME {
         result.add_warning("System clock appears to be set incorrectly (before 2020)");
     }
-    if header.height > 0 && header.timestamp > current_time + MAX_TIMESTAMP_DRIFT {
-        result.add_error("Block timestamp too far in future");
+    // Network-adjusted time (audit M-4): shift the future-block boundary by the
+    // median offset of OUTBOUND peers' clocks, so a node whose local clock is
+    // skewed does not wrongly reject valid blocks. `net_time::offset_secs` is
+    // hardened against remote clock-poisoning — per-netgroup dedup, sampled only
+    // after VERSION validation, out-of-range median -> 0 (not clamp-to-max),
+    // outbound peers only (see src/net_time.rs and PR #59's review). It returns 0
+    // until >= MIN_TIME_PEERS distinct netgroups are sampled, so a fresh or
+    // isolated node behaves exactly as it did before (local clock only). The
+    // offset is applied on top of the canonical E1 clock, so the DST harness
+    // still fully drives this path.
+    let current_time = (local_time as i64 + crate::net_time::offset_secs()).max(0) as u64;
+    if header.height.as_u64() > 0 && header.timestamp.as_secs() > current_time + MAX_TIMESTAMP_DRIFT {
+        result.add_error_coded(
+            crate::diagnostics::CYNC_CONS_004,
+            "Block timestamp too far in future",
+        );
     }
 }
 
@@ -1349,13 +1432,20 @@ fn validate_difficulty_target(
     let target_value = target_to_u128(target.as_bytes());
     let max_value = target_to_u128(max.as_bytes());
     if target_value > max_value {
-        result.add_error("Target easier than max_target (minimum difficulty)");
+        // F3: a difficulty-target out-of-bounds is a registered invariant.
+        result.add_error_coded(
+            crate::diagnostics::CYNC_POW_001,
+            "Target easier than max_target (minimum difficulty)",
+        );
         return;
     }
 
     // Check 2: Target must be non-zero (would be impossibly hard)
     if target.as_bytes().iter().all(|&b| b == 0) {
-        result.add_error("Target is zero (impossible difficulty)");
+        result.add_error_coded(
+            crate::diagnostics::CYNC_POW_001,
+            "Target is zero (impossible difficulty)",
+        );
         return;
     }
 
@@ -1384,7 +1474,7 @@ fn validate_difficulty_target(
 
             // Normal bounds: target can change by at most 4x in either direction
             // 4x = ratio_scaled 4000, 0.25x = ratio_scaled 250
-            let time_diff = block.header.timestamp.saturating_sub(prev.header.timestamp);
+            let time_diff = block.header.timestamp.saturating_secs_since(prev.header.timestamp);
             let expected_time = crate::constants::TARGET_BLOCK_TIME;
 
             // NOTE: The sanity check here is intentionally loose because the exact
@@ -1502,6 +1592,15 @@ pub(crate) fn validate_transaction_for_network_ctx(
         return Ok(());
     }
 
+    // Shielded (Spark) spends do NOT use the CLSAG ring / transparent-UTXO
+    // model, so they dispatch to their own verifier and MUST NOT fall through
+    // to the ring/range/balance checks below (which assume that model). This
+    // path is fail-closed and gated by SHIELDED_TX_ACTIVATION_HEIGHT — see
+    // check_shielded_tx and docs/design/cip-shielded-txtype.md.
+    if tx.is_shielded() {
+        return check_shielded_tx(tx, expected_network, current_height);
+    }
+
     check_tx_v2_activation(tx, current_height)?;
     // Per-output curve/identity checks (stealth_address, tx_public_key,
     // commitment). Ported here from the mempool-only path so a self-mined
@@ -1524,6 +1623,80 @@ pub(crate) fn validate_transaction_for_network_ctx(
     check_tx_range_proofs(tx, current_height)?;
     check_tx_balance_proof(tx)?;
     Ok(())
+}
+
+/// While shielded txs are inactive at `height`, the PoW-bound header
+/// `spark_set_root` must be zero (it only carries the accumulator root once
+/// shielded activates). Pure predicate for the block gate in
+/// `validate_block_ctx`.
+fn shielded_root_permitted(
+    spark_set_root: &[u8; 32],
+    network: crate::config::NetworkType,
+    height: u64,
+) -> bool {
+    crate::constants::shielded_tx_active_at_height(network, height) || *spark_set_root == [0u8; 32]
+}
+
+/// Validate a shielded (Lelantus-Spark) transaction — CIP-Shielded.
+///
+/// FAIL-CLOSED SKELETON. The wire type (`TxType::Shielded`, borsh discriminant
+/// 3) and this dispatch point exist so the real verifier can be wired into a
+/// clearly-marked slot, but no shielded tx can be accepted yet:
+///  1. It is rejected below `SHIELDED_TX_ACTIVATION_HEIGHT` (currently
+///     `u64::MAX` — permanently disabled until a governance-agreed hard fork).
+///  2. Even at/after activation it stays rejected until the real Spark
+///     spend-proof verifier + serial-tag double-spend check against the
+///     accumulator are wired in (the ACTIVATION SLOT below).
+///
+/// This double gate means a shielded tx can never enter a block on any current
+/// build, while the consensus dispatch/apply structure is in place and tested.
+fn check_shielded_tx(
+    tx: &Transaction,
+    network: crate::config::NetworkType,
+    current_height: u64,
+) -> Result<()> {
+    debug_assert!(tx.is_shielded());
+    if !crate::constants::shielded_tx_active_at_height(network, current_height) {
+        return Err(Error::InvalidTransaction(
+            "shielded (Spark) transactions are not activated at this height".to_string(),
+        ));
+    }
+
+    // v2 (SparkPayload — the canonical libspark-aligned format): STATELESS
+    // structural routing only. The full verify is STATEFUL — cover set + pool
+    // value + per-tx mint/spend proofs — and runs at block level in
+    // `chain.rs::verify_block_spark_v2` (which holds the SparkPoolStore and
+    // rejects the whole block on any fault; that is the authoritative gate).
+    // Here we only confirm the payload decodes as a current-version SparkPayload:
+    // a malformed v2 tx is rejected now, a well-formed one is admitted to face
+    // the block-level verify.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    if crate::consensus::spark_payload::SparkPayload::decode(&tx.extra).is_ok() {
+        return Ok(());
+    }
+
+    // v1 (ShieldedPayload — the legacy native-GK engine, see
+    // cip-shielded-one-pool-consolidation.md). Stateless structural check: the
+    // payload in `tx.extra` must be a well-formed, current-version
+    // ShieldedPayload. The stateful serial-tag double-spend + accumulator append
+    // happen at block-apply against the ShieldedStore.
+    let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
+    // ── ACTIVATION SLOT ───────────────────────────────────────────────────
+    // Route through the shielded connector (its own crate). Under the
+    // `libspark-ffi` engine the payload's `balance_proof` carries the
+    // self-contained libspark spend bundle (the native gk fields are unused on
+    // this path), verified by the vendored Firo Spark backend. Without the
+    // feature the connector's fail-closed StubBackend rejects — an activation
+    // height can never precede a working, reviewed verifier. The stateful
+    // cover-set + serial-tag double-spend verify runs at block-apply.
+    #[cfg(feature = "libspark-ffi")]
+    {
+        crate::consensus::shielded_connector::verify_bundle(&payload.balance_proof)
+    }
+    #[cfg(not(feature = "libspark-ffi"))]
+    {
+        crate::consensus::shielded_connector::verify_payload(&payload, tx.fee.as_atomic())
+    }
 }
 
 // ── §9–§13  validate_transaction sub-checks (AUDIT 2026-06-30 H1) ──────────
@@ -1554,6 +1727,7 @@ pub(crate) fn validate_transaction_for_network_ctx(
 /// consensus at the fork).
 fn check_tx_version_range(tx: &Transaction) -> Result<()> {
     if tx.version == 0 || tx.version > MAX_TX_VERSION {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_006, "unsupported tx version");
         return Err(Error::InvalidTxVersion(tx.version));
     }
     Ok(())
@@ -1610,6 +1784,7 @@ fn check_tx_input_output_counts(tx: &Transaction, v1_0_12_active: bool) -> Resul
             // v1.0.12 #3/8 (cf. commit 9c8633e7): encrypted_amount must be
             // exactly 8 bytes post-fork.
             if output.encrypted_amount.len() != 8 {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_007, "output encrypted_amount size");
                 return Err(Error::InvalidTransaction(format!(
                     "output {} encrypted_amount must be exactly 8 bytes, got {}",
                     out_idx,
@@ -1644,6 +1819,7 @@ fn check_tx_input_output_counts(tx: &Transaction, v1_0_12_active: bool) -> Resul
             // tightening to `!= 8` above is strictly stricter than `> 64`,
             // so the > 64 check is dead code after activation.
             if output.encrypted_memo.len() > crate::constants::MAX_OUTPUT_MEMO_SIZE {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_008, "output encrypted_memo size");
                 return Err(Error::InvalidTransaction(format!(
                     "output {} encrypted_memo too large: {} bytes (max {})",
                     out_idx,
@@ -1694,6 +1870,7 @@ fn check_tx_input_output_counts(tx: &Transaction, v1_0_12_active: bool) -> Resul
 fn check_tx_io_ratio_legacy(tx: &Transaction) -> Result<()> {
     let ratio_limit = 32usize;
     if tx.inputs.len() > tx.outputs.len().saturating_mul(ratio_limit) {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_009, "input:output ratio");
         return Err(Error::InvalidTransaction(format!(
             "Input/output ratio too high: {} inputs to {} outputs (max {}:1)",
             tx.inputs.len(),
@@ -1702,6 +1879,7 @@ fn check_tx_io_ratio_legacy(tx: &Transaction) -> Result<()> {
         )));
     }
     if tx.outputs.len() > tx.inputs.len().saturating_mul(ratio_limit) {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_010, "output:input ratio");
         return Err(Error::InvalidTransaction(format!(
             "Output/input ratio too high: {} outputs to {} inputs (max {}:1)",
             tx.outputs.len(),
@@ -1745,6 +1923,7 @@ fn check_tx_uniform_shape(tx: &Transaction, current_height: u64) -> Result<()> {
     }
     // Inputs must always be exactly STANDARD_INPUT_COUNT (== 2).
     if tx.inputs.len() != crate::constants::STANDARD_INPUT_COUNT {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_011, "transfer/churn input count");
         return Err(Error::InvalidTransaction(format!(
             "Post-activation Transfer/Churn must have exactly {} inputs, got {}",
             crate::constants::STANDARD_INPUT_COUNT,
@@ -1757,6 +1936,7 @@ fn check_tx_uniform_shape(tx: &Transaction, current_height: u64) -> Result<()> {
     let cync_shape = crate::constants::STANDARD_OUTPUT_COUNT;
     let asset_shape = crate::constants::STANDARD_OUTPUT_COUNT + 1;
     if tx.outputs.len() != cync_shape && tx.outputs.len() != asset_shape {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_012, "transfer/churn output count");
         return Err(Error::InvalidTransaction(format!(
             "Post-activation Transfer/Churn must have exactly {} outputs (CYNC) \
              or {} outputs (asset), got {}",
@@ -1769,6 +1949,7 @@ fn check_tx_uniform_shape(tx: &Transaction, current_height: u64) -> Result<()> {
     // shape (3 outputs), reject it. Churns by definition spend and
     // re-receive the SAME CYNC, never assets.
     if matches!(tx.tx_type, TxType::Churn) && tx.outputs.len() != cync_shape {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_013, "churn output count");
         return Err(Error::InvalidTransaction(format!(
             "Churn must have exactly {} outputs (CYNC shape), got {}",
             cync_shape,
@@ -1795,11 +1976,13 @@ fn check_tx_no_double_spend(tx: &Transaction, utxos: &UtxoSet) -> Result<()> {
     let mut seen_in_tx = std::collections::HashSet::with_capacity(tx.inputs.len());
     for input in &tx.inputs {
         if !seen_in_tx.insert(input.key_image) {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_014, "duplicate key image");
             return Err(Error::DuplicateKeyImage(
                 "duplicate key image detected".into(),
             ));
         }
         if utxos.contains_key_image(&input.key_image) {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_014, "duplicate key image");
             return Err(Error::DuplicateKeyImage(
                 "duplicate key image detected".into(),
             ));
@@ -1826,8 +2009,12 @@ fn check_tx_no_double_spend(tx: &Transaction, utxos: &UtxoSet) -> Result<()> {
 ///
 /// Two lookup paths: live UTXO set (`get_output_by_stealth`), then the
 /// permanent output index that retains ALL historical outputs
-/// (`get_output_index_entry`). Pre-`STRICT_RING_MEMBER_HEIGHT`, ring
-/// members not found in either are logged and allowed (bootstrap gap).
+/// (`get_output_index_entry`). A member found in NEITHER never existed on
+/// this chain and is rejected at every height (#219) — the former
+/// `STRICT_RING_MEMBER_HEIGHT` escape hatch that allowed missing members in
+/// blocks 1-99 was an inflation hole and is removed; those early blocks are
+/// coinbase-only under the 100-block coinbase maturity, so it never
+/// legitimately fired.
 ///
 /// v1.0.12 #5/8 (fork-gated by HARD_FORK_V1_0_12_HEIGHT): also runs the
 /// dup-stealth-address check on tx.outputs at the top of this function,
@@ -1884,12 +2071,14 @@ fn check_tx_ring_members(
         for (out_idx, output) in tx.outputs.iter().enumerate() {
             let addr_bytes = *output.stealth_address.as_bytes();
             if !seen_outputs_in_tx.insert(addr_bytes) {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_015, "duplicate output stealth address");
                 return Err(Error::InvalidTransaction(format!(
                     "duplicate stealth address at output {}",
                     out_idx,
                 )));
             }
             if utxos.get_output_index_entry(&addr_bytes).is_some() {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_016, "output stealth collides on-chain");
                 return Err(Error::InvalidTransaction(format!(
                     "output {} stealth address collides with existing on-chain output",
                     out_idx,
@@ -1904,6 +2093,7 @@ fn check_tx_ring_members(
             match utxos.get_output_by_stealth(stealth_bytes) {
                 Some(output_ref) => {
                     if member.commitment != output_ref.output.commitment {
+                        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_017, "ring commitment mismatch (live UTXO)");
                         return Err(Error::InvalidTransaction(format!(
                             "Input {} ring member {} commitment mismatch \
                              (transaction commitment does not match on-chain UTXO)",
@@ -1930,6 +2120,7 @@ fn check_tx_ring_members(
                     match utxos.get_output_index_entry(stealth_bytes) {
                         Some(idx_entry) => {
                             if member.commitment != idx_entry.commitment {
+                                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_018, "ring commitment mismatch (spent record)");
                                 return Err(Error::InvalidTransaction(format!(
                                     "Input {} ring member {} commitment mismatch \
                                      (spent output commitment does not match on-chain record)",
@@ -1958,24 +2149,33 @@ fn check_tx_ring_members(
                             )?;
                         }
                         None => {
-                            // Output never existed on this chain.
-                            if current_height >= crate::constants::STRICT_RING_MEMBER_HEIGHT {
-                                return Err(Error::InvalidTransaction(format!(
-                                    "Input {} ring member {} references non-existent output \
-                                     (stealth address not found in output index)",
-                                    input_idx, member_idx
-                                )));
-                            } else {
-                                // H3: Pre-activation known bootstrap gap.
-                                tracing::warn!(
-                                    "Ring member {}.{} not found in output index \
-                                     (pre-activation height {}, allowing — \
-                                     known gap, closes at STRICT_RING_MEMBER_HEIGHT)",
-                                    input_idx,
-                                    member_idx,
-                                    current_height
-                                );
-                            }
+                            // #219: the member exists in NEITHER the live UTXO
+                            // set NOR the permanent output index — it never
+                            // existed on this chain, so it is a FABRICATED ring
+                            // member minting unbacked value (CLSAG and the
+                            // balance proof still pass against the forged
+                            // commitment). Reject at EVERY height.
+                            //
+                            // Previously heights below STRICT_RING_MEMBER_HEIGHT
+                            // (100) only logged a warning and fell through — an
+                            // inflation hole for blocks 1-99. That escape hatch
+                            // was never needed and never legitimately fired:
+                            // coinbase maturity is MIN_OUTPUT_AGE_POST_FORK (100)
+                            // from genesis on this network, so no coin can be
+                            // spent before height 100 and blocks 1-99 are
+                            // coinbase-only (coinbase inputs carry no ring, so
+                            // they never reach this check). A legitimate spend at
+                            // ANY height references a real output that IS indexed;
+                            // only a forgery lands here. Rejecting it accepts
+                            // every block a pre-fix node accepts and additionally
+                            // rejects the forgery — a strict tightening, not a
+                            // chain split.
+                            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_019, "ring member non-existent (#219)");
+                            return Err(Error::InvalidTransaction(format!(
+                                "Input {} ring member {} references non-existent output \
+                                 (stealth address not found in output index)",
+                                input_idx, member_idx
+                            )));
                         }
                     }
                 }
@@ -2018,6 +2218,7 @@ fn check_ring_member_coinbase_maturity(
     // network so builds with different features agree on ring-member maturity.
     let required = network.min_output_age(current_height);
     if age < required {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_020, "ring member immature coinbase");
         return Err(Error::InvalidTransaction(format!(
             "Input {} ring member {} references immature coinbase output \
              (height {}, age {} < required {})",
@@ -2044,6 +2245,7 @@ fn check_ring_member_time_lock(
 ) -> Result<()> {
     if let Some(lh) = lock_height {
         if current_height < lh {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_021, "ring member time-locked");
             return Err(Error::InvalidTransaction(format!(
                 "Input {} ring member {} references time-locked output \
                  (unlocks at height {}, current {})",
@@ -2149,6 +2351,7 @@ fn check_tx_ring_size_and_unique_members(
         let mut seen_keys = std::collections::HashSet::new();
         for member in &input.ring_members {
             if !seen_keys.insert(*member.public_key.as_bytes()) {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_022, "duplicate ring member");
                 return Err(Error::InvalidSignature(format!(
                     "Duplicate ring member in input {}",
                     input_idx
@@ -2178,6 +2381,7 @@ fn check_tx_ring_signatures(tx: &Transaction) -> Result<()> {
     });
     if !all_sigs_valid.load(Ordering::SeqCst) {
         let idx = failed_idx.load(Ordering::SeqCst);
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_023, "CLSAG verification failed");
         return Err(Error::InvalidSignature(format!(
             "Ring signature verification failed for input {}",
             idx
@@ -2203,6 +2407,14 @@ fn check_tx_range_proofs(tx: &Transaction, current_height: u64) -> Result<()> {
 /// commitment arithmetic.
 fn check_tx_balance_proof(tx: &Transaction) -> Result<()> {
     if !verify_balance_proof(tx) {
+        // SHLD-001 (F3): a failed balance proof means the committed input and
+        // output values do not balance — value created or destroyed "across the
+        // veil". Record the coded diagnostic for the fault dump (F5); the hard
+        // rejection below is unchanged, so enforcement is identical.
+        crate::flight_recorder::record(
+            crate::diagnostics::CYNC_SHLD_001,
+            "transaction balance proof failed: shielded value not conserved",
+        );
         return Err(Error::CommitmentMismatch);
     }
 
@@ -2559,6 +2771,7 @@ pub fn validate_all_transactions(
     {
         let guard = first_error.lock();
         if let Some((idx, ref e)) = *guard {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_024, "transaction validation failed");
             return Err(Error::InvalidTransaction(format!(
                 "Transaction {} failed: {}",
                 idx, e
@@ -2605,11 +2818,13 @@ fn check_output_curve_points(tx: &Transaction) -> Result<()> {
     for output in &tx.outputs {
         // stealth_address (H-19)
         if output.stealth_address.as_bytes() == &[0u8; 32] {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_025, "output stealth address zero");
             return Err(Error::InvalidTransaction(
                 "output stealth address is zero (unspendable — potential burning attack)".into(),
             ));
         }
         if crate::crypto::PublicPoint::from_bytes(*output.stealth_address.as_bytes()).is_none() {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_026, "output stealth not a point");
             return Err(Error::InvalidTransaction(
                 "output stealth address is not a valid Ristretto point (unspendable)".into(),
             ));
@@ -2617,12 +2832,14 @@ fn check_output_curve_points(tx: &Transaction) -> Result<()> {
 
         // tx_public_key (ephemeral R) — deanonymization / burn vector
         if output.tx_public_key.as_bytes() == &[0u8; 32] {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_027, "tx_public_key identity");
             return Err(Error::InvalidTransaction(
                 "output tx_public_key is zero (identity point — breaks stealth ECDH / deanon)"
                     .into(),
             ));
         }
         if crate::crypto::PublicPoint::from_bytes(*output.tx_public_key.as_bytes()).is_none() {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_028, "tx_public_key not a point");
             return Err(Error::InvalidTransaction(
                 "output tx_public_key is not a valid Ristretto point (unspendable)".into(),
             ));
@@ -2630,11 +2847,13 @@ fn check_output_curve_points(tx: &Transaction) -> Result<()> {
 
         // commitment (H-19)
         if output.commitment == [0u8; 32] {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_029, "output commitment identity");
             return Err(Error::InvalidTransaction(
                 "output commitment is zero (identity point — balance equation breakable)".into(),
             ));
         }
         if crate::crypto::PublicPoint::from_bytes(output.commitment).is_none() {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_030, "output commitment not a point");
             return Err(Error::InvalidTransaction(
                 "output commitment is not a valid Ristretto point".into(),
             ));
@@ -2654,6 +2873,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
     // < V2_TX_ACTIVATION_HEIGHT` check at line ~811), so pre-activation
     // V2 txs are still rejected — just not by this contextless path.
     if tx.version == 0 || tx.version > MAX_TX_VERSION {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_006, "unsupported tx version");
         return Err(Error::InvalidTxVersion(tx.version));
     }
 
@@ -2661,11 +2881,13 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
     // This prevents mempool pollution with malformed transactions that can
     // never be mined (full validate_transaction checks this, but basic didn't).
     if tx.inputs.is_empty() {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_031, "transaction has no inputs");
         return Err(Error::InvalidTransaction(
             "transaction has no inputs".into(),
         ));
     }
     if tx.outputs.is_empty() {
+        crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_032, "transaction has no outputs");
         return Err(Error::InvalidTransaction(
             "transaction has no outputs".into(),
         ));
@@ -2704,6 +2926,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         // Ring size must meet minimum (Constitution Article III)
         for input in &tx.inputs {
             if input.ring_members.len() < crate::constants::BOOTSTRAP_MIN_RING_SIZE {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_033, "ring size below minimum");
                 return Err(Error::InvalidTransaction(format!(
                     "UNCONSTITUTIONAL: ring size {} < minimum {} (Article III — Mandatory Privacy)",
                     input.ring_members.len(),
@@ -2713,6 +2936,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         }
         // Range proof must exist (Bill of Rights I — Bulletproofs required)
         if tx.range_proof.is_empty() {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_034, "missing range proof");
             return Err(Error::InvalidTransaction(
                 "UNCONSTITUTIONAL: missing range proof (Bill of Rights I — Bulletproofs required)"
                     .into(),
@@ -2732,6 +2956,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         let mut seen_key_images = std::collections::HashSet::new();
         for input in &tx.inputs {
             if !seen_key_images.insert(input.key_image) {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_035, "duplicate key image within tx");
                 return Err(Error::InvalidTransaction(
                     "duplicate key image within transaction".into(),
                 ));
@@ -2766,6 +2991,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         }
         // encrypted_amount: exactly 8 bytes (XOR'd u64)
         if output.encrypted_amount.len() > 64 {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_036, "encrypted_amount cap");
             return Err(Error::InvalidTransaction(format!(
                 "encrypted_amount too large: {} bytes (max 64)",
                 output.encrypted_amount.len()
@@ -2773,6 +2999,7 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         }
         // encrypted_memo: optional, max 256 bytes to prevent blockchain bloat
         if output.encrypted_memo.len() > 256 {
+            crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_037, "encrypted_memo cap");
             return Err(Error::InvalidTransaction(format!(
                 "encrypted_memo too large: {} bytes (max 256)",
                 output.encrypted_memo.len()
@@ -2798,12 +3025,14 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         for (idx, input) in tx.inputs.iter().enumerate() {
             let ki_bytes = input.key_image.as_bytes();
             if ki_bytes == &[0u8; 32] {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_038, "input key image zero");
                 return Err(Error::InvalidTransaction(format!(
                     "input {} has zero key image (double-spend detection bypass)",
                     idx
                 )));
             }
             if crate::crypto::PublicPoint::from_bytes(*ki_bytes).is_none() {
+                crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_039, "input key image not a point");
                 return Err(Error::InvalidTransaction(format!(
                     "input {} key image is not a valid curve point",
                     idx
@@ -2925,8 +3154,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height,
-            timestamp: 0,
+            height: crate::primitives::Height::new(height),
+            timestamp: crate::primitives::Timestamp::from_secs(0),
             prev_hash: Hash::zero(),
             tx_root: Hash::zero(),
             anchor: Hash::zero(),
@@ -2988,6 +3217,13 @@ mod tests {
             !above.valid,
             "reward above the genesis maximum must be rejected"
         );
+        // F3: the ceiling breach records its diagnostic code, so the rejection
+        // maps to the catalog without string-matching.
+        assert!(
+            above.codes.contains(&crate::diagnostics::CYNC_EMIT_001),
+            "ceiling breach must record CYNC-EMIT-001; got {:?}",
+            above.codes
+        );
     }
 
     #[test]
@@ -3025,8 +3261,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
-            timestamp: 0,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(0),
             prev_hash: Hash::zero(),
             tx_root: Hash::zero(),
             anchor: Hash::zero(),
@@ -3267,7 +3503,7 @@ mod tests {
     fn child_block(height: u64, txs: Vec<Transaction>, prev: &Block) -> Block {
         let mut h = block_at_height(height).header;
         h.prev_hash = prev.header.hash();
-        h.timestamp = 1_000_000;
+        h.timestamp = crate::primitives::Timestamp::from_secs(1_000_000);
         Block::new(h, txs)
     }
 
@@ -3568,6 +3804,8 @@ mod tests {
             .errors
             .iter()
             .any(|e| e.contains("Duplicate key image in block")));
+        // F3: the double-spend breach records its diagnostic code.
+        assert!(result.codes.contains(&crate::diagnostics::CYNC_CONS_002));
     }
 
     /// Regression (issue #105): the in-block duplicate-key-image scan was done
@@ -3659,7 +3897,7 @@ mod tests {
         let mut header = block_at_height(1).header;
         header.version = 1; // downgrade v2 -> v1
         header.prev_hash = prev_header.hash();
-        header.timestamp = prev_header.timestamp + 1;
+        header.timestamp = prev_header.timestamp + std::time::Duration::from_secs(1);
         let mut result = BlockValidation::ok();
         check_header_vs_prev(&header, Some(&prev_header), &mut result);
         assert!(!result.valid);
@@ -3667,6 +3905,40 @@ mod tests {
             .errors
             .iter()
             .any(|e| e.contains("version cannot decrease")));
+    }
+
+    #[test]
+    fn clock_poison_future_timestamp_is_rejected_cons004_and_recorded() {
+        // DST clock-poison (#59): with the wall clock pinned (E1 override), a block
+        // timestamped far beyond now + MAX_TIMESTAMP_DRIFT is rejected by the
+        // future-cap with CYNC-CONS-004 (F3), and the rejection is captured by the
+        // flight recorder (F5). Fully deterministic — no mining, clock controlled.
+        let _clock = crate::clock::override_scope(1_700_000_000);
+        let now = crate::clock::unix_now();
+
+        let mut header = block_at_height(1).header;
+        header.timestamp =
+            crate::primitives::Timestamp::from_secs(now + MAX_TIMESTAMP_DRIFT + 10_000);
+        let mut result = BlockValidation::ok();
+        check_header_future_timestamp(&header, &mut result);
+        assert!(!result.valid, "a poisoned future timestamp must be rejected");
+        assert!(
+            result.codes.contains(&crate::diagnostics::CYNC_CONS_004),
+            "rejection must carry CYNC-CONS-004"
+        );
+        assert!(
+            crate::flight_recorder::snapshot()
+                .iter()
+                .any(|e| e.code == crate::diagnostics::CYNC_CONS_004),
+            "the clock-poison rejection must be recorded in the flight recorder (F5)"
+        );
+
+        // The inclusive bound (exactly now + MAX_TIMESTAMP_DRIFT) is accepted.
+        let mut ok_header = block_at_height(1).header;
+        ok_header.timestamp = crate::primitives::Timestamp::from_secs(now + MAX_TIMESTAMP_DRIFT);
+        let mut ok = BlockValidation::ok();
+        check_header_future_timestamp(&ok_header, &mut ok);
+        assert!(ok.valid, "a timestamp exactly at the drift bound is accepted");
     }
 
     #[test]
@@ -3737,7 +4009,7 @@ mod tests {
     #[test]
     fn check_header_future_timestamp_genesis_exempt() {
         let mut header = block_at_height(0).header; // height 0
-        header.timestamp = u64::MAX / 2; // absurd future
+        header.timestamp = crate::primitives::Timestamp::from_secs(u64::MAX / 2); // absurd future
         let mut result = BlockValidation::ok();
         check_header_future_timestamp(&header, &mut result);
         assert!(
@@ -3823,7 +4095,7 @@ mod tests {
         let mut blk_t = [0u8; 32];
         blk_t[0] = 1;
         block.header.target = Hash::from_bytes(blk_t);
-        block.header.timestamp = prev.header.timestamp + 1; // normal (non-emergency) window
+        block.header.timestamp = crate::primitives::Timestamp::from_secs(prev.header.timestamp.as_secs() + 1); // normal (non-emergency) window
         let mut result = BlockValidation::ok();
         validate_difficulty_target(&block, Some(&prev), &mut result);
         assert!(!result.valid);
@@ -3855,6 +4127,8 @@ mod tests {
             "below-checkpoint block must still be PoW-verified in a non-fast-sync build, got: {:?}",
             result.errors
         );
+        // F3: the PoW-failure rejection records its diagnostic code.
+        assert!(result.codes.contains(&crate::diagnostics::CYNC_CONS_001));
     }
 
     // ── v1_0_12_rules_active differential ───────────────────────────────
@@ -4109,6 +4383,36 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("references non-existent output"), "got: {err}");
+    }
+
+    /// #219 regression: a ring member that exists in neither the UTXO set nor
+    /// the output index must be rejected even BELOW STRICT_RING_MEMBER_HEIGHT.
+    /// Before the fix, heights < 100 only logged a warning and accepted the tx —
+    /// an inflation hole (a fabricated member mints unbacked value while CLSAG +
+    /// the balance proof still verify).
+    #[test]
+    fn ring_members_rejects_nonexistent_output_below_strict_height_219() {
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(5, ring_of(1, 90))],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        let utxos = UtxoSet::new();
+        // Heights well below STRICT_RING_MEMBER_HEIGHT (100), including the
+        // first non-genesis block, must now reject the fabricated member.
+        for height in [1u64, 5, 50, 99] {
+            let err = check_tx_ring_members(NetworkType::Testnet, &tx, &utxos, height, false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("references non-existent output"),
+                "height {height} must reject a fabricated ring member, got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -4375,6 +4679,21 @@ mod tests {
     }
 
     #[test]
+    fn balance_proof_failure_is_rejected_and_records_shld001() {
+        // SHLD-001 (F3/F5): a non-conserving balance proof is hard-rejected
+        // (CommitmentMismatch) AND records the coded diagnostic — value created
+        // or destroyed across the veil surfaces in a fault dump.
+        let tx = bp_tx(vec![bp_input([0u8; 32])], vec![a_valid_output()]);
+        assert!(check_tx_balance_proof(&tx).is_err());
+        assert!(
+            crate::flight_recorder::snapshot()
+                .iter()
+                .any(|e| e.code == crate::diagnostics::CYNC_SHLD_001),
+            "a failed balance proof must record CYNC-SHLD-001"
+        );
+    }
+
+    #[test]
     fn balance_proof_rejects_noncurve_pseudo_output() {
         let tx = bp_tx(vec![bp_input([0xFFu8; 32])], vec![a_valid_output()]);
         assert!(!verify_balance_proof(&tx));
@@ -4498,6 +4817,151 @@ mod tests {
         assert!(results[1].1.is_err());
         assert_eq!(results[2].0, 2);
         assert!(results[2].1.is_ok());
+    }
+
+    #[test]
+    fn shielded_tx_is_rejected_fail_closed() {
+        // TxType::Shielded exists on the wire but is fail-closed: rejected in
+        // validation below SHIELDED_TX_ACTIVATION_HEIGHT (u64::MAX = disabled),
+        // and it must dispatch to the shielded path, never the transparent
+        // ring/range/balance checks.
+        let mut tx = coinbase_tx(vec![a_valid_output()]);
+        tx.tx_type = TxType::Shielded;
+        let utxos = UtxoSet::new();
+
+        let err = validate_transaction(&tx, &utxos, 0).unwrap_err().to_string();
+        assert!(
+            err.contains("shielded") && err.contains("not activated"),
+            "below activation must reject as not-activated, got: {err}"
+        );
+
+        // At/after activation with a WELL-FORMED payload: still fail-closed at
+        // the (unwired) verifier — activation can never precede a real verifier.
+        tx.extra = crate::consensus::shielded::ShieldedPayload {
+            version: crate::consensus::shielded::SHIELDED_PAYLOAD_VERSION,
+            inputs: vec![crate::consensus::shielded::ShieldedInput {
+                bucket_index: 0,
+                nullifier: [2u8; 32],
+                spend_proof: vec![],
+                range_proof: vec![],
+            }],
+            outputs: vec![],
+            value_balance: 0,
+            balance_proof: vec![],
+        }
+        .encode();
+        let err_hi = validate_transaction(&tx, &utxos, u64::MAX)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err_hi.contains("shielded") && err_hi.contains("verifier"),
+            "post-activation must reject as verifier-not-wired, got: {err_hi}"
+        );
+
+        // At/after activation with a MALFORMED payload: rejected at decode.
+        tx.extra = vec![0xFFu8; 3];
+        let err_bad = validate_transaction(&tx, &utxos, u64::MAX)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err_bad.contains("shielded payload decode"),
+            "malformed payload must be rejected at decode, got: {err_bad}"
+        );
+    }
+
+    #[cfg(feature = "libspark-ffi")]
+    #[test]
+    fn shielded_tx_with_valid_libspark_bundle_verifies_post_activation() {
+        use crate::consensus::shielded::{ShieldedPayload, SHIELDED_PAYLOAD_VERSION};
+        let bundle = spark_connector::ffi::make_verify_bundle().expect("build libspark bundle");
+
+        let mk = |bp: Vec<u8>| {
+            let payload = ShieldedPayload {
+                version: SHIELDED_PAYLOAD_VERSION,
+                inputs: vec![],
+                outputs: vec![],
+                value_balance: 0,
+                balance_proof: bp, // libspark engine: the spend bundle rides here
+            };
+            let mut tx = coinbase_tx(vec![a_valid_output()]);
+            tx.tx_type = TxType::Shielded;
+            tx.extra = payload.encode();
+            tx
+        };
+        let utxos = UtxoSet::new();
+
+        // A valid libspark spend bundle verifies through the node post-activation
+        // (activation == u64::MAX, so height u64::MAX exercises the active path).
+        assert!(
+            validate_transaction(&mk(bundle.clone()), &utxos, u64::MAX).is_ok(),
+            "a valid libspark spend bundle must verify post-activation"
+        );
+
+        // A proof-region tamper is rejected (fail-closed).
+        let mut bad = bundle;
+        let n = bad.len();
+        bad[n - 10] ^= 0x01;
+        assert!(
+            validate_transaction(&mk(bad), &utxos, u64::MAX).is_err(),
+            "a tampered libspark bundle must be rejected"
+        );
+    }
+
+    /// Increment #3: regtest gets a finite shielded activation height, and a v2
+    /// `SparkPayload` is routed statelessly (structural admit → the authoritative
+    /// stateful verify runs at block level). Testnet/mainnet stay permanently off.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn regtest_activates_shielded_and_routes_v2_payload_statelessly() {
+        use crate::config::NetworkType::{Regtest, Testnet};
+        use crate::constants::SHIELDED_REGTEST_ACTIVATION_HEIGHT as ACT;
+
+        // A real authenticated v2 SparkPayload (mint / shield-in).
+        let (payload, _) =
+            crate::consensus::spark_payload::build::build_mint_payload(b"regtest-act-seed", &[10_000u64, 20_000], &[])
+                .expect("build v2 mint payload");
+        let mut tx = coinbase_tx(vec![a_valid_output()]);
+        tx.tx_type = TxType::Shielded; // not coinbase → reaches check_shielded_tx
+        tx.extra = payload.encode();
+        let utxos = UtxoSet::new();
+
+        // Regtest at/after activation: the stateless gate ADMITS the well-formed
+        // v2 payload (structural); the full stateful verify runs at block level.
+        assert!(
+            validate_transaction_for_network_ctx(&tx, &utxos, ACT, Regtest, false).is_ok(),
+            "regtest at activation must admit a well-formed v2 shielded tx"
+        );
+        // Regtest BELOW activation: rejected (not activated).
+        assert!(
+            validate_transaction_for_network_ctx(&tx, &utxos, ACT - 1, Regtest, false).is_err(),
+            "regtest below activation must reject the shielded tx"
+        );
+        // Testnet: shielded is inactive at every REALISTIC height (activation is
+        // u64::MAX — the unreachable sentinel; a real chain never reaches it).
+        assert!(
+            validate_transaction_for_network_ctx(&tx, &utxos, 1_000_000_000, Testnet, false).is_err(),
+            "testnet must not activate shielded at any reachable height"
+        );
+        // A malformed payload is rejected even on regtest at activation.
+        tx.extra = vec![0xFFu8; 4];
+        assert!(
+            validate_transaction_for_network_ctx(&tx, &utxos, ACT, Regtest, false).is_err(),
+            "a malformed shielded payload must be rejected"
+        );
+    }
+
+    #[test]
+    fn shielded_root_gate_requires_zero_while_inactive() {
+        // Testnet is permanently inactive (u64::MAX) in every build, so it
+        // exercises the "while inactive" gate stably.
+        use crate::config::NetworkType::Testnet as N;
+        // Zero root is always permitted.
+        assert!(shielded_root_permitted(&[0u8; 32], N, 0));
+        assert!(shielded_root_permitted(&[0u8; 32], N, 100_000));
+        // A non-zero root is rejected while shielded is inactive (the current,
+        // permanently-disabled state) — at genesis and at any height.
+        assert!(!shielded_root_permitted(&[1u8; 32], N, 0));
+        assert!(!shielded_root_permitted(&[9u8; 32], N, 123_456));
     }
 
     // ── validate_transaction_basic granular gates ───────────────────────

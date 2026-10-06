@@ -89,6 +89,15 @@ pub fn enforce_privacy_policy(block: &Block) -> Result<()> {
         if tx.tx_type == TxType::Coinbase {
             continue;
         }
+        // Shielded (Spark) spends provide sender/amount/recipient privacy via
+        // their own proof model, not the transparent CLSAG-ring rules below
+        // (whose §4 would reject a shielded tx for having no ring inputs). Their
+        // privacy is enforced by the shielded verifier in
+        // `validation::check_shielded_tx`. This is the "Phase 2" branch the §4
+        // TODO anticipated. (Shielded is itself fail-closed until activation.)
+        if tx.tx_type == TxType::Shielded {
+            continue;
+        }
         check_tx_privacy(tx)?;
     }
     Ok(())
@@ -267,8 +276,8 @@ mod tests {
         BlockHeader {
             network_magic: [0, 0, 0, 0],
             version: 1,
-            height: 1,
-            timestamp: 1,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1),
             prev_hash: Hash::zero(),
             tx_root: Hash::zero(),
             anchor: Hash::zero(),

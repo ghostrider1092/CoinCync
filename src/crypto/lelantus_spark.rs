@@ -4,6 +4,17 @@
 //!
 //! ## Status
 //!
+//! **UNSOUND SKETCH — DO NOT ACTIVATE (#221).** The hand-rolled AOS
+//! one-out-of-many proof here is neither zero-knowledge nor binding:
+//! its Fiat-Shamir challenge is seeded from the REAL spend index (so
+//! the verifier can recover which coin was spent — an anonymity
+//! break), and the serial tag is never proven bound to the spent coin
+//! (so a fresh tag can accompany every spend — no double-spend
+//! linkage). To stop anyone trusting it, [`verify_spark_spend`] is
+//! FAIL-CLOSED: it refuses every proof. The real one-out-of-many proof
+//! (Groth-Kohlweiss / libspark) must replace this before any
+//! activation. Do not read the protocol prose below as "implemented".
+//!
 //! Gated behind the `sketch-lelantus-spark` cargo feature, OFF by
 //! default. Default builds do NOT compile this module; the
 //! production audit perimeter is unchanged. Activation requires the
@@ -114,7 +125,6 @@
 //!   `build_anon_set_contains_real_idx_when_pool_sufficient`.
 
 use curve25519_dalek::{
-    constants::RISTRETTO_BASEPOINT_POINT as G,
     ristretto::{CompressedRistretto, RistrettoPoint},
     scalar::Scalar,
     traits::Identity,
@@ -132,29 +142,18 @@ use crate::error::{Error, Result};
 
 /// Value generator `G` (Ristretto base).
 #[inline]
+// Generators G/H/K now come from the shared single-source-of-truth module
+// (crypto/spark_generators.rs), so the commitment and the Groth-Kohlweiss
+// one-of-many proof use the identical basis. Points are unchanged (same
+// basepoint + same NUMS domain tags).
 fn gen_g() -> RistrettoPoint {
-    G
+    crate::crypto::spark_generators::gen_g()
 }
-
-/// Serial generator `H`, deterministic but independent of `G`.
-/// Derived with a nothing-up-my-sleeve hash.
 fn gen_h() -> RistrettoPoint {
-    let mut hasher = Sha3_512::new();
-    hasher.update(b"COINCYNC_SPARK_GEN_H_v1");
-    let digest = hasher.finalize();
-    let mut wide = [0u8; 64];
-    wide.copy_from_slice(&digest);
-    RistrettoPoint::from_uniform_bytes(&wide)
+    crate::crypto::spark_generators::gen_h()
 }
-
-/// Blinding generator `K`, independent of `G` and `H`.
 fn gen_k() -> RistrettoPoint {
-    let mut hasher = Sha3_512::new();
-    hasher.update(b"COINCYNC_SPARK_GEN_K_v1");
-    let digest = hasher.finalize();
-    let mut wide = [0u8; 64];
-    wide.copy_from_slice(&digest);
-    RistrettoPoint::from_uniform_bytes(&wide)
+    crate::crypto::spark_generators::gen_k()
 }
 
 /// Commit `(value, serial, randomness)` as `C = v*G + s*H + r*K`.
@@ -601,7 +600,19 @@ pub fn prove_spark_spend<R: CryptoRng + RngCore>(
 /// ```
 ///
 /// and checks the serial tag decompresses to a valid curve point.
+#[allow(unreachable_code, unused_variables, unused_mut)]
 pub fn verify_spark_spend(proof: &SparkSpendProof, pubkeys: &[RistrettoPoint]) -> Result<()> {
+    // #221 FAIL-CLOSED: this hand-rolled AOS "one-of-many" sketch is UNSOUND and
+    // MUST NOT be trusted. Its Fiat-Shamir challenge is seeded from the REAL spend
+    // index, so a verifier can recover which coin was spent (anonymity break), and
+    // the serial tag is never proven bound to the spent coin, so a fresh tag can
+    // accompany each spend (no double-spend linkage). It is gated behind
+    // `sketch-lelantus-spark` and OFF by default; refuse unconditionally so
+    // enabling the feature cannot silently accept unsound spends. The real
+    // one-of-many proof (Groth-Kohlweiss / libspark) replaces this — see CIP-005
+    // and issue #221. The body below is preserved for that implementation.
+    return Err(Error::SparkVerifyFailed);
+
     let n = pubkeys.len();
     if n == 0 {
         return Err(Error::SparkVerifyFailed);
@@ -879,6 +890,7 @@ mod tests {
     // ─── Completeness ──────────────────────────────────────────────
 
     #[test]
+    #[ignore = "verify_spark_spend is fail-closed pending the real one-of-many proof (#221)"]
     fn completeness_n1_real_at_0() {
         let mut rng = OsRng;
         let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 500, 1, 0);
@@ -889,7 +901,26 @@ mod tests {
         verify_spark_spend(&proof, &pubkeys).expect("honest proof must verify (n=1)");
     }
 
+    /// #221 FAIL-CLOSED: even an honestly-built proof must be REJECTED — the AOS
+    /// sketch is unsound (spender revealed via the index-seeded challenge, serial
+    /// tag never bound), so the verifier refuses everything until the real
+    /// one-of-many proof replaces it. (Completeness tests are `#[ignore]`d for the
+    /// same reason; un-ignore them when the real verifier lands.)
     #[test]
+    fn verify_spark_spend_is_fail_closed_221() {
+        let mut rng = OsRng;
+        let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 500, 3, 1);
+        let indices: Vec<u64> = (0..3).collect();
+        let proof = prove_spark_spend(&note, &anon_set, &indices, 1, &[7u8; 32], &mut rng)
+            .expect("honest prover still runs");
+        assert!(
+            verify_spark_spend(&proof, &pubkeys).is_err(),
+            "verifier must fail closed until the real one-of-many proof lands (#221)"
+        );
+    }
+
+    #[test]
+    #[ignore = "verify_spark_spend is fail-closed pending the real one-of-many proof (#221)"]
     fn completeness_n2_real_at_every_position() {
         for real_idx in 0..2 {
             let mut rng = OsRng;
@@ -904,6 +935,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "verify_spark_spend is fail-closed pending the real one-of-many proof (#221)"]
     fn completeness_n3_real_at_every_position() {
         for real_idx in 0..3 {
             let mut rng = OsRng;
@@ -918,6 +950,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "verify_spark_spend is fail-closed pending the real one-of-many proof (#221)"]
     fn completeness_n5_real_at_every_position() {
         for real_idx in 0..5 {
             let mut rng = OsRng;
@@ -938,6 +971,7 @@ mod tests {
     /// containing even one tampered proof is rejected (never accept a proof the
     /// single verifier rejects).
     #[test]
+    #[ignore = "verify_spark_spend is fail-closed pending the real one-of-many proof (#221)"]
     fn batch_verify_sparks_agrees_with_single_and_rejects_one_tampered() {
         let mut rng = OsRng;
         let mut build = |value: u64, n: usize, real: usize| {

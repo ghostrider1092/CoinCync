@@ -1,4 +1,17 @@
-//! # Shielded Note Store
+//! # Shielded Note Store — LEGACY (one-pool consolidation)
+//!
+//! **DEPRECATED / legacy — superseded by `SparkPoolStore` (`storage::spark_pool`).**
+//! This is the Halo2/native-GK engine's note store. Its Halo2 ZK spend circuit
+//! was never implemented, and the shielded design has homogenized on the
+//! libspark-aligned `SparkPoolStore` (the store the audited libspark spend path
+//! needs) — see `docs/design/cip-shielded-one-pool-consolidation.md`. It is NOT
+//! deleted: the native-GK
+//! engine (`groth_kohlweiss.rs` + `shielded_pipeline.rs`) is retained, gated
+//! off, as a real independent second implementation to differential-verify the
+//! libspark proofs against — full removal is deferred until after the libspark
+//! external audit. New shielded work targets `SparkPoolStore`, not this store.
+//! (No `#[deprecated]` attribute — it is still used internally by the gated v1
+//! path; the attribute would only spam warnings across those call sites.)
 //!
 //! Persistent storage for the Halo2 shielded-pool note commitment tree
 //! and the nullifier set. Uses a real `bridgetree::BridgeTree` under
