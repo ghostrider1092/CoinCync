@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD036 -->
 # CIP-005 — Lelantus Spark
 
-**Status:** Sketch (pre-Draft)
+**Status:** Sketch (pre-Draft) — native proof is an UNSOUND placeholder (#221)
 **Type:** Standards Track (consensus change, hard fork)
 **Created:** 2026-05-07
 **Layer:** Consensus + Wallet
@@ -9,11 +9,45 @@
 
 ---
 
+> ## ⚠️ Soundness status (read first — issue #221)
+>
+> This document described a native Rust one-out-of-many proof in
+> `src/crypto/lelantus_spark.rs`. **That native implementation is an UNSOUND
+> hand-rolled SKETCH and is NOT a one-out-of-many proof.** It is an O(n) AOS
+> ring signature with two breaks (confirmed in #221):
+>
+> 1. **Spender revealed.** Its Fiat-Shamir challenge is seeded from the REAL
+>    spend index, and the verifier recovers the spent coin by scanning for the
+>    matching seed. It is not zero-knowledge.
+> 2. **Serial tag not bound.** The tag `T` is only hashed, never proven equal to
+>    the spent coin's key (the Chaum–Pedersen binding this CIP's prose describes
+>    does not exist), so a fresh tag can accompany every spend of the same coin —
+>    no double-spend linkage.
+>
+> It is therefore **fail-closed** (`verify_spark_spend` refuses every proof),
+> gated behind the OFF-by-default `sketch-lelantus-spark` feature, used **only**
+> by the gated experimental privacy-connector / Underground-manifold demos, and
+> is **NEVER on the shielded consensus path.**
+>
+> **The production shielded engine is the audited Firo libspark backend**
+> (`crate::consensus::spark_payload::SparkPayload`, feature `libspark-ffi`),
+> which supplies the real one-out-of-many proof with a bound serial tag. The
+> `O(log N)` / `~3 KB` / "does not learn which coin was spent" properties below
+> describe **that** engine (Firo Spark), **not** the native sketch. Every
+> performance and privacy claim in this CIP should be read as a *target for the
+> libspark path*, not a statement about `lelantus_spark.rs`.
+>
+> The native sketch is retained only as a clearly-marked non-consensus
+> placeholder; it must never be activated. See `src/crypto/lelantus_spark.rs`
+> and issue #221.
+
+---
+
 ## Abstract
 
 Activate Firo's Lelantus Spark protocol as an alternative private-spend mechanism alongside CLSAG-16 ring signatures. Spark uses a **one-out-of-many proof** over a vector commitment to the entire historical anonymity set — currently capped at 16,384 coins, roughly 1000× the anonymity set of a CLSAG-16 ring. Each spend produces a serial tag that lets verifiers detect double-spends without learning anything about which coin was spent.
 
-CoinCync's existing `src/crypto/lelantus_spark.rs` (906 LoC) implements the Schnorr-style one-out-of-many proof construction over the same Ristretto primitives used by CLSAG. This CIP defines the activation path: how Spark spends are encoded in transactions, how the chain maintains the Spark accumulator state, and how wallets mint and spend Spark notes.
+CoinCync's `src/crypto/lelantus_spark.rs` contains a **non-production SKETCH** of a Schnorr-style construction over the same Ristretto primitives used by CLSAG — but that sketch is unsound and fail-closed (see the soundness box above, #221). The production Spark engine is the audited Firo **libspark** backend (`consensus::spark_payload`, feature `libspark-ffi`). This CIP defines the activation path for that engine: how Spark spends are encoded in transactions, how the chain maintains the Spark accumulator state, and how wallets mint and spend Spark notes.
 
 ---
 
@@ -35,7 +69,7 @@ The existing 906-LoC implementation provides:
 
 - `SparkNote` — a minted coin with secret serial, blinding factor, value
 - `SparkAccumulator` — vector commitment over the entire mint history
-- `SparkSpendProof` — Schnorr-style one-out-of-many proof over a 16,384-coin window, plus a serial-tag double-spend detector
+- `SparkSpendProof` — the UNSOUND sketch proof (O(n) AOS, not a real one-out-of-many; reveals the spender and does not bind the tag — #221). Fail-closed; never consensus. The real proof + bound tag come from the libspark backend, not this type.
 - Mint, spend, and verification functions
 
 Activation is gated by a new `Chain.spark_state: Option<SparkAccumulator>` field (not yet defined) staying as `None` until this CIP reaches Active.
@@ -84,7 +118,7 @@ Verification:
 
 ### Anonymity-set window
 
-Spark's proof verifies in O(log N) where N is the anonymity-set size. At N = 16,384, the proof is ~3 KB and verification is ~50 ms on a modern CPU. The window is rolling: each spend specifies its own 16,384-coin slice of the accumulator, anchored at a recent block height.
+The real Firo Spark one-out-of-many proof (the libspark engine — NOT the native `lelantus_spark.rs` sketch, which is O(n) and unsound) verifies in O(log N) where N is the anonymity-set size. At N = 16,384, the proof is ~3 KB and verification is ~50 ms on a modern CPU. The window is rolling: each spend specifies its own 16,384-coin slice of the accumulator, anchored at a recent block height.
 
 This gives users explicit control over the anonymity set used for a given spend: a more recent window is faster to verify but smaller; an older window includes more historical coins but is slower for the verifier (one extra accumulator traversal step per ~10,000 mints in between).
 
@@ -92,7 +126,7 @@ This gives users explicit control over the anonymity set used for a given spend:
 
 ## Privacy Properties
 
-**Spend privacy.** Observers learn that a Spark spend occurred and see the 16,384-coin window referenced. They do not learn which coin within that window was spent.
+**Spend privacy.** With the libspark engine, observers learn that a Spark spend occurred and see the 16,384-coin window referenced, but not which coin within that window was spent. (The native `lelantus_spark.rs` sketch does NOT provide this — its proof reveals the spent index, #221 — which is one reason it is fail-closed and never used on the consensus path.)
 
 **Cross-spend linkability.** Two Spark spends from the same wallet are unlinkable as long as the spent coins were from independent mints. The serial tag `T` is per-coin, not per-wallet.
 
