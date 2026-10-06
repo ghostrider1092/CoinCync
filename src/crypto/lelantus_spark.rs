@@ -11,9 +11,19 @@
 //! break), and the serial tag is never proven bound to the spent coin
 //! (so a fresh tag can accompany every spend — no double-spend
 //! linkage). To stop anyone trusting it, [`verify_spark_spend`] is
-//! FAIL-CLOSED: it refuses every proof. The real one-out-of-many proof
-//! (Groth-Kohlweiss / libspark) must replace this before any
-//! activation. Do not read the protocol prose below as "implemented".
+//! FAIL-CLOSED: it refuses every proof. Do not read the protocol prose
+//! below as "implemented".
+//!
+//! NOT ON THE CONSENSUS PATH. The production shielded engine is the
+//! audited Firo libspark backend (`crate::consensus::spark_payload`,
+//! feature `libspark-ffi`) — that is what `check_shielded_tx` and
+//! `chain::verify_block_spark_v2` route to, and what the 24h in-block
+//! soak exercises. This native module is used ONLY by the gated,
+//! experimental privacy-connector / Underground-manifold demos
+//! (`crate::crypto::{privacy_connector, privacy_manifold}`), never by
+//! block/mempool validation. It is retained solely as a clearly-marked
+//! placeholder and MUST NEVER be activated; the real one-out-of-many
+//! proof with a bound serial tag is libspark's, not this file's (#221).
 //!
 //! Gated behind the `sketch-lelantus-spark` cargo feature, OFF by
 //! default. Default builds do NOT compile this module; the
