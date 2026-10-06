@@ -64,6 +64,7 @@ fn make_utxo(amount: u64, index: u8) -> UTXO {
         lock_height: None,
         subaddress_account: None,
         subaddress_index: None,
+        payment_id: None,
     }
 }
 
@@ -206,6 +207,7 @@ fn utxo_with_locator(amount: u64, tx_tag: u8, out_index: u8, height: u64, loc_he
         lock_height: None,
         subaddress_account: None,
         subaddress_index: None,
+        payment_id: None,
     }
 }
 
@@ -610,6 +612,7 @@ fn build_prepared_legacy_shape_adds_change_and_up_to_two_dummies() {
         view_public: keys.view_public,
         memo: None,
         extra: Vec::new(),
+        payment_id: None,
     };
     let tx = build_prepared_privacy_transaction(prepared, rings, &mut rng).expect("build");
 

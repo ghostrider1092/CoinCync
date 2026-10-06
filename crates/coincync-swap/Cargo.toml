@@ -4,15 +4,12 @@ version      = "0.0.1"
 edition      = "2021"
 rust-version = "1.75"
 authors      = ["CoinCync 1.0 Contributors"]
-description  = "CYNC↔BTC atomic swap (skeleton — see CIP-001 for protocol design)."
+description  = "Audit-gated CYNC↔BTC atomic swap implementation"
 license      = "MIT"
 publish      = false
 
-# Status: SKELETON. No working swap is shipped yet. This crate exists
-# to provide the module structure, type signatures, and CLI surface
-# that the eventual implementation will fill in. See CIP-001 in the
-# docs/ tree for the protocol spec, and the "Status" section of
-# src/lib.rs for current implementation state.
+# Status: implemented behind an explicit release sentinel pending dedicated
+# audit and live dual-daemon exercise. See CIP-001 and src/lib.rs.
 #
 # Mainnet launch blocker per project memory
 # `project_atomic_swap_mainnet_blocker.md`. Testnet ships without it.
@@ -26,13 +23,8 @@ name = "cyncswap"
 path = "src/bin/cyncswap.rs"
 
 [dependencies]
-# Crypto: real BIP-340 Schnorr adaptor primitives (slice landed
-# 2026-05-17). secp256k1 supplies the curve + scalar arithmetic;
-# sha2 supplies the BIP-340 tagged-hash challenge. The remaining
-# stubbed surfaces (BTC RPC, CYNC adaptor, cross-curve DL proof,
-# coordinator transport) still return NotImplemented and will
-# pull in `bitcoin`, `curve25519-dalek`, `tokio` etc. as each
-# lands.
+# Crypto: BIP-340 and CYNC adaptor primitives plus the strict cross-curve
+# binding used by the Bitcoin-first safety gate.
 secp256k1  = { version = "0.29", features = ["rand", "global-context"] }
 sha2       = "0.10"
 # HMAC-SHA256 over the state-file canonical body for integrity. Without it,
@@ -161,25 +153,13 @@ libc = "0.2"
 # discrete-log-equality proof (see `src/strict_dleq.rs` and CIP-001
 # §"Pre-audit hardening"). The construction proves cross-curve
 # same-secret binding cryptographically rather than relying on the
-# operational binding from the adaptor signatures themselves. It is
-# **off by default** because:
-#   - The dual-response Schoenmakers fast-floor proof (always available)
-#     is operationally sufficient: Alice's BTC claim reveals `t` to
-#     Bob, and Bob's CYNC spend secret = bob_secret + t either succeeds
-#     (correct t) or fails the swap (wrong t). No funds at risk either
-#     way.
-#   - Strict-DLEQ proofs are ~81 KB on the wire vs ~129 bytes for the
-#     fast-floor proof. Bandwidth budget is fine for a once-per-swap
-#     exchange but it's pointless cost unless the audit team requires it.
-#   - Verifier cost: ~252 EC scalar muls per curve for the bit-OR-proofs
-#     plus 2 multi-scalar muls for the linear-combination openings.
-#     Negligible CPU but non-zero.
-#
-# Flip on with `--features strict-dleq` when the audit team asks for
-# the stronger same-secret-cross-curve property. No deps added — the
-# module uses only crates already in `[dependencies]`.
+# operational binding from the adaptor signatures themselves. It is enabled
+# by default because `safety::verify_pre_cync_lock` requires strict binding for
+# both parties before Alice can lock CYNC. The proof is ~81 KB and costs about
+# 252 per-bit checks per curve, paid only during swap setup. No dependencies are
+# added; the module uses crates already in `[dependencies]`.
 [features]
-default = []
+default = ["strict-dleq"]
 strict-dleq = []
 
 [lints.rust]

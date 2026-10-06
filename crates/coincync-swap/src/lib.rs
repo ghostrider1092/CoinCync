@@ -45,21 +45,17 @@
 //! ## Module layout
 //!
 //! - [`protocol`] — state machine + role types + transition rules
-//! - [`adaptor`] — adaptor-signature primitives shared by both sides.
-//!                 **BTC-side primitives (BIP-340 Schnorr adaptors)
-//!                 are real as of the 2026-05-17 slice — see the
-//!                 module docs.** CYNC adaptor + cross-curve DL
-//!                 proof are still stubs.
-//! - [`btc`]      — Bitcoin-side: HTLC construction, broadcasting, watching (stub)
-//! - [`cync`]     — CoinCync-side: tx construction with adaptor binding (stub)
-//! - [`coordinator`] — peer-to-peer messaging skeleton between Alice / Bob (stub)
+//! - [`adaptor`] — adaptor-signature primitives shared by both sides
+//! - [`strict_dleq`] — mandatory same-secret cross-curve proof
+//! - [`safety`]   — BTC-first two-path contract and verification capabilities
+//! - [`btc`]      — Bitcoin RPC plus legacy diagnostic construction helpers
+//! - [`cync`]     — CoinCync RPC and joint-key derivation
+//! - [`coordinator`] — authenticated peer-to-peer negotiation transport
 //! - [`error`]    — typed errors for the swap state machine
 //!
-//! The remaining stubbed functions return `Error::NotImplemented` with
-//! a structured `stage` note. This keeps downstream type signatures
-//! stable while the rest of the cryptography is built. Once all
-//! `NotImplemented` returns have been replaced and the dual-testnet
-//! smoke passes, [`is_implemented`] flips to `true`.
+//! Wallet-entangled CYNC construction lives behind the root crate's
+//! `cyncswap` feature. The release sentinel remains false until the dedicated
+//! audit and live dual-daemon exercise are complete.
 
 #![forbid(unsafe_code)]
 
@@ -69,15 +65,13 @@ pub mod coordinator;
 pub mod cync;
 pub mod error;
 pub mod protocol;
+#[cfg(feature = "strict-dleq")]
+pub mod safety;
 pub mod state;
 
-/// Strict-binding cross-curve DLEQ (Noether 2018). **Opt-in** via the
-/// `strict-dleq` Cargo feature. The default fast-floor proof in
-/// [`adaptor`] is operationally sufficient for the atomic-swap
-/// protocol; the strict variant is here for audit-team-requested
-/// cryptographic-level same-secret binding. See `Cargo.toml`'s
-/// `[features]` section and `docs/cip/CIP-001-atomic-swap.md`
-/// §"Pre-audit hardening" for the rationale.
+/// Strict-binding cross-curve DLEQ (Noether 2018). Enabled by default because
+/// the pre-CYNC-lock safety gate must prove that each Bitcoin adaptor point
+/// and CYNC spend share encode the same scalar.
 #[cfg(feature = "strict-dleq")]
 pub mod strict_dleq;
 

@@ -366,37 +366,28 @@ pub struct CyncAdaptorSig {
 /// derived from all four points, so the prover can't independently
 /// produce two unrelated proofs and concatenate them.
 ///
-/// **What this does NOT yet prove:** that the two discrete logs are
+/// **What this does not prove by itself:** that the two discrete logs are
 /// the *same number*. A strict "same-secret-across-curves" binding
 /// requires either (a) range-bounded secrets + Bulletproofs range
 /// proofs (Comit / xmr-btc-swap approach) or (b) Noether's
 /// bit-decomposition tree of commitments (DLEQ Across Groups, 2018).
-/// Both are multi-week follow-up slices that build on top of the
-/// primitive shipped here.
+/// The production safety gate supplies that property with the shipped
+/// Noether bit-decomposition proof in [`crate::strict_dleq`].
 ///
-/// **Why this is still useful in the swap context:** the strict
-/// same-secret binding is enforced *operationally* by the adaptor
-/// signatures themselves â€” if Alice tries to claim BTC with a secret
-/// that doesn't match the CYNC adaptor point, the
-/// [`cync_decrypt_adaptor`] result will not produce a valid CLSAG
-/// when Bob tries to use it. The DLEQ proof here is the
-/// **pre-commitment sanity check** that catches obvious mismatches
-/// before either party broadcasts. The cryptographic backstop is
-/// the adaptors themselves.
+/// **Why this remains useful:** it is the strict proof's inexpensive fast
+/// floor, rejecting obvious mismatches before the bit-level verification.
+/// It is not sufficient on its own to authorize a CYNC lock.
 ///
-/// The wire shape will not change when the strict variant lands:
-/// it adds extra fields (range commitments, bit-tree nodes), it
-/// does not modify the four fields here.
+/// The strict proof embeds this unchanged wire shape and adds bit commitments
+/// plus linear-combination openings.
 ///
 /// **Strict-binding variant design spec.** See
 /// `docs/cip/CIP-001-atomic-swap.md` §"Pre-audit hardening:
 /// strict-binding cross-curve DLEQ (Noether 2018)" for the full
 /// construction, wire format (`CrossCurveDlProofStrict`),
 /// Cargo-feature plan (`strict-dleq`), and proof-size budget
-/// (~81 KB per proof). The strict variant is deferred until the
-/// audit team's preference is known; this fast variant is
-/// operationally sufficient (the adaptors enforce same-secret
-/// binding via the spend path).
+/// (~81 KB per proof). The strict variant is enabled by default and mandatory
+/// in [`crate::safety::verify_pre_cync_lock`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CrossCurveDlProof {
     /// Commitment on the secp256k1 side: `A_btc = kÂ·G_btc`. 33-byte
@@ -430,6 +421,36 @@ impl CrossCurveDlProof {
         out[65..97].copy_from_slice(&self.s_btc);
         out[97..129].copy_from_slice(&self.s_cync);
         out
+    }
+
+    /// Decode the fixed canonical wire form produced by
+    /// [`canonical_bytes`](Self::canonical_bytes).
+    ///
+    /// This performs the structural length check only. Curve-point and scalar
+    /// canonicality are deliberately checked by [`verify_cross_curve_proof`]
+    /// so every decoded proof follows the same verification path.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != Self::CANONICAL_LEN {
+            return Err(Error::Verification(
+                "cross-curve proof has wrong canonical length",
+            ));
+        }
+
+        let mut a_btc = [0u8; 33];
+        let mut a_cync = [0u8; 32];
+        let mut s_btc = [0u8; 32];
+        let mut s_cync = [0u8; 32];
+        a_btc.copy_from_slice(&bytes[..33]);
+        a_cync.copy_from_slice(&bytes[33..65]);
+        s_btc.copy_from_slice(&bytes[65..97]);
+        s_cync.copy_from_slice(&bytes[97..129]);
+
+        Ok(Self {
+            a_btc,
+            a_cync,
+            s_btc,
+            s_cync,
+        })
     }
 }
 

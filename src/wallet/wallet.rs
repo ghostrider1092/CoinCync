@@ -1767,6 +1767,7 @@ mod tests {
             lock_height: None,
             subaddress_account: None,
             subaddress_index: None,
+            payment_id: None,
         });
         wallet.history.add(TransactionRecord::incoming(
             Hash::from_bytes([5u8; 32]),
@@ -2123,6 +2124,7 @@ mod tests {
             lock_height: None,
             subaddress_account: None,
             subaddress_index: None,
+            payment_id: None,
         });
         assert_eq!(wo.total_balance().as_atomic(), 5_000_000);
 
@@ -2232,6 +2234,7 @@ mod tests {
             lock_height: None,
             subaddress_account: None,
             subaddress_index: None,
+            payment_id: None,
         });
         assert_eq!(w.total_balance().as_atomic(), 6_000_000);
 
@@ -2264,6 +2267,7 @@ mod tests {
             lock_height: None,
             subaddress_account: None,
             subaddress_index: None,
+            payment_id: None,
         });
         w.record_incoming(Hash::from_bytes([3u8; 32]), Amount::from_atomic(4_200_000), 7, 0, 1, None);
         w.set_scanned_height(77);

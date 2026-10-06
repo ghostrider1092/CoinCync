@@ -113,6 +113,11 @@ pub struct UTXO {
     pub subaddress_account: Option<u32>,
     #[serde(default)]
     pub subaddress_index: Option<u32>,
+    /// Decrypted 8-byte payment ID (integrated addresses), if this output
+    /// carried one. Observability only — lets the wallet / an exchange associate
+    /// the deposit. `#[serde(default)]` so pre-fix sidecars still load as `None`.
+    #[serde(default)]
+    pub payment_id: Option<[u8; 8]>,
 }
 
 impl std::fmt::Debug for UTXO {
@@ -516,6 +521,7 @@ mod tests {
             lock_height: None,
             subaddress_account: None,
             subaddress_index: None,
+            payment_id: None,
         }
     }
 
@@ -598,6 +604,7 @@ mod tests {
             lock_height: None,
             subaddress_account: None,
             subaddress_index: None,
+            payment_id: None,
         }
     }
 

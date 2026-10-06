@@ -396,21 +396,21 @@ impl CyncChain for MockCyncChain {
 //
 // The CYNC half of the swap reuses the existing wallet's transaction
 // builder — there is no swap-specific transaction encoding. What the
-// swap protocol DOES need is two key-derivation helpers that bind
-// the CYNC recipient/spender keys to the cross-curve adaptor secret:
+// swap protocol DOES need is joint-key derivation for the two CYNC
+// key shares exchanged during negotiation:
 //
-//   [`derive_swap_recipient_spend_pub`] — given the counterparty's
-//     spend pubkey `P` and the adaptor point `T = t·G_cync`,
-//     produces `P + T`. The CYNC sender hands this to their
+//   [`combine_spend_public_shares`] — given Alice's and Bob's
+//     public shares `S_a` and `S_b`, produces `S_a + S_b`. The
+//     CYNC sender hands this to their
 //     existing wallet's [`coincync::transaction::TransactionBuilder`]
 //     as the recipient's spend public key. The lock output ends up
 //     at a stealth address whose underlying spending key is
-//     `s_recipient + t`.
+//     `s_a + s_b`.
 //
-//   [`derive_swap_spender_secret`] — given the counterparty's spend
-//     secret `s` and the adaptor secret `t`, produces `s + t`. The
-//     CYNC recipient — who learns `t` from the BTC-side adaptor
-//     reveal — feeds this to the wallet's normal one-time-secret
+//   [`combine_spend_secret_shares`] — given the local spend share
+//     and the counterparty share revealed by a BTC-side adaptor,
+//     produces `s_a + s_b`. The recipient feeds this to the
+//     wallet's normal one-time-secret
 //     derivation. The resulting one-time secret correctly signs a
 //     spend of the lock output via the existing CLSAG path.
 //
@@ -419,26 +419,77 @@ impl CyncChain for MockCyncChain {
 //
 //     stealth.public_key = H(ECDH(view, tx_pub) || idx) · G + spend_pub
 //
-// Replacing `spend_pub` with `P + T` is a clean substitution — no
+// Replacing `spend_pub` with `S_a + S_b` is a clean substitution — no
 // CYNC consensus change required, and the scan/spend machinery
 // continues to work as long as the recipient's wallet uses the
 // modified spend secret.
 //
 // What is deliberately NOT done in this slice:
-// - **CLSAG ring-binding for the adaptor.** A more advanced
-//   construction would fold the adaptor into the CLSAG c-value
-//   directly so that the *act of spending* (rather than the
-//   *recipient detection*) reveals `t`. That requires modifying
-//   the ring-signature challenge derivation in
-//   `coincync::crypto::clsag` and is a separate consensus-touching
-//   slice. The shipped derivation is sufficient for the basic
-//   atomic-swap protocol — `t` is revealed via the BTC-side
-//   signature (which we already ship) and the recipient uses it
-//   to derive the CYNC spend secret.
+// - **CLSAG adaptor signatures.** The CYNC side uses an ordinary
+//   joint-key CLSAG spend. Both share-reveal paths live on Bitcoin.
 
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar as Ristretto255Scalar;
+use curve25519_dalek::traits::Identity;
+
+fn decode_public_share(
+    bytes: &[u8; 32],
+    name: &'static str,
+) -> Result<curve25519_dalek::ristretto::RistrettoPoint> {
+    let point = CompressedRistretto::from_slice(bytes)
+        .map_err(|_| Error::Verification(name))?
+        .decompress()
+        .ok_or(Error::Verification(name))?;
+    if point == curve25519_dalek::ristretto::RistrettoPoint::identity() {
+        return Err(Error::Verification("CYNC key share must not be identity"));
+    }
+    Ok(point)
+}
+
+fn decode_secret_share(bytes: &[u8; 32], name: &'static str) -> Result<Ristretto255Scalar> {
+    let scalar =
+        Option::<Ristretto255Scalar>::from(Ristretto255Scalar::from_canonical_bytes(*bytes))
+            .ok_or(Error::Verification(name))?;
+    if scalar == Ristretto255Scalar::ZERO {
+        return Err(Error::Verification("CYNC secret share must not be zero"));
+    }
+    Ok(scalar)
+}
+
+/// Combine Alice's and Bob's CYNC public spend shares into the joint
+/// spend key used by the lock output.
+pub fn combine_spend_public_shares(
+    alice_share: &[u8; 32],
+    bob_share: &[u8; 32],
+) -> Result<[u8; 32]> {
+    let alice = decode_public_share(alice_share, "alice spend share decode")?;
+    let bob = decode_public_share(bob_share, "bob spend share decode")?;
+    let joint = alice + bob;
+    if joint == curve25519_dalek::ristretto::RistrettoPoint::identity() {
+        return Err(Error::Verification(
+            "joint CYNC spend key must not be identity",
+        ));
+    }
+    Ok(joint.compress().to_bytes())
+}
+
+/// Combine a locally held CYNC spend share with the counterparty share
+/// recovered from the corresponding Bitcoin adaptor signature.
+pub fn combine_spend_secret_shares(
+    local_share: &[u8; 32],
+    revealed_share: &[u8; 32],
+) -> Result<[u8; 32]> {
+    let local = decode_secret_share(local_share, "local spend share out of range")?;
+    let revealed = decode_secret_share(revealed_share, "revealed spend share out of range")?;
+    let joint = local + revealed;
+    if joint == Ristretto255Scalar::ZERO {
+        return Err(Error::Verification(
+            "joint CYNC spend secret must not be zero",
+        ));
+    }
+    Ok(joint.to_bytes())
+}
 
 /// CYNC swap recipient spend pubkey: `P + T` where `P` is the
 /// counterparty's wallet spend pubkey and `T = t·G_cync` is the
@@ -460,15 +511,7 @@ pub fn derive_swap_recipient_spend_pub(
     counterparty_spend_pub: &[u8; 32],
     adaptor_point: &[u8; 32],
 ) -> Result<[u8; 32]> {
-    let p = CompressedRistretto::from_slice(counterparty_spend_pub)
-        .map_err(|_| Error::Verification("counterparty_spend_pub length"))?
-        .decompress()
-        .ok_or(Error::Verification("counterparty_spend_pub decode"))?;
-    let t = CompressedRistretto::from_slice(adaptor_point)
-        .map_err(|_| Error::Verification("adaptor_point length"))?
-        .decompress()
-        .ok_or(Error::Verification("adaptor_point decode"))?;
-    Ok((p + t).compress().to_bytes())
+    combine_spend_public_shares(counterparty_spend_pub, adaptor_point)
 }
 
 /// CYNC swap effective spend secret: `s + t` where `s` is the
@@ -487,32 +530,18 @@ pub fn derive_swap_spender_secret(
     counterparty_spend_secret: &[u8; 32],
     adaptor_secret: &[u8; 32],
 ) -> Result<[u8; 32]> {
-    let s = Option::<Ristretto255Scalar>::from(Ristretto255Scalar::from_canonical_bytes(
-        *counterparty_spend_secret,
-    ))
-    .ok_or(Error::Verification(
-        "counterparty_spend_secret out of range",
-    ))?;
-    let t = Option::<Ristretto255Scalar>::from(Ristretto255Scalar::from_canonical_bytes(
-        *adaptor_secret,
-    ))
-    .ok_or(Error::Verification("adaptor_secret out of range"))?;
-    Ok((s + t).to_bytes())
+    combine_spend_secret_shares(counterparty_spend_secret, adaptor_secret)
 }
 
-/// CYNC swap adaptor point: `T = t·G_cync`. Convenience wrapper so
-/// callers building a [`derive_swap_recipient_spend_pub`] request
-/// don't need to depend on `curve25519_dalek` directly.
-///
-/// Mirrors [`crate::adaptor::cync_adaptor_point`] (same math); kept
-/// in this module so the swap key-derivation surface is
-/// self-contained for callers who only care about the chain side.
+/// Derive the public point for one canonical, non-zero CYNC key share.
+pub fn public_share_from_secret(secret_share: &[u8; 32]) -> Result<[u8; 32]> {
+    let share = decode_secret_share(secret_share, "secret share out of range")?;
+    Ok((&share * RISTRETTO_BASEPOINT_TABLE).compress().to_bytes())
+}
+
+/// Backwards-compatible name for deriving a CYNC public share.
 pub fn cync_adaptor_point_from_secret(adaptor_secret: &[u8; 32]) -> Result<[u8; 32]> {
-    let t = Option::<Ristretto255Scalar>::from(Ristretto255Scalar::from_canonical_bytes(
-        *adaptor_secret,
-    ))
-    .ok_or(Error::Verification("adaptor_secret out of range"))?;
-    Ok((&t * RISTRETTO_BASEPOINT_TABLE).compress().to_bytes())
+    public_share_from_secret(adaptor_secret)
 }
 
 // ── Public wrappers (preserve the pre-existing function signatures) ──
@@ -525,8 +554,7 @@ pub fn cync_adaptor_point_from_secret(adaptor_secret: &[u8; 32]) -> Result<[u8; 
 /// cannot depend on the main `coincync` crate without dragging in
 /// the entire consensus/storage/networking compile graph just to
 /// use `TransactionBuilder`. By returning a typed bundle of bytes
-/// the wallet drops into its existing `Recipient { spend_public,
-/// view_public, amount, lock_height }` shape, the dep cycle stays
+/// the wallet drops into its existing `Recipient` shape, the dep cycle stays
 /// clean (wallet → swap, never swap → wallet's lib).
 ///
 /// The wallet side does:
@@ -536,32 +564,25 @@ pub fn cync_adaptor_point_from_secret(adaptor_secret: &[u8; 32]) -> Result<[u8; 
 ///     spend_public: PublicKey::from_bytes(&params.spend_public_bytes)?,
 ///     view_public:  PublicKey::from_bytes(&params.view_public_bytes)?,
 ///     amount:       Amount::from(params.amount_atomic),
-///     lock_height:  params.lock_height,
+///     lock_height:  None,
 /// };
 /// // ...then add_output + add_input + build as normal.
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SwapLockRecipient {
     /// 32-byte Ristretto spend pubkey for the lock output. Already
-    /// includes the adaptor tweak: `P_lock = bob_spend_pub + T_cync`.
+    /// is the joint key `S_a + S_b`.
     /// The wallet drops this straight into `Recipient.spend_public`.
     pub spend_public_bytes: [u8; 32],
 
-    /// 32-byte Ristretto view pubkey for the lock output. **Not**
-    /// tweaked — the swap protocol does not modify the view key.
-    /// Bob's view key passes through unchanged.
+    /// 32-byte Ristretto shared view pubkey for the lock output.
+    /// Both parties must hold the corresponding shared view secret
+    /// before either side broadcasts an on-chain lock.
     pub view_public_bytes: [u8; 32],
 
     /// Lock amount in CYNC atomic units. Pass-through from the
     /// swap-parameters layer; the wallet wraps in its `Amount` type.
     pub amount_atomic: u64,
-
-    /// Optional lock_height for the output (the on-chain CSV-style
-    /// timeout). `Some(h)` means "cannot be spent before block h";
-    /// `None` lets the wallet decide. The swap state machine uses
-    /// the `SwapParameters::cync_timeout_blocks` value computed at
-    /// negotiation time.
-    pub lock_height: Option<u64>,
 }
 
 /// Compute the wallet-ready recipient bundle for the CYNC lock
@@ -589,22 +610,20 @@ pub struct SwapLockRecipient {
 ///   here because the wallet does the full check at `Recipient`
 ///   construction).
 pub fn compute_swap_lock_recipient(
-    counterparty_spend_pub: &[u8; 32],
-    counterparty_view_pub: &[u8; 32],
-    adaptor_point: &[u8; 32],
+    alice_spend_share: &[u8; 32],
+    bob_spend_share: &[u8; 32],
+    shared_view_pub: &[u8; 32],
     amount_atomic: u64,
-    lock_height: Option<u64>,
 ) -> Result<SwapLockRecipient> {
     if amount_atomic == 0 {
         return Err(Error::Verification("swap lock amount must be > 0"));
     }
-    let spend_public_bytes =
-        derive_swap_recipient_spend_pub(counterparty_spend_pub, adaptor_point)?;
+    let spend_public_bytes = combine_spend_public_shares(alice_spend_share, bob_spend_share)?;
+    decode_public_share(shared_view_pub, "shared view key decode")?;
     Ok(SwapLockRecipient {
         spend_public_bytes,
-        view_public_bytes: *counterparty_view_pub,
+        view_public_bytes: *shared_view_pub,
         amount_atomic,
-        lock_height,
     })
 }
 
@@ -623,9 +642,9 @@ pub fn compute_swap_lock_recipient(
 /// 2. Caller hands the bundle to the wallet's existing
 ///    `TransactionBuilder` along with its wallet-specific signing
 ///    material and broadcasts the resulting tx normally.
-/// 3. After the swap reveals the adaptor secret `t`, the receiver
-///    derives their effective spend secret via
-///    [`derive_swap_spender_secret`] and uses the wallet's
+/// 3. After a Bitcoin claim or refund reveals the counterparty's
+///    key share, the receiver combines both shares via
+///    [`combine_spend_secret_shares`] and uses the wallet's
 ///    standard one-time-secret derivation to construct the spend tx.
 ///
 /// Returns `NotImplemented` with a `stage` of `cync.build_lock_tx`
@@ -1384,36 +1403,23 @@ mod tests {
     // ── Wallet-bridge tests: compute_swap_lock_recipient ────────────
 
     #[test]
-    fn compute_swap_lock_recipient_bundles_all_four_fields() {
-        let (bob_spend_pub, _) = test_ristretto_keypair(100);
-        let bob_spend_pub_pt = Ristretto255Scalar::from_canonical_bytes(bob_spend_pub).unwrap();
-        let bob_spend_pub_bytes = (&bob_spend_pub_pt * RISTRETTO_BASEPOINT_TABLE)
-            .compress()
-            .to_bytes();
-        let (t_secret, _) = test_ristretto_keypair(200);
-        let adaptor_point = cync_adaptor_point_from_secret(&t_secret).unwrap();
-        let bob_view_pub = [0xAB; 32]; // view pub isn't curve-validated here
+    fn compute_swap_lock_recipient_bundles_joint_address() {
+        let (_, alice_spend_share) = test_ristretto_keypair(100);
+        let (_, bob_spend_share) = test_ristretto_keypair(200);
+        let (_, shared_view_pub) = test_ristretto_keypair(300);
 
         let bundle = compute_swap_lock_recipient(
-            &bob_spend_pub_bytes,
-            &bob_view_pub,
-            &adaptor_point,
+            &alice_spend_share,
+            &bob_spend_share,
+            &shared_view_pub,
             12_345,
-            Some(987_654),
         )
         .unwrap();
 
-        // spend_public must match derive_swap_recipient_spend_pub(bob, T).
-        let expected =
-            derive_swap_recipient_spend_pub(&bob_spend_pub_bytes, &adaptor_point).unwrap();
+        let expected = combine_spend_public_shares(&alice_spend_share, &bob_spend_share).unwrap();
         assert_eq!(bundle.spend_public_bytes, expected);
-
-        // view_public passes through unchanged.
-        assert_eq!(bundle.view_public_bytes, bob_view_pub);
-
-        // amount + lock_height passed through.
+        assert_eq!(bundle.view_public_bytes, shared_view_pub);
         assert_eq!(bundle.amount_atomic, 12_345);
-        assert_eq!(bundle.lock_height, Some(987_654));
     }
 
     #[test]
@@ -1421,9 +1427,10 @@ mod tests {
         // Zero-amount lock would dust-out at the wallet layer anyway,
         // but rejecting at the swap boundary gives a clearer error +
         // prevents an accidental "swap zero CYNC for some BTC" config.
-        let zero_pub = [0u8; 32];
-        let view_pub = [0u8; 32];
-        let r = compute_swap_lock_recipient(&zero_pub, &view_pub, &zero_pub, 0, None);
+        let (_, alice) = test_ristretto_keypair(310);
+        let (_, bob) = test_ristretto_keypair(311);
+        let (_, view) = test_ristretto_keypair(312);
+        let r = compute_swap_lock_recipient(&alice, &bob, &view, 0);
         assert!(matches!(r, Err(Error::Verification(_))));
     }
 
@@ -1432,23 +1439,30 @@ mod tests {
         // 0xFF...FF is non-canonical on Ristretto — exercises the
         // decode failure path in derive_swap_recipient_spend_pub.
         let bad_pub = [0xFFu8; 32];
-        let view_pub = [0u8; 32];
-        let adaptor = [0u8; 32]; // identity, fine
-        let r = compute_swap_lock_recipient(&bad_pub, &view_pub, &adaptor, 1, None);
+        let (_, bob) = test_ristretto_keypair(320);
+        let (_, view) = test_ristretto_keypair(321);
+        let r = compute_swap_lock_recipient(&bad_pub, &bob, &view, 1);
         assert!(matches!(r, Err(Error::Verification(_))));
     }
 
     #[test]
-    fn compute_swap_lock_recipient_lock_height_none_passes_through() {
-        let (s_pub, _) = test_ristretto_keypair(300);
-        let spend_pt = (&Ristretto255Scalar::from_canonical_bytes(s_pub).unwrap()
-            * RISTRETTO_BASEPOINT_TABLE)
-            .compress()
-            .to_bytes();
-        let (t, _) = test_ristretto_keypair(400);
-        let t_point = cync_adaptor_point_from_secret(&t).unwrap();
+    fn compute_swap_lock_recipient_rejects_invalid_shared_view_key() {
+        let (_, alice) = test_ristretto_keypair(330);
+        let (_, bob) = test_ristretto_keypair(331);
+        let invalid_view = [0u8; 32];
+        let result = compute_swap_lock_recipient(&alice, &bob, &invalid_view, 1);
+        assert!(matches!(result, Err(Error::Verification(_))));
+    }
 
-        let bundle = compute_swap_lock_recipient(&spend_pt, &[0u8; 32], &t_point, 1, None).unwrap();
-        assert_eq!(bundle.lock_height, None);
+    #[test]
+    fn joint_key_derivation_rejects_cancelling_shares() {
+        let (alice_secret, alice_public) = test_ristretto_keypair(340);
+        let alice = Ristretto255Scalar::from_canonical_bytes(alice_secret).unwrap();
+        let bob = -alice;
+        let bob_secret = bob.to_bytes();
+        let bob_public = (&bob * RISTRETTO_BASEPOINT_TABLE).compress().to_bytes();
+
+        assert!(combine_spend_public_shares(&alice_public, &bob_public).is_err());
+        assert!(combine_spend_secret_shares(&alice_secret, &bob_secret).is_err());
     }
 }

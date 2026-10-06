@@ -83,16 +83,99 @@ fn create_real_decoys(count: usize) -> Vec<DecoyOutput> {
         .collect()
 }
 
+/// Build a `SpendableInput` whose one-time secret is derived through the
+/// SUBADDRESS spend path — the W-1/W-B scenario. A real subaddress output
+/// is produced by the sender (`R = r*D_1`), then the recipient reconstructs
+/// the one-time secret with the per-subaddress offset
+/// (`compute_subaddress_spend_secret` + `compute_one_time_secret`). The
+/// real ring member the builder places is `one_time_secret.public_key()`,
+/// which MUST equal the output's stealth address `P` — otherwise the CLSAG
+/// spend fails and the funds are unspendable. Asserted here, then exercised
+/// end-to-end through the builder + mempool validator by the test below.
+fn create_subaddress_input(amount: u64) -> SpendableInput {
+    use coincync::crypto::{
+        compute_one_time_secret, generate_stealth_address_checked_ext, PublicPoint, SecretScalar,
+        StealthAddress,
+    };
+    use coincync::wallet::subaddress::{
+        compute_subaddress_spend_secret, SubaddressIndex, SubaddressManager,
+    };
+
+    let mut rng = OsRng;
+    let view_secret = SecretKey::generate(&mut rng);
+    let spend_secret = SecretKey::generate(&mut rng);
+    let view_public = view_secret.public_key();
+    let spend_public = spend_secret.public_key();
+
+    // Subaddress (0,1): D_1 (spend key), C_1 = a*D_1 (published view key).
+    let mut mgr = SubaddressManager::new(
+        SecretKey::from_bytes(*view_secret.as_bytes()),
+        PublicKey::from_bytes(*spend_public.as_bytes()),
+        PublicKey::from_bytes(*view_public.as_bytes()),
+    );
+    let d1 = mgr
+        .generate_at(SubaddressIndex::new(0, 1))
+        .expect("subaddress derivation")
+        .spend_public;
+    let d1_point = PublicPoint::from_bytes(*d1.as_bytes()).expect("D_1 is a curve point");
+    let view_scalar = SecretScalar::from_bytes(*view_secret.as_bytes());
+    let c1 = PublicKey::from_bytes(d1_point.mul(&view_scalar).to_bytes());
+
+    // Sender builds the production subaddress output at index 0 (R = r*D_1).
+    let (stealth, _tx_secret) =
+        generate_stealth_address_checked_ext(&d1, &c1, 0, true, &mut rng).expect("stealth output");
+
+    // Recipient reconstructs the one-time secret WITH the per-subaddress offset.
+    let recipient_stealth = StealthAddress {
+        public_key: stealth.public_key,
+        tx_public_key: stealth.tx_public_key,
+    };
+    let effective_spend =
+        compute_subaddress_spend_secret(&spend_secret, &view_secret, SubaddressIndex::new(0, 1));
+    let one_time_secret =
+        compute_one_time_secret(&recipient_stealth, &view_secret, &effective_spend, 0)
+            .expect("one-time secret");
+
+    // Spendability condition: the derived secret must control the output.
+    assert_eq!(
+        one_time_secret.public_key().as_bytes(),
+        stealth.public_key.as_bytes(),
+        "W-1/W-B: subaddress one-time secret must satisfy x*G == P"
+    );
+
+    SpendableInput {
+        tx_hash: Hash::from_bytes([0x5a; 32]),
+        output_index: 0,
+        amount: Amount::from_atomic(amount),
+        one_time_secret: SecretKey::from_bytes(*one_time_secret.as_bytes()),
+        blinding: BlindingFactor::random(&mut rng),
+        height: 1000,
+    }
+}
+
 /// Build a fully valid transaction with real CLSAG, real range proofs,
 /// real balance equation. This is what a wallet produces.
 fn build_valid_transaction(input_amount: u64, output_amount: u64, fee: u64) -> Transaction {
-    assert_eq!(input_amount, output_amount + fee, "amounts must balance");
+    build_valid_transaction_from(
+        create_real_input(input_amount, rand::random::<u8>()),
+        output_amount,
+        fee,
+    )
+}
+
+/// Same as [`build_valid_transaction`] but spends a caller-supplied input,
+/// so a subaddress-sourced input can be driven through the full pipeline.
+fn build_valid_transaction_from(input: SpendableInput, output_amount: u64, fee: u64) -> Transaction {
+    assert_eq!(
+        input.amount.as_atomic(),
+        output_amount + fee,
+        "amounts must balance"
+    );
     let mut rng = OsRng;
 
     let (_, recipient_spend) = generate_keypair();
     let (_, recipient_view) = generate_keypair();
 
-    let input = create_real_input(input_amount, rand::random::<u8>());
     let ring_size = BOOTSTRAP_MIN_RING_SIZE;
     let decoys = create_real_decoys(ring_size - 1);
     let real_index = rand::random::<usize>() % ring_size;
@@ -155,6 +238,162 @@ fn real_crypto_valid_tx_accepted_by_mempool() {
         result.unwrap(),
         tx_hash,
         "Returned hash must match transaction hash"
+    );
+}
+
+// =============================================================================
+// TEST 1b: Subaddress-received output is spendable end-to-end (W-1/W-B)
+//
+// A subaddress output (R = r*D_i) whose one-time secret is reconstructed
+// with the per-subaddress offset must produce a transaction that passes
+// the FULL mempool validator — real CLSAG, real key image, real balance.
+// Before the W-A offset fix the wallet derived the key from the main spend
+// secret, so the ring member / key image didn't match and the funds were
+// unspendable. This drives the fixed path through the real pipeline.
+// =============================================================================
+
+#[test]
+fn real_crypto_subaddress_output_spendable_e2e() {
+    let mut pool = Mempool::new();
+    let fee = 50_000_000u64;
+    let output = 1_950_000_000u64;
+    let input = create_subaddress_input(output + fee);
+    let tx = build_valid_transaction_from(input, output, fee);
+    let tx_hash = tx.hash();
+
+    let result = pool.add(tx);
+    assert!(
+        result.is_ok(),
+        "A transaction spending a SUBADDRESS-received output MUST be accepted by \
+         the full mempool validator (W-1/W-B). Got error: {:?}",
+        result.err()
+    );
+    assert_eq!(result.unwrap(), tx_hash, "Returned hash must match tx hash");
+}
+
+// =============================================================================
+// TEST 1c: Integrated-address payment ID travels encrypted + is recoverable
+//
+// A payment ID attached via `with_payment_id` must be (a) present in tx.extra,
+// (b) NOT in cleartext (privacy), and (c) recoverable by the recipient using
+// their view secret + the output's tx public key — the same ECDH channel as
+// memos. This is the functional core of integrated addresses.
+// =============================================================================
+
+#[test]
+fn real_crypto_payment_id_encrypted_and_recoverable() {
+    use coincync::crypto::decrypt_memo;
+    use coincync::transaction::payment_id::find_encrypted;
+    use coincync::transaction::Recipient;
+
+    let mut rng = OsRng;
+    // Recipient whose view SECRET we keep so we can recover the payment id.
+    let (recipient_view_secret, recipient_view) = generate_keypair();
+    let (_, recipient_spend) = generate_keypair();
+
+    let fee = 50_000_000u64;
+    let output = 1_950_000_000u64;
+    let input = output + fee;
+    let pid = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+
+    let mut builder = TransactionBuilder::transfer()
+        .with_target_height(0)
+        .with_payment_id(pid);
+    builder
+        .add_input(
+            create_real_input(input, rand::random::<u8>()),
+            create_real_decoys(BOOTSTRAP_MIN_RING_SIZE - 1),
+            rand::random::<usize>() % BOOTSTRAP_MIN_RING_SIZE,
+        )
+        .expect("add_input");
+    builder
+        .add_output(
+            &Recipient {
+                spend_public: recipient_spend,
+                view_public: recipient_view,
+                amount: Amount::from_atomic(output),
+                lock_height: None,
+            },
+            0,
+            &mut rng,
+        )
+        .expect("add_output");
+    builder.set_fee(Amount::from_atomic(fee));
+    let tx = builder.build(&mut rng).expect("build");
+
+    // (a) present in extra
+    let enc = find_encrypted(&tx.extra).expect("payment id must be embedded in tx.extra");
+    // (b) not cleartext — the raw 8-byte pid must not appear in extra
+    assert!(
+        !tx.extra.windows(pid.len()).any(|w| w == pid),
+        "payment id must NOT be stored in cleartext"
+    );
+    // (c) recoverable by the recipient (try each output's tx pubkey)
+    let recovered = tx
+        .outputs
+        .iter()
+        .find_map(|o| {
+            decrypt_memo(&enc, recipient_view_secret.as_bytes(), o.tx_public_key.as_bytes())
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
+        .expect("recipient must recover the payment id");
+    assert_eq!(recovered.as_slice(), &pid, "recovered payment id must match");
+}
+
+// =============================================================================
+// TEST 1d: Scanner auto-recovers the payment ID on receive
+// =============================================================================
+
+#[test]
+fn real_crypto_payment_id_recovered_by_scanner() {
+    use coincync::transaction::Recipient;
+    use coincync::wallet::WalletScanner;
+
+    let mut rng = OsRng;
+    let (recipient_view_secret, recipient_view) = generate_keypair();
+    let (_recipient_spend_secret, recipient_spend) = generate_keypair();
+
+    let fee = 50_000_000u64;
+    let output = 1_950_000_000u64;
+    let input = output + fee;
+    let pid = [0x09u8, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02];
+
+    let mut builder = TransactionBuilder::transfer()
+        .with_target_height(0)
+        .with_payment_id(pid);
+    builder
+        .add_input(
+            create_real_input(input, rand::random::<u8>()),
+            create_real_decoys(BOOTSTRAP_MIN_RING_SIZE - 1),
+            rand::random::<usize>() % BOOTSTRAP_MIN_RING_SIZE,
+        )
+        .expect("add_input");
+    builder
+        .add_output(
+            &Recipient {
+                spend_public: recipient_spend,
+                view_public: recipient_view,
+                amount: Amount::from_atomic(output),
+                lock_height: None,
+            },
+            0,
+            &mut rng,
+        )
+        .expect("add_output");
+    builder.set_fee(Amount::from_atomic(fee));
+    let tx = builder.build(&mut rng).expect("build");
+
+    // The recipient's wallet scanner must detect the output AND auto-recover
+    // the payment id from tx.extra.
+    let mut scanner = WalletScanner::new();
+    scanner.add_keys(recipient_view_secret, recipient_spend, 0);
+    let found = scanner.scan_transaction(&tx);
+
+    assert!(!found.is_empty(), "scanner must detect the recipient output");
+    assert!(
+        found.iter().any(|d| d.payment_id == Some(pid)),
+        "scanner must auto-recover the payment id on receive"
     );
 }
 

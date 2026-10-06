@@ -35,6 +35,7 @@ fn run_send_command_v2(cli: Cli) {
 
     let Command::Send {
         password,
+        address,
         to_spend,
         to_view,
         amount,
@@ -44,6 +45,7 @@ fn run_send_command_v2(cli: Cli) {
         memo,
         recovery_address,
         recovery_timeout,
+        payment_id,
         policy,
     } = command
     else {
@@ -53,6 +55,7 @@ fn run_send_command_v2(cli: Cli) {
     let arguments = SendCommandArguments {
         wallet_path: resolve_home(&wallet),
         password,
+        address,
         to_spend,
         to_view,
         amount,
@@ -62,6 +65,7 @@ fn run_send_command_v2(cli: Cli) {
         memo,
         recovery_address,
         recovery_timeout,
+        payment_id,
         policy,
         node,
     };
@@ -87,8 +91,9 @@ fn run_send_command_v2(cli: Cli) {
 struct SendCommandArguments {
     wallet_path: PathBuf,
     password: Option<String>,
-    to_spend: String,
-    to_view: String,
+    address: Option<String>,
+    to_spend: Option<String>,
+    to_view: Option<String>,
     amount: u64,
     fee_multiplier: f64,
     split_output: bool,
@@ -96,6 +101,7 @@ struct SendCommandArguments {
     memo: Option<String>,
     recovery_address: Option<String>,
     recovery_timeout: Option<u64>,
+    payment_id: Option<String>,
     policy: Option<String>,
     node: String,
 }
@@ -104,6 +110,7 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
     let SendCommandArguments {
         wallet_path,
         password,
+        address,
         to_spend: to_spend_hex,
         to_view: to_view_hex,
         amount,
@@ -113,26 +120,69 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
         memo,
         recovery_address: recovery_address_hex,
         recovery_timeout,
+        payment_id: payment_id_hex,
         policy,
         node,
     } = arguments;
+    use coincync::primitives::{Address, AddressType, PublicKey};
     use coincync::wallet::spend::{SpendCoordinator, SpendIntent, SpendSubmission};
     use coincync::wallet::{KeyEpoch, Wallet};
 
-    // Treasury policy: refuse before touching keys if the recipient is not
-    // approved (redirect guard) or this send would exceed the per-window
-    // outflow cap (velocity guard).
+    // Resolve the recipient. `--address` (a standard / subaddress / integrated
+    // address string) takes precedence and supplies the spend key, view key,
+    // address type (subaddress flag), and any embedded payment ID directly, so a
+    // user can pay a generated integrated address without hand-passing the hex
+    // flags. Otherwise fall back to the explicit --to-spend/--to-view flags.
+    // Captured from --address (if given) so we can validate it against the
+    // wallet's own network once the wallet is opened below (jun #50 review).
+    let mut recipient_network: Option<coincync::primitives::Network> = None;
+    let (to_spend, to_view, subaddress, payment_id): (PublicKey, PublicKey, bool, Option<[u8; 8]>) =
+        if let Some(addr_str) = address.as_deref() {
+            let addr = Address::from_string(addr_str.trim())
+                .map_err(|e| format!("invalid --address: {e}"))?;
+            recipient_network = Some(addr.network);
+            let is_sub = addr.address_type == AddressType::Subaddress;
+            // An integrated address carries its own payment ID; a --payment-id
+            // flag passed alongside must not silently override it.
+            let pid = if addr.payment_id.is_some() {
+                if payment_id_hex.is_some() {
+                    return Err(
+                        "--payment-id cannot be combined with an integrated --address (which \
+                         already carries a payment ID)"
+                            .into(),
+                    );
+                }
+                addr.payment_id
+            } else {
+                parse_payment_id_v2(payment_id_hex.as_deref())?
+            };
+            (addr.spend_public_key, addr.view_public_key, is_sub, pid)
+        } else {
+            let to_spend_hex = to_spend_hex
+                .ok_or("provide either --address or both --to-spend and --to-view")?;
+            let to_view_hex = to_view_hex
+                .ok_or("provide either --address or both --to-spend and --to-view")?;
+            let pid = parse_payment_id_v2(payment_id_hex.as_deref())?;
+            (
+                parse_public_key_v2(&to_spend_hex, "to-spend")?,
+                parse_public_key_v2(&to_view_hex, "to-view")?,
+                subaddress,
+                pid,
+            )
+        };
+
+    // Treasury policy (main): refuse before building the tx if the resolved
+    // recipient is not approved (redirect guard) or this send would exceed the
+    // per-window outflow cap (velocity guard). Enforced on the RESOLVED keys so
+    // it also covers a recipient supplied via an integrated --address (#50).
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     if let Some(policy_file) = policy.as_deref() {
-        enforce_send_policy(policy_file, &to_spend_hex, &to_view_hex)?;
+        enforce_send_policy(policy_file, &to_spend.to_hex(), &to_view.to_hex())?;
         enforce_send_velocity(policy_file, amount, now_secs)?;
     }
-
-    let to_spend = parse_public_key_v2(&to_spend_hex, "to-spend")?;
-    let to_view = parse_public_key_v2(&to_view_hex, "to-view")?;
     let memo_bytes = validate_memo_v2(memo)?;
 
     if matches!(
@@ -152,22 +202,33 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
 
     let password = resolve_password(password, false)?;
     let mut wallet = Wallet::open(wallet_path).map_err(|error| format!("open wallet: {error}"))?;
+
+    // jun #50 review: reject an --address whose network doesn't match this
+    // wallet's. Paying a mainnet address from a testnet wallet (or vice versa)
+    // sends to keys that are unspendable on this chain — the funds are burned.
+    if let Some(net) = recipient_network {
+        let wallet_net = wallet.network_name().to_string();
+        let addr_net = match net {
+            coincync::primitives::Network::Mainnet => "mainnet",
+            coincync::primitives::Network::Testnet => "testnet",
+        };
+        // A testnet-prefixed address is valid on both testnet and regtest
+        // wallets (regtest shares the testnet address prefix).
+        let ok = wallet_net.as_str() == addr_net
+            || (addr_net == "testnet" && wallet_net == "regtest");
+        if !ok {
+            return Err(format!(
+                "--address is a {addr_net} address but this wallet is {wallet_net}; refusing to send"
+            ));
+        }
+    }
     wallet
         .unlock(password.as_str())
         .map_err(|error| format!("unlock wallet: {error}"))?;
-    // W-1/W-B launch-safety: --subaddress sends are disabled on mainnet in this
-    // release. This raw-pubkey path bypasses Address parsing (where the mainnet
-    // subaddress gate lives), so it must be rejected here explicitly — a
-    // subaddress-received output is currently unspendable (spend path omits the
-    // per-subaddress offset). Available on testnet/regtest. See W-B / W-1.
-    if subaddress && wallet.network_name() == "mainnet" {
-        return Err(
-            "subaddresses are disabled on mainnet in this release (funds received \
-             at a subaddress would be permanently unspendable); omit --subaddress \
-             and send to a standard address"
-                .to_string(),
-        );
-    }
+    // W-1/W-B gate LIFTED: the spend path now applies the per-subaddress offset
+    // (W-A fix), so subaddress-received outputs are spendable on all networks —
+    // verified end-to-end by `real_crypto_subaddress_output_spendable_e2e`. The
+    // prior mainnet rejection on this raw-pubkey send path has been removed.
     let keys: KeyEpoch = wallet
         .current_keys()
         .cloned()
@@ -181,8 +242,8 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
         .map_err(|error| format!("start spend session: {error}"))?;
 
     println!("Building transaction:");
-    println!("  Recipient spend: {}", &to_spend_hex[..16]);
-    println!("  Recipient view:  {}", &to_view_hex[..16]);
+    println!("  Recipient spend: {}", &hex::encode(to_spend.as_bytes())[..16]);
+    println!("  Recipient view:  {}", &hex::encode(to_view.as_bytes())[..16]);
     println!("  Amount:          {} atomic", amount);
     println!("  Height:          {}", session.target_height());
     println!("  Fee multiplier:  {}", fee_multiplier);
@@ -206,7 +267,8 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
     let intent = SpendIntent::new(payments)
         .with_fee_multiplier(fee_multiplier)
         .with_memo(memo_bytes)
-        .with_extra(extra);
+        .with_extra(extra)
+        .with_payment_id(payment_id);
     let mut rng = rand::rngs::OsRng;
     let built = coordinator
         .build_privacy_transaction(
@@ -300,6 +362,21 @@ fn parse_public_key_v2(value: &str, label: &str) -> Result<coincync::primitives:
 
     coincync::primitives::PublicKey::from_bytes_checked(bytes)
         .map_err(|error| format!("invalid {label}: {error}"))
+}
+
+/// Parse an optional integrated-address payment ID (16-hex / 8 bytes).
+fn parse_payment_id_v2(hex_opt: Option<&str>) -> Result<Option<[u8; 8]>, String> {
+    match hex_opt {
+        Some(h) => {
+            let bytes =
+                hex::decode(h.trim()).map_err(|e| format!("invalid --payment-id hex: {e}"))?;
+            let arr: [u8; 8] = bytes
+                .try_into()
+                .map_err(|b: Vec<u8>| format!("payment id must be 8 bytes, got {}", b.len()))?;
+            Ok(Some(arr))
+        }
+        None => Ok(None),
+    }
 }
 
 fn validate_memo_v2(memo: Option<String>) -> Result<Option<Vec<u8>>, String> {
@@ -477,8 +554,8 @@ mod v2_support_tests {
             panic!("expected Send");
         };
         assert_eq!(password.as_deref(), Some("s3cret"));
-        assert_eq!(to_spend, HEX32);
-        assert_eq!(to_view, HEX32);
+        assert_eq!(to_spend.as_deref(), Some(HEX32));
+        assert_eq!(to_view.as_deref(), Some(HEX32));
         assert_eq!(amount, 4242);
         assert_eq!(fee_multiplier, 2.5);
         assert!(!split_output);
