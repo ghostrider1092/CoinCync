@@ -48,6 +48,12 @@ pub use peer_scalars::{PeerPoint, PeerScalar};
 // type. The engine is constructed but inert in v1.0.x — see CIP-003.
 pub mod mw_cutthrough;
 
+// Single guarded boundary between the experimental privacy schemes
+// (Lelantus Spark, MW cut-through) and the RingCT chain. Inert by default —
+// see `privacy_connector` for the fail-closed activation/safety model
+// (kill switch, mainnet-audit gate, activation height, rate limit).
+pub mod privacy_connector;
+
 // ── Sketch / future-CIP modules (gated, off by default) ─────────
 // These are real implementations behind feature flags. They do not
 // appear in the production audit perimeter unless their feature is
@@ -59,6 +65,8 @@ pub mod kernel_offset; // CIP-004
 pub mod spark_generators;
 #[cfg(feature = "sketch-lelantus-spark")]
 pub mod lelantus_spark; // CIP-005
+#[cfg(feature = "sketch-privacy-manifold")]
+pub mod privacy_manifold; // Underground — uniform-face transaction envelope
 #[cfg(feature = "sketch-gk-proof")]
 pub mod groth_kohlweiss; // CIP-Shielded 2c#1 (real log-size spend proof)
 #[cfg(feature = "sketch-gk-proof")]

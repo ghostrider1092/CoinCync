@@ -228,5 +228,40 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── get_privacy_features ──────────────────────────────────
+    // Full, HONEST status of every privacy feature: which are live, which are
+    // gated-inert pending external audit, and which are disabled — the single
+    // source of truth the community can query so nothing is over-claimed.
+    // Backed by the privacy connector's read-only registry (#49). Re-landed
+    // here after main moved RPC registration into per-domain register fns.
+    module
+        .register_method("get_privacy_features", |_params, state, _ext| {
+            use crate::crypto::privacy_connector::{
+                privacy_feature_registry, ConnectorGate, FeatureStatus, CONNECTOR_AUDITED,
+            };
+            let height = state.chain.stats().height;
+            // `None` activation height => gated consensus schemes report as
+            // inert, the truthful state until they are audited + scheduled.
+            let gate = ConnectorGate::new(state.chain.network(), height, None);
+            let features: Vec<_> = privacy_feature_registry(&gate)
+                .into_iter()
+                .map(|f| {
+                    let status = match f.status {
+                        FeatureStatus::Active => "active",
+                        FeatureStatus::GatedInert => "gated-inert",
+                        FeatureStatus::Disabled => "disabled",
+                    };
+                    json!({ "name": f.name, "status": status, "note": f.note })
+                })
+                .collect();
+            Ok::<_, ErrorObjectOwned>(json!({
+                "connector_audited": CONNECTOR_AUDITED,
+                "network": format!("{:?}", state.chain.network()),
+                "height": height,
+                "features": features,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
     Ok(())
 }

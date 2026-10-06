@@ -69,6 +69,11 @@ metrics = []
 # gated follow-up). Gated so production builds are unaffected; lets the rule be
 # built, modelled, and reviewed ahead of any activation decision.
 fee-reservoir = []
+# CIP-Cross-Chain-Onramp: the peg-in turnstile SEAM (design scaffold only —
+# PegAttestation type + PegAttestor trait + FailClosedAttestor). Off by default,
+# fail-closed, nothing wired. Lets the interfaces be reviewed ahead of the
+# post-audit implementation without touching production builds.
+crosschain-onramp = []
 # Rolling soft-finality (CIP-009.D) consensus-layer adapter. Off by
 # default: compiles in `src/consensus/rolling_finality.rs` and pulls
 # the `coincync-rolling-finality` crate only when explicitly enabled.
@@ -104,6 +109,7 @@ sketch-cut-through        = []   # CIP-003 (also see existing src/crypto/mw_cutt
 sketch-block-aggregation  = []   # CIP-003 (pairs with cut-through)
 sketch-kernel-offsets     = []   # CIP-004
 sketch-lelantus-spark     = []   # CIP-005 (gates src/crypto/lelantus_spark.rs)
+sketch-privacy-manifold   = []   # Underground manifold — uniform-face tx envelope (gates src/crypto/privacy_manifold.rs)
 sketch-gk-proof           = []   # CIP-Shielded 2c#1 (gates src/crypto/groth_kohlweiss.rs)
 shielded-soak-stub        = []   # CIP-Shielded: inert prover/verifier for the assembly-line soak (NEVER production)
 # CIP-Shielded: use the vendored Firo libspark FFI backend as the shielded engine.

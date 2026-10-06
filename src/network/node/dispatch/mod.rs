@@ -282,11 +282,13 @@ pub(super) async fn process_message(
 
         // ─── Personal Node (Tier 1) Protocol ─────────────────────────────
         MessageType::GetFilters => {
-            query::handle_get_filters(peer_id, payload, magic, chain, senders).await?;
+            query::handle_get_filters(peer_id, payload, magic, peers, scorer, chain, senders)
+                .await?;
         }
 
         MessageType::GetOutputDigests => {
-            query::handle_get_output_digests(peer_id, payload, magic, chain, senders).await?;
+            query::handle_get_output_digests(peer_id, payload, magic, peers, scorer, chain, senders)
+                .await?;
         }
 
         MessageType::GetFilterCheckpoints => {
