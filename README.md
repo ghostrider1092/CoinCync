@@ -34,8 +34,7 @@ cannot quietly change.
 ## Development resources
 
 - Web: [coincync.network](https://coincync.network)
-- Explorer: [explorer.coincync.network](https://explorer.coincync.network)
-- Live chain (JSON-RPC): [api.coincync.network/rpc/testnet](https://api.coincync.network/rpc/testnet)
+- Live chain: run a local node and query its JSON-RPC at `http://127.0.0.1:28081` (see [Run a node](docs/src/getting-started/run-a-node.md)). _The public `api.coincync.network` JSON-RPC and `explorer.coincync.network` endpoints are temporarily unavailable while the front-end hosting is being brought up; connect to the P2P seed `2.29.34.197:28080` and use your own node's RPC in the meantime._
 - Discord: [join](https://discord.gg/5tYNSCsqzy) — the primary place for development discussion and coordination
 - Security: `CyncLabs@proton.me`
 

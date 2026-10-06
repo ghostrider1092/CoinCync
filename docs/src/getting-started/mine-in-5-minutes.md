@@ -23,9 +23,11 @@ Invoke-WebRequest -Uri "$base/coincync-wallet.exe" -OutFile coincync-wallet.exe
 # 2. Create a wallet (you'll set a password; remember it)
 .\coincync-wallet.exe --network testnet --wallet testnet.bin create
 
-# 3. Start mining (point at the public testnet RPC; no API key needed)
+# 3. Start mining against your own local node's RPC
+#    (the public api.coincync.network RPC is temporarily unavailable — run a
+#     local testnet node first, see Run a node, and point the rig at it)
 $addr = (.\coincync-wallet.exe --network testnet --wallet testnet.bin address | Select-String '^Address:').ToString().Split()[-1]
-.\coincync-rig.exe run-solo --node https://api.coincync.network/rpc/testnet --address $addr --network testnet --tui
+.\coincync-rig.exe run-solo --node http://127.0.0.1:28081/rpc/testnet --address $addr --network testnet --tui
 ```
 
 The `--tui` flag opens a live dashboard. Press `q` to quit.
@@ -58,8 +60,9 @@ cargo build --release --bin coincync-rig --bin coincync-wallet
 # 2. Get your address
 ADDR=$(./target/release/coincync-wallet --network testnet --wallet testnet.bin address | awk '/^Address:/{print $2}')
 
-# 3. Mine
-./target/release/coincync-rig run-solo --node https://api.coincync.network/rpc/testnet --address "$ADDR" --network testnet --tui
+# 3. Mine against your own local node's RPC (the public api.coincync.network RPC
+#    is temporarily unavailable — run a local testnet node first, see Run a node)
+./target/release/coincync-rig run-solo --node http://127.0.0.1:28081/rpc/testnet --address "$ADDR" --network testnet --tui
 ```
 
 ---

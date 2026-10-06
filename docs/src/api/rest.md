@@ -1,5 +1,7 @@
 # REST endpoints
 
+> ⚠️ **The public `api.coincync.network` / `explorer.coincync.network` endpoints are temporarily unavailable** while the front-end hosting is being brought up. The `https://api.coincync.network/v1/…` examples below describe the intended production surface; until the proxy is restored, run a local node and hit its REST at `http://127.0.0.1:28083/v1/…` (or its JSON-RPC at `http://127.0.0.1:28081`). See [Run a node](../getting-started/run-a-node.md).
+
 The REST API is a higher-level wrapper around the JSON-RPC surface, served by `src/rpc/rest.rs` (an axum app). It's the right transport for browser-side code that wants typed JSON without managing JSON-RPC envelopes.
 
 ## Where it lives
