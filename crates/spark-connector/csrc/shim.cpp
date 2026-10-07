@@ -867,6 +867,61 @@ int spark_ffi_spend_outputs(const unsigned char* ptr, int len,
     }
 }
 
+// Stateless extraction of a spend bundle's linking tags T (`getUsedLTags`), for
+// mempool double-spend dedup on UNTRUSTED P2P input. Unlike spark_ffi_verify_bundle
+// it does NOT verify the proof and needs no cover set; unlike spark_ffi_spend_outputs
+// it does not extract output coins. It bounds the attacker-controlled
+// `output_count` BEFORE constructing the SpendTransaction — the one unbounded
+// allocation on this path (the preceding vector reads are chunk-capped by the
+// serialization framework) — so a crafted bundle cannot force a large allocation.
+// Writes tags as [u32 count][serialize_size-byte tag]... (same wire form as
+// spark_ffi_verify_bundle) and returns 1; returns 0 on malformed/oversized input
+// (fail-closed). The returned tags are a deterministic function of the spent
+// coin(s) regardless of proof validity, so two spends of the same coin yield the
+// same tag — exactly what the mempool needs to reject a conflicting second spend.
+#define SPARK_FFI_MAX_SPEND_OUTPUTS 64
+int spark_ffi_spend_ltags(const unsigned char* ptr, int len,
+                          unsigned char* out_tags, int tags_cap, int* out_tags_len) {
+    try {
+        const spark::Params* params = spark::Params::get_test();
+        CDataStream ss((const char*)ptr, (const char*)ptr + len, SER_NETWORK, PROTOCOL_VERSION);
+        uint64_t cover_set_id;
+        std::vector<unsigned char> rep;
+        uint256 block_hash;
+        std::vector<spark::Coin> cover_set, out_coins;
+        uint64_t output_count;
+        ss >> cover_set_id;
+        ss >> rep;
+        ss >> block_hash;
+        ss >> cover_set;
+        ss >> out_coins;
+        ss >> output_count;
+        // DoS bound: output_count is read raw (not via the chunk-capped vector
+        // reader) and sizes the SpendTransaction's internal vectors. A legitimate
+        // spend has a handful of outputs; reject anything absurd before building.
+        if (output_count > SPARK_FFI_MAX_SPEND_OUTPUTS) return 0;
+        spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2, (std::size_t)output_count);
+        ss >> tx;
+
+        const std::vector<GroupElement>& tags = tx.getUsedLTags();
+        const int enc = (int)GroupElement::serialize_size;
+        int need = 4 + (int)tags.size() * enc;
+        if (need > tags_cap) return 0;
+        uint32_t n = (uint32_t)tags.size();
+        out_tags[0] = (unsigned char)(n & 0xff);
+        out_tags[1] = (unsigned char)((n >> 8) & 0xff);
+        out_tags[2] = (unsigned char)((n >> 16) & 0xff);
+        out_tags[3] = (unsigned char)((n >> 24) & 0xff);
+        for (std::size_t i = 0; i < tags.size(); i++) {
+            tags[i].serialize(out_tags + 4 + (int)i * enc);
+        }
+        *out_tags_len = need;
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
 // ── Mint bundle: authenticated shield-in (transparent -> shielded). ─────────
 // A libspark MintTransaction proves each coin's value commitment C opens to its
 // PUBLIC value v (a Schnorr proof over C − G·v = H·hash_val(k)), so a verifier

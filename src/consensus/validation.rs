@@ -2877,16 +2877,52 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         return Err(Error::InvalidTxVersion(tx.version));
     }
 
+    // ── Shielded (Spark) structural admission (#172) ───────────────────────
+    // A shielded tx carries its value and crypto in a `SparkPayload` (in
+    // `tx.extra`), not in transparent inputs/outputs/range-proof, so the three
+    // transparent structural rejects below (empty inputs, empty outputs, missing
+    // range proof) must be RELAXED for it — a pure Spark spend has no transparent
+    // side at all, and a shield-in mint has only transparent *inputs* (its coins
+    // are shielded). Everything else (version, size, min-fee, per-input ring
+    // rules on a mint's transparent inputs, input/output count caps) still runs.
+    //
+    // This is STATELESS routing only, mirroring `check_shielded_tx`: the payload
+    // must decode as a current `SparkPayload` and carry a mint or a spend. The
+    // authoritative STATEFUL verify (cover set + pool value + `T ∉ spent_tags`)
+    // stays at block level in `verify_block_spark_v2`, and the whole path is
+    // fail-closed under `SHIELDED_TX_ACTIVATION_HEIGHT = u64::MAX`. Gated on both
+    // shielded features: without them `is_shielded` is `const false`, so the
+    // default build rejects a shielded tx exactly as before.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    let is_shielded = tx.is_shielded();
+    #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
+    let is_shielded = false;
+
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    if is_shielded {
+        let payload = crate::consensus::spark_payload::SparkPayload::decode(&tx.extra)?;
+        if payload.spend.is_none() && payload.mint.is_none() && payload.outputs.is_empty() {
+            crate::flight_recorder::record(
+                crate::diagnostics::CYNC_CONS_031,
+                "shielded tx carries neither a mint nor a spend",
+            );
+            return Err(Error::InvalidTransaction(
+                "shielded tx carries neither a mint nor a spend".into(),
+            ));
+        }
+    }
+
     // SECURITY (BUG-17): Reject transactions with empty inputs or outputs.
     // This prevents mempool pollution with malformed transactions that can
     // never be mined (full validate_transaction checks this, but basic didn't).
-    if tx.inputs.is_empty() {
+    // Relaxed for shielded (#172): a pure Spark spend has no transparent side.
+    if tx.inputs.is_empty() && !is_shielded {
         crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_031, "transaction has no inputs");
         return Err(Error::InvalidTransaction(
             "transaction has no inputs".into(),
         ));
     }
-    if tx.outputs.is_empty() {
+    if tx.outputs.is_empty() && !is_shielded {
         crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_032, "transaction has no outputs");
         return Err(Error::InvalidTransaction(
             "transaction has no outputs".into(),
@@ -2934,8 +2970,12 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
                 )));
             }
         }
-        // Range proof must exist (Bill of Rights I — Bulletproofs required)
-        if tx.range_proof.is_empty() {
+        // Range proof must exist (Bill of Rights I — Bulletproofs required).
+        // Relaxed for shielded (#172): a Spark tx's range proofs live inside the
+        // libspark bundle (verified at block level), not in `tx.range_proof` —
+        // its transparent output set is empty, so there is nothing to range-prove
+        // here. A mint's transparent *inputs* are still ring-checked above.
+        if tx.range_proof.is_empty() && !is_shielded {
             crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_034, "missing range proof");
             return Err(Error::InvalidTransaction(
                 "UNCONSTITUTIONAL: missing range proof (Bill of Rights I — Bulletproofs required)"
@@ -4867,6 +4907,77 @@ mod tests {
             err_bad.contains("shielded payload decode"),
             "malformed payload must be rejected at decode, got: {err_bad}"
         );
+    }
+
+    // #172: `validate_transaction_basic` (the mempool/relay admission choke
+    // point) relaxes the transparent empty-input / empty-output / missing-range-
+    // proof rejects for a shielded tx, while the default build (no shielded
+    // features) still rejects it exactly as before.
+    #[test]
+    fn validate_basic_shielded_admission_172() {
+        use crate::transaction::{Transaction, TxType};
+        let shielded_tx = |extra: Vec<u8>| {
+            let mut tx = Transaction {
+                version: 1,
+                tx_type: TxType::Shielded,
+                inputs: vec![],
+                outputs: vec![],
+                fee: crate::primitives::Amount::from_atomic(0),
+                range_proof: vec![],
+                extra,
+            };
+            // Meet the static relay fee floor (size × MIN_FEE_PER_BYTE).
+            let floor = (tx.size() as u64) * crate::constants::MIN_FEE_PER_BYTE;
+            tx.fee = crate::primitives::Amount::from_atomic(floor.max(1));
+            tx
+        };
+
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        {
+            use crate::consensus::spark_payload::{SparkPayload, SpendBundle, SPARK_PAYLOAD_VERSION};
+            // A structurally well-formed spend payload (basic admission only
+            // decodes + requires a mint/spend; the proof is verified at block
+            // level) → a shielded tx with empty transparent inputs/outputs and no
+            // range proof is ADMITTED.
+            let ok = SparkPayload {
+                version: SPARK_PAYLOAD_VERSION,
+                mint: None,
+                outputs: vec![],
+                spend: Some(SpendBundle { cover_set_id: 0, anchor_height: 1, bundle: vec![0u8; 1024] }),
+                value_balance: 0,
+            };
+            assert!(
+                validate_transaction_basic(&shielded_tx(ok.encode())).is_ok(),
+                "a well-formed shielded tx passes basic admission"
+            );
+            // Neither mint nor spend → structurally rejected.
+            let empty = SparkPayload {
+                version: SPARK_PAYLOAD_VERSION,
+                mint: None,
+                outputs: vec![],
+                spend: None,
+                value_balance: 0,
+            };
+            assert!(
+                validate_transaction_basic(&shielded_tx(empty.encode())).is_err(),
+                "a shielded tx carrying neither a mint nor a spend is rejected"
+            );
+            // Undecodable payload → rejected.
+            assert!(
+                validate_transaction_basic(&shielded_tx(vec![0xFFu8; 1024])).is_err(),
+                "an undecodable shielded payload is rejected"
+            );
+        }
+
+        #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
+        {
+            // Default build: no relaxation — a shielded tx with empty inputs is
+            // rejected exactly as before (#172 stays inert without the features).
+            assert!(
+                validate_transaction_basic(&shielded_tx(vec![0u8; 1024])).is_err(),
+                "the default build rejects shielded txs (relaxation compiled out)"
+            );
+        }
     }
 
     #[cfg(feature = "libspark-ffi")]
