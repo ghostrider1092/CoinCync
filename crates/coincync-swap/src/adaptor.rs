@@ -702,6 +702,22 @@ pub fn verify_pre_sig(
         .r_point
         .combine(adaptor_pt)
         .map_err(|_| Error::Verification("R + T combine failed"))?;
+
+    // #247: the decrypted signature is `((R+T).x, s_pre + t)`, and a BIP-340
+    // verifier lifts `(R+T).x` to the point with EVEN y. If `R + T` has odd y,
+    // the adaptor equation `s_pre·G == R + e·X` below can still hold while the
+    // completed signature can NEVER satisfy BIP-340 — so a counterparty could
+    // hand over a pre-signature that passes the safety gate (which checks the
+    // claim and refund adaptors with `verify_pre_sig` alone) yet is forever
+    // uncompletable, bricking that path. An honest signer already retries the
+    // nonce until the parity is even; the verifier must enforce the same.
+    let (_, r_plus_t_parity) = r_plus_t.x_only_public_key();
+    if r_plus_t_parity != secp256k1::Parity::Even {
+        return Err(Error::Verification(
+            "R + T has odd y; pre-signature can never be completed under BIP-340",
+        ));
+    }
+
     let e = bip340_challenge(&r_plus_t, signer_x, msg)?;
 
     // Lift signer_x to a full PublicKey with even y (BIP-340 convention).
@@ -1419,6 +1435,58 @@ mod tests {
             create_pre_sig(&seckey, &msg, &adaptor_pt, &nonce).expect("create_pre_sig");
         verify_pre_sig(&pre_sig, &signer_x, &adaptor_pt, &msg)
             .expect("verify_pre_sig should accept a freshly-created pre-sig");
+    }
+
+    #[test]
+    fn verify_pre_sig_rejects_odd_y_r_plus_t() {
+        // #247: a pre-sig built with the low-level `create_pre_sig` and a nonce
+        // whose `R + T` has ODD y satisfies the adaptor equation `s_pre·G ==
+        // R + e·X`, but its decrypted signature `((R+T).x, s_pre + t)` can never
+        // verify under BIP-340 (which lifts `(R+T).x` with even y). The verifier
+        // must reject such a pre-sig so the safety gate is never handed an
+        // uncompletable claim/refund adaptor. This test fixes the keys and only
+        // varies the nonce parity, so acceptance of the even case and rejection
+        // of the odd case isolate the parity check as the sole cause.
+        let secp = Secp256k1::new();
+        let (seckey, _, t_sk, msg) = test_keys(0x0DD_17); // "ODD-IT"
+        let adaptor_pt = PublicKey::from_secret_key(&secp, &t_sk);
+
+        let parity_of = |nonce: &SecretKey| {
+            let r_point = PublicKey::from_secret_key(&secp, nonce);
+            let r_plus_t = r_point.combine(&adaptor_pt).expect("R + T combine");
+            r_plus_t.x_only_public_key().1
+        };
+
+        // Find one even-y and one odd-y nonce for the same (key, T, msg).
+        let mut rng = StdRng::seed_from_u64(0x0DD_17);
+        let mut even_nonce = None;
+        let mut odd_nonce = None;
+        while even_nonce.is_none() || odd_nonce.is_none() {
+            let (nonce, _) = secp.generate_keypair(&mut rng);
+            match parity_of(&nonce) {
+                secp256k1::Parity::Even if even_nonce.is_none() => even_nonce = Some(nonce),
+                secp256k1::Parity::Odd if odd_nonce.is_none() => odd_nonce = Some(nonce),
+                _ => {}
+            }
+        }
+
+        // Even-y R + T: accepted (the construction is otherwise valid).
+        let (even_sig, even_x) =
+            create_pre_sig(&seckey, &msg, &adaptor_pt, &even_nonce.unwrap())
+                .expect("create_pre_sig (even)");
+        verify_pre_sig(&even_sig, &even_x, &adaptor_pt, &msg)
+            .expect("verify_pre_sig must accept an even-y R + T pre-signature");
+
+        // Odd-y R + T: rejected, specifically for the parity.
+        let (odd_sig, odd_x) =
+            create_pre_sig(&seckey, &msg, &adaptor_pt, &odd_nonce.unwrap())
+                .expect("create_pre_sig (odd)");
+        let err = verify_pre_sig(&odd_sig, &odd_x, &adaptor_pt, &msg)
+            .expect_err("verify_pre_sig must reject an odd-y R + T pre-signature");
+        assert!(
+            matches!(err, Error::Verification(m) if m.contains("odd y")),
+            "expected an odd-y parity rejection, got: {err:?}"
+        );
     }
 
     #[test]
