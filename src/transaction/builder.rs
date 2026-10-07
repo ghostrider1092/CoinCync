@@ -131,6 +131,11 @@ pub struct TransactionBuilder {
     payment_id: Option<[u8; 8]>,
     /// Transaction version.
     tx_version: u8,
+    /// Shielded value bridge (#172): atomic value moved across the transparent↔
+    /// shielded veil. `< 0` shields value IN (transparent inputs exceed outputs+
+    /// fee by `|value_balance|`), `> 0` unshields OUT. `0` for a plain transparent
+    /// tx, which leaves the balance check `input == output + fee` unchanged.
+    value_balance: i64,
 }
 
 impl TransactionBuilder {
@@ -148,7 +153,18 @@ impl TransactionBuilder {
             extra: Vec::new(),
             payment_id: None,
             tx_version: 1,
+            value_balance: 0,
         }
+    }
+
+    /// Set the shielded value bridge (#172): atomic value crossing the veil.
+    /// `< 0` shields IN, `> 0` unshields OUT, `0` is a plain transparent tx. The
+    /// balance check becomes `input_sum == output_sum + fee - value_balance`;
+    /// pairs with a `SparkPayload` in `extra` whose `value_balance` matches and a
+    /// `tx_type` of `TxType::Shielded`.
+    pub fn with_value_balance(mut self, value_balance: i64) -> Self {
+        self.value_balance = value_balance;
+        self
     }
 
     /// Attach an 8-byte payment ID (integrated address). Encrypted into
@@ -577,7 +593,19 @@ impl TransactionBuilder {
         let outputs_plus_fee = output_sum
             .checked_add(self.fee.as_atomic())
             .ok_or(Error::AmountOverflow)?;
-        if input_sum != outputs_plus_fee {
+        // #172: shielded value bridge. The transparent balance is
+        //   input_sum + value_balance == output_sum + fee
+        // (value_balance < 0 shields value IN → inputs exceed outputs+fee by
+        //  |vb|; > 0 unshields OUT). For a plain transparent tx value_balance ==
+        // 0, so this is exactly the classic `input == output + fee` (and the u64
+        // overflow check on output+fee above is preserved). The commitment-level
+        // bridge the node checks (verify_transparent_shielded_balance) is
+        // satisfied because the builder forces Σ pseudo_blinding == Σ
+        // output_blinding below.
+        let input_plus_bridge = (input_sum as i128)
+            .checked_add(self.value_balance as i128)
+            .ok_or(Error::AmountOverflow)?;
+        if input_plus_bridge != outputs_plus_fee as i128 {
             return Err(Error::TransactionUnbalanced {
                 inputs: input_sum,
                 outputs: outputs_plus_fee,

@@ -653,6 +653,83 @@ fn add_prepared_inputs_rejects_ring_count_mismatch() {
     }
 }
 
+/// #172 PR2: a transparent-funded shield-in built via `build_shield_in_transaction`
+/// satisfies BOTH consensus mint gates the node applies in `verify_block_spark_v2`:
+/// the transparent↔shielded value bridge (`verify_transparent_shielded_balance`,
+/// over the tx's pseudo-output and output commitments) and the authenticated mint
+/// value proof (`verify_mint_shield_in`). Uses real libspark + synthetic inputs.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+#[test]
+fn shield_in_tx_satisfies_mint_consensus_gates() {
+    use super::shield_in::{
+        build_shield_in_transaction, input_key_image_outpoint, PreparedShieldIn,
+    };
+    use crate::consensus::spark_payload::{
+        build::build_mint_payload, verify_mint_shield_in, verify_transparent_shielded_balance,
+        SparkPayload,
+    };
+    use crate::transaction::TxType;
+
+    let mut rng = ChaCha20Rng::seed_from_u64(1172);
+    let keys = epoch_from_seed(0x42);
+    let ring_size = 8usize;
+    let height = 1_000u64;
+
+    // One funding input of 10M atomic: shield 6M in, fee 1M, change 3M (≥ MIN).
+    let input_amount = 10_000_000u64;
+    let shield_amount = 6_000_000u64;
+    let fee = 1_000_000u64;
+    let change = input_amount - shield_amount - fee;
+    assert!(change >= MIN_OUTPUT_AMOUNT);
+
+    let (inputs, reals) = synthetic_inputs(&[(input_amount, 0x42, 0, height)]);
+    let rings = rings_for(&reals, ring_size, &mut rng);
+
+    // Mint bundle bound to the input's key-image outpoint (the exact set the chain
+    // re-derives at apply), value_balance = −shield_amount.
+    let seed = b"shield-in-test-seed";
+    let outpoints: Vec<Vec<u8>> = inputs
+        .iter()
+        .map(|i| input_key_image_outpoint(i).unwrap())
+        .collect();
+    let (payload, _ctx) =
+        build_mint_payload(seed, &[shield_amount], &outpoints).expect("build mint payload");
+    assert_eq!(payload.value_balance, -(shield_amount as i64));
+
+    let context = SpendContext::with_ring_size(height, ring_size).unwrap();
+    let prepared = PreparedShieldIn::from_parts_for_test(
+        inputs,
+        change,
+        Amount::from_atomic(fee),
+        shield_amount,
+        payload.encode(),
+        keys.spend_public,
+        keys.view_public,
+        context,
+    );
+    let tx = build_shield_in_transaction(prepared, rings, &mut rng).expect("build shield-in tx");
+
+    assert_eq!(tx.tx_type, TxType::Shielded, "shield-in is a TxType::Shielded tx");
+
+    // The transparent↔shielded value bridge the node checks at block level: the
+    // tx's pseudo-output commitments must exceed its transparent output
+    // commitments + fee by exactly the shielded amount.
+    let pseudo: Vec<[u8; 32]> = tx.inputs.iter().map(|i| i.pseudo_output_commitment).collect();
+    let outs: Vec<[u8; 32]> = tx.outputs.iter().map(|o| o.commitment).collect();
+    let decoded = SparkPayload::decode(&tx.extra).expect("decode payload");
+    assert!(
+        decoded.spend.is_none() && decoded.outputs.is_empty(),
+        "a shield-in carries a mint, no spend and no bare coins"
+    );
+    verify_transparent_shielded_balance(&pseudo, &outs, tx.fee.as_atomic(), decoded.value_balance)
+        .expect("value bridge holds — the shield-in balances across the veil");
+
+    // The authenticated mint value proof: the minted coins' total value equals the
+    // shielded-in amount (−value_balance).
+    verify_mint_shield_in(decoded.mint.as_ref().expect("mint bundle"), decoded.value_balance)
+        .expect("mint value proof + conservation holds");
+}
+
 // ===========================================================================
 // SpendContext / Payment / vesting / legacy path
 // ===========================================================================

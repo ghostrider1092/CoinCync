@@ -224,6 +224,27 @@ enum Command {
         password: Option<String>,
     },
 
+    /// Shield transparent funds INTO the Spark pool (a shield-in mint).
+    ///
+    /// Spends this wallet's transparent UTXOs to create `amount` atomic units of
+    /// SHIELDED value owned by this wallet (a real transparent-funded shield-in:
+    /// ring-signed transparent inputs + an authenticated mint bundle +
+    /// `value_balance = −amount`), then submits the `TxType::Shielded` tx via
+    /// `send_raw_transaction`. EXPERIMENTAL: pre-activation the node accepts it
+    /// structurally but it will not CONFIRM until shielded activation
+    /// (`SHIELDED_TX_ACTIVATION_HEIGHT`). Requires a synced wallet (`wallet scan`)
+    /// and `--node`. Present only in a `sketch-gk-proof + libspark-ffi` build.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    ShieldedMint {
+        /// Amount to shield in, in atomic units.
+        #[arg(long)]
+        amount: u64,
+        /// Wallet password. Use `-` to read from stdin. Reads
+        /// `COINCYNC_WALLET_PASSWORD` env if neither flag nor stdin is provided.
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+    },
+
     /// Show this wallet's shielded (Spark) balance from the node's cover set.
     ///
     /// EXPERIMENTAL / regtest-gated: fetches `get_shielded_cover_set` (`--node`)
@@ -889,6 +910,10 @@ async fn main() {
             demo,
             password,
         } => cmd_shielded_send(&wallet_path, password, &cli.node, to, amount, demo).await,
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        Command::ShieldedMint { amount, password } => {
+            cmd_shielded_mint(&wallet_path, password, &cli.node, amount).await
+        }
         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
         Command::ShieldedBalance {
             demo,
@@ -2156,6 +2181,113 @@ async fn cmd_shielded_send(
     }
 }
 
+/// LIVE shield-in mint: spend this wallet's transparent UTXOs to create `amount`
+/// of shielded value owned by the wallet, then submit the `TxType::Shielded` tx
+/// via `send_raw_transaction`. Fetches the decoy distribution from the node for
+/// the transparent inputs' rings (same path as a normal transparent send), builds
+/// the shield-in (ring inputs + mint bundle + `value_balance = -amount`), and
+/// submits. PRE-ACTIVATION the node rejects it at the shielded-activation gate —
+/// reported plainly by `submit_shielded_tx`. (#172 PR2)
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+async fn cmd_shielded_mint(
+    path: &PathBuf,
+    password: Option<String>,
+    node: &str,
+    amount: u64,
+) -> Result<(), String> {
+    use coincync::decoy::{DecoyDistributionSnapshot, ResolvedDecoySnapshot};
+    use coincync::wallet::decoy_selection::{
+        allocate_unique_rings, build_covered_request, validate_covered_response,
+        ValidatedDecoySnapshot,
+    };
+    use coincync::wallet::{KeyEpoch, Wallet};
+
+    if amount == 0 {
+        return Err("--amount must be greater than zero".into());
+    }
+
+    let password = resolve_password(password, false)?;
+    // The raw seed drives the libspark mint bundle (the shielded identity the
+    // wallet scans with); the opened Wallet gives the transparent balance + keys.
+    let data = load_wallet(path, Some(password.as_str()))
+        .map_err(|e| format!("unlock failed: {e}"))?;
+    let seed = data.seed;
+
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {e}"))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {e}"))?;
+    let keys: KeyEpoch = wallet
+        .current_keys()
+        .cloned()
+        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
+    let balance_snapshot = wallet.balance();
+
+    mole_notice(amount);
+
+    // Decoy distribution for the transparent inputs' rings (same as cmd_send).
+    let snapshot: DecoyDistributionSnapshot = serde_json::from_value(
+        rpc_call(node, "get_decoy_distribution", serde_json::json!([]))
+            .await
+            .map_err(|e| format!("rpc get_decoy_distribution: {e}"))?,
+    )
+    .map_err(|e| format!("decode decoy distribution: {e}"))?;
+    let snapshot = ValidatedDecoySnapshot::try_from(snapshot)
+        .map_err(|e| format!("validate decoy distribution: {e}"))?;
+    let current_height = snapshot.spend_height();
+    let ring_size = coincync::constants::ring_size_at_height(current_height);
+    let min_decoy_age = coincync::constants::min_output_age_at_height(current_height);
+
+    let mut rng = rand::rngs::OsRng;
+    let prepared = coincync::wallet::send::prepare_shield_in(
+        &balance_snapshot,
+        &seed,
+        amount,
+        &keys,
+        current_height,
+        ring_size,
+        &mut rng,
+    )
+    .map_err(|e| format!("prepare shield-in: {e}"))?;
+
+    println!("Building shield-in mint:");
+    println!("  Amount (to pool): {amount} atomic");
+    println!("  Transparent inputs: {}", prepared.input_count());
+    println!("  Fee:              {} atomic", prepared.fee().as_atomic());
+    println!("  Change (back):    {} atomic", prepared.change_amount());
+    println!("  Height:           {current_height}");
+
+    // Resolve decoys → rings (same covered-locator path as a transparent send).
+    let real_outputs = prepared.real_outputs();
+    let real_locators: Vec<_> = real_outputs.iter().map(|o| o.locator()).collect();
+    let requested = build_covered_request(&snapshot, &real_locators, prepared.ring_size(), min_decoy_age, &mut rng)
+        .map_err(|e| format!("build covered decoy request: {e}"))?;
+    let resolved: ResolvedDecoySnapshot = serde_json::from_value(
+        rpc_call(
+            node,
+            "get_outputs_by_locators",
+            serde_json::json!([
+                snapshot.snapshot_id().height(),
+                snapshot.snapshot_id().hash(),
+                snapshot.snapshot_id().policy_version(),
+                requested.locators(),
+            ]),
+        )
+        .await
+        .map_err(|e| format!("rpc get_outputs_by_locators: {e}"))?,
+    )
+    .map_err(|e| format!("decode resolved decoys: {e}"))?;
+    let resolved = validate_covered_response(requested, resolved)
+        .map_err(|e| format!("validate resolved decoys: {e}"))?;
+    let rings = allocate_unique_rings(resolved, &real_outputs, &mut rng)
+        .map_err(|e| format!("allocate transaction rings: {e}"))?;
+
+    let tx = coincync::wallet::send::build_shield_in_transaction(prepared, rings, &mut rng)
+        .map_err(|e| format!("build shield-in tx: {e}"))?;
+
+    submit_shielded_tx(node, &tx, &format!("shield-in mint of {amount} atomic")).await
+}
+
 /// The "mole" notice: announce that a transaction is going UNDERGROUND (shielded).
 /// Printed to stderr so it never pollutes machine-readable stdout. ASCII only —
 /// the Windows console mangles non-ASCII.
@@ -2224,6 +2356,7 @@ fn shielded_send_demo(seed: &[u8], to: &str, amount: u64) -> Result<(), String> 
 /// shielded submission RPC yet; see the endpoint's docs).
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
 async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> Result<(), String> {
+    use coincync::consensus::spark_payload::{SparkPayload, SpendBundle, SPARK_PAYLOAD_VERSION};
     use spark_connector::ffi::{build_spend_to_address, LibsparkBackend};
     use spark_connector::SparkBackend;
 
@@ -2253,17 +2386,100 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
             format!("no single owned note covers {amount} atomic (largest owned note is {largest})")
         })?;
 
+    // fee = funding note value − amount — the spend's implicit fee, which its
+    // balance proof is built with (input == output + fee); the node verifies the
+    // bundle against exactly this fee.
+    let fee = chosen_value
+        .checked_sub(amount)
+        .ok_or("funding note does not cover the amount")?;
+
     // Build the spend to the recipient over the fetched cover set, then
     // self-verify the bundle (standalone — the node re-verifies on submit).
     let spend = build_spend_to_address(seed, &cover_coins, spend_index, &chosen_ctx, amount, to.as_bytes())
         .ok_or("failed to build shielded spend (bad recipient address or output value)")?;
     let tags = backend
-        .verify_spend(&[], &spend, 0, 0)
+        .verify_spend(&[], &spend, fee, 0)
         .map_err(|e| format!("built spend failed self-verification: {e}"))?;
 
     println!("  Funding note:    value {chosen_value} atomic at cover index {spend_index}");
-    report_built_transfer(to, amount, cover_coins.len(), 1, tags.len(), spend.0.len());
-    Ok(())
+    println!("  Fee:             {fee} atomic");
+    println!("  Nullifier tags:  {} (funding note spent)", tags.len());
+
+    // #172 PR2: wrap the spend in a v2 SparkPayload + a TxType::Shielded tx and
+    // submit it to the node via send_raw_transaction (replaces the old build-only
+    // "not submitted" report).
+    let payload = SparkPayload {
+        version: SPARK_PAYLOAD_VERSION,
+        mint: None,
+        outputs: vec![],
+        spend: Some(SpendBundle { cover_set_id: 0, anchor_height, bundle: spend.0 }),
+        value_balance: 0,
+    };
+    let tx = shielded_transaction(payload.encode(), fee);
+    submit_shielded_tx(node, &tx, &format!("shielded spend of {amount} atomic to {to}")).await
+}
+
+/// Build a `TxType::Shielded` transaction carrying `extra` (an encoded
+/// `SparkPayload`) with the given relay `fee`. `inputs`/`outputs` default to
+/// empty (a pure shielded spend); the mint path overrides them with the
+/// transparent funding side. (#172 PR2)
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+fn shielded_transaction(extra: Vec<u8>, fee: u64) -> coincync::transaction::Transaction {
+    coincync::transaction::Transaction {
+        version: 1,
+        tx_type: coincync::transaction::TxType::Shielded,
+        inputs: vec![],
+        outputs: vec![],
+        fee: coincync::primitives::Amount::from_atomic(fee),
+        range_proof: vec![],
+        extra,
+    }
+}
+
+/// Serialize a shielded tx (borsh → hex, the `send_raw_transaction` wire form)
+/// and submit it to the node. Reports the node's response. PRE-ACTIVATION the
+/// node's full validator rejects shielded txs at the activation gate
+/// (`SHIELDED_TX_ACTIVATION_HEIGHT = u64::MAX`) — expected and surfaced plainly;
+/// the wiring is complete for when shielded activates. (#172 PR2)
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+async fn submit_shielded_tx(
+    node: &str,
+    tx: &coincync::transaction::Transaction,
+    what: &str,
+) -> Result<(), String> {
+    let bytes = borsh::to_vec(tx).map_err(|e| format!("serialize shielded tx: {e}"))?;
+    let tx_hex = hex::encode(&bytes);
+    let txid = hex::encode(tx.hash().as_bytes());
+    println!();
+    println!(
+        "Submitting {what} to {node} ({} bytes, txid {})...",
+        bytes.len(),
+        &txid[..16]
+    );
+    match rpc_call(node, "send_raw_transaction", serde_json::json!([tx_hex])).await {
+        Ok(result) => {
+            if result.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false) {
+                println!("  OK: accepted by the mempool. txid {txid}");
+                println!(
+                    "  NOTE: it will not CONFIRM until shielded activation \
+                     (SHIELDED_TX_ACTIVATION_HEIGHT is u64::MAX pre-audit)."
+                );
+                Ok(())
+            } else {
+                Err(format!("node rejected: {result}"))
+            }
+        }
+        // Pre-activation the full validator rejects shielded txs — that is the
+        // fail-closed activation gate, not a wiring bug. Report it and succeed.
+        Err(e) if e.contains("not activated") || e.contains("activation") => {
+            println!("  Node rejected (expected pre-activation): {e}");
+            println!(
+                "  The submission path is wired; the tx is accepted once shielded activates."
+            );
+            Ok(())
+        }
+        Err(e) => Err(format!("rpc send_raw_transaction: {e}")),
+    }
 }
 
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
