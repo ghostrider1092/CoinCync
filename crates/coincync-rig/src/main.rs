@@ -336,9 +336,154 @@ fn run_pool_cli(
     rt.block_on(async move { orchestrator::run_pool(pool, login, password, net, threads).await })
 }
 
+/// Detect the CPU crypto features RandomX cares about (x86 only; `false`
+/// elsewhere). Pure std — no extra dependency.
+fn cpu_flags() -> (bool, bool) {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        (
+            std::is_x86_feature_detected!("aes"),
+            std::is_x86_feature_detected!("avx2"),
+        )
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        (false, false)
+    }
+}
+
+/// XMRig-style system-info banner, CoinCync-branded (teal/green, "the mole goes
+/// underground" ethos — no gold). Shows what the rig is and what it will run on:
+/// version, PoW, CPU + the crypto features that gate RandomX speed. Degrades to a
+/// plain, un-colored banner when stdout is not a terminal (piped / logged), so a
+/// captured log never carries escape codes.
 fn print_banner() {
-    println!("CoinCync Rig v{}", env!("CARGO_PKG_VERSION"));
-    println!("No donation. No telemetry. No surprises.");
+    use crossterm::style::{Color, Stylize};
+    use std::io::IsTerminal;
+
+    let ver = env!("CARGO_PKG_VERSION");
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0);
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    let (aes, avx2) = cpu_flags();
+    let yn = |b: bool| if b { "yes" } else { "no" };
+
+    // CPU model + memory via sysinfo (one-time read for the banner).
+    let sys = sysinfo::System::new_all();
+    let cpu_desc = sys
+        .cpus()
+        .first()
+        .map(|c| c.brand().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("{arch} CPU"));
+    let total_gb = sys.total_memory() as f64 / 1_000_000_000.0;
+    let used_gb = sys.used_memory() as f64 / 1_000_000_000.0;
+    let mem_pct = if total_gb > 0.0 {
+        (used_gb / total_gb * 100.0).round() as u32
+    } else {
+        0
+    };
+
+    // Plain fallback for non-terminals (pipes, log files).
+    if !std::io::stdout().is_terminal() {
+        println!("CoinCync Rig v{ver}  (RandomX, CPU-only)");
+        println!("the mole goes underground - no donation, no telemetry, no surprises");
+        println!("POW RandomX (rx/cync)");
+        println!("CPU {cpu_desc} ({cores} cores, {arch}, AES {}, AVX2 {})", yn(aes), yn(avx2));
+        println!("MEMORY {used_gb:.1} / {total_gb:.1} GB ({mem_pct}% used)");
+        println!("SYSTEM {os}");
+        println!();
+        return;
+    }
+
+    // Palette (no gold): teal accent for the frame + labels, green for "on",
+    // soft off-white body, muted gray for secondary text.
+    let teal = Color::Rgb { r: 86, g: 194, b: 180 };
+    let teal_dim = Color::Rgb { r: 58, g: 130, b: 122 };
+    let green = Color::Rgb { r: 127, g: 184, b: 121 };
+    let body = Color::Rgb { r: 224, g: 230, b: 228 };
+    let muted = Color::Rgb { r: 138, g: 148, b: 146 };
+
+    // Framed title. Width derives from the longest content line so the box always
+    // closes flush. ANSI codes are zero-width, so padding is computed on the plain
+    // text and the colors applied after.
+    let title = format!("CoinCync Rig  -  RandomX CPU miner");
+    let sub = format!("v{ver} - the mole goes underground");
+    let inner = title.chars().count().max(sub.chars().count()) + 2; // 1-space gutter each side
+    let bar = "─".repeat(inner);
+
+    let framed = |text: &str| {
+        let pad = inner - 1 - text.chars().count(); // leading gutter space + text + pad
+        format!(
+            "  {} {}{} {}",
+            "│".with(teal),
+            text.with(body),
+            " ".repeat(pad),
+            "│".with(teal)
+        )
+    };
+
+    println!();
+    println!("  {}{}{}", "┌".with(teal), bar.clone().with(teal), "┐".with(teal));
+    println!("{}", framed(&title));
+    println!("{}", framed(&sub));
+    println!("  {}{}{}", "└".with(teal), bar.with(teal), "┘".with(teal));
+    println!();
+
+    // XMRig-style `* LABEL  value` rows.
+    let row = |label: &str, value: String| {
+        println!(
+            "   {} {}  {}",
+            "*".with(teal),
+            format!("{label:<9}").with(teal_dim).bold(),
+            value
+        );
+    };
+    let on = |b: bool| {
+        if b {
+            "yes".to_string().with(green).to_string()
+        } else {
+            "no".to_string().with(muted).to_string()
+        }
+    };
+    // Continuation line, aligned under a row's value column (3 + "* " + 9 + 2).
+    let cont = |value: String| println!("{}{}", " ".repeat(16), value);
+
+    row("ABOUT", format!("{} {}", format!("CoinCync Rig v{ver}").with(body), "(RandomX, CPU-only)".with(muted)));
+    row("POW", format!("{}  {}  {}", "RandomX".with(body), "·".with(muted), "rx/cync".with(muted)));
+    row("CPU", cpu_desc.clone().with(body).to_string());
+    cont(format!(
+        "{} cores {} {} {} AES {} {} AVX2 {}",
+        cores.to_string().with(body),
+        "·".with(muted),
+        arch.with(body),
+        "·".with(muted),
+        on(aes),
+        "·".with(muted),
+        on(avx2),
+    ));
+    row(
+        "MEMORY",
+        format!(
+            "{} {} {} GB {} {}",
+            format!("{used_gb:.1}").with(body),
+            "/".with(muted),
+            format!("{total_gb:.1}").with(body),
+            "·".with(muted),
+            format!("{mem_pct}% used").with(muted),
+        ),
+    );
+    row("SYSTEM", os.with(body).to_string());
+    row(
+        "DONATE",
+        format!(
+            "{}  {}",
+            "0%".with(green).bold(),
+            "no donation · no telemetry · no surprises".with(muted)
+        ),
+    );
     println!();
 }
 

@@ -68,3 +68,7 @@ toml = "0.8"
 # stdout so journalctl-driven systemd setups don't change.
 ratatui   = "0.30"
 crossterm = "0.29"
+
+# System info for the startup banner (CPU model + total/used RAM). Default
+# features only; we just read CPU brand + memory, no process/network probing.
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }

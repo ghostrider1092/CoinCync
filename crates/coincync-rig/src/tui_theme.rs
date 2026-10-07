@@ -145,7 +145,10 @@ pub const MONO: Theme = Theme {
 };
 
 /// Light-background theme — for users with light terminals. Inverts
-/// the contrast direction; body text is dark.
+/// the contrast direction; body text is dark. Kept out of the `t` cycle (see
+/// [`THEMES`]) because the TUI never paints its own background, so dark body on
+/// a dark terminal is unreadable; retained for a future light-terminal mode.
+#[allow(dead_code)]
 pub const PAPER: Theme = Theme {
     name: "Paper",
     accent: Color::Rgb(212, 160, 89), // gold accent
@@ -160,7 +163,8 @@ pub const PAPER: Theme = Theme {
 };
 
 /// Soft warm light theme — alternative to Paper with a brown accent
-/// instead of gold.
+/// instead of gold. Also kept out of the `t` cycle (light theme, see [`PAPER`]).
+#[allow(dead_code)]
 pub const CREAM: Theme = Theme {
     name: "Cream",
     accent: Color::Rgb(90, 74, 48), // #5a4a30 — deep tan
@@ -191,9 +195,13 @@ pub const CONTRAST: Theme = Theme {
 
 /// Cycle order for the `t` key. Brass is default (index 0); cycle
 /// matches the website's theme picker.
-pub const THEMES: &[Theme] = &[
-    BRASS, DARK, MIDNIGHT, FORGE, VAULT, MONO, PAPER, CREAM, CONTRAST,
-];
+/// Themes the `t` key cycles. Only DARK-background-readable themes belong here:
+/// the TUI never paints its own background (every theme's `bg` is
+/// `Color::Reset`, i.e. the terminal's own), so a LIGHT theme with dark body
+/// text renders dark-on-dark and is unreadable. PAPER and CREAM are such light
+/// themes — they stay defined (for a future light-terminal mode) but are kept
+/// OUT of the cycle so `t` only ever lands on a legible theme.
+pub const THEMES: &[Theme] = &[BRASS, DARK, MIDNIGHT, FORGE, VAULT, MONO, CONTRAST];
 
 /// Resolve the next theme in the cycle from the current index.
 pub fn next_theme(idx: usize) -> usize {

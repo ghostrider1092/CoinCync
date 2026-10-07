@@ -69,6 +69,14 @@ pub struct MetricsState {
     /// 0 means "not yet observed" — the TUI suppresses the share % stat
     /// until this is non-zero.
     pub network_hashrate_hps: AtomicU64,
+    /// Peer count from the daemon's `get_info` — the mesh-health signal the
+    /// mining gate keys on (`peer_count >= 3`). 0 means "none / not yet sampled".
+    pub peers: AtomicU64,
+    /// Whether the orchestrator's sync/mesh/fork gate currently ALLOWS mining
+    /// (`is_synced && (regtest || (peers >= 3 && !diverged))`). The TUI shows a
+    /// green "mining" vs amber "waiting for mesh" pill from this, so an operator
+    /// sees WHY the rig is or isn't producing blocks.
+    pub mining_ready: AtomicBool,
     /// Operator-toggled pause flag. When `true`, the orchestrator sleeps
     /// instead of fetching a new template — visible to the user as a
     /// frozen hashrate + "PAUSED" status pill in the header.
@@ -113,6 +121,8 @@ impl MetricsState {
             tip_age_secs: AtomicU64::new(0),
             rpc_latency_ms: AtomicU64::new(0),
             network_hashrate_hps: AtomicU64::new(0),
+            peers: AtomicU64::new(0),
+            mining_ready: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             hashrate_ring: Mutex::new(VecDeque::with_capacity(HASHRATE_RING_SIZE)),
             block_finds: Mutex::new(VecDeque::with_capacity(BLOCK_FINDS_RING_SIZE)),
