@@ -335,6 +335,13 @@ pub struct Mempool {
     by_fee: BTreeMap<(u64, Hash), Hash>,
     /// Key images in mempool (for double-spend detection)
     key_images: HashSet<KeyImage>,
+    /// Shielded (Spark) linking tags in mempool — the Spark-side analog of
+    /// `key_images`, keyed by the tag's canonical bytes. Reject a second tx whose
+    /// spend reveals a tag already present, so a miner can't build a block that
+    /// then fails `verify_block_spark_v2`'s duplicate-linking-tag check. Only ever
+    /// populated under the shielded features (a transparent tx yields none); empty
+    /// in the default build (#172).
+    linking_tags: HashSet<Vec<u8>>,
     /// Maximum mempool size in bytes
     max_size: usize,
     /// Current size in bytes (invariant: sum of all entry.size)
@@ -366,6 +373,7 @@ impl Mempool {
             transactions: HashMap::new(),
             by_fee: BTreeMap::new(),
             key_images: HashSet::new(),
+            linking_tags: HashSet::new(),
             max_size,
             current_size: 0,
             chain_height: 0,
@@ -605,6 +613,18 @@ impl Mempool {
         if tx.is_coinbase() {
             return Ok(());
         }
+        // Shielded (Spark) txs carry their crypto inside the SparkPayload bundle
+        // (Grootle membership + Chaum tag-binding + range + balance), verified by
+        // the shielded verifier at block level — not by the transparent range /
+        // balance / ring checks below (a pure Spark spend has no transparent side
+        // for them to run against). Structural admission for shielded is handled
+        // in `validate_transaction_basic`; the path stays fail-closed under
+        // `SHIELDED_TX_ACTIVATION_HEIGHT = u64::MAX`. Gated so the default build is
+        // unchanged (#172).
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        if tx.is_shielded() {
+            return Ok(());
+        }
         if !verify_output_range_proofs(tx, chain_height) {
             return Err(Error::InvalidTransaction(
                 "Range proof verification failed — rejected at mempool".into(),
@@ -626,6 +646,27 @@ impl Mempool {
         Ok(())
     }
 
+    /// Shielded (Spark) linking-tag dedup keys for a tx — the Spark-side analog
+    /// of `tx.key_images()`. Returns the canonical tag bytes for a shielded
+    /// spend, an empty vec for a transparent tx or a mint-only shielded tx, and
+    /// (compiled out → always empty) when the shielded features are off, so the
+    /// default build never touches `linking_tags`. `Err` if a shielded spend's
+    /// bundle can't be parsed for its tags — the caller rejects such a tx at
+    /// admission. Stateless: no cover set, no pool, no proof verification (that is
+    /// the block-level gate) (#172).
+    fn shielded_linking_tags(tx: &Transaction) -> Result<Vec<Vec<u8>>> {
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        {
+            if tx.is_shielded() {
+                let payload = crate::consensus::spark_payload::SparkPayload::decode(&tx.extra)?;
+                let tags = crate::consensus::spark_payload::spend_linking_tags(&payload)?;
+                return Ok(tags.into_iter().map(|n| n.0).collect());
+            }
+        }
+        let _ = tx;
+        Ok(Vec::new())
+    }
+
     /// Final admission path: size/fee/RBF checks + actual insertion.
     /// Called by both `add` (after crypto verify) and `add_skip_crypto`
     /// (skipping crypto). Owns the consensus rules below the crypto layer.
@@ -639,6 +680,15 @@ impl Mempool {
             };
             return Err(self.reject(tx_hash, err));
         }
+
+        // Shielded (Spark) linking tags for this tx (#172). Computed once here (a
+        // malformed spend bundle is rejected now), checked for conflicts after the
+        // key-image loop below, and inserted on admission. Empty for transparent
+        // txs and in the default build.
+        let shielded_tags = match Self::shielded_linking_tags(&tx) {
+            Ok(tags) => tags,
+            Err(e) => return Err(self.reject(tx_hash, e)),
+        };
 
         // HARDENING (Layer 5): Dynamic minimum fee.
         // As mempool fills, required fee increases exponentially.
@@ -703,6 +753,23 @@ impl Mempool {
                 return Err(self.reject(tx_hash, err));
             }
         }
+
+        // Shielded (Spark) double-spend check (#172): reject a tx whose spend
+        // reveals a linking tag already in the mempool. Unlike transparent key
+        // images there is no RBF here — a conflicting shielded spend is simply
+        // rejected (the tag uniquely identifies the spent coin), which keeps a
+        // miner from building a block that then fails `verify_block_spark_v2`'s
+        // duplicate-linking-tag check. The authoritative stateful verify stays at
+        // block level.
+        for t in &shielded_tags {
+            if self.linking_tags.contains(t) {
+                let err = Error::InvalidTransaction(
+                    "duplicate shielded linking tag in mempool (double-spend)".into(),
+                );
+                return Err(self.reject(tx_hash, err));
+            }
+        }
+
         // ATOMICITY (2026-08-18): decide admissibility BEFORE mutating anything.
         // Previously the RBF removals below and the eviction loop ran first, and
         // if room still could not be freed within MAX_EVICTION_ATTEMPTS the
@@ -839,6 +906,11 @@ impl Mempool {
         for ki in entry.tx.key_images() {
             self.key_images.insert(ki);
         }
+        // Track shielded linking tags (#172) — mirror of key images on the Spark
+        // side. Computed before `tx` was moved into `entry`.
+        for t in shielded_tags {
+            self.linking_tags.insert(t);
+        }
 
         // Add to indices
         self.by_fee.insert((entry.fee_per_byte, tx_hash), tx_hash);
@@ -854,6 +926,13 @@ impl Mempool {
             // Remove key images
             for ki in entry.tx.key_images() {
                 self.key_images.remove(&ki);
+            }
+            // Remove shielded linking tags (#172). Recomputed from the entry's tx
+            // (deterministic: the same bundle yields the same tags it was admitted
+            // with). `unwrap_or_default` because the tx parsed cleanly at
+            // admission, and a removal must never fail.
+            for t in Self::shielded_linking_tags(&entry.tx).unwrap_or_default() {
+                self.linking_tags.remove(&t);
             }
 
             // Remove from fee index
@@ -1049,6 +1128,12 @@ impl Mempool {
         let mut result = Vec::new();
         let mut total_size = 0;
         let mut selected_key_images: HashSet<KeyImage> = HashSet::new();
+        // #172: also dedup shielded linking tags within the template, so a miner
+        // never assembles a block that then fails `verify_block_spark_v2`'s
+        // duplicate-linking-tag check. (Admission already bars two same-tag txs
+        // from coexisting in the mempool; this is the matching belt-and-suspenders
+        // guard, mirroring the key-image dedup. Empty in the default build.)
+        let mut selected_linking_tags: HashSet<Vec<u8>> = HashSet::new();
 
         // Iterate in reverse order (highest fee first)
         for (_, tx_hash) in self.by_fee.iter().rev() {
@@ -1060,16 +1145,21 @@ impl Mempool {
                 if total_size + entry.size <= max_size {
                     // Check for key image conflicts with already-selected txs (O(1) per key image)
                     let tx_key_images = entry.tx.key_images();
+                    let tx_tags = Self::shielded_linking_tags(&entry.tx).unwrap_or_default();
                     let has_conflict = tx_key_images
                         .iter()
-                        .any(|ki| selected_key_images.contains(ki));
+                        .any(|ki| selected_key_images.contains(ki))
+                        || tx_tags.iter().any(|t| selected_linking_tags.contains(t));
                     if has_conflict {
                         continue;
                     }
 
-                    // Track key images from this transaction
+                    // Track key images + linking tags from this transaction
                     for ki in &tx_key_images {
                         selected_key_images.insert(*ki);
+                    }
+                    for t in tx_tags {
+                        selected_linking_tags.insert(t);
                     }
 
                     result.push(entry.tx.clone());
@@ -1093,6 +1183,9 @@ impl Mempool {
         let mut result = Vec::new();
         let mut total_size = 0;
         let mut selected_key_images: HashSet<KeyImage> = HashSet::new();
+        // #172: mirror get_block_transactions' shielded linking-tag dedup so the
+        // summary set stays a faithful preview of the real template.
+        let mut selected_linking_tags: HashSet<Vec<u8>> = HashSet::new();
 
         for (_, tx_hash) in self.by_fee.iter().rev() {
             if result.len() >= max_count {
@@ -1101,14 +1194,19 @@ impl Mempool {
             if let Some(entry) = self.transactions.get(tx_hash) {
                 if total_size + entry.size <= max_size {
                     let tx_key_images = entry.tx.key_images();
+                    let tx_tags = Self::shielded_linking_tags(&entry.tx).unwrap_or_default();
                     let has_conflict = tx_key_images
                         .iter()
-                        .any(|ki| selected_key_images.contains(ki));
+                        .any(|ki| selected_key_images.contains(ki))
+                        || tx_tags.iter().any(|t| selected_linking_tags.contains(t));
                     if has_conflict {
                         continue;
                     }
                     for ki in &tx_key_images {
                         selected_key_images.insert(*ki);
+                    }
+                    for t in tx_tags {
+                        selected_linking_tags.insert(t);
                     }
                     result.push(TxSummary {
                         hash: entry.tx_hash,
@@ -1939,6 +2037,113 @@ mod generation_tests {
             MAX_CHAIN_GENERATION_ATTEMPTS
         );
         assert!(matches!(result, Err(crate::error::Error::InvalidState(_))));
+    }
+}
+
+// #172: shielded (Spark) transactions can be ADMITTED to the mempool — the
+// transparent empty-input/output/range-proof rejects are relaxed for them — and
+// a second spend of the same coin is rejected on its linking tag. Exercises the
+// real production `add()` path with real libspark spends. Gated on the shielded
+// features; without them a shielded tx is rejected at `validate_transaction_basic`
+// (the default build is unchanged), so there is nothing to admit.
+#[cfg(all(test, feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+mod shielded_mempool_admission_172 {
+    use super::*;
+    use crate::consensus::spark_payload::build::{build_mint_payload, build_spend_payload};
+    use crate::consensus::spark_payload::derive_outpoint;
+    use crate::storage::spark_pool::SparkPoolStore;
+    use crate::transaction::{Transaction, TxType};
+    use spark_connector::ffi::cover_set_size;
+
+    fn mk_shielded_tx(extra: Vec<u8>) -> Transaction {
+        // Fee is set by the caller to the floor; start at 0.
+        Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        }
+    }
+
+    /// The static relay fee floor (`size × MIN_FEE_PER_BYTE`) — what the mempool
+    /// enforces for a shielded tx's admission (paid from the pool-value balance).
+    fn with_floor_fee(mut tx: Transaction) -> Transaction {
+        let floor = (tx.size() as u64) * crate::constants::MIN_FEE_PER_BYTE;
+        tx.fee = Amount::from_atomic(floor.max(1));
+        tx
+    }
+
+    #[test]
+    fn shielded_spend_admits_and_double_spend_rejects() {
+        let store = SparkPoolStore::new();
+        let seed = b"mempool-172-seed";
+        let n = cover_set_size().unwrap();
+        let inputs = vec![vec![0x7Au8; 36]];
+        let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
+        let (mint_payload, contexts) = build_mint_payload(seed, &values, &inputs).unwrap();
+        let mint = mint_payload.mint.as_ref().unwrap();
+        let (_t, coins) = spark_connector::ffi::verify_mint_bundle(mint).unwrap();
+        for (i, coin) in coins.iter().enumerate() {
+            let op = derive_outpoint(&inputs, i as u32);
+            store.add_coin(op, coin.clone(), contexts[0].clone(), 1).unwrap();
+        }
+
+        // Two spends of coin #2 — different OUTPUT values so the bundles (hence
+        // txids) differ, but the spent coin (hence linking tag) is the same. And
+        // one spend of coin #3 (a different tag).
+        let op2 = derive_outpoint(&inputs, 2);
+        let op3 = derive_outpoint(&inputs, 3);
+        let tx_2a = with_floor_fee(mk_shielded_tx(
+            build_spend_payload(seed, &store, &op2, 3_000, 0, 1).unwrap().encode(),
+        ));
+        let tx_2b = with_floor_fee(mk_shielded_tx(
+            build_spend_payload(seed, &store, &op2, 3_100, 0, 1).unwrap().encode(),
+        ));
+        let tx_3 = with_floor_fee(mk_shielded_tx(
+            build_spend_payload(seed, &store, &op3, 3_000, 0, 1).unwrap().encode(),
+        ));
+
+        // Sanity: coin #2's two spends share a tag; coin #3 differs; the txids differ.
+        let tag_2a = Mempool::shielded_linking_tags(&tx_2a).unwrap();
+        let tag_2b = Mempool::shielded_linking_tags(&tx_2b).unwrap();
+        let tag_3 = Mempool::shielded_linking_tags(&tx_3).unwrap();
+        assert_eq!(tag_2a, tag_2b, "same coin → same linking tag");
+        assert_ne!(tag_2a, tag_3, "different coin → different linking tag");
+        assert_ne!(tx_2a.hash(), tx_2b.hash(), "distinct bundles → distinct txids");
+
+        let mut mp = Mempool::new();
+        // First spend of coin #2 is ADMITTED — proves the shielded relaxations
+        // (empty inputs/outputs, no transparent range proof) all the way through
+        // the production add() path.
+        let h2a = mp.add(tx_2a).expect("shielded spend admitted to mempool");
+        assert!(mp.contains(&h2a));
+        // Second spend of the SAME coin is REJECTED on its linking tag.
+        assert!(
+            mp.add(tx_2b.clone()).is_err(),
+            "double-spend of the same shielded coin rejected on its linking tag"
+        );
+        // A spend of a DIFFERENT coin is admitted.
+        let h3 = mp.add(tx_3).expect("different-coin spend admitted");
+        assert!(mp.contains(&h3));
+        // Removing the first frees its tag → the previously-conflicting spend admits.
+        mp.remove(&h2a);
+        let h2b = mp.add(tx_2b).expect("tag freed after removal → re-admit");
+        assert!(mp.contains(&h2b));
+    }
+
+    #[test]
+    fn malformed_shielded_payload_rejected() {
+        // A shielded tx whose `extra` is not a decodable SparkPayload is rejected
+        // structurally — the relaxations must not admit an empty-everything tx.
+        let mut mp = Mempool::new();
+        let tx = with_floor_fee(mk_shielded_tx(vec![0xABu8; 4096]));
+        assert!(
+            mp.add(tx).is_err(),
+            "undecodable shielded payload rejected at admission"
+        );
     }
 }
 

@@ -181,6 +181,26 @@ pub fn apply_spark_payload(
     Ok(())
 }
 
+/// STATELESS linking-tag keys for a v2 payload's spend — for mempool/relay
+/// double-spend dedup on untrusted input. `Ok(vec![])` for a mint-only payload
+/// (no spend to dedup), `Ok(tags)` for a parseable spend, `Err` when the spend
+/// bundle is malformed (the caller rejects the tx at admission). Does NOT verify
+/// the spend proof, resolve a cover set, or touch the pool — two spends of the
+/// same coin reveal the same tag regardless of proof validity, which is all the
+/// mempool needs to reject a conflicting second spend. The authoritative stateful
+/// verify (cover set + pool value + `T ∉ spent_tags`) stays at block level in
+/// `verify_block_spark_v2`. Gated `libspark-ffi` (needs the real backend to parse
+/// the bundle); without it the shielded path is inert anyway.
+#[cfg(feature = "libspark-ffi")]
+pub fn spend_linking_tags(payload: &SparkPayload) -> Result<Vec<Nullifier>> {
+    let Some(sb) = &payload.spend else {
+        return Ok(Vec::new());
+    };
+    spark_connector::ffi::spend_ltags(&sb.bundle).ok_or_else(|| {
+        Error::SerializationError("spark v2 spend bundle: unparseable linking tags".into())
+    })
+}
+
 /// The transparent↔shielded value BRIDGE. A shielded tx's public
 /// `value_balance` must be backed by its transparent commitments, or value
 /// could be shielded/unshielded that the transparent side never moved. This
@@ -654,6 +674,45 @@ mod tests {
 
         // Re-verify now fails: the tag is in the spent-set (no longer unspent).
         assert!(verify_spark_payload(&store, &backend, &payload, 0).is_err());
+    }
+
+    // #172: the STATELESS mempool tag extraction (`spend_linking_tags`) must
+    // return EXACTLY the tags the STATEFUL verify (`verify_spark_payload`)
+    // reveals, so mempool double-spend dedup matches the block-level guard. Build
+    // a real spend and compare the two.
+    #[cfg(feature = "libspark-ffi")]
+    #[test]
+    fn spend_linking_tags_match_verified_tags() {
+        use super::build::{build_mint_payload, build_spend_payload};
+        use spark_connector::ffi::{cover_set_size, LibsparkBackend};
+
+        let store = SparkPoolStore::new();
+        let seed = b"ltag-match-seed";
+        let n = cover_set_size().unwrap();
+        let inputs = vec![vec![0x33u8; 36]];
+        let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
+        let (mint_payload, contexts) = build_mint_payload(seed, &values, &inputs).unwrap();
+        let mint = mint_payload.mint.as_ref().unwrap();
+        let (_total, coins) = spark_connector::ffi::verify_mint_bundle(mint).unwrap();
+        for (i, coin) in coins.iter().enumerate() {
+            let op = derive_outpoint(&inputs, i as u32);
+            store.add_coin(op, coin.clone(), contexts[0].clone(), 1).unwrap();
+        }
+        let owned_op = derive_outpoint(&inputs, 2);
+        let spend = build_spend_payload(seed, &store, &owned_op, 3_000, 0, 1).unwrap();
+
+        // Stateful verify (cover set + backend) reveals the tags.
+        let verified = verify_spark_payload(&store, &LibsparkBackend, &spend, 0).unwrap();
+        // Stateless extraction (no cover set, no proof verify) returns the same.
+        let stateless = spend_linking_tags(&spend).unwrap();
+        assert_eq!(
+            stateless, verified,
+            "stateless mempool tags must equal the verified tags"
+        );
+        assert_eq!(stateless.len(), 1, "a single-input spend reveals one tag");
+
+        // A mint-only payload has no spend → no tags.
+        assert!(spend_linking_tags(&mint_payload).unwrap().is_empty());
     }
 
     // Shield-in value conservation: Σ(authenticated mint v) must equal
