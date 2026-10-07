@@ -192,7 +192,18 @@ static NODE_MINING_ACTIVE: std::sync::atomic::AtomicBool =
 /// startup, before any block validation/PoW, so the RandomX mode default is
 /// chosen correctly. See [`NODE_MINING_ACTIVE`].
 pub fn set_node_mining_active(active: bool) {
-    NODE_MINING_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
+    let was = NODE_MINING_ACTIVE.swap(active, std::sync::atomic::Ordering::Relaxed);
+    // #244: the mode default is read only when a dataset entry is BUILT. A
+    // --mine node starts in light mode, validates the tip (caching a light
+    // entry for the epoch key), THEN flips this flag at the mine gate — so
+    // `ensure_dataset`'s fast path keeps returning that light entry and the
+    // miner hashes against the light cache until the next epoch key (2048
+    // blocks) or a restart. On the false->true transition, drop a cached
+    // light entry so the miner's first hash rebuilds it full-mem.
+    #[cfg(feature = "randomx")]
+    if active && !was {
+        randomx_cache::drop_light_entry();
+    }
 }
 
 /// Whether the built-in miner has been declared active in this process (see
@@ -471,6 +482,22 @@ mod randomx_cache {
 
     static DATASET_CACHE: RwLock<Option<DatasetEntry>> = RwLock::new(None);
 
+    /// #244: discard a cached dataset entry that is NOT full-mem, so the next
+    /// hash rebuilds it in full-mem mode. Called from `set_node_mining_active`
+    /// on the false->true transition: a --mine node that already cached a
+    /// light entry (from validating the tip before the mine gate opened) would
+    /// otherwise keep mining against that light cache for a whole epoch. A
+    /// full-mem entry is left untouched (nothing to fix).
+    pub(super) fn drop_light_entry() {
+        let mut guard = DATASET_CACHE.write();
+        if guard
+            .as_ref()
+            .is_some_and(|e| !e.flags.contains(RandomXFlag::FLAG_FULL_MEM))
+        {
+            *guard = None;
+        }
+    }
+
     /// RandomX (re)initialization backoff deadline, on a MONOTONIC clock.
     /// #142: the previous deadline was a wall-clock `AtomicU64` (`now_secs +
     /// 60`). When the system clock read before the Unix epoch, every hash/batch
@@ -534,6 +561,10 @@ mod randomx_cache {
 
     struct ThreadVm {
         key: [u8; 32],
+        // #244: a thread that already built a light VM for this epoch key must
+        // rebuild when the node flips to full-mem mining — keying on the seed
+        // alone would keep the light VM. Compared alongside `key`.
+        flags: RandomXFlag,
         vm: RandomXVM,
     }
 
@@ -614,7 +645,9 @@ mod randomx_cache {
         THREAD_VM.with(|cell| {
             let mut guard = cell.borrow_mut();
             let needs_new = match &*guard {
-                Some(tvm) => tvm.key != *seed,
+                // #244: rebuild when the seed rotates OR the mode changes
+                // (light -> full-mem when the node starts mining).
+                Some(tvm) => tvm.key != *seed || tvm.flags != flags,
                 None => true,
             };
             if needs_new {
@@ -625,7 +658,7 @@ mod randomx_cache {
                     .map_err(|e| crate::error::Error::Internal(
                         format!("per-thread RandomX VM init: {}", e)
                     ))?;
-                *guard = Some(ThreadVm { key: *seed, vm });
+                *guard = Some(ThreadVm { key: *seed, flags, vm });
             }
             // INVARIANT: the block above set `*guard = Some(ThreadVm { .. })`
             // and no code path releases the guard between there and here.
@@ -683,7 +716,8 @@ mod randomx_cache {
         THREAD_VM.with(|cell| {
             let mut guard = cell.borrow_mut();
             let needs_new = match &*guard {
-                Some(tvm) => tvm.key != *seed,
+                // #244: rebuild on seed rotation OR mode change (see compute_hash).
+                Some(tvm) => tvm.key != *seed || tvm.flags != flags,
                 None => true,
             };
             if needs_new {
@@ -692,7 +726,7 @@ mod randomx_cache {
                     .map_err(|e| crate::error::Error::Internal(
                         format!("per-thread RandomX VM init: {}", e)
                     ))?;
-                *guard = Some(ThreadVm { key: *seed, vm });
+                *guard = Some(ThreadVm { key: *seed, flags, vm });
             }
             let tvm = guard.as_ref()
                 .expect("BUG: thread VM guard is None immediately after being set — invariant broken by refactor");

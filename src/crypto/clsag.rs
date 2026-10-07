@@ -58,7 +58,7 @@
 //!   `simple_ring_verify_rejects_identity_ring_member`,
 //!   `simple_ring_verify_rejects_non_canonical_response_scalar`,
 //!   `simple_ring_verify_rejects_zero_challenge_c0`, `test_simple_ring_wrong_message`.
-//! - **§7 `clsag_hash` (challenge / domain separation)** — INVARIANT: every per-round
+//! - **§7 `clsag_hash_base` / `clsag_hash_round` (challenge / domain separation)** — INVARIANT: every per-round
 //!   challenge is domain-tagged (`CLSAG_`) and the ring size and message are length-framed,
 //!   so the transcript is unambiguous and the message is bound into the challenge.
 //!   THREAT: cross-instance / boundary-shift collision letting a signature be replayed
@@ -148,16 +148,24 @@ impl fmt::Debug for ClsagSignature {
     }
 }
 
-/// Aggregate hash for CLSAG
-fn clsag_hash(
+/// Fixed prefix of the CLSAG aggregate hash, absorbed once.
+///
+/// #246: every round of the sign/verify loop hashes the SAME domain tag, ring
+/// size, every `(P_i, C_i)` pair, the key image, the commitment image, and the
+/// message — only `L` and `R` vary. Re-absorbing all of that per ring member
+/// made the loop O(n²) (and re-compressed every ring point n times). This
+/// builds the invariant prefix into a `Sha3_512` state once; the loop clones it
+/// and absorbs only `L` and `R` per round (see [`clsag_hash_round`]). The byte
+/// sequence absorbed is identical to the old per-call hash, so the scalar
+/// output is bit-identical and no hard fork is involved — the KAT in the tests
+/// covers it.
+fn clsag_hash_base(
     prefix: &[u8],
     ring: &[RingMember],
     key_image: &KeyImage,
     commitment_image: &PublicPoint,
     message: &[u8],
-    l: &RistrettoPoint,
-    r: &RistrettoPoint,
-) -> Scalar {
+) -> Sha3_512 {
     let mut hasher = Sha3_512::new();
     hasher.update(b"CLSAG_");
     hasher.update(prefix);
@@ -183,12 +191,19 @@ fn clsag_hash(
     hasher.update((message.len() as u64).to_le_bytes());
     hasher.update(message);
 
-    // L and R values
+    hasher
+}
+
+/// Finish a CLSAG aggregate hash for one round: clone the precomputed
+/// [`clsag_hash_base`] state and absorb only the round's `L` and `R`. #246.
+#[inline]
+fn clsag_hash_round(base: &Sha3_512, l: &RistrettoPoint, r: &RistrettoPoint) -> Scalar {
+    let mut hasher = base.clone();
     hasher.update(l.compress().as_bytes());
     hasher.update(r.compress().as_bytes());
-
     Scalar::from_bytes_mod_order_wide(&hasher.finalize().into())
 }
+
 
 /// Aggregation-coefficient hash for CLSAG.
 ///
@@ -232,7 +247,7 @@ fn clsag_agg_hash(
 /// Each is an independent random-oracle evaluation over the full statement
 /// (see [`clsag_agg_hash`]); `mu_c` is NOT derived from `mu_p`. The message is
 /// intentionally not bound here — it is bound in the per-round challenge
-/// ([`clsag_hash`]) exactly as in Monero CLSAG.
+/// ([`clsag_hash_round`]) exactly as in Monero CLSAG.
 fn compute_aggregate_coefficients(
     ring: &[RingMember],
     key_image: &KeyImage,
@@ -343,17 +358,19 @@ pub fn clsag_sign<R: RngCore + CryptoRng>(
     let l_real = alpha.as_scalar() * generator();
     let r_real = alpha.as_scalar() * hp;
 
+    // #246: absorb the loop-invariant prefix (domain tag, ring, images,
+    // message) once; each round below clones it and hashes only L and R.
+    let hash_base = clsag_hash_base(b"c", ring, &key_image, &commitment_image, message);
+
     // Start the challenge chain
     let mut challenges = vec![Scalar::ZERO; n];
-    challenges[(real_index + 1) % n] = clsag_hash(
-        b"c",
-        ring,
-        &key_image,
-        &commitment_image,
-        message,
-        &l_real,
-        &r_real,
-    );
+    challenges[(real_index + 1) % n] = clsag_hash_round(&hash_base, &l_real, &r_real);
+
+    // #246: `mu_p * I + mu_c * D` is loop-invariant (matches the hoist the
+    // verifier already does at `aggregate_key_image`). Compute it once rather
+    // than per ring member. Bit-identical.
+    let aggregate_key_image =
+        mu_p * key_image.as_point().as_point() + mu_c * commitment_image.as_point();
 
     // Compute challenges for the rest of the ring
     for offset in 1..n {
@@ -366,20 +383,9 @@ pub fn clsag_sign<R: RngCore + CryptoRng>(
         let l_i = responses[i] * generator() + challenges[i] * aggregate_keys[i];
 
         // R_i = s_i * Hp(P_i) + c_i * (I + mu_c * D)
-        // Aggregate key image: mu_p * I + mu_c * D
-        let aggregate_key_image =
-            mu_p * key_image.as_point().as_point() + mu_c * commitment_image.as_point();
         let r_i = responses[i] * hp_i + challenges[i] * aggregate_key_image;
 
-        challenges[next] = clsag_hash(
-            b"c",
-            ring,
-            &key_image,
-            &commitment_image,
-            message,
-            &l_i,
-            &r_i,
-        );
+        challenges[next] = clsag_hash_round(&hash_base, &l_i, &r_i);
     }
 
     // Compute the real response
@@ -525,6 +531,16 @@ pub fn clsag_verify(
     let aggregate_key_image = mu_p * signature.key_image.as_point().as_point()
         + mu_c * signature.commitment_image.as_point();
 
+    // #246: absorb the loop-invariant prefix once; the loop clones it and
+    // hashes only L and R per round (was O(n²) re-hashing + re-compression).
+    let hash_base = clsag_hash_base(
+        b"c",
+        ring,
+        &signature.key_image,
+        &signature.commitment_image,
+        message,
+    );
+
     // Verify the challenge chain by computing all challenges and checking closure
     // The ring signature forms a closed loop: c[1] -> c[2] -> ... -> c[n-1] -> c[0] -> c[1]
     let mut current_challenge = c1;
@@ -542,15 +558,7 @@ pub fn clsag_verify(
         // R_idx = s_idx * Hp(P_idx) + c_idx * J where J = mu_p * I + mu_c * D
         let r_idx = responses[idx] * hp_idx + current_challenge * aggregate_key_image;
 
-        current_challenge = clsag_hash(
-            b"c",
-            ring,
-            &signature.key_image,
-            &signature.commitment_image,
-            message,
-            &l_idx,
-            &r_idx,
-        );
+        current_challenge = clsag_hash_round(&hash_base, &l_idx, &r_idx);
     }
 
     // After going through all n elements, the challenge chain should close back to c1
@@ -995,17 +1003,16 @@ mod tests {
 
         let l_real = alpha * generator();
         let r_real = alpha * hp;
+        let hash_base = clsag_hash_base(b"c", &ring, &forged_ki, &forged_d, message);
         let mut challenges = vec![Scalar::ZERO; n];
-        challenges[(real_index + 1) % n] =
-            clsag_hash(b"c", &ring, &forged_ki, &forged_d, message, &l_real, &r_real);
+        challenges[(real_index + 1) % n] = clsag_hash_round(&hash_base, &l_real, &r_real);
         for offset in 1..n {
             let i = (real_index + offset) % n;
             let next = (i + 1) % n;
             let hp_i = hash_to_point(&ring[i].public_key.to_bytes());
             let l_i = responses[i] * generator() + challenges[i] * aggregate_keys[i];
             let r_i = responses[i] * hp_i + challenges[i] * aggregate_key_image;
-            challenges[next] =
-                clsag_hash(b"c", &ring, &forged_ki, &forged_d, message, &l_i, &r_i);
+            challenges[next] = clsag_hash_round(&hash_base, &l_i, &r_i);
         }
         responses[real_index] = alpha - challenges[real_index] * w;
 
