@@ -517,8 +517,14 @@ pub(super) async fn handle_connection(
             .get(&peer_id)
             .is_some_and(|existing| !Arc::ptr_eq(&existing.connection_token, &info.connection_token));
         if is_duplicate {
-            let our_key = *identity.public_bytes();
-            let their_key = peer_id; // == remote static key for encrypted peers
+            // #245: compare like with like. `peer_id` is blake3(remote static
+            // key) (see NodeIdentity::peer_id), so our side of the tie-break must
+            // be our OWN peer_id, not the raw X25519 public key — otherwise each
+            // end ranks a raw key against a hash, disagrees on the survivor, and
+            // the #190 flap persists (duplicate connections torn down every
+            // 50-60s). Both ends now hash both static keys and converge.
+            let our_key = identity.peer_id();
+            let their_key = peer_id; // == blake3(remote static key) for encrypted peers
             let keep_this = connection_wins_duplicate_tiebreak(outbound, &our_key, &their_key);
             if !keep_this {
                 debug!(
@@ -696,6 +702,63 @@ mod tests {
                 assert!(a_keeps_ba && b_keeps_ba, "larger key kb → B→A survives");
             }
         }
+    }
+
+    /// #245: the two ends must feed the tie-break the SAME kind of key.
+    /// `their_key` is the remote `peer_id` = blake3(remote static key), so our
+    /// side must be our OWN `peer_id`, not the raw X25519 `public_bytes()`. The
+    /// old code compared `public_bytes()` (raw) against the peer's hashed id, so
+    /// each end ranked values from different spaces and could disagree on the
+    /// survivor — the #190 flap. This builds real identities, finds a pair for
+    /// which the OLD mapping diverges, and asserts the FIXED mapping (peer_id on
+    /// both sides) converges for that exact pair.
+    #[test]
+    fn duplicate_tiebreak_uses_peer_id_not_raw_key_245() {
+        use crate::network::noise::NodeIdentity;
+
+        // Does a given (our, their) mapping make both ends agree on one survivor?
+        let converges = |a_our: &[u8; 32], a_their: &[u8; 32], b_our: &[u8; 32], b_their: &[u8; 32]| {
+            // A's view: A→B outbound, B→A inbound.
+            let a_keeps_ab = connection_wins_duplicate_tiebreak(true, a_our, a_their);
+            let a_keeps_ba = connection_wins_duplicate_tiebreak(false, a_our, a_their);
+            // B's view: B→A outbound, A→B inbound.
+            let b_keeps_ba = connection_wins_duplicate_tiebreak(true, b_our, b_their);
+            let b_keeps_ab = connection_wins_duplicate_tiebreak(false, b_our, b_their);
+            (a_keeps_ab ^ a_keeps_ba)
+                && (b_keeps_ab ^ b_keeps_ba)
+                && a_keeps_ab == b_keeps_ab
+                && a_keeps_ba == b_keeps_ba
+        };
+
+        // Find a pair whose raw-key ordering and hashed-id ordering disagree, so
+        // the OLD mapping (raw our_key vs hashed their_key) diverges.
+        let mut found_buggy_divergence = false;
+        for _ in 0..256 {
+            let a = NodeIdentity::generate();
+            let b = NodeIdentity::generate();
+            let (a_pub, b_pub) = (*a.public_bytes(), *b.public_bytes());
+            let (a_id, b_id) = (a.peer_id(), b.peer_id());
+            if a_id == b_id {
+                continue; // astronomically unlikely; skip degenerate case
+            }
+
+            // OLD (buggy): our side = raw public_bytes, their side = hashed id.
+            let old_converges = converges(&a_pub, &b_id, &b_pub, &a_id);
+            // NEW (fixed): both sides = peer_id (what the caller now passes).
+            let new_converges = converges(&a_id, &b_id, &b_id, &a_id);
+
+            // The fix must ALWAYS converge (shared ordering on peer_id).
+            assert!(new_converges, "fixed mapping (peer_id both ends) must converge");
+
+            if !old_converges {
+                found_buggy_divergence = true;
+                break;
+            }
+        }
+        assert!(
+            found_buggy_divergence,
+            "expected to observe the #190/#245 divergence under the old raw-vs-hashed mapping"
+        );
     }
 
     /// Equal keys (self-connection) must not "win" either side → dropped.
