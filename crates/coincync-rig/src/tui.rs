@@ -39,7 +39,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
     widgets::{
@@ -326,6 +326,7 @@ fn draw(f: &mut Frame, metrics: &MetricsState, logs: &VecDeque<String>, ui: &UiS
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Length(4)); // stat cards
+    constraints.push(Constraint::Length(1)); // mesh / chain health strip
     constraints.push(Constraint::Length(3)); // ETA gauge
                                              // Log pane: only push the constraint when the user has it
                                              // visible. Previously this branch fell through to
@@ -360,6 +361,8 @@ fn draw(f: &mut Frame, metrics: &MetricsState, logs: &VecDeque<String>, ui: &UiS
         idx += 1;
     }
     draw_stat_cards(f, chunks[idx], metrics, theme);
+    idx += 1;
+    draw_mesh_strip(f, chunks[idx], metrics, theme);
     idx += 1;
     draw_eta_gauge(f, chunks[idx], metrics, theme, ui);
     idx += 1;
@@ -804,6 +807,59 @@ fn draw_stat_cards(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Th
     }
 }
 
+// ─── Mesh / chain-health strip ───────────────────────────────────────
+
+/// One-line "am I actually mining?" strip: peer count + the gate decision
+/// (green "mining" vs amber "waiting for mesh" — mining needs `peers >= 3`),
+/// plus node height, tip-age, and RPC ping. The peer gate is the #1 reason a
+/// freshly-started rig sits at 0 blocks, so it gets its own always-visible line.
+fn draw_mesh_strip(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Theme) {
+    let peers = metrics.peers.load(Ordering::Relaxed);
+    let ready = metrics.mining_ready.load(Ordering::Relaxed);
+    let tip_age = metrics.tip_age_secs.load(Ordering::Relaxed);
+    let ping = metrics.rpc_latency_ms.load(Ordering::Relaxed);
+    let height = metrics.current_template_height.load(Ordering::Relaxed);
+
+    let (status_txt, status_color, mark) = if ready {
+        ("mining", theme.success, "✓")
+    } else if peers >= 3 {
+        ("syncing / gated", theme.warn, "✓")
+    } else {
+        ("waiting for mesh (need 3)", theme.warn, "✗")
+    };
+
+    let dim = Style::default().fg(theme.muted);
+    let sep = Span::styled("   ·   ", Style::default().fg(theme.border));
+    let spans = vec![
+        Span::styled(
+            " MESH ",
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("peers ", dim),
+        Span::styled(
+            format!("{peers} {mark}"),
+            Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  {status_txt}"), Style::default().fg(status_color)),
+        sep.clone(),
+        Span::styled("node ", dim),
+        Span::styled(format!("h={height}"), Style::default().fg(theme.body)),
+        sep.clone(),
+        Span::styled("tip-age ", dim),
+        Span::styled(
+            if tip_age == 0 { "—".to_string() } else { format_duration(tip_age) },
+            Style::default().fg(if tip_age > 300 { theme.warn } else { theme.body }),
+        ),
+        sep,
+        Span::styled("ping ", dim),
+        Span::styled(
+            if ping == 0 { "—".to_string() } else { format!("{ping}ms") },
+            Style::default().fg(theme.body),
+        ),
+    ];
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 // ─── Worker-thread heatmap ───────────────────────────────────────────
 
 /// Render a one-line heatmap strip showing each worker thread's current
@@ -956,31 +1012,97 @@ fn draw_eta_gauge(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &The
 
 // ─── Log scrollback ──────────────────────────────────────────────────
 
+/// Classify a log line into a colored, ICON-tagged category box (CoinCync's
+/// take on XMRig's left-column log tags — same at-a-glance scannability, but
+/// with themed glyphs so it reads as ours). Keyword-matched on the message; the
+/// category colors are deliberately independent of the active theme so they stay
+/// distinct from each other across themes. Returns `(icon, label, box color)`.
+fn log_tag(level: &str, rest: &str) -> (&'static str, &'static str, Color) {
+    if level == "ERROR" {
+        return ("✗", "ERR", Color::Rgb(216, 99, 99)); // red
+    }
+    if level == "WARN" {
+        return ("▲", "WARN", Color::Rgb(228, 175, 78)); // amber
+    }
+    let l = rest.to_ascii_lowercase();
+    if l.contains("block found") || l.contains("block accepted") || l.contains("blocks_found") {
+        ("★", "BLOCK", Color::Rgb(127, 184, 121)) // green — struck gold
+    } else if l.contains("randomx") || l.contains("dataset") || l.contains("cache") {
+        ("⬡", "RX", Color::Rgb(180, 139, 224)) // violet — RandomX
+    } else if l.contains("speed")
+        || l.contains("h/s")
+        || l.contains("hashrate")
+        || l.contains("nonce")
+        || l.contains("mining loop")
+        || l.contains("miner")
+    {
+        ("⛏", "MINE", Color::Rgb(150, 120, 220)) // purple — the dig
+    } else if l.contains("new job")
+        || l.contains("template")
+        || l.contains("submit")
+        || l.contains("daemon")
+        || l.contains("rpc")
+        || l.contains("http")
+    {
+        ("⇄", "NET", Color::Rgb(111, 179, 224)) // blue — talking to the node
+    } else if l.contains("sync") || l.contains("mesh") || l.contains("peer") {
+        ("◈", "MESH", Color::Rgb(86, 194, 180)) // teal — the mesh gate
+    } else {
+        ("◉", "INFO", Color::Rgb(150, 160, 158)) // muted
+    }
+}
+
 fn draw_logs(f: &mut Frame, area: Rect, logs: &VecDeque<String>, theme: &Theme) {
     let visible = (area.height as usize).saturating_sub(2);
-    let start = logs.len().saturating_sub(visible);
-    let items: Vec<ListItem> = logs
+
+    // Collapse CONSECUTIVE same-category lines into a single row carrying the
+    // latest message plus a `(×N)` repeat count — so a burst (e.g. regtest
+    // mining a block a second, or a run of new-job polls) reads as
+    // `★ BLOCK  height=890 … (×7)` instead of flooding the pane and scrolling
+    // every other category off screen. Done over the whole buffer; the last
+    // `visible` collapsed rows are shown. (icon, tag, color, latest msg, count)
+    let mut rows: Vec<(&'static str, &'static str, Color, String, usize)> = Vec::new();
+    for l in logs.iter() {
+        let level = l.split_whitespace().next().unwrap_or("");
+        let rest = l.get(level.len()..).unwrap_or("").trim_start();
+        let (icon, tag, color) = log_tag(level, rest);
+        // Strip the tracing target (first token) so the line reads as a clean
+        // message — the colored box carries the category, not a `::` path.
+        let msg = rest
+            .split_once(char::is_whitespace)
+            .map(|(_, m)| m.trim_start())
+            .unwrap_or(rest)
+            .to_string();
+        match rows.last_mut() {
+            Some(last) if last.1 == tag => {
+                last.3 = msg;
+                last.4 += 1;
+            }
+            _ => rows.push((icon, tag, color, msg, 1)),
+        }
+    }
+    let start = rows.len().saturating_sub(visible);
+    let items: Vec<ListItem> = rows
         .iter()
         .skip(start)
-        .map(|l| {
-            let level = l.split_whitespace().next().unwrap_or("");
-            let (glyph, color) = match level {
-                "ERROR" => ('✗', theme.danger),
-                "WARN" => ('▲', theme.warn),
-                "INFO" => ('◉', theme.accent),
-                "DEBUG" => ('◌', theme.muted),
-                "TRACE" => ('·', theme.muted),
-                _ => (' ', theme.body),
+        .map(|(icon, tag, color, msg, count)| {
+            let body = if *count > 1 {
+                format!("{msg}  (×{count})")
+            } else {
+                msg.clone()
             };
-            let rest = l.get(level.len()..).unwrap_or("").trim_start();
+            // Filled colored tag box with a CoinCync icon, label padded to a
+            // uniform width so the boxes line up down the left column.
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!(" {glyph} "),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    format!(" {icon} {tag:<5}"),
+                    Style::default()
+                        .bg(*color)
+                        .fg(Color::Rgb(18, 17, 15))
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(level.to_string(), Style::default().fg(color)),
-                Span::raw("  "),
-                Span::styled(rest.to_string(), Style::default().fg(theme.body)),
+                Span::raw(" "),
+                Span::styled(body, Style::default().fg(theme.body)),
             ]))
         })
         .collect();
@@ -1051,7 +1173,35 @@ fn draw_blocks_timeline_and_ticker(
     ));
     f.render_widget(Paragraph::new(Line::from(row1)), split[0]);
 
-    // Ticker — slowly scrolling stat line. Compose from current state.
+    // Ticker — a DIGGING MOLE on the left (CoinCync's "underground" mascot),
+    // and a slowly-scrolling stat line on the right.
+    let trow = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(8), Constraint::Min(0)])
+        .split(split[1]);
+
+    // Two-frame dig animation; the mole grins for a few seconds after a fresh
+    // block (it just struck gold).
+    let just_found = metrics
+        .recent_block_finds(now)
+        .iter()
+        .any(|&t| now.saturating_sub(t) < 8);
+    let mole = if just_found {
+        "(•ᴗ•)⛏"
+    } else if (ui.started.elapsed().as_millis() / 400) % 2 == 0 {
+        "(•ω•)⛏"
+    } else {
+        "(•ω•)╱"
+    };
+    let mole_color = if just_found { theme.success } else { theme.accent };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {mole}"),
+            Style::default().fg(mole_color).add_modifier(Modifier::BOLD),
+        ))),
+        trow[0],
+    );
+
     let height = metrics.current_template_height.load(Ordering::Relaxed);
     let net = metrics.network_hashrate_hps.load(Ordering::Relaxed);
     let mine = metrics.current_hashrate_hps.load(Ordering::Relaxed);
@@ -1070,19 +1220,19 @@ fn draw_blocks_timeline_and_ticker(
         .map(|s| format!("solo ~{}", format_duration(s)))
         .unwrap_or_else(|| "solo ~—".to_string());
     let raw = format!(
-        "  ◉ {} · tip h{} · net {} · share {} · {} · {} lifetime hashes · 0% dev fee · no telemetry · home miner · cyncthub.xyz   ",
+        "the mole digs alone — any block is yours · {} · tip h{} · net {} · share {} · {} · {} lifetime hashes · 0% dev fee · no telemetry · cyncthub.xyz   ",
         mining_status, height, fmt_hps(net), share, eta, lifetime,
     );
     // Scroll by area.width per frame; cycle the string.
     let scroll = (ui.started.elapsed().as_millis() / 200) as usize % raw.chars().count().max(1);
-    let visible_w = split[1].width as usize;
+    let visible_w = trow[1].width as usize;
     let chars: Vec<char> = raw.chars().chain(raw.chars()).chain(raw.chars()).collect();
     let view: String = chars.into_iter().skip(scroll).take(visible_w).collect();
     let p = Paragraph::new(Line::from(Span::styled(
         view,
         Style::default().fg(theme.muted),
     )));
-    f.render_widget(p, split[1]);
+    f.render_widget(p, trow[1]);
 }
 
 fn fmt_hps(h: u64) -> String {
@@ -1139,10 +1289,13 @@ fn draw_splash(f: &mut Frame, ui: &UiState) {
     let total = SPLASH_SECS;
     let progress = (elapsed / total).clamp(0.0, 1.0);
 
-    // Typewriter the brand mark. 9 chars of `COINCYNC `; reveal one
-    // char per ~250ms.
+    // Typewriter the 8-char brand mark `COINCYNC`, finishing by ~60% of the
+    // splash and HOLDING the full word for the rest — otherwise the last letter
+    // only appears at the final frame and the splash reads "COINCYN". `ceil` so
+    // no letter lags a frame behind.
     let chars: Vec<char> = "COINCYNC".chars().collect();
-    let visible = ((progress * chars.len() as f32) as usize).min(chars.len());
+    let reveal = (progress / 0.6).clamp(0.0, 1.0);
+    let visible = ((reveal * chars.len() as f32).ceil() as usize).min(chars.len());
     let revealed: String = chars.iter().take(visible).collect();
     let pending: String = chars.iter().skip(visible).map(|_| ' ').collect();
 
@@ -1229,7 +1382,7 @@ fn draw_help_modal(f: &mut Frame, theme: &Theme) {
     let lines = vec![
         Line::from(""),
         row("q / Esc", "quit (prints session summary)"),
-        row("t      ", "cycle theme · Brass / Moon / Mono"),
+        row("t      ", "cycle theme (dark themes only)"),
         row("p      ", "pause / resume mining"),
         row("l      ", "toggle log pane"),
         row("c      ", "snapshot dashboard to /tmp"),

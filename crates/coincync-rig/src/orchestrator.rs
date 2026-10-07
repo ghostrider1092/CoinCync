@@ -162,6 +162,11 @@ pub async fn run_solo(
                         m.network_hashrate_hps
                             .store(net, std::sync::atomic::Ordering::Relaxed);
                     }
+                    // Mesh health for the TUI's peer gate (same key the mining
+                    // gate below reads).
+                    if let Some(peers) = info.get("peer_count").and_then(|v| v.as_u64()) {
+                        m.peers.store(peers, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 last_get_info = Some(Instant::now());
             }
@@ -295,6 +300,11 @@ pub async fn run_solo(
                         };
                         cached_synced = ok;
                         last_sync_check = Some(Instant::now());
+                        // Surface the gate decision + mesh size to the TUI.
+                        if let Some(m) = metrics.as_ref() {
+                            m.mining_ready.store(ok, std::sync::atomic::Ordering::Relaxed);
+                            m.peers.store(peers, std::sync::atomic::Ordering::Relaxed);
+                        }
                         (ok, reason)
                     }
                     Err(e) => {
@@ -372,7 +382,7 @@ pub async fn run_solo(
             }
         };
 
-        let height = header.height;
+        let height = header.height.as_u64();
         if let Some(m) = metrics.as_ref() {
             m.current_template_height
                 .store(height, std::sync::atomic::Ordering::Relaxed);
