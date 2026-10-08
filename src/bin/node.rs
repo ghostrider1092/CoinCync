@@ -1945,6 +1945,8 @@ async fn start_node(
                                             | coincync::chain::BlockStatus::AcceptedReorg { .. }
                                     );
                                     if accepted {
+                                        coincync::mining::MINER_BLOCKS_FOUND
+                                            .fetch_add(1, Ordering::Relaxed);
                                         let update = p2p_m.next_chain_update();
                                         p2p_m.set_chain_state(update).await;
                                         if let Err(e) = p2p_m.broadcast_block(&b).await {

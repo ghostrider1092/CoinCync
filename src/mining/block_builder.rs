@@ -209,6 +209,10 @@ pub fn search_nonce(
                     &tx_root,
                     height,
                 ) {
+                    // Observability: count every hash actually computed so
+                    // `get_mining_live` can report hashes_total / hashrate.
+                    crate::mining::MINER_HASHES_TOTAL
+                        .fetch_add(hashes.len() as u64, Ordering::Relaxed);
                     for (k, h) in hashes.iter().enumerate() {
                         if h.meets_difficulty(&target) {
                             let _ = tx.send(batch[k]);
