@@ -649,6 +649,23 @@ pub(super) async fn handle_headers(
                             // (The write channel is reaped when the connection task
                             // observes the peer is gone.)
                             peers.remove(&peer_id);
+                            // Purge the dropped peer's advertised height/work from
+                            // ChainSync at the authoritative drop point. A banned
+                            // header peer typically over-claimed on an INCOMPATIBLE
+                            // chain (genesis/anchor mismatch — e.g. a pre-reset node
+                            // advertising a higher tip than our post-reset network
+                            // has). If its height stays latched in `peer_heights`,
+                            // `true_best_height()` is pinned to that phantom target
+                            // forever: the node sits at the real tip logging
+                            // "No progress ... (target <phantom>)" and never flips
+                            // `synced` — recoverable only by restart. The per-tick
+                            // `retain_connected_peers` reconcile can lag this drop
+                            // (it keys off the connection set, reaped asynchronously
+                            // by the connection task), so purge here rather than wait
+                            // for it. Safe: no ChainSync lock is held across the
+                            // off-lock header validation above, and this branch
+                            // returns before the later write-lock section.
+                            sync.write().await.remove_peer_height(&peer_id);
                             warn!(
                                 "Dropped banned peer {:?} after header-validation failure: {}",
                                 &peer_id[..4],
@@ -827,5 +844,68 @@ mod handle_headers_tests {
             .unwrap();
 
         assert!(scorer.read().await.get(&addr).unwrap().reputation < 100);
+    }
+
+    #[tokio::test]
+    async fn banned_header_peer_height_is_purged_from_sync_target() {
+        // Regression guard for the phantom IBD-target bug: when a peer's headers
+        // fail validation and it crosses the ban threshold, the drop path must
+        // ALSO purge the peer's advertised height from ChainSync. Dropping it
+        // only from the peer map (the original 64a6348 behavior) left its height
+        // latched in `peer_heights`, pinning `true_best_height()` to a phantom
+        // target forever — the node sat at the real tip logging "No progress …
+        // (target <phantom>)" and never flipped `synced`, recoverable only by a
+        // restart. This exercises the full dispatch path, so it also catches a
+        // future refactor that forgets the `remove_peer_height` call.
+        let peer = [20u8; 32];
+        let addr = addr_for(31010);
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr, false));
+
+        let chain = genesis_chain();
+        // Fails validation at the very first check (wrong network magic), so no
+        // RandomX work is needed to produce a bannable reject.
+        let genesis = chain.get_block_by_height(0).expect("genesis block");
+        let mut bad = genesis.header.clone();
+        bad.network_magic = [0xAB, 0xAB, 0xAB, 0xAB];
+        bad.height = crate::primitives::Height::new(1);
+        bad.prev_hash = genesis.hash();
+
+        // The peer advertised a high tip: it IS the sync target until dropped.
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let nonce = {
+            let mut g = sync.write().await;
+            g.update_peer_height_for(peer, 5_000);
+            g.begin_headers_request(peer, 123).expect("nonce issued")
+        };
+        assert_eq!(
+            sync.read().await.true_best_height(),
+            5_000,
+            "peer height should drive the target before the ban"
+        );
+
+        // Pre-arm the scorer so the validation failure trips should_ban().
+        let scorer = RwLock::new(PeerScorer::new());
+        scorer
+            .write()
+            .await
+            .get_or_create(addr)
+            .record_misbehavior(crate::network::scoring::MisbehaviorType::InvalidBlockPoW);
+
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: vec![bad],
+            nonce,
+        })
+        .unwrap();
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        assert!(!peers.contains_key(&peer), "banned peer must be dropped");
+        assert_eq!(
+            sync.read().await.true_best_height(),
+            0,
+            "phantom target must be purged when the peer is banned"
+        );
     }
 }

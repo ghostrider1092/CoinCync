@@ -103,21 +103,29 @@ fn test_different_types_independent() {
 fn test_window_reset() {
     let mut tracker = PeerMessageRateTracker::new();
 
-    // Exceed the limit
-    for _ in 0..51 {
+    // Fill exactly to the limit (50): none flagged yet.
+    for _ in 0..50 {
         tracker.record(MSG_VERSION);
     }
+    // The 51st exceeds the limit and is flagged. NOTE: the tracker flags a
+    // type at most ONCE per window (scoring.rs `flagged` set) — so only this
+    // FIRST over-limit record returns true...
     assert!(
         tracker.record(MSG_VERSION),
-        "Should be flagged after exceeding limit"
+        "First over-limit record should be flagged"
+    );
+    // ...and a further over-limit record in the SAME window is not re-flagged.
+    assert!(
+        !tracker.record(MSG_VERSION),
+        "Over-limit record should not be re-flagged within the same window"
     );
 
-    // Wait for window to expire (tracker uses 10-second window internally;
-    // we simulate by sleeping). In production this is ~10s but for tests
-    // we just verify the API contract.
+    // Wait for the 10-second window to expire (tracker uses a 10s window
+    // internally; we exercise the real wall-clock reset path here).
     std::thread::sleep(std::time::Duration::from_secs(11));
 
-    // After window reset, messages should be accepted again
+    // After window reset, both the counter and the flag clear, so messages
+    // are accepted (and unflagged) again.
     assert!(
         !tracker.record(MSG_VERSION),
         "Should accept messages after window reset"
