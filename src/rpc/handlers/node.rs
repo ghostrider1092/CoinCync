@@ -145,6 +145,20 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 // Sync + P2P
                 "synced":                  synced,
                 "is_synced":               synced, // back-compat alias
+                "blocks_behind":           target_height.saturating_sub(height),
+                // Dig-Out #3: `true` when we are more than a finality window
+                // (CHECKPOINT_INTERVAL) behind the best-known height and not
+                // synced — a gap beyond max_reorg_depth / the finality floor
+                // (tip − CHECKPOINT_INTERVAL) that cannot self-heal by reorg.
+                // During initial sync this is expected and clears as the node
+                // catches up; if it PERSISTS while `height` does not advance
+                // across polls, the node is wedged on a minority fork and needs
+                // an operator reset-to-network. Mirrors the `[dig-out]
+                // FORK-STUCK` node log line so the rig MESH strip + monitors
+                // light up.
+                "fork_stuck":              !synced
+                    && target_height.saturating_sub(height)
+                        > crate::constants::CHECKPOINT_INTERVAL,
                 "peer_count":              peer_count,
                 // Sustained mesh-floor state (observational). See crate::vitals
                 // + docs/design/runtime-mesh-floor.md.

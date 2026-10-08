@@ -1002,6 +1002,32 @@ impl PeerScorer {
         self.banned.remove(addr);
     }
 
+    /// Dig-Out (fork recovery): clear EVERY peer's `GetBlocks` ban and reset its
+    /// `consecutive_empty_blocks` counter. Returns how many peers were actually
+    /// unbanned (for logging).
+    ///
+    /// Why this exists: a node on a minority fork requests block spans its peers
+    /// don't have → empty replies → after `EMPTY_BLOCKS_BAN_THRESHOLD` each peer
+    /// is GetBlocks-banned for `EMPTY_BLOCKS_BAN_DURATION_SECS` (1 h). Once ALL
+    /// peers are banned, `live_block_peers` returns empty and the sync driver
+    /// loops `[IBD] No live peers for GetBlocks` forever — no existing path clears
+    /// these bans (`unban` only touches the full-disconnect set). The sync
+    /// driver's emergency-recovery tier calls this when it is stuck-but-not-synced
+    /// with connected peers, giving the node a clean shot at the (correctly
+    /// queued) majority hashes so a shallow fork can reorg instead of wedging.
+    /// Observed live on the testnet seed 2026-10-07 (wedged 35 h at height 107).
+    pub fn clear_get_blocks_bans(&mut self) -> usize {
+        let mut cleared = 0usize;
+        for score in self.scores.values_mut() {
+            if score.get_blocks_banned_until.is_some() {
+                cleared += 1;
+            }
+            score.get_blocks_banned_until = None;
+            score.consecutive_empty_blocks = 0;
+        }
+        cleared
+    }
+
     /// Get top N peers for block download
     pub fn top_peers_for_download(&self, n: usize) -> Vec<SocketAddr> {
         let mut peers: Vec<_> = self
@@ -1325,6 +1351,34 @@ mod tests {
             score.get_blocks_banned_until.is_none(),
             "ban field cleared on expiry"
         );
+    }
+
+    #[test]
+    fn dig_out_clear_get_blocks_bans_unbans_all_peers() {
+        // Dig-Out: a node wedged behind a minority fork ends up with EVERY peer
+        // GetBlocks-banned; clear_get_blocks_bans() must un-ban them all (and
+        // reset the empty counters) so sync can retry the majority hashes.
+        let mut scorer = PeerScorer::new();
+        let a: SocketAddr = "1.2.3.4:28080".parse().unwrap();
+        let b: SocketAddr = "5.6.7.8:28080".parse().unwrap();
+        for addr in [a, b] {
+            let s = scorer.get_or_create(addr);
+            for _ in 0..EMPTY_BLOCKS_BAN_THRESHOLD {
+                s.record_empty_blocks_response();
+            }
+            assert!(s.is_get_blocks_banned(), "peer banned after threshold empties");
+        }
+
+        let cleared = scorer.clear_get_blocks_bans();
+        assert_eq!(cleared, 2, "both banned peers reported cleared");
+
+        for addr in [a, b] {
+            let s = scorer.get_or_create(addr);
+            assert!(!s.is_get_blocks_banned(), "peer no longer GetBlocks-banned");
+            assert_eq!(s.consecutive_empty_blocks, 0, "empty-counter reset");
+        }
+        // Idempotent: nothing left to clear.
+        assert_eq!(scorer.clear_get_blocks_bans(), 0);
     }
 
     #[test]
