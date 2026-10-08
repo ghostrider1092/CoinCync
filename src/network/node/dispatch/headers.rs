@@ -623,11 +623,38 @@ pub(super) async fn handle_headers(
                         error.reason.as_str(),
                     );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
-                        scorer
-                            .write()
-                            .await
-                            .get_or_create(addr)
-                            .record_misbehavior(error.offense);
+                        let banned = {
+                            let mut guard = scorer.write().await;
+                            let score = guard.get_or_create(addr);
+                            score.record_misbehavior(error.offense);
+                            score.should_ban()
+                        };
+                        // A peer whose headers fail validation and crosses the ban
+                        // threshold must be ACTIVELY DISCONNECTED, not merely
+                        // score-banned — otherwise the sync driver keeps selecting
+                        // the still-open connection for GetHeaders and it keeps
+                        // feeding rejects. The decisive case: a genesis/anchor
+                        // mismatch (InvalidBlockPoW) means the peer is on a
+                        // DIFFERENT chain — it can never give us a valid block, and
+                        // left connected it wastes every header request and (via its
+                        // block/InvBlock announcements) feeds the orphan path. Header
+                        // validation failures are genuine chain/protocol violations,
+                        // so dropping a now-banned header peer is safe (unlike the
+                        // missing-parent reorg race, which is handled elsewhere and
+                        // never reaches here).
+                        if banned {
+                            // Drop the peer from the live set so the sync driver
+                            // stops selecting it for GetHeaders; the recorded ban
+                            // (above) blocks it from being re-added on reconnect.
+                            // (The write channel is reaped when the connection task
+                            // observes the peer is gone.)
+                            peers.remove(&peer_id);
+                            warn!(
+                                "Dropped banned peer {:?} after header-validation failure: {}",
+                                &peer_id[..4],
+                                error.reason,
+                            );
+                        }
                     }
                     return Ok(());
                 }
