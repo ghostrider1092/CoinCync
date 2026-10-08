@@ -1450,31 +1450,54 @@ async fn start_node(
                             });
                         }
                         Ok(BlockStatus::Orphan) => {
-                            // Don't re-request the orphan itself — peers will keep handing
-                            // back the same block and we never advance. Instead, ask sync
-                            // to fetch the orphan's parent so the gap fills, AND pass the
-                            // orphan body so the sync manager can stash it in
-                            // `orphan_blocks`. When the parent connects, the drain loop in
-                            // `on_block_received_from` replays the pooled orphan directly —
-                            // no second gossip required.
+                            // Orphan-parent walkback is ONLY for near-tip out-of-order
+                            // delivery (a peer's fork tip arriving a few blocks before we
+                            // backfill its parents). A block FAR ABOVE our tip is a sync
+                            // GAP, not a race: chasing its parent walks back one block at a
+                            // time and — against a wrong-genesis or beyond-finality peer —
+                            // never connects. That is the orphan-fetch cascade that wedged a
+                            // node stuck at a fork with EMERGENCY-TIER-3 firing repeatedly
+                            // (and the 2026-06-17 h=167 stall; see sync::mark_block_orphan).
                             //
-                            // See sync::mark_block_orphan for the long version, including
-                            // the 2026-06-17 root-cause notes on why the hashes-only
-                            // version stuck the chain at h=167 with 200 blocks of
-                            // orphan-fetch loops.
-                            warn!(
-                                "Block {} from peer {:?} orphan; fetching parent {}",
-                                hex::encode(&hash.as_bytes()[..8]),
-                                &peer_id[..4],
-                                hex::encode(&prev_hash.as_bytes()[..8]),
-                            );
+                            // Fix: only walk back a near-tip orphan; DROP a far one and let
+                            // headers-first IBD fill the gap linearly — a genuine competing
+                            // chain arrives as validated headers that connect to a known
+                            // block (and resolves deep reorgs properly), never as an endless
+                            // orphan walkback.
+                            const ORPHAN_WALKBACK_WINDOW: u64 = 32;
+                            let orphan_height = block_for_relay.header.height.as_u64();
+                            let tip_height = event_chain.height();
                             let p2p2 = event_p2p.clone();
-                            let block_for_pool = block_for_relay.clone();
-                            tokio::spawn(async move {
-                                p2p2.notify_block_received(&hash).await;
-                                p2p2.notify_block_orphan(&peer_id, block_for_pool, &prev_hash)
-                                    .await;
-                            });
+                            if orphan_height <= tip_height.saturating_add(ORPHAN_WALKBACK_WINDOW) {
+                                // Don't re-request the orphan itself — peers keep handing
+                                // back the same block. Stash it + fetch its parent; the
+                                // drain loop replays it when the parent connects.
+                                warn!(
+                                    "Block {} from peer {:?} orphan; fetching parent {}",
+                                    hex::encode(&hash.as_bytes()[..8]),
+                                    &peer_id[..4],
+                                    hex::encode(&prev_hash.as_bytes()[..8]),
+                                );
+                                let block_for_pool = block_for_relay.clone();
+                                tokio::spawn(async move {
+                                    p2p2.notify_block_received(&hash).await;
+                                    p2p2.notify_block_orphan(&peer_id, block_for_pool, &prev_hash)
+                                        .await;
+                                });
+                            } else {
+                                tracing::debug!(
+                                    "Block {} (h={}) from peer {:?} is {} blocks above tip {} — \
+                                     dropping orphan; headers-first IBD fills the gap (no walkback)",
+                                    hex::encode(&hash.as_bytes()[..8]),
+                                    orphan_height,
+                                    &peer_id[..4],
+                                    orphan_height.saturating_sub(tip_height),
+                                    tip_height,
+                                );
+                                tokio::spawn(async move {
+                                    p2p2.notify_block_received(&hash).await;
+                                });
+                            }
                         }
                         Ok(BlockStatus::Invalid(reason)) => {
                             warn!(
