@@ -33,6 +33,33 @@ mod audit;
 mod batch_verify;
 mod cache;
 mod disclosure;
+// Sluice — the unified heavy-verify valve (Warren Phase 0 foundation). The seam
+// every heavy privacy-verify path plugs into + the self-regulating, mining-
+// separate concurrency valve that governs them. Non-gated (generic Rust); the
+// per-path adapters that implement `HeavyVerify` are gated with their backend.
+// See docs/design/warren-architecture.md §3.5/§3.7/§3.8.
+pub mod heavy_verify;
+// Warren Phase-0: the verify-result cache seam the Sluice consults (§3.7) —
+// positive-only, bounded LRU, keyed by a statement hash; a proof verified once
+// is not re-verified in a block or on reorg replay. Non-gated.
+pub mod verify_cache;
+// Heavy-verify DoS budget (Warren Phase 0 — §3.8). Bounds total heavy-verify
+// WORK per block, the complement to the Sluice's bound on verify CONCURRENCY.
+// Non-gated (pure arithmetic), sketch, NOT wired into validation yet.
+pub mod verify_budget;
+// Warren Phase-0: `HeavyVerify`/Sluice adapters for the TRANSPARENT heavy paths
+// (Bulletproofs range proofs + CLSAG), so the valve is unified across all heavy
+// verify (§3.0), not Spark-only. Wraps the existing audited verify fns; does NOT
+// replace the live batch paths. Non-gated.
+pub mod transparent_sluice;
+// Warren Phase-0: finality-triggered proof-pruning policy (§3.7/§6) — drop
+// prunable proof bytes below the finality floor, keep commitments/nullifiers,
+// archival opt-out. Non-gated pure policy; storage wiring is a TODO.
+pub mod pruning;
+// Warren Phase-0: connector registry (§3.4/§3.7) — the `SparkBackend` swap point
+// generalized so privacy engines (stub/libspark/future prover) register + swap
+// cleanly, fail-closed. Non-gated; not yet wired into shielded_connector.
+pub mod connector_registry;
 pub mod memo;
 mod parallel_proofs;
 mod ring_selection;
@@ -77,6 +104,18 @@ pub mod spark_range; // CIP-Shielded (value range binding via BP+)
 pub mod spark_turnstile; // CIP-Shielded (transparent⇄shielded value turnstile)
 #[cfg(feature = "sketch-gk-proof")]
 pub mod spark_note; // CIP-Shielded (Note Connector: stealth⇄bound-coin detect/recover)
+// Warren Phase-0 sketch: the shielded block-verify loop reimplemented through
+// the Sluice valve (parallel per-tx verify + serial pool/tag conclusion). Not
+// wired into consensus; same gate as the serial loop it mirrors. See the module
+// docstring and docs/design/warren-architecture.md §3.5.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+pub mod spark_sluice;
+// Warren Phase-0 sketch: the Surface commitment accumulator — the shielded-set
+// root that binds into the reserved `spark_set_root` header field. Fail-closed
+// pre-activation; NOT wired into header/validation. See the module docstring
+// and docs/design/warren-architecture.md §3.1.
+#[cfg(feature = "sketch-gk-proof")]
+pub mod surface_commit;
 
 pub use bulletproofs::{
     batch_verify_range_proofs, commit, create_aggregated_range_proof,
@@ -162,6 +201,8 @@ pub use parallel_proofs::{
     verify_block_proofs, AggregatedProofVerifier, ParallelProofVerifier, ParallelVerifyResult,
     ProofTask, VerifierStats,
 };
+
+pub use heavy_verify::{HeavyVerify, Sluice, SluiceMetrics, SluiceMetricsSnapshot};
 
 // `disclosure` is consumed by the wallet CLI (`src/bin/wallet.rs`)
 // which exposes selective-disclosure proofs (balance / ownership / sum

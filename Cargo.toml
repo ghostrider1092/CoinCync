@@ -350,6 +350,11 @@ harness = false
 name = "consensus_hot_paths"
 harness = false
 
+# Warren Phase-0 §3.7: measures the Sluice parallel-verify speedup across widths.
+[[bench]]
+name = "sluice_verify"
+harness = false
+
 [profile.release]
 opt-level     = 3
 lto           = "thin"

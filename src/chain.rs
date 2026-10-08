@@ -4906,6 +4906,93 @@ mod tests {
         );
     }
 
+    /// Warren Phase-0 equivalence check (docs/design/warren-architecture.md §3.5):
+    /// the Sluice reimplementation `crypto::spark_sluice::verify_spark_payloads`
+    /// MUST return the SAME verdict as the real serial consensus loop
+    /// `verify_block_spark_v2`, on real libspark fixtures — on both the accept
+    /// path and the double-spend reject path — and that verdict MUST be identical
+    /// at every valve width (the Sluice invariant, now checked against real Spark
+    /// proofs rather than the toy `assert_valve_invariant` fixture). The parallel
+    /// widths double as a libspark-FFI reentrancy probe: `recommended_valve()`
+    /// stays serial until reentrancy is independently established, so a parallel
+    /// divergence or crash HERE is precisely the signal to keep the Spark valve
+    /// shut. Mirrors the mint→spend setup of the hook test above.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn spark_sluice_matches_serial_verify_block_spark_v2() {
+        use crate::consensus::spark_payload::build::{build_mint_payload, build_spend_payload};
+        use crate::consensus::spark_payload::derive_outpoint;
+        use crate::crypto::spark_sluice::verify_spark_payloads;
+        use crate::crypto::Sluice;
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxType};
+        use spark_connector::ffi::cover_set_size;
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new();
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+
+        let mk_shielded_tx = |extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+
+        let seed = b"sluice-equivalence-seed";
+        let n = cover_set_size().unwrap();
+        let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
+        let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
+        let mint_tx = mk_shielded_tx(mint_payload.encode());
+        chain.apply_spark_v2_txs(std::slice::from_ref(&mint_tx), 1);
+        assert_eq!(store.coin_count(), n);
+
+        let owned_op = derive_outpoint(&[], 2);
+        let spend_payload =
+            build_spend_payload(seed, store.as_ref(), &owned_op, 3_000, 0, 1).unwrap();
+        let spend_tx = mk_shielded_tx(spend_payload.encode());
+        let block = [spend_tx];
+
+        // ── ACCEPT path: the serial consensus loop accepts the unspent spend. ──
+        let serial_ok = chain.verify_block_spark_v2(&block).is_ok();
+        assert!(serial_ok, "baseline: serial verify accepts the unspent spend");
+        assert!(
+            verify_spark_payloads(store.as_ref(), &block, &Sluice::serial()).is_ok(),
+            "sluice(serial) must match verify_block_spark_v2 on the accept path"
+        );
+        for threads in [2usize, 4] {
+            let got = verify_spark_payloads(store.as_ref(), &block, &Sluice::with_threads(threads));
+            assert_eq!(
+                got.is_ok(),
+                serial_ok,
+                "sluice({threads}) verdict diverged from serial on the accept path"
+            );
+        }
+
+        // Apply the spend → its linking tag is now marked spent in the store.
+        chain.apply_spark_v2_txs(&block, 2);
+
+        // ── REJECT path: the serial loop now rejects (double-spend). ──
+        let serial_rej = chain.verify_block_spark_v2(&block).is_err();
+        assert!(serial_rej, "baseline: serial verify rejects the now-spent spend");
+        assert!(
+            verify_spark_payloads(store.as_ref(), &block, &Sluice::serial()).is_err(),
+            "sluice(serial) must match verify_block_spark_v2 on the reject path"
+        );
+        for threads in [2usize, 4] {
+            let got = verify_spark_payloads(store.as_ref(), &block, &Sluice::with_threads(threads));
+            assert_eq!(
+                got.is_err(),
+                serial_rej,
+                "sluice({threads}) verdict diverged from serial on the reject path"
+            );
+        }
+    }
+
     /// IN-BLOCK shielded-consensus SOAK. Drives mint → spend → double-spend →
     /// reorg cycles through the real chain block hooks (verify_block_spark_v2 →
     /// apply_spark_v2_txs, with checkpoint/rewind) using real libspark proofs,
