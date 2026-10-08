@@ -4339,6 +4339,50 @@ mod tests {
     }
 
     #[test]
+    fn load_from_database_rejects_mismatched_block1_anchor() {
+        // #3 anchor-derivation guard: a dir whose block 1 was mined under a
+        // DIFFERENT RandomX anchor derivation (e.g. a pre-reset chain that
+        // shares our genesis HASH) must be refused at load — not silently
+        // loaded and extended. The genesis-hash check alone cannot catch it
+        // because the 2026-09 reset kept genesis d2240fea.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+
+        // Block 1 with a deliberately WRONG anchor: it cannot equal the
+        // deterministic recompute from its own header fields.
+        let mut b1 = genesis.clone();
+        b1.header.height = crate::primitives::Height::new(1);
+        b1.header.prev_hash = genesis_hash;
+        b1.header.anchor = Hash::from_bytes([0xFF; 32]);
+        let b1_hash = b1.hash();
+        db.blocks.insert(&b1).unwrap();
+        db.blocks.set_height_hash(1, &b1_hash).unwrap();
+
+        db.state
+            .save_state(&ChainStateData {
+                tip_hash: b1_hash,
+                height: 1,
+                total_difficulty: 2,
+                total_supply: 0,
+                total_burned: 0,
+                last_checkpoint: 0,
+            })
+            .unwrap();
+
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(
+            error.contains("incompatible RandomX anchor"),
+            "unexpected error: {}",
+            error
+        );
+    }
+
+    #[test]
     fn total_difficulty_recompute_and_fork_walk_agree_on_genesis_base() {
         // Regression lock for the fleet-wide total_difficulty divergence bug.
         //
