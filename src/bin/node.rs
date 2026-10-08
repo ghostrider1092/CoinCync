@@ -260,9 +260,93 @@ enum Command {
 // register_blocking_method so they run on the blocking thread pool,
 // not on tokio workers. Larger sweep of all 41 handlers is queued
 // for v1.0.11 — for now we covered the highest-traffic three.
+/// Enable ANSI/VT rendering in the Windows console so the color codes `tracing`
+/// emits display as colors instead of printing literally (e.g. `←[32m INFO`).
+/// Classic conhost and PowerShell 5.1's default console ship with
+/// virtual-terminal processing OFF; this flips `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
+/// on stdout + stderr. No-op elsewhere, and harmless when VT is already on
+/// (Windows Terminal, pwsh), so logs are colored in any Windows console.
+#[cfg(windows)]
+fn enable_ansi_colors() {
+    extern "system" {
+        fn GetStdHandle(n: u32) -> *mut core::ffi::c_void;
+        fn GetConsoleMode(h: *mut core::ffi::c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(h: *mut core::ffi::c_void, mode: u32) -> i32;
+    }
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+    // STD_OUTPUT_HANDLE = -11, STD_ERROR_HANDLE = -12.
+    for id in [-11i32 as u32, -12i32 as u32] {
+        unsafe {
+            let h = GetStdHandle(id);
+            if h.is_null() || h == (-1isize as *mut core::ffi::c_void) {
+                continue;
+            }
+            let mut mode = 0u32;
+            if GetConsoleMode(h, &mut mode) != 0 {
+                let _ = SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_ansi_colors() {}
+
+/// CoinCync log formatter — monerod daemon look (local-time stamp, colored
+/// level tag, logging category) with a CoinCync twist: a bright-cyan `◈` brand
+/// glyph leading the category. `ansi` gates all color so redirected output is
+/// plain.
+struct CyncLogStyle {
+    ansi: bool,
+}
+
+impl<S, N> tracing_subscriber::fmt::FormatEvent<S, N> for CyncLogStyle
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'a> tracing_subscriber::fmt::FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> core::fmt::Result {
+        use tracing_subscriber::fmt::FormatFields as _;
+        let meta = event.metadata();
+        // monerod-style level tags, padded to 5 so the categories line up.
+        let (lvl, color) = match *meta.level() {
+            tracing::Level::ERROR => ("ERROR", "31"), // red
+            tracing::Level::WARN => ("WARN ", "33"),  // yellow
+            tracing::Level::INFO => ("INFO ", "32"),  // green
+            tracing::Level::DEBUG => ("DEBUG", "34"), // blue
+            tracing::Level::TRACE => ("TRACE", "90"), // bright-black
+        };
+        // monerod-style local timestamp with millis.
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        // Category = the target, with our crate prefix trimmed for a short,
+        // monerod-like label (coincync::network::node → network::node).
+        let cat = meta.target().strip_prefix("coincync::").unwrap_or(meta.target());
+
+        if self.ansi {
+            // dim timestamp · bold colored level · CoinCync ◈ + bright-cyan category
+            write!(
+                writer,
+                "\x1b[2m{ts}\x1b[0m \x1b[1;{color}m{lvl}\x1b[0m \x1b[96m◈ {cat}\x1b[0m  "
+            )?;
+        } else {
+            write!(writer, "{ts} {lvl} ◈ {cat}  ")?;
+        }
+        ctx.format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
     let cli = Cli::parse();
+
+    // Make the Windows console render tracing's ANSI colors (vs. raw escapes).
+    enable_ansi_colors();
 
     // Initialize tracing. Prefer RUST_LOG, then --log-level, then "info"
     // as a guaranteed-valid last resort. A malformed RUST_LOG or
@@ -278,9 +362,15 @@ async fn main() {
             );
             "info".parse().expect("'info' is a valid log filter")
         });
+    // CoinCync log style: monerod-flavored layout — local-time stamp (dimmed),
+    // a colored level tag, then the logging category — with a CoinCync twist:
+    // the ◈ brand glyph in bright cyan leading the category. Color is emitted
+    // only when stdout is a real terminal (piped/redirected output stays clean).
+    use std::io::IsTerminal as _;
+    let use_color = std::io::stdout().is_terminal();
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
-        .with_target(false)
+        .event_format(CyncLogStyle { ansi: use_color })
         .init();
 
     let network = match cli.network.as_str() {
