@@ -179,6 +179,12 @@ pub struct DandelionRouter {
     /// Kept to detect stem loops and avoid double-fluffing.
     /// Pruned periodically.
     fluffed: HashMap<Hash, u64>, // hash → fluff timestamp
+    /// Edge-trigger for the "privacy degraded" warning. `set_outbound_peers`
+    /// is called every maintenance tick, so logging the warning unconditionally
+    /// spammed it every ~10s while under the peer floor — noise that buried real
+    /// events and made a transiently-thin node look broken. Log only on the
+    /// degraded↔restored transition.
+    privacy_degraded_warned: bool,
 }
 
 impl DandelionRouter {
@@ -197,6 +203,7 @@ impl DandelionRouter {
             },
             epoch_number: 0,
             fluffed: HashMap::new(),
+            privacy_degraded_warned: false,
         }
     }
 
@@ -205,13 +212,27 @@ impl DandelionRouter {
     /// Set the full list of outbound peers.  Called by node.rs whenever the
     /// outbound peer set changes (connect/disconnect).
     pub fn set_outbound_peers(&mut self, peers: Vec<PeerId>) {
-        if peers.len() < MIN_PEERS_FOR_PRIVACY && !peers.is_empty() {
+        // Edge-triggered logging: this is called every maintenance tick, so
+        // warn only when we ENTER the degraded state and note recovery only
+        // when we return to adequate — never once-per-tick while degraded, and
+        // never a false "restored" on a drop to zero peers (handled by the
+        // isolation/re-bootstrap path, not here).
+        let degraded = peers.len() < MIN_PEERS_FOR_PRIVACY && !peers.is_empty();
+        if degraded && !self.privacy_degraded_warned {
             tracing::warn!(
-                "Dandelion++ has only {} outbound peer(s) — privacy degraded. \
-                 Need {} for adequate anonymity.",
+                "Dandelion++ privacy degraded: only {} outbound peer(s), need {} for \
+                 adequate anonymity (silencing this until it recovers).",
                 peers.len(),
                 MIN_PEERS_FOR_PRIVACY
             );
+            self.privacy_degraded_warned = true;
+        } else if peers.len() >= MIN_PEERS_FOR_PRIVACY && self.privacy_degraded_warned {
+            tracing::info!(
+                "Dandelion++ privacy restored: {} outbound peers (>= {}).",
+                peers.len(),
+                MIN_PEERS_FOR_PRIVACY
+            );
+            self.privacy_degraded_warned = false;
         }
         self.outbound_peers = peers;
     }
@@ -674,6 +695,25 @@ mod tests {
     use super::*;
     use crate::primitives::Amount;
     use crate::transaction::TxType;
+
+    #[test]
+    fn privacy_degraded_warning_is_edge_triggered() {
+        let mut r = DandelionRouter::new();
+        assert!(!r.privacy_degraded_warned);
+        // Enter degraded (1 < MIN_PEERS_FOR_PRIVACY): flag set.
+        r.set_outbound_peers(vec![[1u8; 32]]);
+        assert!(r.privacy_degraded_warned, "should mark degraded on entry");
+        // Still degraded on the next tick (2 < 3): flag stays set, no re-warn.
+        r.set_outbound_peers(vec![[1u8; 32], [2u8; 32]]);
+        assert!(r.privacy_degraded_warned);
+        // A transient drop to zero is NOT a false "restore".
+        r.set_outbound_peers(vec![]);
+        assert!(r.privacy_degraded_warned, "zero peers is not a recovery");
+        // Restored to adequate (>= MIN): flag clears.
+        let adequate: Vec<PeerId> = (0..MIN_PEERS_FOR_PRIVACY as u8).map(|i| [i; 32]).collect();
+        r.set_outbound_peers(adequate);
+        assert!(!r.privacy_degraded_warned, "should clear when restored");
+    }
 
     fn make_test_tx(extra: u8) -> Transaction {
         Transaction {
