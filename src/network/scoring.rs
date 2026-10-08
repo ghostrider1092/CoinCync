@@ -495,6 +495,10 @@ pub const EMPTY_BLOCKS_BAN_DURATION_SECS: u64 = 3600;
 pub struct PeerMessageRateTracker {
     /// (message_type_id, count) for the current window
     counts: HashMap<u8, u32>,
+    /// Message types already flagged as over-limit THIS window. Ensures the
+    /// over-limit signal (warn + penalty) fires at most once per type per
+    /// window instead of once per message — see `record`.
+    flagged: std::collections::HashSet<u8>,
     /// Start of current measurement window
     window_start: MonoInstant,
     /// Window duration (default 10 seconds)
@@ -546,7 +550,7 @@ const MSG_RATE_LIMITS: &[(u8, u32)] = &[
     (12, 100), // MessageType::GetBlocks  — 10/sec (block-fetch flood)
     (14, 200), // MessageType::GetData    — 20/sec (bulk fetch flood)
     (22, 500), // MessageType::InvTx      — 50/sec (tx-relay flood; higher because relaying txs across a mesh is normal)
-    (23, 100), // MessageType::InvBlock   — 10/sec (block-announce flood)
+    (23, 200), // MessageType::InvBlock   — 20/sec (block-announce flood; raised from 10/sec: on a low-difficulty / fast-block network, legit block-announce + reorg-reconciliation bursts briefly exceed 10/sec)
     (30, 50),  // MessageType::GetAddr    — 5/sec  (peer-list scraping)
     (2, 30),   // MessageType::Ping       — 3/sec  (keepalive spam)
     // Light-client / DHT query types (audit R3-4). Their handlers do bounded but
@@ -567,26 +571,40 @@ impl PeerMessageRateTracker {
     pub fn new() -> Self {
         PeerMessageRateTracker {
             counts: HashMap::new(),
+            flagged: std::collections::HashSet::new(),
             window_start: mono_now(),
             window_secs: 10,
         }
     }
 
-    /// Record a message and return true if the rate limit is exceeded.
+    /// Record a message and return true ONLY on the first message that crosses
+    /// the per-type limit in the current window; every further over-limit
+    /// message of that type in the same window returns false.
+    ///
+    /// The caller (`network::node::runtime`) warns + penalizes on `true`, so
+    /// once-per-window flagging means a flooding peer is warned + penalized once
+    /// per 10s window per type instead of once per message. A sustained flooder
+    /// still accrues a penalty every window → eventually banned (DoS protection
+    /// intact), but a brief legit burst — e.g. a miner on a low-difficulty /
+    /// fast-block network, or reorg reconciliation — gets a single penalty and
+    /// recovers, and the log is no longer flooded with per-message warnings.
     pub fn record(&mut self, msg_type_id: u8) -> bool {
         let now = mono_now();
         if now.saturating_duration_since(self.window_start).as_secs() >= self.window_secs {
             self.counts.clear();
+            self.flagged.clear();
             self.window_start = now;
         }
 
         let count = self.counts.entry(msg_type_id).or_insert(0);
         *count += 1;
 
-        // Check against per-type limit
+        // Check against per-type limit; flag at most once per type per window.
         for &(type_id, limit) in MSG_RATE_LIMITS {
             if msg_type_id == type_id && *count > limit {
-                return true; // Rate exceeded
+                // insert() returns true only the first time this type is flagged
+                // this window → exactly one warn+penalty per window per type.
+                return self.flagged.insert(msg_type_id);
             }
         }
         false
@@ -1455,6 +1473,18 @@ mod tests {
             exceeded,
             "expected message flood threshold to trigger for GetBlocks"
         );
+    }
+
+    #[test]
+    fn rate_tracker_flags_at_most_once_per_window() {
+        // Over-limit must fire the warn+penalty signal exactly ONCE per type per
+        // window, not once per message — otherwise a bursty peer (e.g. a miner
+        // on a low-difficulty network announcing blocks) floods the log and is
+        // penalized into a ban per-message instead of per-window.
+        let mut t = PeerMessageRateTracker::new();
+        let id = crate::network::protocol::MessageType::InvBlock as u8; // limit 200
+        let flags = (0..600).filter(|_| t.record(id)).count();
+        assert_eq!(flags, 1, "over-limit must flag once per window, not per message");
     }
 
     #[test]
