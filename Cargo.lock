@@ -1113,6 +1113,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sysinfo",
  "tokio",
  "toml",
  "tracing",

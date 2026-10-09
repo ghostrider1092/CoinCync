@@ -263,6 +263,13 @@ pub mod ffi {
             ctx_cap: c_int,
             out_ctx_len: *mut c_int,
         ) -> c_int;
+        fn spark_ffi_spend_ltags(
+            ptr: *const u8,
+            len: c_int,
+            out_tags: *mut u8,
+            tags_cap: c_int,
+            out_tags_len: *mut c_int,
+        ) -> c_int;
         fn spark_ffi_address_from_seed(seed: *const u8, seed_len: c_int, out: *mut u8, cap: c_int) -> c_int;
         fn spark_ffi_identify(
             seed: *const u8,
@@ -587,6 +594,49 @@ pub mod ffi {
         Some((coins, ctx_buf))
     }
 
+    /// STATELESS, DoS-safe extraction of a spend bundle's linking tags T
+    /// (`getUsedLTags`) — for mempool double-spend dedup on UNTRUSTED input. Does
+    /// NOT verify the proof and needs no cover set (unlike [`LibsparkBackend::verify_spend`]),
+    /// and does not touch output coins (unlike [`spend_outputs`]). The shim bounds
+    /// the attacker-controlled `output_count` before allocating, so a crafted
+    /// bundle can't force a large allocation. Returns the tags (a deterministic
+    /// function of the spent coin, so two spends of the same coin yield the same
+    /// tag), or `None` on malformed/oversized input (fail-closed — the caller
+    /// rejects the tx). Same `[u32 count][34-byte tag]...` wire form as
+    /// `spark_ffi_verify_bundle`.
+    pub fn spend_ltags(bundle: &[u8]) -> Option<Vec<Nullifier>> {
+        let mut tags = vec![0u8; 8192];
+        let mut tags_len: c_int = 0;
+        // Safety: shim reads `bundle`, writes up to `tags.len()` into `tags`.
+        let rc = unsafe {
+            spark_ffi_spend_ltags(
+                bundle.as_ptr(),
+                bundle.len() as c_int,
+                tags.as_mut_ptr(),
+                tags.len() as c_int,
+                &mut tags_len,
+            )
+        };
+        if rc != 1 {
+            return None;
+        }
+        let tl = tags_len.max(0) as usize;
+        if tl < 4 {
+            return None;
+        }
+        let count = u32::from_le_bytes([tags[0], tags[1], tags[2], tags[3]]) as usize;
+        let mut out = Vec::with_capacity(count);
+        let mut off = 4usize;
+        for _ in 0..count {
+            if off + 34 > tl {
+                return None;
+            }
+            out.push(Nullifier(tags[off..off + 34].to_vec()));
+            off += 34;
+        }
+        Some(out)
+    }
+
     /// The Grootle cover-set cardinality `N = n_grootle ^ m_grootle` for the
     /// active params — the exact number of coins a caller must supply to
     /// [`build_spend_over_set`]. `None` on error.
@@ -861,6 +911,29 @@ pub mod ffi {
             let b = LibsparkBackend;
             let coin = b.create_output(&addr, 500, b"hi").expect("create_output");
             assert!(!coin.0.is_empty(), "coin bytes must be non-empty");
+        }
+
+        #[test]
+        fn spend_ltags_matches_verified_tags_and_rejects_garbage() {
+            // #172: the STATELESS, DoS-safe tag extractor must return the SAME
+            // linking tags as the full verify (so mempool dedup matches the
+            // block-level double-spend guard), and fail closed on bad input.
+            let bundle = make_verify_bundle().expect("failed to build verify bundle");
+            let verified = LibsparkBackend
+                .verify_spend(&[], &SpendBytes(bundle.clone()), 0, 0)
+                .expect("valid bundle verifies");
+            let stateless = spend_ltags(&bundle).expect("stateless tag extraction");
+            assert_eq!(stateless, verified, "stateless tags must equal verified tags");
+            assert_eq!(stateless.len(), 1, "one input => one linking tag");
+            assert_eq!(stateless[0].0.len(), 34, "tag is a 34-byte group element");
+
+            // Fail-closed on garbage / truncated input — no panic, no large alloc.
+            assert!(spend_ltags(&[]).is_none(), "empty bundle rejected");
+            assert!(spend_ltags(&[0xFFu8; 16]).is_none(), "garbage bundle rejected");
+            assert!(
+                spend_ltags(&bundle[..bundle.len() / 2]).is_none(),
+                "truncated bundle rejected"
+            );
         }
 
         #[test]
