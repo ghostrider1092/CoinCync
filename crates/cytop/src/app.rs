@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use ratatui::style::Color;
 use ratatui::widgets::ListState;
-use sysinfo::{Networks, System};
+use sysinfo::{Disks, Networks, System};
 
 use crate::collect::{spawn_log_tailer, FeedLine, NodeClient, NodeInfo, EVENTS_CAP};
 use crate::draw::{clock_hms, icon_for, parse_log_line, short_hash, BRAND};
@@ -18,7 +18,11 @@ pub const HIST: usize = 120;
 pub struct App {
     pub sys: System,
     pub nets: Networks,
+    pub disks: Disks,
     pub theme: Theme,
+    themes: Vec<(String, Theme)>,
+    theme_idx: usize,
+    pub theme_name: String,
     client: NodeClient,
     pub node: NodeInfo,
     // host history
@@ -43,13 +47,20 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(rpc: String, log: Option<String>, theme: Theme) -> Self {
+    pub fn new(rpc: String, log: Option<String>, themes: Vec<(String, Theme)>, theme_idx: usize) -> Self {
         let mut sys = System::new_all();
         sys.refresh_all();
+        let theme_idx = theme_idx.min(themes.len().saturating_sub(1));
+        let theme = themes[theme_idx].1.clone();
+        let theme_name = themes[theme_idx].0.clone();
         App {
             sys,
             nets: Networks::new_with_refreshed_list(),
+            disks: Disks::new_with_refreshed_list(),
             theme,
+            themes,
+            theme_idx,
+            theme_name,
             client: NodeClient::new(rpc),
             node: NodeInfo::default(),
             cpu_hist: VecDeque::from(vec![0; HIST]),
@@ -70,9 +81,20 @@ impl App {
         }
     }
 
+    /// Cycle to the next built-in/loaded theme.
+    pub fn next_theme(&mut self) {
+        if self.themes.is_empty() {
+            return;
+        }
+        self.theme_idx = (self.theme_idx + 1) % self.themes.len();
+        self.theme = self.themes[self.theme_idx].1.clone();
+        self.theme_name = self.themes[self.theme_idx].0.clone();
+    }
+
     pub fn tick(&mut self) {
         self.sys.refresh_all();
         self.nets.refresh();
+        self.disks.refresh();
 
         // CPU average across cores.
         let cpus = self.sys.cpus();

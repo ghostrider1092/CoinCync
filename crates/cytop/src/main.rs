@@ -38,18 +38,24 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let theme = match &cli.theme {
-        Some(path) => match std::fs::read_to_string(path) {
-            Ok(text) => Theme::from_str(&text),
-            Err(e) => {
-                eprintln!("warning: could not read theme '{path}': {e}; using Default");
-                Theme::default_theme()
+    // Built-in themes, plus any --theme file (placed first and selected).
+    let mut themes = theme::builtins();
+    let mut start_idx = 0;
+    if let Some(path) = &cli.theme {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let name = std::path::Path::new(path)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "custom".into());
+                themes.insert(0, (name, Theme::from_str(&text)));
+                start_idx = 0;
             }
-        },
-        None => Theme::default_theme(),
-    };
+            Err(e) => eprintln!("warning: could not read theme '{path}': {e}; using Default"),
+        }
+    }
 
-    let mut app = App::new(cli.rpc.clone(), cli.log.clone(), theme);
+    let mut app = App::new(cli.rpc.clone(), cli.log.clone(), themes, start_idx);
     let refresh = Duration::from_millis(cli.refresh_ms.max(200));
 
     let mut terminal = ratatui::init();
@@ -69,6 +75,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, refresh: Duration
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
                     KeyCode::Char(' ') => app.paused = !app.paused,
+                    KeyCode::Char('t') | KeyCode::Char('T') => app.next_theme(),
                     KeyCode::Down | KeyCode::Char('j') => app.feed_scroll(1),
                     KeyCode::Up | KeyCode::Char('k') => app.feed_scroll(-1),
                     KeyCode::PageDown => app.feed_scroll(15),

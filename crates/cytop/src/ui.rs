@@ -46,7 +46,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Percentage(33),
     ])
     .split(body[1]);
-    draw_mem(f, mid[0], app);
+    // Left column stacks mem over disks (btop-style).
+    let left = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(mid[0]);
+    draw_mem(f, left[0], app);
+    draw_disks(f, left[1], app);
     draw_node(f, mid[1], app);
     draw_net(f, mid[2], app);
     draw_activity(f, body[2], app);
@@ -177,6 +180,36 @@ fn draw_mem(f: &mut Frame, area: Rect, app: &App) {
     ];
     if stotal > 0 {
         lines.push(meter_line(t, "Swap", "used", sused as f64 / stotal as f64 * 100.0, &human_bytes(sused), bar_w));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_disks(f: &mut Frame, area: Rect, app: &App) {
+    let t = &app.theme;
+    let block = bpanel(t, 6, "disks", "", "mem_box");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let bar_w = (inner.width as usize).saturating_sub(24).clamp(4, 40);
+
+    let avail_rows = inner.height as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for disk in app.disks.iter() {
+        if lines.len() >= avail_rows {
+            break;
+        }
+        let total = disk.total_space();
+        if total == 0 {
+            continue;
+        }
+        let used = total.saturating_sub(disk.available_space());
+        let pct = used as f64 / total as f64 * 100.0;
+        let mount = disk.mount_point().to_string_lossy();
+        let label = truncate(mount.trim_end_matches('\\'), 7);
+        let value = format!("{}/{}", human_bytes(used), human_bytes(total));
+        lines.push(meter_line(t, &label, "used", pct, &value, bar_w));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("no disks", Style::default().fg(t.c("inactive_fg")))));
     }
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -350,6 +383,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         key("j/k"), lbl(" scroll  "),
         key("G"), lbl(" live  "),
         key("space"), lbl(" pause  "),
+        key("t"), lbl(" theme:"),
+        Span::styled(format!("{}  ", app.theme_name), Style::default().fg(t.c("title"))),
     ];
     if app.paused {
         hint.push(Span::styled("PAUSED  ", Style::default().fg(t.g("available", 70.0)).add_modifier(Modifier::BOLD)));

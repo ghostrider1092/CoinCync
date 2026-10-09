@@ -63,6 +63,141 @@ const GRADIENTS: &[&str] = &[
     "cpu", "used", "free", "available", "cached", "download", "upload", "process", "temp",
 ];
 
+// ─── built-in themes ──────────────────────────────────────────────────────────
+// Original palettes (not btop's .theme files). Each overrides only the roles it
+// wants; everything else inherits from Default via `from_str`.
+
+const THEME_COINCYNC: &str = r##"
+theme[main_fg]="#d8e6e6"
+theme[title]="#eafcff"
+theme[hi_fg]="#3ad1d1"
+theme[selected_bg]="#143a3a"
+theme[inactive_fg]="#4a5a5a"
+theme[cpu_box]="#2f8f8f"
+theme[mem_box]="#3a6f8f"
+theme[net_box]="#5c588d"
+theme[proc_box]="#2f8f8f"
+theme[div_line]="#263030"
+theme[cpu_start]="#1f6f6f"
+theme[cpu_mid]="#3ad1d1"
+theme[cpu_end]="#eafcff"
+theme[used_start]="#59402b"
+theme[used_mid]="#d99a62"
+theme[used_end]="#ffcf47"
+theme[free_start]="#164d4d"
+theme[free_mid]="#3ad1d1"
+theme[free_end]="#aefcff"
+theme[download_start]="#163350"
+theme[download_mid]="#4f8fa3"
+theme[download_end]="#b0e9de"
+"##;
+
+const THEME_MATRIX: &str = r##"
+theme[main_bg]="#00"
+theme[main_fg]="#33ff66"
+theme[title]="#aaffaa"
+theme[hi_fg]="#00ff41"
+theme[selected_bg]="#0a2f0a"
+theme[inactive_fg]="#1f5f1f"
+theme[graph_text]="#2f7f2f"
+theme[meter_bg]="#103010"
+theme[cpu_box]="#1f7f3f"
+theme[mem_box]="#1f7f3f"
+theme[net_box]="#1f7f3f"
+theme[proc_box]="#1f7f3f"
+theme[div_line]="#0f3f1f"
+theme[cpu_start]="#0a5f0a"
+theme[cpu_mid]="#33ff66"
+theme[cpu_end]="#aaffcc"
+theme[used_start]="#0a5f0a"
+theme[used_mid]="#33cc44"
+theme[used_end]="#aaff88"
+theme[free_start]="#0a5f0a"
+theme[free_mid]="#33ff66"
+theme[free_end]="#aaffaa"
+theme[available_start]="#0a5f0a"
+theme[available_mid]="#7fff7f"
+theme[available_end]="#ccffcc"
+theme[download_start]="#0a5f2a"
+theme[download_mid]="#33ff88"
+theme[download_end]="#aaffcc"
+theme[process_start]="#0a5f0a"
+theme[process_mid]="#33ff66"
+theme[process_end]="#aaffaa"
+"##;
+
+const THEME_AMBER: &str = r##"
+theme[main_bg]="#00"
+theme[main_fg]="#ffcf87"
+theme[title]="#ffe9c2"
+theme[hi_fg]="#ff9f1c"
+theme[selected_bg]="#3a260a"
+theme[inactive_fg]="#6a4f2a"
+theme[graph_text]="#8a6a3a"
+theme[meter_bg]="#3a2a14"
+theme[cpu_box]="#b5772a"
+theme[mem_box]="#b5772a"
+theme[net_box]="#8d6a2a"
+theme[proc_box]="#b5772a"
+theme[div_line]="#3a2a14"
+theme[cpu_start]="#7a4f14"
+theme[cpu_mid]="#ffb84d"
+theme[cpu_end]="#ffe9c2"
+theme[used_start]="#7a3514"
+theme[used_mid]="#ff8c3a"
+theme[used_end]="#ffcf47"
+theme[free_start]="#7a4f14"
+theme[free_mid]="#ffb84d"
+theme[free_end]="#ffe9a0"
+theme[available_start]="#7a5f14"
+theme[available_mid]="#ffd77a"
+theme[available_end]="#ffe9c2"
+theme[download_start]="#7a4f14"
+theme[download_mid]="#ffb84d"
+theme[download_end]="#ffe9c2"
+"##;
+
+const THEME_MONO: &str = r##"
+theme[main_fg]="#c8"
+theme[title]="#f0"
+theme[hi_fg]="#f0"
+theme[selected_bg]="#38"
+theme[inactive_fg]="#50"
+theme[graph_text]="#70"
+theme[meter_bg]="#38"
+theme[cpu_box]="#80"
+theme[mem_box]="#80"
+theme[net_box]="#80"
+theme[proc_box]="#80"
+theme[div_line]="#30"
+theme[cpu_start]="#50"
+theme[cpu_mid]="#a0"
+theme[cpu_end]="#f0"
+theme[used_start]="#40"
+theme[used_mid]="#90"
+theme[used_end]="#e0"
+theme[free_start]="#40"
+theme[free_mid]="#90"
+theme[free_end]="#e0"
+theme[available_start]="#40"
+theme[available_mid]="#90"
+theme[available_end]="#e0"
+theme[download_start]="#40"
+theme[download_mid]="#90"
+theme[download_end]="#e0"
+"##;
+
+/// The built-in themes, in cycle order (Default first).
+pub fn builtins() -> Vec<(String, Theme)> {
+    vec![
+        ("default".into(), Theme::default_theme()),
+        ("coincync".into(), Theme::from_str(THEME_COINCYNC)),
+        ("matrix".into(), Theme::from_str(THEME_MATRIX)),
+        ("amber".into(), Theme::from_str(THEME_AMBER)),
+        ("mono".into(), Theme::from_str(THEME_MONO)),
+    ]
+}
+
 #[derive(Clone)]
 pub struct Theme {
     colors: HashMap<String, Color>,
