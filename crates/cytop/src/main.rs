@@ -15,7 +15,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+    MouseEventKind,
+};
+use crossterm::execute;
 
 use crate::app::App;
 use crate::config::{Config, DEFAULT_REFRESH_MS, DEFAULT_RPC};
@@ -82,8 +86,10 @@ fn main() -> anyhow::Result<()> {
     let refresh = Duration::from_millis(refresh_ms.max(200));
 
     let mut terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     app.tick();
     let res = run(&mut terminal, &mut app, refresh);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
 
     // Persist the resolved settings (incl. the theme the user ended on).
@@ -96,8 +102,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, refresh: Duration
         terminal.draw(|f| ui::draw(f, app))?;
 
         if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(k) = event::read()? {
-                match k.code {
+            match event::read()? {
+                Event::Key(k) => match k.code {
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
                     KeyCode::Char(' ') => app.paused = !app.paused,
@@ -112,7 +118,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, refresh: Duration
                         app.feed_state.select(Some(0));
                     }
                     _ => {}
-                }
+                },
+                Event::Mouse(m) => match m.kind {
+                    MouseEventKind::ScrollDown => app.feed_scroll(3),
+                    MouseEventKind::ScrollUp => app.feed_scroll(-3),
+                    MouseEventKind::Down(MouseButton::Left) => app.click_feed(m.column, m.row),
+                    _ => {}
+                },
+                _ => {}
             }
         }
         app.frame = app.frame.wrapping_add(1);

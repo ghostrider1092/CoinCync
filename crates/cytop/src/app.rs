@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
+use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::widgets::ListState;
 use sysinfo::{Disks, Networks, System};
@@ -41,6 +42,7 @@ pub struct App {
     pub events: VecDeque<FeedLine>,
     pub feed_state: ListState,
     pub feed_follow: bool,
+    pub feed_area: Rect, // inner area of the feed list, for mouse hit-testing
     log_rx: Option<Receiver<String>>,
     // bookkeeping
     pub last_poll: Instant,
@@ -85,6 +87,7 @@ impl App {
             events: VecDeque::new(),
             feed_state: ListState::default(),
             feed_follow: true,
+            feed_area: Rect::default(),
             log_rx: log.map(spawn_log_tailer),
             last_poll: Instant::now(),
             paused: false,
@@ -238,6 +241,22 @@ impl App {
         let next = (cur + delta).clamp(0, len as isize - 1) as usize;
         self.feed_state.select(Some(next));
         self.feed_follow = next >= len - 1;
+    }
+
+    /// Select the feed line under a click at (col, row), if inside the feed.
+    pub fn click_feed(&mut self, col: u16, row: u16) {
+        let a = self.feed_area;
+        if a.width == 0 || a.height == 0 {
+            return;
+        }
+        if col < a.x || col >= a.x + a.width || row < a.y || row >= a.y + a.height {
+            return;
+        }
+        let idx = self.feed_state.offset() + (row - a.y) as usize;
+        if idx < self.events.len() {
+            self.feed_state.select(Some(idx));
+            self.feed_follow = idx + 1 >= self.events.len();
+        }
     }
 }
 

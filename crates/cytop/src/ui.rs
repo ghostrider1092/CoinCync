@@ -403,6 +403,7 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &mut App) {
     let tabs = format!(" {src} · {sel}/{len} · {mode} ");
     let block = bpanel(&app.theme, 5, "chain-activity", &tabs, "proc_box");
     let inner = block.inner(area);
+    app.feed_area = inner; // for mouse hit-testing
     let hl = if app.feed_follow {
         Style::default()
     } else {

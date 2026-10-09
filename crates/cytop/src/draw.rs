@@ -27,16 +27,29 @@ pub fn superscript(n: u32) -> String {
 /// (hi_fg) superscript index + white (title) name tab, and optional right tab.
 pub fn bpanel(theme: &Theme, idx: u32, title: &str, tabs: &str, box_role: &str) -> Block<'static> {
     let box_color = theme.c(box_role);
+    // Wrap a title in btop's notch glyphs: ─┐ … ┌ (box colour), the ┐/┌ notching
+    // the label down into the top border line.
+    let notch = |inner: Vec<Span<'static>>| {
+        let mut v = vec![
+            Span::styled("─┐", Style::default().fg(box_color)),
+        ];
+        v.extend(inner);
+        v.push(Span::styled("┌", Style::default().fg(box_color)));
+        v
+    };
     let mut b = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(box_color))
-        .title(Line::from(vec![
+        .title(Line::from(notch(vec![
             Span::styled(superscript(idx), Style::default().fg(theme.c("hi_fg")).add_modifier(Modifier::BOLD)),
             Span::styled(title.to_string(), Style::default().fg(theme.c("title")).add_modifier(Modifier::BOLD)),
-        ]));
+        ])));
     if !tabs.is_empty() {
-        b = b.title(Line::from(Span::styled(tabs.to_string(), Style::default().fg(box_color))).right_aligned());
+        b = b.title(
+            Line::from(notch(vec![Span::styled(tabs.to_string(), Style::default().fg(theme.c("title")))]))
+                .right_aligned(),
+        );
     }
     b
 }
