@@ -131,6 +131,19 @@ pub struct TransactionBuilder {
     payment_id: Option<[u8; 8]>,
     /// Transaction version.
     tx_version: u8,
+    /// Value-bridge term for shield-in transactions (transparent → shielded
+    /// pool). This is the public value that leaves the transparent side into
+    /// the Spark pool, equal to `|value_balance|` when `value_balance < 0`.
+    ///
+    /// Like `fee`, it is a public amount committed with *zero* blinding, so it
+    /// does NOT participate in the pseudo-output blinding balance
+    /// (`Σ r'_i = Σ r_out` still holds). It only enlarges the plaintext value
+    /// balance: `Σ inputs = Σ outputs + fee + shielded_value_out`. The
+    /// consensus value bridge re-derives the same relation from the
+    /// `SparkPayload.value_balance` carried in `extra` (see
+    /// `chain::verify_transparent_shielded_balance`). Default 0 → an ordinary
+    /// transparent transaction. Only meaningful for `TxType::Shielded`.
+    shielded_value_out: u64,
 }
 
 impl TransactionBuilder {
@@ -148,6 +161,7 @@ impl TransactionBuilder {
             extra: Vec::new(),
             payment_id: None,
             tx_version: 1,
+            shielded_value_out: 0,
         }
     }
 
@@ -166,6 +180,24 @@ impl TransactionBuilder {
     /// case. Empty → standard tx with no recovery metadata (default).
     pub fn with_extra(mut self, extra: Vec<u8>) -> Self {
         self.extra = extra;
+        self
+    }
+
+    /// Declare the public value leaving the transparent side into the Spark
+    /// shielded pool (a shield-in / mint). This is `|value_balance|` when
+    /// `value_balance < 0`.
+    ///
+    /// Treated exactly like an extra fee for the *plaintext* balance equation
+    /// (`Σ inputs = Σ outputs + fee + shielded_value_out`) but committed with
+    /// zero blinding, so the Pedersen pseudo-output balance
+    /// (`Σ r'_i = Σ r_out`) is unchanged. The caller is responsible for also
+    /// attaching the matching `SparkPayload` (with `value_balance =
+    /// -(shielded_value_out as i64)` and the mint bundle) via
+    /// [`with_extra`](Self::with_extra); the two MUST agree or the consensus
+    /// value bridge rejects the transaction. Only meaningful for
+    /// `TxType::Shielded`.
+    pub fn with_shielded_value_out(mut self, value: u64) -> Self {
+        self.shielded_value_out = value;
         self
     }
 
@@ -574,8 +606,15 @@ impl TransactionBuilder {
             .try_fold(0u64, |acc, o| acc.checked_add(o.amount.as_atomic()))
             .ok_or(Error::AmountOverflow)?;
 
+        // Public value on the output side = transparent outputs + fee +
+        // (for a shield-in) the value minted into the Spark pool. The last
+        // term is committed with zero blinding, exactly like the fee, so it
+        // appears here in the plaintext balance but NOT in the pseudo-output
+        // blinding balance below (Σ r'_i = Σ r_out is unchanged).
         let outputs_plus_fee = output_sum
             .checked_add(self.fee.as_atomic())
+            .ok_or(Error::AmountOverflow)?
+            .checked_add(self.shielded_value_out)
             .ok_or(Error::AmountOverflow)?;
         if input_sum != outputs_plus_fee {
             return Err(Error::TransactionUnbalanced {
@@ -1232,6 +1271,73 @@ mod tests {
             matches!(err, Error::AmountOverflow),
             "output_sum + fee overflow must be AmountOverflow, got {err:?}"
         );
+    }
+
+    #[test]
+    fn shielded_value_out_balances_as_extra_public_value() {
+        // A shield-in: input == transparent change + fee + value minted into
+        // the Spark pool. with_shielded_value_out() declares that last term as
+        // extra PUBLIC value (zero blinding, like the fee), so the plaintext
+        // balance is inputs == outputs + fee + shielded_value_out. Here
+        // 10_000_000 == 3_000_000 (change) + 1_000_000 (fee) + 6_000_000 (pool).
+        let mut b = TransactionBuilder::new(TxType::Shielded).with_shielded_value_out(6_000_000);
+        b.add_input_at_position(make_spendable_input(10_000_000), make_decoys(10), 0)
+            .unwrap();
+        b.add_output(&make_recipient(3_000_000), 0, &mut OsRng).unwrap();
+        b.set_fee(Amount::from_atomic(1_000_000));
+        let tx = b
+            .build(&mut OsRng)
+            .expect("shield-in with matching value balance must build");
+        assert_eq!(tx.tx_type, TxType::Shielded);
+        // Exactly one transparent (change) output; the shielded coin is NOT a
+        // transparent output.
+        assert_eq!(tx.outputs.len(), 1);
+        assert_eq!(tx.fee.as_atomic(), 1_000_000);
+    }
+
+    #[test]
+    fn shielded_value_out_unbalanced_rejected() {
+        // Same as above but the pool term is 1 atomic too large, so
+        // outputs + fee + shielded_value_out (10_000_001) != input (10_000_000).
+        let mut b = TransactionBuilder::new(TxType::Shielded).with_shielded_value_out(6_000_001);
+        b.add_input_at_position(make_spendable_input(10_000_000), make_decoys(10), 0)
+            .unwrap();
+        b.add_output(&make_recipient(3_000_000), 0, &mut OsRng).unwrap();
+        b.set_fee(Amount::from_atomic(1_000_000));
+        let err = b.build(&mut OsRng).err().unwrap();
+        assert!(
+            matches!(err, Error::TransactionUnbalanced { inputs, outputs }
+                if inputs == 10_000_000 && outputs == 10_000_001),
+            "shield-in with mismatched value balance must be TransactionUnbalanced, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn shielded_value_out_overflow_rejected() {
+        // outputs + fee is fine, but adding shielded_value_out overflows u64.
+        let mut b = TransactionBuilder::new(TxType::Shielded).with_shielded_value_out(u64::MAX);
+        b.add_input_at_position(make_spendable_input(10_000_000), make_decoys(2), 0)
+            .unwrap();
+        b.add_output(&make_recipient(5_000_000), 0, &mut OsRng).unwrap();
+        b.set_fee(Amount::from_atomic(1));
+        let err = b.build(&mut OsRng).err().unwrap();
+        assert!(
+            matches!(err, Error::AmountOverflow),
+            "outputs+fee+shielded_value_out overflow must be AmountOverflow, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn shielded_value_out_zero_is_an_ordinary_transfer() {
+        // Default (unset) shielded_value_out == 0 → the balance equation is the
+        // plain inputs == outputs + fee, unchanged for every existing caller.
+        let mut b = TransactionBuilder::transfer();
+        b.add_input_at_position(make_spendable_input(10_000_000), make_decoys(2), 0)
+            .unwrap();
+        b.add_output(&make_recipient(9_000_000), 0, &mut OsRng).unwrap();
+        b.set_fee(Amount::from_atomic(1_000_000));
+        b.build(&mut OsRng)
+            .expect("ordinary transfer unaffected by the shielded_value_out default");
     }
 
     #[test]
