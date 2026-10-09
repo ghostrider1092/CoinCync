@@ -16,8 +16,8 @@ use sysinfo::System;
 
 use crate::app::App;
 use crate::draw::{
-    bpanel, braille_graph, human_bytes, human_dur, human_hashrate, meter_line, meter_spans, slice,
-    truncate, BRAND,
+    bpanel, braille_graph, human_bytes, human_cync, human_dur, human_hashrate, meter_line,
+    meter_spans, slice, truncate, BRAND,
 };
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -337,6 +337,19 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(n.blocks_found.to_string(), Style::default().fg(t.c("main_fg"))),
         Span::styled("   mempool ", Style::default().fg(dim)),
         Span::styled(format!("{} tx", n.mempool), Style::default().fg(t.c("main_fg"))),
+    ]));
+
+    // Estimated mining earnings = blocks_found × last block reward (reward is
+    // derived from supply_atomic deltas in the log feed). ESTIMATE ONLY — ignores
+    // reward drift across blocks, coinbase maturity, and anything spent.
+    let earned = match app.block_reward {
+        Some(r) if n.blocks_found > 0 => format!("≈ {}", human_cync(r.saturating_mul(n.blocks_found))),
+        _ => "—".to_string(),
+    };
+    lines.push(Line::from(vec![
+        Span::styled("earned  ", Style::default().fg(dim)),
+        Span::styled(earned, Style::default().fg(t.g("free", 80.0))),
+        Span::styled("  estimate", Style::default().fg(t.g("available", 70.0))),
     ]));
 
     let gold = t.g("available", 80.0);

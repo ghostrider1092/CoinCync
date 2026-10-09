@@ -168,6 +168,27 @@ pub fn clock_hms() -> String {
     format!("{:02}:{:02}:{:02}", d / 3600, (d % 3600) / 60, d % 60)
 }
 
+/// Extract `supply_atomic=<N>` from a BLOCK_COMMIT log line (else None).
+pub fn parse_supply(line: &str) -> Option<u64> {
+    let i = line.find("supply_atomic=")? + "supply_atomic=".len();
+    let rest = &line[i..];
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Atomic units per CYNC (COIN = ATOMIC_UNITS = 1e12 in src/constants.rs).
+pub const COIN: f64 = 1_000_000_000_000.0;
+
+/// Format an atomic amount as CYNC with sensible precision.
+pub fn human_cync(atomic: u64) -> String {
+    let c = atomic as f64 / COIN;
+    if c >= 1000.0 {
+        format!("{c:.2} CYNC")
+    } else {
+        format!("{c:.4} CYNC")
+    }
+}
+
 pub fn short_hash(h: &str) -> String {
     if h.len() <= 14 {
         if h.is_empty() { "…".into() } else { h.to_string() }

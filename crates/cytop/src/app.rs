@@ -13,7 +13,7 @@ use sysinfo::{Disks, Networks, System};
 use crate::collect::{
     spawn_gpu_poller, spawn_log_tailer, FeedLine, GpuInfo, NodeClient, NodeInfo, EVENTS_CAP,
 };
-use crate::draw::{clock_hms, icon_for, parse_log_line, short_hash, BRAND};
+use crate::draw::{clock_hms, icon_for, parse_log_line, parse_supply, short_hash, BRAND};
 use crate::theme::Theme;
 
 pub const HIST: usize = 120;
@@ -43,6 +43,9 @@ pub struct App {
     pub feed_state: ListState,
     pub feed_follow: bool,
     pub feed_area: Rect, // inner area of the feed list, for mouse hit-testing
+    // earnings estimate — derived from supply_atomic deltas in the log feed
+    last_supply: Option<u64>,
+    pub block_reward: Option<u64>, // latest coinbase reward (atomic), from supply delta
     log_rx: Option<Receiver<String>>,
     // bookkeeping
     pub last_poll: Instant,
@@ -88,6 +91,8 @@ impl App {
             feed_state: ListState::default(),
             feed_follow: true,
             feed_area: Rect::default(),
+            last_supply: None,
+            block_reward: None,
             log_rx: log.map(spawn_log_tailer),
             last_poll: Instant::now(),
             paused: false,
@@ -169,10 +174,25 @@ impl App {
             let theme = self.theme.clone();
             while let Ok(line) = rx.try_recv() {
                 if !line.trim().is_empty() {
+                    self.track_supply(&line);
                     self.push_feed(parse_log_line(&theme, &line));
                 }
             }
             self.log_rx = Some(rx);
+        }
+    }
+
+    /// Derive the coinbase reward from `supply_atomic=` in BLOCK_COMMIT lines:
+    /// the supply delta between consecutive commits is one block's reward, which
+    /// lets us estimate mining earnings (blocks_found × reward).
+    fn track_supply(&mut self, line: &str) {
+        if let Some(supply) = parse_supply(line) {
+            if let Some(prev) = self.last_supply {
+                if supply > prev {
+                    self.block_reward = Some(supply - prev);
+                }
+            }
+            self.last_supply = Some(supply);
         }
     }
 
