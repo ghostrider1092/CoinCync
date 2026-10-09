@@ -45,6 +45,85 @@ fn serialize_peer_info(peer: &crate::network::peer::PeerInfo, minimize_metadata:
     }
 }
 
+/// A node behind by more than a finality window AND not advancing its height
+/// for this long is treated as genuinely fork-stuck (wedged), as opposed to
+/// merely lagging during a normal IBD catch-up. On the order of several block
+/// times / poll intervals.
+const FORK_STUCK_STALL_SECS: u64 = 120;
+
+/// Seconds since the chain `height` last increased, observed across `get_info`
+/// polls.
+///
+/// Dig-Out #3 refinement (reviewer finding): `fork_stuck` must mean "behind AND
+/// not making progress", not merely "far behind" — the latter is the NORMAL
+/// state during initial sync and wrongly tripped the flag on a node that was
+/// actively catching up (observed live: bridges read `fork_stuck:true` while
+/// still downloading). This samples the observed height between polls
+/// (process-global, lock-free) and reports how long it has been frozen: a node
+/// that is advancing resets it to ~0 on the next poll, while a genuinely wedged
+/// node's value climbs without bound. Returns 0 on the first observation and
+/// after a restart — we never claim a stall we have not actually measured.
+/// This mirrors the reviewer's own "if it PERSISTS while `height` does not
+/// advance across polls" criterion, measured in wall-clock rather than left to
+/// the operator. A fully-synced node is excluded by the `!synced` guard at the
+/// call site, so a tip idling between blocks never reads as stuck.
+/// Pure stall-clock transition: given the previous `(height, observed_at)` (if
+/// any), the current `height`, and `now`, return the next state and the stall
+/// seconds. Extracted from [`height_stall_secs`] so the logic is unit-testable
+/// with synthetic instants (no sleeps).
+fn stall_secs_core(
+    prev: Option<(u64, std::time::Instant)>,
+    height: u64,
+    now: std::time::Instant,
+) -> (Option<(u64, std::time::Instant)>, u64) {
+    match prev {
+        // Height advanced → reset the stall clock to now.
+        Some((h, _)) if height > h => (Some((height, now)), 0),
+        // Unchanged (or a reorg rewind) → keep the baseline, report elapsed.
+        Some((h, at)) => (Some((h, at)), now.saturating_duration_since(at).as_secs()),
+        // First observation this process → start the clock, no stall yet.
+        None => (Some((height, now)), 0),
+    }
+}
+
+fn height_stall_secs(height: u64) -> u64 {
+    use std::time::Instant;
+    static LAST: std::sync::Mutex<Option<(u64, Instant)>> = std::sync::Mutex::new(None);
+    let mut guard = LAST.lock().unwrap_or_else(|p| p.into_inner());
+    let (next, secs) = stall_secs_core(*guard, height, Instant::now());
+    *guard = next;
+    secs
+}
+
+#[cfg(test)]
+mod fork_stuck_tests {
+    use super::stall_secs_core;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn stall_clock_resets_on_advance_and_climbs_when_frozen() {
+        let t0 = Instant::now();
+        // First observation: no stall yet, baseline recorded at height 100.
+        let (s1, secs1) = stall_secs_core(None, 100, t0);
+        assert_eq!(secs1, 0);
+        assert_eq!(s1, Some((100, t0)));
+        // 150s later, height unchanged → reported stall is 150s, baseline kept.
+        let t1 = t0 + Duration::from_secs(150);
+        let (s2, secs2) = stall_secs_core(s1, 100, t1);
+        assert_eq!(secs2, 150);
+        assert_eq!(s2, Some((100, t0)), "baseline must be preserved while frozen");
+        // Height advances → stall resets to 0 and the baseline moves forward.
+        let t2 = t1 + Duration::from_secs(10);
+        let (s3, secs3) = stall_secs_core(s2, 101, t2);
+        assert_eq!(secs3, 0);
+        assert_eq!(s3, Some((101, t2)));
+        // A reorg rewind (height drops) counts as "not advancing".
+        let t3 = t2 + Duration::from_secs(90);
+        let (_s4, secs4) = stall_secs_core(s3, 100, t3);
+        assert_eq!(secs4, 90);
+    }
+}
+
 pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // ── get_info ───────────────────────────────────────────────
     //
@@ -74,6 +153,14 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             let height = tip.height;
             let synced = state.chain.is_synced();
             let target_height = state.chain.target_height();
+            // Dig-Out #3 refinement: distinguish "behind but progressing"
+            // (normal IBD) from "wedged" (behind AND height frozen). `fork_stuck`
+            // now requires BOTH a beyond-finality gap AND a measured height stall.
+            let blocks_behind = target_height.saturating_sub(height);
+            let sync_stall_secs = height_stall_secs(height);
+            let fork_stuck = !synced
+                && blocks_behind > crate::constants::CHECKPOINT_INTERVAL
+                && sync_stall_secs >= FORK_STUCK_STALL_SECS;
             let peer_count = state
                 .p2p
                 .as_ref()
@@ -145,20 +232,23 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 // Sync + P2P
                 "synced":                  synced,
                 "is_synced":               synced, // back-compat alias
-                "blocks_behind":           target_height.saturating_sub(height),
-                // Dig-Out #3: `true` when we are more than a finality window
-                // (CHECKPOINT_INTERVAL) behind the best-known height and not
-                // synced — a gap beyond max_reorg_depth / the finality floor
-                // (tip − CHECKPOINT_INTERVAL) that cannot self-heal by reorg.
-                // During initial sync this is expected and clears as the node
-                // catches up; if it PERSISTS while `height` does not advance
-                // across polls, the node is wedged on a minority fork and needs
-                // an operator reset-to-network. Mirrors the `[dig-out]
-                // FORK-STUCK` node log line so the rig MESH strip + monitors
-                // light up.
-                "fork_stuck":              !synced
-                    && target_height.saturating_sub(height)
-                        > crate::constants::CHECKPOINT_INTERVAL,
+                "blocks_behind":           blocks_behind,
+                // Seconds the local height has sat frozen (observed across
+                // polls). ~0 while actively syncing; climbs when wedged. Lets
+                // the rig/monitors apply their own thresholds and distinguishes
+                // a lagging-but-progressing node from a stuck one.
+                "sync_stall_secs":         sync_stall_secs,
+                // Dig-Out #3 (refined): `true` ONLY when we are more than a
+                // finality window (CHECKPOINT_INTERVAL) behind the best-known
+                // height, not synced, AND the height has not advanced for
+                // FORK_STUCK_STALL_SECS — i.e. genuinely wedged on a minority
+                // fork that cannot self-heal by reorg, needing an operator
+                // reset-to-network. A node merely catching up during normal IBD
+                // is behind but still advancing, so it no longer trips this
+                // (the prior gap-only test fired during every initial sync).
+                // Mirrors the `[dig-out] FORK-STUCK` node log line so the rig
+                // MESH strip + monitors light up.
+                "fork_stuck":              fork_stuck,
                 "peer_count":              peer_count,
                 // Sustained mesh-floor state (observational). See crate::vitals
                 // + docs/design/runtime-mesh-floor.md.

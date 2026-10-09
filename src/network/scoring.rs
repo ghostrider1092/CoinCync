@@ -438,6 +438,13 @@ pub struct PeerScore {
     /// instant in the variant. Auto-expires (cleared by `is_get_blocks_banned`)
     /// so peers that recover from their own resync get another shot.
     pub get_blocks_banned_until: Option<MonoInstant>,
+    /// Dig-Out #4 (reviewer finding): how many times emergency recovery has
+    /// force-cleared this peer's GetBlocks ban, and when it last did. A peer
+    /// that keeps re-earning a ban right after each clear is backed off
+    /// exponentially (see `clear_get_blocks_bans`) so recovery stops churning
+    /// it; reset to 0 on a real block delivery (`record_block_success`).
+    pub get_blocks_ban_clears: u32,
+    pub last_get_blocks_clear: Option<MonoInstant>,
 }
 
 impl Default for PeerScore {
@@ -459,6 +466,8 @@ impl Default for PeerScore {
             reconnects: 0,
             consecutive_empty_blocks: 0,
             get_blocks_banned_until: None,
+            get_blocks_ban_clears: 0,
+            last_get_blocks_clear: None,
         }
     }
 }
@@ -474,6 +483,13 @@ pub const EMPTY_BLOCKS_BAN_THRESHOLD: u32 = 5;
 /// they're in the middle of their own resync) without permanently locking
 /// them out. Auto-expires; no manual unban needed.
 pub const EMPTY_BLOCKS_BAN_DURATION_SECS: u64 = 3600;
+
+/// Dig-Out #4: base cooldown before emergency recovery may force-clear the SAME
+/// peer's GetBlocks ban again, doubled per prior clear and capped, so a
+/// persistently unhelpful peer is not re-introduced on every emergency tick.
+/// The first clear of a peer is always allowed (cooldown 0).
+pub const GET_BLOCKS_CLEAR_BACKOFF_BASE_SECS: u64 = 120;
+pub const GET_BLOCKS_CLEAR_BACKOFF_MAX_SECS: u64 = 3600;
 
 /// Per-peer, per-message-type rate tracker.
 ///
@@ -740,6 +756,7 @@ impl PeerScore {
         self.last_success = Some(mono_now());
         self.validated = true; // H-15 FIX: delivering valid block = validated
         self.consecutive_empty_blocks = 0; // a real delivery clears the wedge counter
+        self.get_blocks_ban_clears = 0; // Dig-Out #4: peer is useful again → reset backoff
         self.update_latency(latency);
         self.update_validity_rate();
         self.adjust_reputation(2);
@@ -1035,13 +1052,68 @@ impl PeerScorer {
     /// queued) majority hashes so a shallow fork can reorg instead of wedging.
     /// Observed live on the testnet seed 2026-10-07 (wedged 35 h at height 107).
     pub fn clear_get_blocks_bans(&mut self) -> usize {
-        let mut cleared = 0usize;
-        for score in self.scores.values_mut() {
-            if score.get_blocks_banned_until.is_some() {
-                cleared += 1;
+        // Dig-Out #4 (reviewer finding): do NOT wipe every peer's ban on every
+        // emergency tick — that re-introduces persistently-unhelpful peers
+        // wholesale, which immediately re-empty and re-ban (churn). Instead
+        // clear selectively with per-peer exponential backoff, and keep a
+        // guaranteed-progress fallback so a fully-banned peer set can never
+        // deadlock on the backoff.
+        let now = mono_now();
+        // Cooldown before the SAME peer may be cleared again, growing with the
+        // number of prior clears (first clear is always due: cooldown 0).
+        let cooldown = |clears: u32| -> Duration {
+            if clears == 0 {
+                Duration::ZERO
+            } else {
+                let shift = clears.min(5); // cap so the shift cannot overflow
+                let secs = GET_BLOCKS_CLEAR_BACKOFF_BASE_SECS
+                    .saturating_mul(1u64 << shift)
+                    .min(GET_BLOCKS_CLEAR_BACKOFF_MAX_SECS);
+                Duration::from_secs(secs)
             }
+        };
+        let mut clear_one = |score: &mut PeerScore| {
             score.get_blocks_banned_until = None;
             score.consecutive_empty_blocks = 0;
+            score.get_blocks_ban_clears = score.get_blocks_ban_clears.saturating_add(1);
+            score.last_get_blocks_clear = Some(now);
+        };
+
+        // Pass 1: clear every banned peer whose backoff has elapsed.
+        let mut cleared = 0usize;
+        let mut any_banned = false;
+        for score in self.scores.values_mut() {
+            if score.get_blocks_banned_until.is_none() {
+                continue;
+            }
+            any_banned = true;
+            let due = match score.last_get_blocks_clear {
+                None => true,
+                Some(at) => now.saturating_duration_since(at) >= cooldown(score.get_blocks_ban_clears),
+            };
+            if due {
+                clear_one(score);
+                cleared += 1;
+            }
+        }
+
+        // Guaranteed-progress fallback: peers are banned but none were due (all
+        // in backoff) → still free the single one cleared longest ago, so a node
+        // whose entire peer set is banned can never wedge on the backoff itself.
+        if cleared == 0 && any_banned {
+            if let Some(score) = self
+                .scores
+                .values_mut()
+                .filter(|s| s.get_blocks_banned_until.is_some())
+                .max_by_key(|s| {
+                    s.last_get_blocks_clear
+                        .map(|t| now.saturating_duration_since(t))
+                        .unwrap_or(Duration::MAX)
+                })
+            {
+                clear_one(score);
+                cleared = 1;
+            }
         }
         cleared
     }
@@ -1439,6 +1511,51 @@ mod tests {
             score.should_ban(),
             "a peer that only ever sends empties must eventually be disconnect-eligible"
         );
+    }
+
+    #[test]
+    fn clear_get_blocks_bans_is_selective_with_backoff() {
+        // Dig-Out #4: emergency recovery must not wipe every peer's GetBlocks
+        // ban on every tick (which re-introduces unhelpful peers wholesale).
+        // The FIRST clear frees all banned peers; an immediate re-ban + re-clear
+        // (no time elapsed, so per-peer backoff has not expired) frees only ONE
+        // (the guaranteed-progress fallback), not both.
+        let mut scorer = PeerScorer::new();
+        let a: std::net::SocketAddr = "1.1.1.1:1".parse().unwrap();
+        let b: std::net::SocketAddr = "2.2.2.2:2".parse().unwrap();
+
+        let ban = |scorer: &mut PeerScorer, addr: std::net::SocketAddr| {
+            let s = scorer.get_or_create(addr);
+            for _ in 0..EMPTY_BLOCKS_BAN_THRESHOLD {
+                s.record_empty_blocks_response();
+            }
+        };
+
+        ban(&mut scorer, a);
+        ban(&mut scorer, b);
+        assert!(scorer.get_or_create(a).is_get_blocks_banned());
+        assert!(scorer.get_or_create(b).is_get_blocks_banned());
+
+        // First clear: no prior clears → both are due.
+        assert_eq!(scorer.clear_get_blocks_bans(), 2);
+        assert!(!scorer.get_or_create(a).is_get_blocks_banned());
+        assert!(!scorer.get_or_create(b).is_get_blocks_banned());
+
+        // Re-ban both immediately and clear again with ~0 elapsed time: the
+        // per-peer backoff (120s·2) has not expired, so pass 1 frees none and the
+        // progress-fallback frees exactly one.
+        ban(&mut scorer, a);
+        ban(&mut scorer, b);
+        let cleared = scorer.clear_get_blocks_bans();
+        assert_eq!(
+            cleared, 1,
+            "backoff must free only one (progress guarantee), not churn both"
+        );
+        let still_banned = [a, b]
+            .iter()
+            .filter(|p| scorer.get_or_create(**p).is_get_blocks_banned())
+            .count();
+        assert_eq!(still_banned, 1, "exactly one peer stays backed off");
     }
 
     #[test]
