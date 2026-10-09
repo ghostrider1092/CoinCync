@@ -2005,6 +2005,7 @@ async fn cmd_integrated_address(
         Network::Mainnet => "mainnet",
         Network::Testnet => "testnet",
         Network::Regtest => "regtest",
+        Network::Beta => "beta",
     };
     if data.network != flag_network {
         eprintln!(
