@@ -179,6 +179,15 @@ pub struct DandelionRouter {
     /// Kept to detect stem loops and avoid double-fluffing.
     /// Pruned periodically.
     fluffed: HashMap<Hash, u64>, // hash → fluff timestamp
+    /// Privacy-policy connector: all adaptive privacy logic lives in
+    /// `dandelion_connector`, not here. Defaults to the historical strict
+    /// classification (`Fixed`); an `Adaptive` policy may be injected (gated)
+    /// to make the privacy SIGNAL honest on a small network. See
+    /// `set_outbound_peers`.
+    privacy_policy: super::dandelion_connector::PrivacyPolicy,
+    /// Last privacy level we logged, so the privacy line is edge-triggered
+    /// (logged on a level CHANGE) instead of every maintenance tick.
+    last_privacy_level: Option<super::dandelion_connector::PrivacyLevel>,
 }
 
 impl DandelionRouter {
@@ -197,7 +206,31 @@ impl DandelionRouter {
             },
             epoch_number: 0,
             fluffed: HashMap::new(),
+            // Default to the historical Fixed policy; opt into size-aware Baffle
+            // behavior with COINCYNC_DANDELION_ADAPTIVE=1 (consistent with the
+            // codebase's other env gates, e.g. COINCYNC_RANDOMX_LIGHT_MODE).
+            // `set_privacy_policy` remains for explicit injection.
+            privacy_policy: if std::env::var("COINCYNC_DANDELION_ADAPTIVE").ok().as_deref()
+                == Some("1")
+            {
+                super::dandelion_connector::PrivacyPolicy::adaptive(MIN_PEERS_FOR_PRIVACY)
+            } else {
+                super::dandelion_connector::PrivacyPolicy::fixed(MIN_PEERS_FOR_PRIVACY)
+            },
+            last_privacy_level: None,
         }
+    }
+
+    /// Inject a privacy policy (gated opt-in). The default is the historical
+    /// strict `Fixed` policy; call this with
+    /// `dandelion_connector::PrivacyPolicy::adaptive(MIN_PEERS_FOR_PRIVACY)` to
+    /// enable size-aware assessment. Resets the edge-trigger so the next
+    /// assessment re-logs the current level under the new policy. The router's
+    /// routing decisions are unaffected — the policy only drives the status
+    /// signal (V1).
+    pub fn set_privacy_policy(&mut self, policy: super::dandelion_connector::PrivacyPolicy) {
+        self.privacy_policy = policy;
+        self.last_privacy_level = None;
     }
 
     // ─── Peer Management ─────────────────────────────────────────────────
@@ -205,13 +238,34 @@ impl DandelionRouter {
     /// Set the full list of outbound peers.  Called by node.rs whenever the
     /// outbound peer set changes (connect/disconnect).
     pub fn set_outbound_peers(&mut self, peers: Vec<PeerId>) {
-        if peers.len() < MIN_PEERS_FOR_PRIVACY && !peers.is_empty() {
-            tracing::warn!(
-                "Dandelion++ has only {} outbound peer(s) — privacy degraded. \
-                 Need {} for adequate anonymity.",
-                peers.len(),
-                MIN_PEERS_FOR_PRIVACY
-            );
+        // Ask the privacy connector how to classify this peer set, then log it
+        // EDGE-TRIGGERED (on a level change) rather than every maintenance tick
+        // — the per-tick warn buried real events and made a transiently-thin
+        // (or simply small) network look misconfigured. All of the adaptivity
+        // (and future features) live in `dandelion_connector`, not here.
+        let assessment = self.privacy_policy.assess(peers.len());
+        if self.last_privacy_level != Some(assessment.level) {
+            use super::dandelion_connector::PrivacyLevel;
+            match assessment.level {
+                PrivacyLevel::Degraded if assessment.warn => tracing::warn!(
+                    "Dandelion++ privacy degraded: {} outbound peer(s), below the {}-peer \
+                     anonymity target and fewer than this node has had — stem anonymity reduced.",
+                    assessment.observed,
+                    assessment.target,
+                ),
+                PrivacyLevel::SizeLimited => tracing::info!(
+                    "Dandelion++ privacy size-limited: {} outbound peer(s); the network offers \
+                     fewer than the {}-peer target. Expected on a small network, not a fault.",
+                    assessment.observed,
+                    assessment.target,
+                ),
+                PrivacyLevel::Adequate if self.last_privacy_level.is_some() => tracing::info!(
+                    "Dandelion++ privacy adequate: {} outbound peer(s).",
+                    assessment.observed,
+                ),
+                _ => {}
+            }
+            self.last_privacy_level = Some(assessment.level);
         }
         self.outbound_peers = peers;
     }
@@ -537,9 +591,25 @@ impl DandelionRouter {
         let mut rng = rand::rngs::OsRng;
         // Exponential distribution: -ln(U) / lambda, where lambda = 1/mean
         let u: f64 = rng.gen_range(0.001..1.0); // avoid ln(0)
-        let delay = (-u.ln() * DANDELION_EMBARGO_MEAN_SECS as f64) as u64;
-        let capped = delay.min(DANDELION_EMBARGO_MAX_SECS);
-        now + capped.max(5) // minimum 5 seconds
+        let base_delay = -u.ln() * DANDELION_EMBARGO_MEAN_SECS as f64;
+        // Step-2 (connector-driven): when outbound peers are scarce, stem-PATH
+        // diversity is unavailable, so the privacy connector stretches the
+        // embargo to add TIMING decorrelation instead. The `Fixed` default
+        // returns 1.0 (strict no-op); the stretch is still bounded by
+        // DANDELION_EMBARGO_MAX_SECS below, so the "embargo must expire"
+        // fail-safe invariant (§5) is preserved.
+        let scale = self
+            .privacy_policy
+            .stem_embargo_scale(self.outbound_peers.len());
+        now + Self::capped_embargo_secs(base_delay, scale)
+    }
+
+    /// Pure embargo clamp: scale the exponential `base_delay_secs`, then clamp
+    /// to the reviewed `[5, DANDELION_EMBARGO_MAX_SECS]` window. Factored out so
+    /// the scale/cap interaction is unit-testable without the RNG.
+    fn capped_embargo_secs(base_delay_secs: f64, scale: f64) -> u64 {
+        let scaled = (base_delay_secs * scale) as u64;
+        scaled.min(DANDELION_EMBARGO_MAX_SECS).max(5) // min 5s, max cap preserved
     }
 
     /// SECURITY (H16-FIX): Generate a random stem forwarding time using
@@ -674,6 +744,24 @@ mod tests {
     use super::*;
     use crate::primitives::Amount;
     use crate::transaction::TxType;
+
+    #[test]
+    fn step2_embargo_scaling_is_bounded_by_the_security_cap() {
+        // Step-2 stretches the embargo when peers are scarce (timing
+        // decorrelation)…
+        assert_eq!(DandelionRouter::capped_embargo_secs(39.0, 2.0), 78);
+        // …but can NEVER exceed the reviewed max (fail-safe: an embargo must
+        // expire, or a censoring stem path could suppress the tx — §5).
+        assert_eq!(
+            DandelionRouter::capped_embargo_secs(1000.0, 3.0),
+            DANDELION_EMBARGO_MAX_SECS
+        );
+        // …and never drops below the 5s floor.
+        assert_eq!(DandelionRouter::capped_embargo_secs(1.0, 1.0), 5);
+        // Scale 1.0 (the `Fixed` default) is the historical value, just clamped
+        // — so the default policy changes nothing about stem timing.
+        assert_eq!(DandelionRouter::capped_embargo_secs(39.0, 1.0), 39);
+    }
 
     fn make_test_tx(extra: u8) -> Transaction {
         Transaction {

@@ -90,6 +90,7 @@ pub mod snapshot;
 pub mod storage;
 
 // ── Network + mining ────────────────────────────────────────
+pub mod connectors; // the Manifold — the named connector catalog (valve family)
 pub mod mining;
 pub mod network;
 

@@ -17,6 +17,7 @@ pub mod faucet_registry;
 pub mod block_filter;
 pub mod compact_blocks;
 pub mod dandelion;
+pub mod dandelion_connector;
 pub mod eviction;
 pub mod firework;
 pub mod framing;
