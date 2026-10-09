@@ -835,18 +835,21 @@ impl UtxoSet {
             let tx_hash = tx.hash();
             let is_coinbase = tx.is_coinbase();
 
-            // Shielded (Spark) transactions do NOT live in the transparent UTXO
-            // set: their outputs are Spark notes appended to the accumulator and
-            // their spends burn a serial tag, neither of which belongs here.
-            // Applying them via this transparent path would wrongly insert Spark
-            // outputs as spendable UTXOs and ignore the spend. When shielded is
-            // activated, its apply routes to the Spark accumulator/serial store
-            // (see consensus::validation::check_shielded_tx). Until then shielded
-            // txs are rejected in validation and never reach apply; this guard
-            // keeps the transparent path correct regardless.
-            if tx.is_shielded() {
-                continue;
-            }
+            // Shielded (Spark) transactions: the SHIELDED coins live in the
+            // SparkPayload (`tx.extra`) and are applied to the Spark accumulator
+            // / serial store separately (chain::apply_spark_v2_txs). But a
+            // shielded tx's `tx.inputs` / `tx.outputs` are its TRANSPARENT side —
+            // the value bridge (shield-in / unshield). A shield-in spends
+            // transparent inputs (their key-images MUST be marked spent here, or
+            // the same output could be shielded in twice) and may return
+            // transparent change (which MUST become a spendable UTXO); an
+            // unshield produces transparent outputs. So the transparent
+            // inputs/outputs ARE processed here, identically to a normal tx — the
+            // ONLY thing that doesn't belong in this path is the shielded coin
+            // set, which never appears in `tx.outputs` (verify_block_spark_v2
+            // rejects bare payload outputs). A pure shielded→shielded spend has
+            // empty inputs/outputs, so this is a no-op for it. Shielded txs only
+            // reach apply once activated (validation rejects them otherwise).
 
             // Add outputs (with coinbase flag for maturity tracking - CRIT-5)
             for (idx, output) in tx.outputs.iter().enumerate() {

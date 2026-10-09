@@ -1595,11 +1595,39 @@ pub(crate) fn validate_transaction_for_network_ctx(
     }
 
     // Shielded (Spark) spends do NOT use the CLSAG ring / transparent-UTXO
-    // model, so they dispatch to their own verifier and MUST NOT fall through
-    // to the ring/range/balance checks below (which assume that model). This
+    // model for the SHIELDED side, so they dispatch to their own verifier and
+    // MUST NOT fall through to the transparent range/balance checks below. This
     // path is fail-closed and gated by SHIELDED_TX_ACTIVATION_HEIGHT — see
     // check_shielded_tx and docs/design/cip-shielded-txtype.md.
+    //
+    // THE VALUE BRIDGE (shield-in): a shielded tx MAY also carry TRANSPARENT
+    // inputs — a shield-in moves value from the transparent UTXO side INTO the
+    // shielded pool (`value_balance < 0`). `verify_block_spark_v2` binds that
+    // value_balance to the inputs' pseudo-output commitments (the balance
+    // equation) and to the mint bundle, but the balance equation alone is
+    // satisfiable with FABRICATED pseudo-outputs — so without authenticating the
+    // transparent inputs here, value could be minted into the pool for free
+    // (inflation across the veil). We therefore run the SAME transparent-input
+    // authentication a normal spend gets — ring signatures (ownership +
+    // commitment-to-zero binding each pseudo-output to a real owned input),
+    // ring-member existence, ring size/uniqueness, key-image double-spend, and
+    // range proofs on any transparent change — but NOT `check_tx_balance_proof`
+    // (the transparent in==out+fee rule is replaced by the cross-veil value
+    // bridge). Only when shielded is actually active (regtest/beta in a gated
+    // build; never testnet/mainnet) and the tx carries transparent inputs.
     if tx.is_shielded() {
+        if crate::constants::shielded_tx_active_at_height(expected_network, current_height)
+            && !tx.inputs.is_empty()
+        {
+            check_output_curve_points(tx)?;
+            if contextual {
+                check_tx_no_double_spend(tx, utxos)?;
+                check_tx_ring_members(expected_network, tx, utxos, current_height, v1_0_12_active)?;
+                check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
+            }
+            check_tx_ring_signatures(tx)?;
+            check_tx_range_proofs(tx, current_height)?;
+        }
         return check_shielded_tx(tx, expected_network, current_height);
     }
 
