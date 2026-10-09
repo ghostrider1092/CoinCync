@@ -69,6 +69,9 @@ struct App {
     last_poll: Instant,
     paused: bool,
     sort_by: SortKey,
+    frame: u64,                   // animation frame (advances ~5x/sec)
+    prev_blocks: Option<u64>,     // last blocks_found seen (block-found edge)
+    block_flash: Option<Instant>, // when a block was just found (flash window)
 }
 
 impl App {
@@ -91,6 +94,9 @@ impl App {
             last_poll: Instant::now(),
             paused: false,
             sort_by: SortKey::Cpu,
+            frame: 0,
+            prev_blocks: None,
+            block_flash: None,
         }
     }
 
@@ -118,6 +124,14 @@ impl App {
 
         // Node RPC (best-effort)
         self.node = self.poll_node();
+        // Block-found edge → trigger the celebratory flash.
+        if self.node.online {
+            let bf = self.node.blocks_found;
+            if matches!(self.prev_blocks, Some(prev) if bf > prev) {
+                self.block_flash = Some(Instant::now());
+            }
+            self.prev_blocks = Some(bf);
+        }
         push(&mut self.hash_hist, self.node.hashrate.round().max(0.0) as u64);
     }
 
@@ -193,6 +207,23 @@ fn load_color(pct: f64) -> Color {
         Color::Rgb(0xe3, 0xc4, 0x4f)
     } else {
         Color::Rgb(0xe3, 0x5c, 0x5c)
+    }
+}
+
+/// Vertical bar glyph for a 0..=100 percentage (8 levels).
+fn bar_char(pct: f64) -> char {
+    const B: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let i = ((pct / 100.0) * 7.0).round().clamp(0.0, 7.0) as usize;
+    B[i]
+}
+
+/// Animated miner swinging a pickaxe. Returns (line, is_strike-frame).
+fn mining_art(frame: u64) -> (&'static str, bool) {
+    match (frame / 2) % 4 {
+        0 => ("(•_•)  ⛏      ", false),
+        1 => ("(•_•)    ⛏    ", false),
+        2 => ("(•_•)      ⛏ ✦", true), // strike + spark
+        _ => ("(•_•)    ⛏    ", false),
     }
 }
 
@@ -322,9 +353,10 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_system(f: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::vertical([
-        Constraint::Length(8), // cpu
+        Constraint::Length(6), // cpu graph
+        Constraint::Length(3), // per-core bars
         Constraint::Length(3), // mem
-        Constraint::Length(7), // net
+        Constraint::Length(6), // net
         Constraint::Min(0),    // processes
     ])
     .split(area);
@@ -334,6 +366,22 @@ fn draw_system(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         graph(&format!("cpu  {cpu_now}%"), &app.cpu_hist, 100, load_color(cpu_now as f64), rows[0]),
         rows[0],
+    );
+
+    // Per-core — one vertical bar per core, coloured by load
+    let cores: Vec<Span> = app
+        .sys
+        .cpus()
+        .iter()
+        .map(|c| {
+            let u = c.cpu_usage() as f64;
+            Span::styled(bar_char(u).to_string(), Style::default().fg(load_color(u)))
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(Line::from(cores))
+            .block(panel(&format!("cores  ({})", app.sys.cpus().len()))),
+        rows[1],
     );
 
     // Mem — gauge coloured by load
@@ -346,7 +394,7 @@ fn draw_system(f: &mut Frame, area: Rect, app: &App) {
             .ratio(ratio.clamp(0.0, 1.0))
             .label(format!("{} / {}", human_bytes(used), human_bytes(total)))
             .gauge_style(Style::default().fg(load_color(ratio * 100.0))),
-        rows[1],
+        rows[2],
     );
 
     // Net — braille area graph of download (auto-scaled)
@@ -359,9 +407,9 @@ fn draw_system(f: &mut Frame, area: Rect, app: &App) {
             &app.down_hist,
             nmax,
             Color::Rgb(0x58, 0xd6, 0x8a),
-            rows[2],
+            rows[3],
         ),
-        rows[2],
+        rows[3],
     );
 
     // Processes — sorted by the active key
@@ -374,7 +422,7 @@ fn draw_system(f: &mut Frame, area: Rect, app: &App) {
         }),
         SortKey::Mem => procs.sort_by(|a, b| b.memory().cmp(&a.memory())),
     }
-    let rows_n = rows[3].height.saturating_sub(2) as usize;
+    let rows_n = rows[4].height.saturating_sub(2) as usize;
     let items: Vec<ListItem> = procs
         .iter()
         .take(rows_n)
@@ -393,7 +441,7 @@ fn draw_system(f: &mut Frame, area: Rect, app: &App) {
         SortKey::Cpu => "processes  (sort: cpu · press m)",
         SortKey::Mem => "processes  (sort: mem · press c)",
     };
-    f.render_widget(List::new(items).block(panel(title)), rows[3]);
+    f.render_widget(List::new(items).block(panel(title)), rows[4]);
 }
 
 fn draw_node(f: &mut Frame, area: Rect, app: &App) {
@@ -440,7 +488,7 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "mining  (off)".to_string()
     };
-    let mrows = Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).split(rows[1]);
+    let mrows = Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(rows[1]);
     let hmax = app.hash_hist.iter().copied().max().unwrap_or(1).max(1);
     f.render_widget(
         graph(
@@ -452,13 +500,34 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
         ),
         mrows[0],
     );
+
+    // Animated miner + celebratory block-found flash (3s).
+    let gold = Color::Rgb(0xf5, 0xc8, 0x42);
+    let flashing = app
+        .block_flash
+        .map(|t| t.elapsed() < Duration::from_secs(3))
+        .unwrap_or(false);
+    let face = if flashing {
+        Line::from(Span::styled(
+            "  ✦ ⛏  BLOCK FOUND!  ⛏ ✦",
+            Style::default().fg(gold).add_modifier(Modifier::BOLD),
+        ))
+    } else if n.is_mining {
+        let (art, strike) = mining_art(app.frame);
+        Line::from(Span::styled(art, Style::default().fg(if strike { gold } else { CYAN })))
+    } else {
+        Line::from(Span::styled("  (-_-) zzz   idle", Style::default().fg(DIM)))
+    };
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("blocks ", Style::default().fg(DIM)),
-            Span::styled(n.blocks_found.to_string(), Style::default().fg(Color::White)),
-            Span::styled("   hashes ", Style::default().fg(DIM)),
-            Span::raw(n.hashes_total.to_string()),
-        ])),
+        Paragraph::new(vec![
+            face,
+            Line::from(vec![
+                Span::styled("blocks ", Style::default().fg(DIM)),
+                Span::styled(n.blocks_found.to_string(), Style::default().fg(Color::White)),
+                Span::styled("   hashes ", Style::default().fg(DIM)),
+                Span::raw(n.hashes_total.to_string()),
+            ]),
+        ]),
         mrows[1],
     );
 
@@ -495,9 +564,8 @@ fn run(
     loop {
         terminal.draw(|f| draw(f, app))?;
 
-        // Wait for input up to the refresh interval, then tick.
-        let wait = refresh.saturating_sub(app.last_poll.elapsed());
-        if event::poll(wait.max(Duration::from_millis(1)))? {
+        // Redraw at ~5 fps (for animation); refresh DATA at the slower `refresh`.
+        if event::poll(Duration::from_millis(200))? {
             if let Event::Key(k) = event::read()? {
                 match k.code {
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
@@ -511,6 +579,7 @@ fn run(
                 }
             }
         }
+        app.frame = app.frame.wrapping_add(1);
         if !app.paused && app.last_poll.elapsed() >= refresh {
             app.tick();
             app.last_poll = Instant::now();
