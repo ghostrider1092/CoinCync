@@ -42,9 +42,11 @@ struct NodeInfo {
     online: bool,
     network: String,
     height: u64,
+    target_height: u64,
     synced: bool,
     fork_stuck: bool,
     sync_stall_secs: u64,
+    mesh_degraded: bool,
     peers: u64,
     difficulty: String,
     mempool: u64,
@@ -148,9 +150,11 @@ impl App {
             online: true,
             network: r.get("network").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
             height: r.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
+            target_height: r.get("target_height").and_then(|v| v.as_u64()).unwrap_or(0),
             synced: r.get("synced").and_then(|v| v.as_bool()).unwrap_or(false),
             fork_stuck: r.get("fork_stuck").and_then(|v| v.as_bool()).unwrap_or(false),
             sync_stall_secs: r.get("sync_stall_secs").and_then(|v| v.as_u64()).unwrap_or(0),
+            mesh_degraded: r.get("mesh_degraded").and_then(|v| v.as_bool()).unwrap_or(false),
             peers: r.get("peer_count").and_then(|v| v.as_u64()).unwrap_or(0),
             difficulty: r.get("difficulty").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
             mempool: r.get("mempool_size").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -284,6 +288,39 @@ enum SortKey {
     Mem,
 }
 
+/// Human-readable duration from seconds.
+fn human_dur(secs: f64) -> String {
+    if !secs.is_finite() || secs <= 0.0 {
+        return "—".into();
+    }
+    let s = secs as u64;
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m{:02}s", s / 60, s % 60)
+    } else if s < 86400 {
+        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+    } else {
+        format!("{}d{}h", s / 86400, (s % 86400) / 3600)
+    }
+}
+
+/// A node alert banner (message, colour), if any condition is active.
+fn node_alert(n: &NodeInfo) -> Option<(String, Color)> {
+    if !n.online {
+        Some(("⚠  node RPC offline".into(), Color::Red))
+    } else if n.fork_stuck {
+        Some((
+            "⚠  FORK-STUCK — wedged on a minority fork; an operator reset may be needed".into(),
+            Color::Red,
+        ))
+    } else if n.mesh_degraded {
+        Some(("⚠  mesh degraded — too few peers".into(), Color::Yellow))
+    } else {
+        None
+    }
+}
+
 fn panel(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -297,8 +334,9 @@ fn panel(title: &str) -> Block<'static> {
 
 fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    // header | body | footer
+    // header | alert | body | footer
     let rows = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
@@ -307,9 +345,19 @@ fn draw(f: &mut Frame, app: &App) {
 
     draw_header(f, rows[0], app);
 
+    if let Some((msg, col)) = node_alert(&app.node) {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {msg} "),
+                Style::default().fg(Color::Black).bg(col).add_modifier(Modifier::BOLD),
+            ))),
+            rows[1],
+        );
+    }
+
     // body: left (system) | right (node)
     let cols = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(rows[1]);
+        .split(rows[2]);
     draw_system(f, cols[0], app);
     draw_node(f, cols[1], app);
 
@@ -328,7 +376,7 @@ fn draw(f: &mut Frame, app: &App) {
         ));
     }
     hint.push(Span::styled("◈ coincync-top", Style::default().fg(CYAN)));
-    f.render_widget(Paragraph::new(Line::from(hint)), rows[2]);
+    f.render_widget(Paragraph::new(Line::from(hint)), rows[3]);
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
@@ -447,7 +495,7 @@ fn draw_system(f: &mut Frame, area: Rect, app: &App) {
 fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     let n = &app.node;
     let rows = Layout::vertical([
-        Constraint::Length(7), // chain
+        Constraint::Length(8), // chain
         Constraint::Length(7), // mining
         Constraint::Min(0),    // peers/privacy
     ])
@@ -473,13 +521,26 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     } else {
         Span::styled(format!("syncing (stall {}s)", n.sync_stall_secs), Style::default().fg(Color::Yellow))
     };
-    let chain = vec![
+    let mut chain = vec![
         Line::from(vec![Span::styled("height  ", Style::default().fg(DIM)), Span::styled(n.height.to_string(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))]),
         Line::from(vec![Span::styled("state   ", Style::default().fg(DIM)), sync]),
         Line::from(vec![Span::styled("network ", Style::default().fg(DIM)), Span::raw(n.network.clone())]),
         Line::from(vec![Span::styled("diff    ", Style::default().fg(DIM)), Span::raw(n.difficulty.clone())]),
         Line::from(vec![Span::styled("mempool ", Style::default().fg(DIM)), Span::raw(format!("{} tx", n.mempool))]),
     ];
+    if !n.synced && n.target_height > n.height {
+        let pct = (n.height as f64 / n.target_height.max(1) as f64) * 100.0;
+        chain.insert(
+            2,
+            Line::from(vec![
+                Span::styled("sync    ", Style::default().fg(DIM)),
+                Span::styled(
+                    format!("{pct:.1}%  ({}/{})", n.height, n.target_height),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]),
+        );
+    }
     f.render_widget(Paragraph::new(chain).block(panel("chain")), rows[0]);
 
     // Mining
@@ -518,6 +579,16 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     } else {
         Line::from(Span::styled("  (-_-) zzz   idle", Style::default().fg(DIM)))
     };
+    let diff_val: f64 = n.difficulty.parse().unwrap_or(0.0);
+    let eta_line = if n.is_mining && n.hashrate > 0.0 && diff_val > 0.0 {
+        Line::from(vec![
+            Span::styled("~block ", Style::default().fg(DIM)),
+            Span::styled(human_dur(diff_val / n.hashrate), Style::default().fg(CYAN)),
+            Span::styled(" (solo est.)", Style::default().fg(DIM)),
+        ])
+    } else {
+        Line::from("")
+    };
     f.render_widget(
         Paragraph::new(vec![
             face,
@@ -527,6 +598,7 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled("   hashes ", Style::default().fg(DIM)),
                 Span::raw(n.hashes_total.to_string()),
             ]),
+            eta_line,
         ]),
         mrows[1],
     );
