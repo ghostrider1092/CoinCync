@@ -339,6 +339,25 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!("{} tx", n.mempool), Style::default().fg(t.c("main_fg"))),
     ]));
 
+    // Shielded (Spark) pool: coin count + short anchor root. Empty while
+    // shielded is activation-gated off, so show a muted placeholder then.
+    if n.shielded_coins > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("shield  ", Style::default().fg(dim)),
+            Span::styled(
+                format!("{} coins", n.shielded_coins),
+                Style::default().fg(t.g("available", 80.0)),
+            ),
+            Span::styled("   anchor ", Style::default().fg(dim)),
+            Span::styled(n.shielded_anchor.clone(), Style::default().fg(t.c("main_fg"))),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("shield  ", Style::default().fg(dim)),
+            Span::styled("pool empty (gated off)", Style::default().fg(dim)),
+        ]));
+    }
+
     // Estimated mining earnings = blocks_found × last block reward (reward is
     // derived from supply_atomic deltas in the log feed). ESTIMATE ONLY — ignores
     // reward drift across blocks, coinbase maturity, and anything spent.

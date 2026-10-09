@@ -30,6 +30,11 @@ pub struct NodeInfo {
     #[allow(dead_code)] // parsed and kept for completeness; not shown in the compact node panel
     pub hashes_total: u64,
     pub blocks_found: u64,
+    /// Shielded (Spark) pool observability: coin count + short anchor root, from
+    /// `get_spark_anchor`. Both 0/empty while shielded is activation-gated off
+    /// (the pool is empty on a live node until the audit).
+    pub shielded_coins: u64,
+    pub shielded_anchor: String,
 }
 
 /// Read-only JSON-RPC client for the node.
@@ -58,6 +63,10 @@ impl NodeClient {
             .call("get_mining_live")
             .and_then(|v| v.get("result").cloned())
             .unwrap_or(serde_json::Value::Null);
+        let sp = self
+            .call("get_spark_anchor")
+            .and_then(|v| v.get("result").cloned())
+            .unwrap_or(serde_json::Value::Null);
         let s = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let u = |k: &str| r.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
         let b = |k: &str| r.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -84,6 +93,12 @@ impl NodeClient {
             hashrate: m.get("hashrate").and_then(|v| v.as_f64()).unwrap_or(0.0),
             hashes_total: m.get("hashes_total").and_then(|v| v.as_u64()).unwrap_or(0),
             blocks_found: m.get("blocks_found").and_then(|v| v.as_u64()).unwrap_or(0),
+            shielded_coins: sp.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+            shielded_anchor: sp
+                .get("root")
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().take(8).collect())
+                .unwrap_or_default(),
         }
     }
 
