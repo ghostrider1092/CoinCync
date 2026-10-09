@@ -17,7 +17,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, List, ListItem, Paragraph},
+    widgets::{Block, BorderType, Borders, List, ListItem, Paragraph},
     Frame,
 };
 use sysinfo::{Networks, System};
@@ -522,24 +522,6 @@ fn human_hashrate(h: f64) -> String {
     }
 }
 
-/// Load-based colour: green < 60%, yellow < 85%, red above.
-fn load_color(pct: f64) -> Color {
-    if pct < 60.0 {
-        Color::Rgb(0x58, 0xd6, 0x8a)
-    } else if pct < 85.0 {
-        Color::Rgb(0xe3, 0xc4, 0x4f)
-    } else {
-        Color::Rgb(0xe3, 0x5c, 0x5c)
-    }
-}
-
-/// Vertical bar glyph for a 0..=100 percentage (8 levels).
-fn bar_char(pct: f64) -> char {
-    const B: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let i = ((pct / 100.0) * 7.0).round().clamp(0.0, 7.0) as usize;
-    B[i]
-}
-
 /// Animated miner swinging a pickaxe. Returns (line, is_strike-frame).
 fn mining_art(frame: u64) -> (&'static str, bool) {
     match (frame / 2) % 4 {
@@ -589,19 +571,6 @@ fn braille_graph(data: &[u64], max: u64, cols: usize, rows: usize) -> Vec<String
         .collect()
 }
 
-/// A bordered braille-graph panel sized to `area`.
-fn graph(title: &str, data: &VecDeque<u64>, max: u64, color: Color, area: Rect) -> Paragraph<'static> {
-    let cols = area.width.saturating_sub(2) as usize;
-    let rows = area.height.saturating_sub(2) as usize;
-    let d = as_slice(data);
-    let lines: Vec<Line> = braille_graph(&d, max, cols, rows)
-        .into_iter()
-        .map(|s| Line::from(Span::styled(s, Style::default().fg(color))))
-        .collect();
-    Paragraph::new(lines).block(panel(title))
-}
-
-
 /// Human-readable duration from seconds.
 fn human_dur(secs: f64) -> String {
     if !secs.is_finite() || secs <= 0.0 {
@@ -635,15 +604,69 @@ fn node_alert(n: &NodeInfo) -> Option<(String, Color)> {
     }
 }
 
-fn panel(title: &str) -> Block<'static> {
-    Block::default()
+/// btop-style panel: square corners, a superscript index + name tab at top-left,
+/// and optional right-aligned tab hints. `┌¹cpu┐…`
+fn bpanel(idx: u32, title: &str, tabs: &str) -> Block<'static> {
+    let mut b = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Plain)
         .border_style(Style::default().fg(DIM))
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-        ))
+        .title(Line::from(vec![
+            Span::styled(superscript(idx), Style::default().fg(Color::White)),
+            Span::styled(title.to_string(), Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+        ]));
+    if !tabs.is_empty() {
+        b = b.title(
+            Line::from(Span::styled(tabs.to_string(), Style::default().fg(DIM))).right_aligned(),
+        );
+    }
+    b
+}
+
+fn superscript(n: u32) -> String {
+    const S: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+    n.to_string().chars().filter_map(|c| c.to_digit(10)).map(|d| S[d as usize]).collect()
+}
+
+/// btop gradient: green → yellow → red across 0.0..=1.0.
+fn grad(f: f64) -> Color {
+    let f = f.clamp(0.0, 1.0);
+    let lerp = |a: u8, b: u8, t: f64| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
+    if f < 0.5 {
+        let t = f / 0.5;
+        Color::Rgb(lerp(0x58, 0xe3, t), lerp(0xd6, 0xc4, t), lerp(0x8a, 0x4f, t))
+    } else {
+        let t = (f - 0.5) / 0.5;
+        Color::Rgb(lerp(0xe3, 0xe3, t), lerp(0xc4, 0x5c, t), lerp(0x4f, 0x5c, t))
+    }
+}
+
+/// A gradient block meter `width` cells wide filled to `pct` (0..=100), each
+/// filled cell coloured by its position along the bar (btop-style).
+fn meter_spans(pct: f64, width: usize) -> Vec<Span<'static>> {
+    let pct = pct.clamp(0.0, 100.0);
+    let filled = ((pct / 100.0) * width as f64).round() as usize;
+    (0..width)
+        .map(|i| {
+            if i < filled {
+                let frac = if width > 1 { i as f64 / (width - 1) as f64 } else { 0.0 };
+                Span::styled("█", Style::default().fg(grad(frac)))
+            } else {
+                Span::styled("─", Style::default().fg(Color::Rgb(0x30, 0x38, 0x38)))
+            }
+        })
+        .collect()
+}
+
+/// One btop-style labelled meter line: `label  NN% ███───  value`.
+fn meter_line(label: &str, pct: f64, value: &str, bar_w: usize) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(format!("{label:<8}"), Style::default().fg(DIM)),
+        Span::styled(format!("{pct:>3.0}% "), Style::default().fg(Color::White)),
+    ];
+    spans.extend(meter_spans(pct, bar_w));
+    spans.push(Span::styled(format!("  {value}"), Style::default().fg(Color::White)));
+    Line::from(spans)
 }
 
 fn draw(f: &mut Frame, app: &App) {
@@ -669,15 +692,25 @@ fn draw(f: &mut Frame, app: &App) {
         );
     }
 
-    // body: top gauges (system | node) over a FULL-WIDTH activity feed, so the
-    // feed grows with the terminal instead of being boxed into the left column.
-    let body = Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(rows[2]);
-    let cols = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(body[0]);
-    draw_system(f, cols[0], app);
-    draw_node(f, cols[1], app);
-    draw_activity(f, body[1], app);
+    // btop silhouette: cpu full-width on top, then a mem | node | net row,
+    // then the full-width chain-activity feed (btop's big "proc" panel).
+    let body = Layout::vertical([
+        Constraint::Percentage(32), // cpu + per-core box
+        Constraint::Percentage(30), // mem | node | net
+        Constraint::Percentage(38), // chain activity
+    ])
+    .split(rows[2]);
+    draw_cpu(f, body[0], app);
+    let mid = Layout::horizontal([
+        Constraint::Percentage(34),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+    ])
+    .split(body[1]);
+    draw_mem(f, mid[0], app);
+    draw_node(f, mid[1], app);
+    draw_net(f, mid[2], app);
+    draw_activity(f, body[2], app);
 
     let mut hint = vec![
         Span::styled(" q ", Style::default().fg(Color::Black).bg(CYAN)),
@@ -716,92 +749,118 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_system(f: &mut Frame, area: Rect, app: &App) {
-    let rows = Layout::vertical([
-        Constraint::Length(6), // cpu graph
-        Constraint::Length(3), // per-core bars
-        Constraint::Length(3), // mem
-        Constraint::Length(6), // net
-        Constraint::Min(0),    // processes
-    ])
-    .split(area);
-
-    // CPU — braille area graph, coloured by load
+/// CPU panel (btop-style): a big braille history graph on the left and a boxed
+/// per-core list with gradient mini-meters on the right.
+fn draw_cpu(f: &mut Frame, area: Rect, app: &App) {
     let cpu_now = *app.cpu_hist.back().unwrap_or(&0);
-    f.render_widget(
-        graph(&format!("cpu  {cpu_now}%"), &app.cpu_hist, 100, load_color(cpu_now as f64), rows[0]),
-        rows[0],
+    let up = System::uptime();
+    let block = bpanel(
+        1,
+        "cpu",
+        &format!(" up {}d {:02}h{:02}m ", up / 86400, (up % 86400) / 3600, (up % 3600) / 60),
     );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    // Per-core — one vertical bar per core, coloured by load
-    let cores: Vec<Span> = app
-        .sys
-        .cpus()
-        .iter()
-        .map(|c| {
-            let u = c.cpu_usage() as f64;
-            Span::styled(bar_char(u).to_string(), Style::default().fg(load_color(u)))
-        })
+    // Split inner: graph (left) | per-core box (right, ~26 cols).
+    let core_w = 30u16.min(inner.width.saturating_sub(20));
+    let parts = Layout::horizontal([Constraint::Min(0), Constraint::Length(core_w)]).split(inner);
+
+    // Left: braille area graph of overall CPU.
+    let gcols = parts[0].width as usize;
+    let grows = parts[0].height as usize;
+    let glines: Vec<Line> = braille_graph(&as_slice(&app.cpu_hist), 100, gcols, grows)
+        .into_iter()
+        .map(|s| Line::from(Span::styled(s, Style::default().fg(grad(cpu_now as f64 / 100.0)))))
         .collect();
-    f.render_widget(
-        Paragraph::new(Line::from(cores))
-            .block(panel(&format!("cores  ({})", app.sys.cpus().len()))),
-        rows[1],
-    );
+    f.render_widget(Paragraph::new(glines), parts[0]);
 
-    // Mem — gauge coloured by load
-    let total = app.sys.total_memory();
+    // Right: per-core list in its own little box titled with the CPU brand.
+    let cpus = app.sys.cpus();
+    let brand = cpus.first().map(|c| c.brand().trim().to_string()).unwrap_or_default();
+    let brand = if brand.is_empty() { format!("{} cores", cpus.len()) } else { brand };
+    let cbox = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(DIM))
+        .title(Span::styled(truncate(&brand, core_w.saturating_sub(2) as usize), Style::default().fg(CYAN)));
+    let cinner = cbox.inner(parts[1]);
+    f.render_widget(cbox, parts[1]);
+
+    let bar_w = (cinner.width as usize).saturating_sub(10);
+    let mut lines = vec![core_row("CPU", cpu_now as f64, bar_w)];
+    let avail = cinner.height.saturating_sub(1) as usize;
+    for (i, c) in cpus.iter().enumerate().take(avail.saturating_sub(1)) {
+        lines.push(core_row(&format!("C{i}"), c.cpu_usage() as f64, bar_w));
+    }
+    f.render_widget(Paragraph::new(lines), cinner);
+}
+
+/// One per-core row: `C0   52% ███───`.
+fn core_row(label: &str, pct: f64, bar_w: usize) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(format!("{label:<4}"), Style::default().fg(DIM)),
+        Span::styled(format!("{pct:>3.0}% "), Style::default().fg(Color::White)),
+    ];
+    if bar_w > 0 {
+        spans.extend(meter_spans(pct, bar_w));
+    }
+    Line::from(spans)
+}
+
+/// Memory panel (btop-style): Total line + gradient meters for used/avail/free
+/// plus swap.
+fn draw_mem(f: &mut Frame, area: Rect, app: &App) {
+    let block = bpanel(2, "mem", "");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let bar_w = (inner.width as usize).saturating_sub(22).clamp(4, 40);
+
+    let total = app.sys.total_memory().max(1);
     let used = app.sys.used_memory();
-    let ratio = if total > 0 { used as f64 / total as f64 } else { 0.0 };
-    f.render_widget(
-        Gauge::default()
-            .block(panel("memory"))
-            .ratio(ratio.clamp(0.0, 1.0))
-            .label(format!("{} / {}", human_bytes(used), human_bytes(total)))
-            .gauge_style(Style::default().fg(load_color(ratio * 100.0))),
-        rows[2],
-    );
+    let avail = app.sys.available_memory();
+    let free = app.sys.free_memory();
+    let stotal = app.sys.total_swap();
+    let sused = app.sys.used_swap();
 
-    // Net — braille area graph of download (auto-scaled)
+    let pct = |v: u64| v as f64 / total as f64 * 100.0;
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Total   ", Style::default().fg(DIM)),
+            Span::styled(human_bytes(total), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        ]),
+        meter_line("Used", pct(used), &human_bytes(used), bar_w),
+        meter_line("Avail", pct(avail), &human_bytes(avail), bar_w),
+        meter_line("Free", pct(free), &human_bytes(free), bar_w),
+    ];
+    if stotal > 0 {
+        lines.push(meter_line("Swap", sused as f64 / stotal as f64 * 100.0, &human_bytes(sused), bar_w));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Network panel (btop-style): braille download graph + a down/up summary.
+fn draw_net(f: &mut Frame, app_area: Rect, app: &App) {
     let down = *app.down_hist.back().unwrap_or(&0);
     let up = *app.up_hist.back().unwrap_or(&0);
+    let block = bpanel(4, "net", &format!(" ↓{down} ↑{up} KiB/s "));
+    let inner = block.inner(app_area);
+    f.render_widget(block, app_area);
     let nmax = app.down_hist.iter().copied().max().unwrap_or(1).max(1);
-    f.render_widget(
-        graph(
-            &format!("net  ↓{down} ↑{up} KiB/s"),
-            &app.down_hist,
-            nmax,
-            Color::Rgb(0x58, 0xd6, 0x8a),
-            rows[3],
-        ),
-        rows[3],
-    );
-
-    // Processes — top consumers by CPU (btop-style), filling the left-bottom
-    // now that the chain-activity feed owns the full-width bottom panel.
-    let mut procs: Vec<_> = app.sys.processes().values().collect();
-    procs.sort_by(|a, b| {
-        b.cpu_usage().partial_cmp(&a.cpu_usage()).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let rows_n = rows[4].height.saturating_sub(2) as usize;
-    let items: Vec<ListItem> = procs
-        .iter()
-        .take(rows_n)
-        .map(|p| {
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{:>5.1}% ", p.cpu_usage()),
-                    Style::default().fg(load_color(p.cpu_usage() as f64)),
-                ),
-                Span::styled(format!("{:>9} ", human_bytes(p.memory())), Style::default().fg(DIM)),
-                Span::styled(
-                    p.name().to_string_lossy().into_owned(),
-                    Style::default().fg(Color::White),
-                ),
-            ]))
-        })
+    let glines: Vec<Line> = braille_graph(&as_slice(&app.down_hist), nmax, inner.width as usize, inner.height as usize)
+        .into_iter()
+        .map(|s| Line::from(Span::styled(s, Style::default().fg(Color::Rgb(0xc8, 0x8a, 0xf0)))))
         .collect();
-    f.render_widget(List::new(items).block(panel("processes  (cpu)")), rows[4]);
+    f.render_widget(Paragraph::new(glines), inner);
+}
+
+/// Truncate a string to at most `max` chars (for titles).
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    }
 }
 
 /// Full-width chain-activity feed: the node's own log lines (or RPC-derived
@@ -835,146 +894,105 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
     let src = if app.log_rx.is_some() { "node log" } else { "rpc" };
-    let title = format!("chain activity · {src}  ({} lines)", app.events.len());
-    f.render_widget(List::new(items).block(panel(&title)), area);
+    let tabs = format!(" {src} · {} lines ", app.events.len());
+    f.render_widget(List::new(items).block(bpanel(5, "chain-activity", &tabs)), area);
 }
 
+/// Node panel (btop's "disks" slot, our data): CoinCync chain + mining + mesh
+/// state as labelled rows and gradient meters, with the animated miner.
 fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     let n = &app.node;
-    let rows = Layout::vertical([
-        Constraint::Length(8), // chain
-        Constraint::Length(7), // mining
-        Constraint::Length(4), // peers/privacy
-        Constraint::Min(0),    // mempool graph
-    ])
-    .split(area);
+    let block = bpanel(3, "node", &format!(" {} ", n.network));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
     if !n.online {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "node RPC offline — start a node or pass --rpc",
+                "RPC offline — start a node or pass --rpc",
                 Style::default().fg(Color::Red),
-            )))
-            .block(panel("node")),
-            rows[0],
+            ))),
+            inner,
         );
         return;
     }
 
-    // Chain
-    let sync = if n.synced {
-        Span::styled("synced", Style::default().fg(Color::Green))
+    let bar_w = (inner.width as usize).saturating_sub(22).clamp(4, 36);
+    let mut lines: Vec<Line> = Vec::new();
+
+    // height + state
+    lines.push(Line::from(vec![
+        Span::styled("height  ", Style::default().fg(DIM)),
+        Span::styled(n.height.to_string(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled("   diff ", Style::default().fg(DIM)),
+        Span::styled(n.difficulty.clone(), Style::default().fg(Color::White)),
+    ]));
+    if n.synced {
+        lines.push(Line::from(vec![
+            Span::styled("state   ", Style::default().fg(DIM)),
+            Span::styled("● synced", Style::default().fg(Color::Green)),
+        ]));
     } else if n.fork_stuck {
-        Span::styled("FORK-STUCK", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+        lines.push(Line::from(vec![
+            Span::styled("state   ", Style::default().fg(DIM)),
+            Span::styled("● FORK-STUCK", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        ]));
     } else {
-        Span::styled(format!("syncing (stall {}s)", n.sync_stall_secs), Style::default().fg(Color::Yellow))
-    };
-    let mut chain = vec![
-        Line::from(vec![Span::styled("height  ", Style::default().fg(DIM)), Span::styled(n.height.to_string(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled("state   ", Style::default().fg(DIM)), sync]),
-        Line::from(vec![Span::styled("network ", Style::default().fg(DIM)), Span::raw(n.network.clone())]),
-        Line::from(vec![Span::styled("diff    ", Style::default().fg(DIM)), Span::raw(n.difficulty.clone())]),
-        Line::from(vec![Span::styled("mempool ", Style::default().fg(DIM)), Span::raw(format!("{} tx", n.mempool))]),
-    ];
-    if !n.synced && n.target_height > n.height {
-        let pct = (n.height as f64 / n.target_height.max(1) as f64) * 100.0;
-        chain.insert(
-            2,
-            Line::from(vec![
-                Span::styled("sync    ", Style::default().fg(DIM)),
-                Span::styled(
-                    format!("{pct:.1}%  ({}/{})", n.height, n.target_height),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]),
-        );
+        let pct = n.height as f64 / n.target_height.max(n.height).max(1) as f64 * 100.0;
+        lines.push(meter_line("sync", pct, &format!("{}/{}", n.height, n.target_height), bar_w));
     }
-    f.render_widget(Paragraph::new(chain).block(panel("chain")), rows[0]);
 
-    // Mining
-    let mining_title = if n.is_mining {
-        format!("mining  {}", human_hashrate(n.hashrate))
+    // peers meter (target ~16 outbound) + privacy
+    lines.push(meter_line("peers", (n.peers as f64 / 16.0 * 100.0).min(100.0), &format!("{}/16", n.peers), bar_w));
+    let privacy = if n.peers >= 3 {
+        Span::styled("● Baffle adequate", Style::default().fg(Color::Green))
     } else {
-        "mining  (off)".to_string()
+        Span::styled("● Baffle size-limited", Style::default().fg(Color::Yellow))
     };
-    let mrows = Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(rows[1]);
-    let hmax = app.hash_hist.iter().copied().max().unwrap_or(1).max(1);
-    f.render_widget(
-        graph(
-            &mining_title,
-            &app.hash_hist,
-            hmax,
-            if n.is_mining { CYAN } else { DIM },
-            mrows[0],
-        ),
-        mrows[0],
-    );
+    lines.push(Line::from(vec![Span::styled("privacy ", Style::default().fg(DIM)), privacy]));
 
-    // Animated miner + celebratory block-found flash (3s).
+    // hashrate meter (relative to the session peak) + mempool
+    let hmax = app.hash_hist.iter().copied().max().unwrap_or(1).max(1) as f64;
+    if n.is_mining {
+        lines.push(meter_line("hashR", n.hashrate / hmax * 100.0, &human_hashrate(n.hashrate), bar_w));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("hashR   ", Style::default().fg(DIM)),
+            Span::styled("mining off", Style::default().fg(DIM)),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("blocks  ", Style::default().fg(DIM)),
+        Span::styled(n.blocks_found.to_string(), Style::default().fg(Color::White)),
+        Span::styled("   mempool ", Style::default().fg(DIM)),
+        Span::styled(format!("{} tx", n.mempool), Style::default().fg(Color::White)),
+    ]));
+
+    // animated miner / block-found flash + solo ETA
     let gold = Color::Rgb(0xf5, 0xc8, 0x42);
-    let flashing = app
-        .block_flash
-        .map(|t| t.elapsed() < Duration::from_secs(3))
-        .unwrap_or(false);
-    let face = if flashing {
-        Line::from(Span::styled(
-            "  ✦ ⛏  BLOCK FOUND!  ⛏ ✦",
+    let flashing = app.block_flash.map(|t| t.elapsed() < Duration::from_secs(3)).unwrap_or(false);
+    let diff_val: f64 = n.difficulty.parse().unwrap_or(0.0);
+    if flashing {
+        lines.push(Line::from(Span::styled(
+            "✦ ⛏ BLOCK FOUND! ⛏ ✦",
             Style::default().fg(gold).add_modifier(Modifier::BOLD),
-        ))
+        )));
     } else if n.is_mining {
         let (art, strike) = mining_art(app.frame);
-        Line::from(Span::styled(art, Style::default().fg(if strike { gold } else { CYAN })))
+        let eta = if n.hashrate > 0.0 && diff_val > 0.0 {
+            format!("  ~block {} (solo)", human_dur(diff_val / n.hashrate))
+        } else {
+            String::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(art, Style::default().fg(if strike { gold } else { CYAN })),
+            Span::styled(eta, Style::default().fg(DIM)),
+        ]));
     } else {
-        Line::from(Span::styled("  (-_-) zzz   idle", Style::default().fg(DIM)))
-    };
-    let diff_val: f64 = n.difficulty.parse().unwrap_or(0.0);
-    let eta_line = if n.is_mining && n.hashrate > 0.0 && diff_val > 0.0 {
-        Line::from(vec![
-            Span::styled("~block ", Style::default().fg(DIM)),
-            Span::styled(human_dur(diff_val / n.hashrate), Style::default().fg(CYAN)),
-            Span::styled(" (solo est.)", Style::default().fg(DIM)),
-        ])
-    } else {
-        Line::from("")
-    };
-    f.render_widget(
-        Paragraph::new(vec![
-            face,
-            Line::from(vec![
-                Span::styled("blocks ", Style::default().fg(DIM)),
-                Span::styled(n.blocks_found.to_string(), Style::default().fg(Color::White)),
-                Span::styled("   hashes ", Style::default().fg(DIM)),
-                Span::raw(n.hashes_total.to_string()),
-            ]),
-            eta_line,
-        ]),
-        mrows[1],
-    );
+        lines.push(Line::from(Span::styled("(-_-) zzz  idle", Style::default().fg(DIM))));
+    }
 
-    // Peers / privacy
-    let privacy = if n.peers >= 3 {
-        Span::styled("Baffle · adequate", Style::default().fg(Color::Green))
-    } else {
-        Span::styled("Baffle · size-limited", Style::default().fg(Color::Yellow))
-    };
-    let peers = vec![
-        Line::from(vec![Span::styled("peers   ", Style::default().fg(DIM)), Span::styled(n.peers.to_string(), Style::default().fg(Color::White))]),
-        Line::from(vec![Span::styled("privacy ", Style::default().fg(DIM)), privacy]),
-    ];
-    f.render_widget(Paragraph::new(peers).block(panel("peers")), rows[2]);
-
-    // Mempool — braille area graph of pending-tx count over time.
-    let mmax = app.mempool_hist.iter().copied().max().unwrap_or(1).max(1);
-    f.render_widget(
-        graph(
-            &format!("mempool  ({} tx)", n.mempool),
-            &app.mempool_hist,
-            mmax,
-            Color::Rgb(0xc8, 0x8a, 0xf0),
-            rows[3],
-        ),
-        rows[3],
-    );
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn main() -> anyhow::Result<()> {
