@@ -6,6 +6,9 @@
 //! replacement for the node's log — a separate monitor you run when you want it.
 
 use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -34,6 +37,12 @@ struct Cli {
     /// Refresh interval, milliseconds.
     #[arg(long, default_value_t = 1000)]
     refresh_ms: u64,
+    /// Tail this node log file into the chain-activity feed (the node's own
+    /// lines: heartbeat ticks, GetBlocks/Received, BLOCK_COMMIT, miner Accepted).
+    /// Point it at the file the node writes/tees to. Without it, the feed falls
+    /// back to events synthesised from RPC state deltas.
+    #[arg(long)]
+    log: Option<String>,
 }
 
 /// Node metrics parsed from the RPC (best-effort; None when the node is down).
@@ -57,18 +66,16 @@ struct NodeInfo {
     blocks_found: u64,
 }
 
-/// A single line in the chain-activity feed (the "processes" panel shows these:
-/// the node's work, reconstructed from RPC state deltas — we're a pure client, so
-/// this is honest derived telemetry, not a tail of the node's own log file).
+/// A single line in the chain-activity feed. Either the node's own log line
+/// (when `--log` tails the node output) or an event synthesised from RPC state
+/// deltas (the fallback). Stored as pre-coloured spans so both sources render
+/// identically.
 #[derive(Clone)]
-struct ChainEvent {
-    ts: String,
-    tag: &'static str,
-    msg: String,
-    color: Color,
+struct FeedLine {
+    spans: Vec<(String, Color)>,
 }
 
-const EVENTS_CAP: usize = 300;
+const EVENTS_CAP: usize = 500;
 
 struct App {
     sys: System,
@@ -83,7 +90,8 @@ struct App {
     hash_hist: VecDeque<u64>,
     mempool_hist: VecDeque<u64>,
     node: NodeInfo,
-    events: VecDeque<ChainEvent>, // chain-activity feed (newest at back)
+    events: VecDeque<FeedLine>,   // chain-activity feed (newest at back)
+    log_rx: Option<Receiver<String>>, // node-log tailer channel (when --log set)
     last_poll: Instant,
     paused: bool,
     frame: u64,                   // animation frame (advances ~5x/sec)
@@ -110,6 +118,7 @@ impl App {
             mempool_hist: VecDeque::from(vec![0; HIST]),
             node: NodeInfo::default(),
             events: VecDeque::new(),
+            log_rx: cli.log.clone().map(spawn_log_tailer),
             last_poll: Instant::now(),
             paused: false,
             frame: 0,
@@ -143,7 +152,11 @@ impl App {
         // Node RPC (best-effort)
         let fresh = self.poll_node();
         let prev = std::mem::replace(&mut self.node, fresh);
-        self.derive_events(&prev);
+        // RPC-derived events are the fallback feed; when we're tailing the node
+        // log, the real log lines are the feed instead (drained in drain_log()).
+        if self.log_rx.is_none() {
+            self.derive_events(&prev);
+        }
         // Block-found edge → trigger the celebratory flash.
         if self.node.online {
             let bf = self.node.blocks_found;
@@ -231,10 +244,33 @@ impl App {
     }
 
     fn push_event(&mut self, tag: &'static str, color: Color, msg: String) {
+        self.push_feed(FeedLine {
+            spans: vec![
+                (format!("{} ", clock_hms()), DIM),
+                (format!("{:<13} ", tag), CYAN),
+                (msg, color),
+            ],
+        });
+    }
+
+    fn push_feed(&mut self, line: FeedLine) {
         if self.events.len() >= EVENTS_CAP {
             self.events.pop_front();
         }
-        self.events.push_back(ChainEvent { ts: clock_hms(), tag, msg, color });
+        self.events.push_back(line);
+    }
+
+    /// Drain any node-log lines the tailer thread has queued into the feed.
+    fn drain_log(&mut self) {
+        // Pull the receiver out so we can borrow self mutably inside the loop.
+        if let Some(rx) = self.log_rx.take() {
+            while let Ok(line) = rx.try_recv() {
+                if !line.trim().is_empty() {
+                    self.push_feed(parse_log_line(&line));
+                }
+            }
+            self.log_rx = Some(rx);
+        }
     }
 
     fn poll_node(&self) -> NodeInfo {
@@ -300,6 +336,125 @@ fn short_hash(h: &str) -> String {
     } else {
         format!("{}…{}", &h[..8], &h[h.len() - 4..])
     }
+}
+
+/// Parse one tracing-fmt node log line into coloured feed spans. Format seen
+/// live: `YYYY-MM-DD HH:MM:SS.mmm  LEVEL  ◈ module::path  message…`. We colour
+/// the time dim, the level by severity, the module cyan and highlight the
+/// interesting messages (commits / miner accepts). Anything that doesn't match
+/// the shape is shown verbatim so nothing is ever dropped.
+fn parse_log_line(line: &str) -> FeedLine {
+    let t: Vec<&str> = line.split_whitespace().collect();
+    // Need at least date, time, level.
+    if t.len() < 3 || !looks_like_level(t[2]) {
+        return FeedLine { spans: vec![(line.trim_end().to_string(), Color::White)] };
+    }
+    let time = t[1];
+    let level = t[2];
+    // Skip an optional decoration glyph (◈, or its mojibake under a mangled
+    // console codepage): any short token with no ASCII-alphanumeric character.
+    let mut i = 3;
+    if t.get(i)
+        .map(|s| !s.chars().any(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or(false)
+    {
+        i += 1;
+    }
+    let module = t.get(i).copied().unwrap_or("");
+    let msg = t.get(i + 1..).map(|r| r.join(" ")).unwrap_or_default();
+
+    let level_color = match level {
+        "ERROR" | "ERRO" => Color::Red,
+        "WARN" | "WARNING" => Color::Yellow,
+        "INFO" => Color::Green,
+        "DEBUG" => Color::Rgb(0x7a, 0x9c, 0xd6),
+        _ => DIM,
+    };
+    let msg_color = if msg.contains("BLOCK_COMMIT") || msg.contains("Accepted") {
+        Color::Rgb(0x6c, 0xff, 0x6c)
+    } else if level == "WARN" || level == "WARNING" {
+        Color::Yellow
+    } else if level == "ERROR" || level == "ERRO" {
+        Color::Red
+    } else if msg.contains("[IBD]") {
+        Color::Rgb(0xf5, 0xc8, 0x42)
+    } else {
+        Color::White
+    };
+
+    FeedLine {
+        spans: vec![
+            (format!("{time} "), DIM),
+            (format!("{level:<5} "), level_color),
+            (format!("{module}  "), CYAN),
+            (msg, msg_color),
+        ],
+    }
+}
+
+fn looks_like_level(s: &str) -> bool {
+    matches!(s, "ERROR" | "ERRO" | "WARN" | "WARNING" | "INFO" | "DEBUG" | "TRACE")
+}
+
+/// Follow a node log file (`tail -f`): seed with the recent tail, then stream
+/// new lines. Survives the file not existing yet and truncation/rotation.
+/// Runs on its own thread; returns the receiving end of the line channel.
+fn spawn_log_tailer(path: String) -> Receiver<String> {
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        // Wait for the file to appear.
+        let mut file = loop {
+            match File::open(&path) {
+                Ok(f) => break f,
+                Err(_) => {
+                    if tx.send(String::new()).is_err() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        };
+        // Seed from roughly the last 48 KiB so the feed isn't empty on open.
+        let mut pos: u64 = 0;
+        if let Ok(meta) = file.metadata() {
+            pos = meta.len().saturating_sub(48 * 1024);
+        }
+        let _ = file.seek(SeekFrom::Start(pos));
+        let mut reader = BufReader::new(file);
+        // Drop a partial first line when we seeked into the middle of one.
+        if pos > 0 {
+            let mut skip = String::new();
+            let _ = reader.read_line(&mut skip);
+        }
+        loop {
+            let mut buf = String::new();
+            match reader.read_line(&mut buf) {
+                Ok(0) => {
+                    // EOF: check for truncation/rotation, else wait for growth.
+                    let cur = reader.stream_position().unwrap_or(0);
+                    if let Ok(f) = File::open(&path) {
+                        if let Ok(meta) = f.metadata() {
+                            if meta.len() < cur {
+                                // File shrank → reopen from the start.
+                                let mut nf = f;
+                                let _ = nf.seek(SeekFrom::Start(0));
+                                reader = BufReader::new(nf);
+                                continue;
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                Ok(_) => {
+                    if tx.send(buf.trim_end().to_string()).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(250)),
+            }
+        }
+    });
+    rx
 }
 
 fn human_bytes(b: u64) -> String {
@@ -579,10 +734,12 @@ fn draw_system(f: &mut Frame, area: Rect, app: &App) {
     // reconstructed live from RPC state changes. Newest at the bottom, log-style.
     let rows_n = rows[4].height.saturating_sub(2) as usize;
     let items: Vec<ListItem> = if app.events.is_empty() {
-        vec![ListItem::new(Line::from(Span::styled(
-            "waiting for chain activity…",
-            Style::default().fg(DIM),
-        )))]
+        let wait = if app.log_rx.is_some() {
+            "waiting for node log… (is --log pointing at the node output?)"
+        } else {
+            "waiting for chain activity…"
+        };
+        vec![ListItem::new(Line::from(Span::styled(wait, Style::default().fg(DIM))))]
     } else {
         app.events
             .iter()
@@ -592,18 +749,21 @@ fn draw_system(f: &mut Frame, area: Rect, app: &App) {
             .into_iter()
             .rev()
             .map(|e| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{} ", e.ts), Style::default().fg(DIM)),
-                    Span::styled(format!("{:<13} ", e.tag), Style::default().fg(CYAN)),
-                    Span::styled(e.msg.clone(), Style::default().fg(e.color)),
-                ]))
+                ListItem::new(Line::from(
+                    e.spans
+                        .iter()
+                        .map(|(t, c)| Span::styled(t.clone(), Style::default().fg(*c)))
+                        .collect::<Vec<_>>(),
+                ))
             })
             .collect()
     };
-    f.render_widget(
-        List::new(items).block(panel(&format!("chain activity  ({} events)", app.events.len()))),
-        rows[4],
-    );
+    let title = if app.log_rx.is_some() {
+        format!("chain activity · node log  ({} lines)", app.events.len())
+    } else {
+        format!("chain activity · rpc  ({} events)", app.events.len())
+    };
+    f.render_widget(List::new(items).block(panel(&title)), rows[4]);
 }
 
 fn draw_node(f: &mut Frame, area: Rect, app: &App) {
@@ -778,6 +938,10 @@ fn run(
             }
         }
         app.frame = app.frame.wrapping_add(1);
+        // Stream node-log lines every frame so the feed stays live between polls.
+        if !app.paused {
+            app.drain_log();
+        }
         if !app.paused && app.last_poll.elapsed() >= refresh {
             app.tick();
             app.last_poll = Instant::now();
