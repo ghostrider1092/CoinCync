@@ -214,6 +214,32 @@ pub fn node_mining_active() -> bool {
     NODE_MINING_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The node's rejection reason when ITS RandomX hash of a block is above the
+/// target. A miner only submits a block after comparing that same hash with
+/// that same target, so getting this back for its own block means the miner's
+/// dataset hashes differently from the node's cache (#235).
+pub const POW_HASH_REJECTION: &str = "Hash doesn't meet target";
+
+/// A miner's own block was rejected with `reason`. If the reason is a PoW
+/// hash mismatch, re-check this process's full-mem dataset against a freshly
+/// built light cache and drop it when they disagree, so the next hash rebuilds
+/// (and self-checks) it instead of mining on a bad dataset until a restart
+/// (#235: 10.5 h of rejected blocks). Takes about a second; call it off the
+/// async executor. Returns true when a bad dataset was dropped.
+pub fn recheck_dataset_after_rejection(reason: &str) -> bool {
+    if !reason.contains(POW_HASH_REJECTION) {
+        return false;
+    }
+    #[cfg(feature = "randomx")]
+    {
+        randomx_cache::recheck_live_entry()
+    }
+    #[cfg(not(feature = "randomx"))]
+    {
+        false
+    }
+}
+
 /// Bind RandomX epoch keys to the genesis hash for the selected network.
 /// Call once at process startup from `coincync-node` and `coincync-miner` (before PoW).
 pub fn bind_randomx_genesis_for_network(network: crate::config::NetworkType) {
@@ -482,6 +508,13 @@ mod randomx_cache {
 
     static DATASET_CACHE: RwLock<Option<DatasetEntry>> = RwLock::new(None);
 
+    /// Bumped whenever a live entry is dropped by something other than a key
+    /// rotation (`recheck_live_entry`, `clear_cache`). Thread-local VMs are
+    /// keyed on seed + flags, so without this a thread that already built its
+    /// VM on a dropped dataset for the SAME key would keep hashing through it.
+    static DATASET_GENERATION: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
     /// #244: discard a cached dataset entry that is NOT full-mem, so the next
     /// hash rebuilds it in full-mem mode. Called from `set_node_mining_active`
     /// on the false->true transition: a --mine node that already cached a
@@ -544,9 +577,11 @@ mod randomx_cache {
     /// known-good path the restart uses. This reintroduces the one-time
     /// ~30-60s build stall at each epoch boundary (acceptable; it is what every
     /// boundary did before prewarm existed) in exchange for correct hashes.
-    /// Flip back to `true` only once a prewarmed-vs-synchronous hash check
-    /// proves the background build is byte-identical. See issue #235.
-    const PREWARM_PROMOTION_ENABLED: bool = false;
+    /// Re-enabled: every full-mem entry is checked against an independently
+    /// built light cache right after the build and again at promotion
+    /// (`self_check_entry`), so a bad build is rebuilt instead of mined on.
+    /// See issue #235.
+    const PREWARM_PROMOTION_ENABLED: bool = true;
 
     thread_local! {
         /// Per-thread RandomX VM. Each thread builds its own VM from
@@ -565,6 +600,8 @@ mod randomx_cache {
         // rebuild when the node flips to full-mem mining — keying on the seed
         // alone would keep the light VM. Compared alongside `key`.
         flags: RandomXFlag,
+        /// `DATASET_GENERATION` when this VM was built (#235).
+        generation: u64,
         vm: RandomXVM,
     }
 
@@ -633,6 +670,7 @@ mod randomx_cache {
         //    Fast path: read lock + matching key (no allocation).
         //    Slow path: write lock + rebuild (only on epoch boundary or
         //    first hash ever).
+        let generation = DATASET_GENERATION.load(std::sync::atomic::Ordering::Acquire);
         let (cache, dataset, flags) = match ensure_dataset(seed) {
             Ok(triple) => triple,
             Err(e) => return Err(e),
@@ -647,7 +685,10 @@ mod randomx_cache {
             let needs_new = match &*guard {
                 // #244: rebuild when the seed rotates OR the mode changes
                 // (light -> full-mem when the node starts mining).
-                Some(tvm) => tvm.key != *seed || tvm.flags != flags,
+                // #235: or when the live entry was dropped under us.
+                Some(tvm) => {
+                    tvm.key != *seed || tvm.flags != flags || tvm.generation != generation
+                }
                 None => true,
             };
             if needs_new {
@@ -658,7 +699,7 @@ mod randomx_cache {
                     .map_err(|e| crate::error::Error::Internal(
                         format!("per-thread RandomX VM init: {}", e)
                     ))?;
-                *guard = Some(ThreadVm { key: *seed, flags, vm });
+                *guard = Some(ThreadVm { key: *seed, flags, generation, vm });
             }
             // INVARIANT: the block above set `*guard = Some(ThreadVm { .. })`
             // and no code path releases the guard between there and here.
@@ -712,12 +753,16 @@ mod randomx_cache {
         // Same seed/VM lifecycle as compute_hash: ensure the shared dataset
         // matches the seed, then (re)build this thread's VM if the key
         // rotated, then hash the whole batch through it.
+        let generation = DATASET_GENERATION.load(std::sync::atomic::Ordering::Acquire);
         let (cache, dataset, flags) = ensure_dataset(seed)?;
         THREAD_VM.with(|cell| {
             let mut guard = cell.borrow_mut();
             let needs_new = match &*guard {
                 // #244: rebuild on seed rotation OR mode change (see compute_hash).
-                Some(tvm) => tvm.key != *seed || tvm.flags != flags,
+                // #235: or when the live entry was dropped under us.
+                Some(tvm) => {
+                    tvm.key != *seed || tvm.flags != flags || tvm.generation != generation
+                }
                 None => true,
             };
             if needs_new {
@@ -726,7 +771,7 @@ mod randomx_cache {
                     .map_err(|e| crate::error::Error::Internal(
                         format!("per-thread RandomX VM init: {}", e)
                     ))?;
-                *guard = Some(ThreadVm { key: *seed, flags, vm });
+                *guard = Some(ThreadVm { key: *seed, flags, generation, vm });
             }
             let tvm = guard.as_ref()
                 .expect("BUG: thread VM guard is None immediately after being set — invariant broken by refactor");
@@ -779,14 +824,26 @@ mod randomx_cache {
             if matches {
                 if PREWARM_PROMOTION_ENABLED {
                     let entry = pw.take().expect("checked Some above");
-                    let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
-                    *guard = Some(entry);
-                    *RETRY_UNTIL.lock() = None; // #142: init succeeded — clear backoff
-                    tracing::info!(
-                        "RandomX epoch dataset promoted from prewarm (no build stall), key={}...",
-                        hex::encode(&seed[..4])
-                    );
-                    return Ok(triple);
+                    match self_check_entry(&entry) {
+                        Ok(()) => {
+                            let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
+                            *guard = Some(entry);
+                            *RETRY_UNTIL.lock() = None; // #142: init succeeded — clear backoff
+                            tracing::info!(
+                                "RandomX epoch dataset promoted from prewarm (no build stall), key={}...",
+                                hex::encode(&seed[..4])
+                            );
+                            return Ok(triple);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "RandomX prewarmed dataset for key={}... failed its self-check at \
+                                 promotion: {}. Rebuilding synchronously.",
+                                hex::encode(&seed[..4]),
+                                e
+                            );
+                        }
+                    }
                 } else {
                     // #235 STOPGAP: a prewarmed entry exists but promotion is
                     // disabled (background-built datasets produced wrong hashes
@@ -918,10 +975,7 @@ mod randomx_cache {
         // fast_light_equivalence test) -- FLAG_SECURE changes memory
         // protection only, never the computed hash. Non-Windows keeps the
         // fast path (FLAG_DEFAULT == 0, so the OR below is a no-op there).
-        #[cfg(target_os = "windows")]
-        let secure = RandomXFlag::FLAG_SECURE;
-        #[cfg(not(target_os = "windows"))]
-        let secure = RandomXFlag::FLAG_DEFAULT;
+        let secure = secure_flag();
 
         // Memory budget: full-mode RandomX needs ~2.5 GB total (cache
         // + 2 GB dataset, both shared across all threads via Arc).
@@ -952,7 +1006,11 @@ mod randomx_cache {
                 full_flags,
                 hex::encode(&seed[..4])
             );
-            match try_build_entry(full_flags, seed) {
+            let built = try_build_entry(full_flags, seed).or_else(|e| {
+                tracing::warn!("RandomX full-mem build failed ({}), retrying once", e);
+                try_build_entry(full_flags, seed)
+            });
+            match built {
                 Ok(entry) => {
                     tracing::info!(
                         "RandomX dataset ready in {:.2}s (mode: full-mem, flags: {:?})",
@@ -1095,12 +1153,115 @@ mod randomx_cache {
             None
         };
 
-        Ok(DatasetEntry {
+        let entry = DatasetEntry {
             key: *seed,
             cache,
             dataset,
             flags,
-        })
+        };
+        self_check_entry(&entry)?;
+        Ok(entry)
+    }
+
+    fn secure_flag() -> RandomXFlag {
+        #[cfg(target_os = "windows")]
+        {
+            RandomXFlag::FLAG_SECURE
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            RandomXFlag::FLAG_DEFAULT
+        }
+    }
+
+    /// Hash a few fixed probes on the new entry and on a light VM over an
+    /// INDEPENDENTLY built cache for the same key. A dataset that came out
+    /// wrong (#235: a whole epoch of rejected blocks) fails here and gets
+    /// rebuilt instead of being mined on. Light entries are skipped: they are
+    /// cheap and a wrong one shows up at once as rejected blocks.
+    fn self_check_entry(entry: &DatasetEntry) -> std::result::Result<(), String> {
+        if !entry.flags.contains(RandomXFlag::FLAG_FULL_MEM) {
+            return Ok(());
+        }
+        let start = std::time::Instant::now();
+        let light_flags =
+            (RandomXFlag::get_recommended_flags() & !RandomXFlag::FLAG_FULL_MEM) | secure_flag();
+        let ref_cache = RandomXCache::new(light_flags, &entry.key)
+            .map_err(|e| format!("self-check cache init: {}", e))?;
+        let ref_vm = RandomXVM::new(light_flags, Some(ref_cache), None)
+            .map_err(|e| format!("self-check light VM: {}", e))?;
+        let vm = RandomXVM::new(entry.flags, Some(entry.cache.clone()), entry.dataset.clone())
+            .map_err(|e| format!("self-check VM: {}", e))?;
+        for i in 0..4u64 {
+            let mut probe = [0u8; 40];
+            probe[..32].copy_from_slice(&entry.key);
+            probe[32..].copy_from_slice(&i.to_le_bytes());
+            let got = vm
+                .calculate_hash(&probe)
+                .map_err(|e| format!("self-check hash: {}", e))?;
+            let want = ref_vm
+                .calculate_hash(&probe)
+                .map_err(|e| format!("self-check light hash: {}", e))?;
+            if got != want {
+                return Err(format!(
+                    "self-check failed: probe {} is {} on the dataset but {} in light mode",
+                    i,
+                    hex::encode(&got[..8]),
+                    hex::encode(&want[..8])
+                ));
+            }
+        }
+        tracing::info!(
+            "RandomX dataset self-check passed in {:.2}s",
+            start.elapsed().as_secs_f64()
+        );
+        Ok(())
+    }
+
+    /// Runtime half of the #235 fix: re-run `self_check_entry` on the live
+    /// full-mem entry after the node rejected one of our blocks for its hash.
+    /// A failing entry is dropped (and `DATASET_GENERATION` bumped so every
+    /// thread rebuilds its VM) so the next `ensure_dataset` builds a fresh one.
+    /// Returns true when a bad entry was dropped. Light entries are not
+    /// checked: the reference is a light cache, and a light miner is not what
+    /// #235 is about.
+    pub(super) fn recheck_live_entry() -> bool {
+        let entry = {
+            let guard = DATASET_CACHE.read();
+            match guard.as_ref() {
+                Some(e) if e.flags.contains(RandomXFlag::FLAG_FULL_MEM) => DatasetEntry {
+                    key: e.key,
+                    cache: e.cache.clone(),
+                    dataset: e.dataset.clone(),
+                    flags: e.flags,
+                },
+                _ => return false,
+            }
+        };
+        match self_check_entry(&entry) {
+            Ok(()) => {
+                tracing::warn!(
+                    "RandomX dataset for key={}... agrees with an independent light build; \
+                     the rejected block is not a local dataset fault",
+                    hex::encode(&entry.key[..4])
+                );
+                false
+            }
+            Err(e) => {
+                tracing::error!(
+                    "RandomX dataset for key={}... hashes wrong ({}); dropping it so the next \
+                     hash rebuilds it",
+                    hex::encode(&entry.key[..4]),
+                    e
+                );
+                let mut guard = DATASET_CACHE.write();
+                if guard.as_ref().is_some_and(|g| g.key == entry.key) {
+                    *guard = None;
+                    DATASET_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
+                }
+                true
+            }
+        }
     }
 
     /// Test helper: build a single VM for the given flag set. The
@@ -1129,6 +1290,7 @@ mod randomx_cache {
     pub fn clear_cache() {
         let mut guard = DATASET_CACHE.write();
         *guard = None;
+        DATASET_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
         THREAD_VM.with(|cell| {
             *cell.borrow_mut() = None;
         });
@@ -1224,6 +1386,47 @@ mod randomx_cache {
             let h1 = compute_hash(&seed, b"prewarm smoke").expect("hash after promote");
             let h2 = compute_hash(&seed, b"prewarm smoke").expect("hash after promote");
             assert_eq!(h1, h2, "same seed+input must hash identically");
+        }
+
+        /// Real 2 GB build (~40 s), so ignored:
+        ///   cargo test -p coincync --features "randomx testnet" -- --ignored self_check_full_mem_entry_passes
+        #[test]
+        #[ignore]
+        fn self_check_full_mem_entry_passes() {
+            let flags =
+                RandomXFlag::get_recommended_flags() | RandomXFlag::FLAG_FULL_MEM | secure_flag();
+            let entry = try_build_entry(flags, &[0x35u8; 32]).expect("full-mem build + self-check");
+            assert!(entry.dataset.is_some());
+            self_check_entry(&entry).expect("second self-check of the same entry");
+        }
+
+        /// A dataset whose content does not belong to the entry's key (what any
+        /// corruption looks like to the check) must fail, and the runtime
+        /// re-check must drop it. Real 2 GB build, so ignored:
+        ///   cargo test -p coincync --features "randomx testnet" -- --ignored self_check_catches_wrong_dataset
+        #[test]
+        #[ignore]
+        fn self_check_catches_wrong_dataset() {
+            let flags =
+                RandomXFlag::get_recommended_flags() | RandomXFlag::FLAG_FULL_MEM | secure_flag();
+            let built_for = [0x36u8; 32];
+            let cache = RandomXCache::new(flags, &built_for).expect("cache");
+            let dataset = RandomXDataset::new(flags, cache.clone(), 0).expect("dataset");
+            let wrong = DatasetEntry { key: [0x37u8; 32], cache, dataset: Some(dataset), flags };
+            let err = self_check_entry(&wrong).expect_err("content from another key must fail");
+            assert!(err.contains("self-check failed"), "{}", err);
+
+            // No full-mem live entry: nothing to check.
+            super::clear_cache();
+            assert!(!recheck_live_entry());
+
+            // Bad live entry: dropped, generation bumped, nothing left to drop.
+            let gen_before = DATASET_GENERATION.load(std::sync::atomic::Ordering::Acquire);
+            *DATASET_CACHE.write() = Some(wrong);
+            assert!(recheck_live_entry());
+            assert!(DATASET_CACHE.read().is_none());
+            assert!(DATASET_GENERATION.load(std::sync::atomic::Ordering::Acquire) > gen_before);
+            assert!(!recheck_live_entry());
         }
 
         #[test]
@@ -1608,6 +1811,19 @@ pub fn work_from_target(target: &Hash) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a PoW hash rejection triggers the (1 s) dataset re-check; lost
+    /// races and other rejections must return without touching RandomX.
+    #[test]
+    fn recheck_ignores_other_rejections() {
+        assert!(!recheck_dataset_after_rejection(
+            "block rejected: orphan (parent not in chain), hash=00"
+        ));
+        assert!(!recheck_dataset_after_rejection("Difficulty target mismatch"));
+        assert!("block rejected: Proof of work validation error: Hash doesn't meet target: \
+                 hash=00, target=00"
+            .contains(POW_HASH_REJECTION));
+    }
 
     #[test]
     fn test_full_anchor_deterministic_and_distinct() {

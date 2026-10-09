@@ -455,6 +455,15 @@ pub async fn run_solo(
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
                         warn!(error = %e, "orchestrator: block submit rejected (likely lost race)");
+                        // #235: a hash rejection of OUR block means this process
+                        // hashes differently from the node. Re-check the dataset
+                        // against a fresh light cache and drop it if it is bad,
+                        // instead of mining on it until someone restarts the rig.
+                        let reason = e.to_string();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            coincync::consensus::pow::recheck_dataset_after_rejection(&reason)
+                        })
+                        .await;
                     }
                 }
             }

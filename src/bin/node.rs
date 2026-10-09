@@ -1838,6 +1838,17 @@ async fn start_node(
                                             warn!("miner: broadcast failed: {}", e);
                                         }
                                     }
+                                    // #235: our own block failed PoW -> re-check the
+                                    // dataset and drop it if it hashes wrong.
+                                    if let coincync::chain::BlockStatus::Invalid(reason) = &status {
+                                        let reason = reason.clone();
+                                        let _ = tokio::task::spawn_blocking(move || {
+                                            coincync::consensus::pow::recheck_dataset_after_rejection(
+                                                &reason,
+                                            )
+                                        })
+                                        .await;
+                                    }
                                 }
                                 Err(e) => warn!("miner: submit failed: {}", e),
                             }
