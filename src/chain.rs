@@ -4869,7 +4869,7 @@ mod tests {
         };
 
         let seed = b"chain-hook-seed";
-        let n = cover_set_size().unwrap();
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
         let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
         // Mint payload built against an EMPTY transparent input set (matches the
         // tx's empty inputs, so the hook re-derives identical outpoints). The
@@ -4949,7 +4949,7 @@ mod tests {
         let mut chain = Blockchain::new();
         chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
         let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
-        let n = cover_set_size().expect("cover set size");
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
         assert!(n >= 2, "soak needs a cover set of at least 2 coins");
         // A fixed second wallet: transfer recipient, distinct from the per-cycle
         // sender seed. Its address is stable across cycles.
