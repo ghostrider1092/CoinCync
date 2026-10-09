@@ -27,9 +27,29 @@ use sysinfo::{Networks, System};
 
 const HIST: usize = 120; // sparkline history depth
 
+// Palette lifted from btop's built-in "Default" theme (src/btop_theme.cpp), so
+// coincync-top matches btop's look exactly.
 /// Brand cyan (the ◈ glyph colour used across CoinCync).
 const CYAN: Color = Color::Rgb(0x3a, 0xd1, 0xd1);
-const DIM: Color = Color::Rgb(0x6c, 0x7a, 0x7a);
+const MAIN: Color = Color::Rgb(0xcc, 0xcc, 0xcc); // main_fg
+const TITLE: Color = Color::Rgb(0xee, 0xee, 0xee); // title
+const HI: Color = Color::Rgb(0xb5, 0x40, 0x40); // hi_fg (accent / shortcut keys / index)
+const DIM: Color = Color::Rgb(0x60, 0x60, 0x60); // graph_text
+const METER_BG: Color = Color::Rgb(0x40, 0x40, 0x40); // meter_bg (empty meter cell)
+const SEL_BG: Color = Color::Rgb(0x6a, 0x2f, 0x2f); // selected_bg
+// per-box border colours
+const CPU_BOX: Color = Color::Rgb(0x55, 0x6d, 0x59);
+const MEM_BOX: Color = Color::Rgb(0x6c, 0x6c, 0x4b);
+const NET_BOX: Color = Color::Rgb(0x5c, 0x58, 0x8d);
+const PROC_BOX: Color = Color::Rgb(0x80, 0x52, 0x52);
+// 3-stop gradients (start → mid → end), as btop's Theme::g(...)
+type Grad = [(u8, u8, u8); 3];
+const GRAD_CPU: Grad = [(0x77, 0xca, 0x9b), (0xcb, 0xc0, 0x6c), (0xdc, 0x4c, 0x4c)];
+const GRAD_USED: Grad = [(0x59, 0x2b, 0x26), (0xd9, 0x62, 0x6d), (0xff, 0x47, 0x69)];
+const GRAD_FREE: Grad = [(0x38, 0x4f, 0x21), (0xb5, 0xe6, 0x85), (0xdc, 0xff, 0x85)];
+const GRAD_AVAIL: Grad = [(0x4e, 0x3f, 0x0e), (0xff, 0xd7, 0x7a), (0xff, 0xb8, 0x14)];
+const GRAD_DOWNLOAD: Grad = [(0x29, 0x1f, 0x75), (0x4f, 0x43, 0xa3), (0xb0, 0xa9, 0xde)];
+const GRAD_PROCESS: Grad = [(0x80, 0xd0, 0xa3), (0xdc, 0xd1, 0x79), (0xd4, 0x54, 0x54)];
 
 #[derive(Parser)]
 #[command(name = "coincync-top", about = "System + CoinCync node monitor (btop-style)")]
@@ -623,20 +643,21 @@ fn node_alert(n: &NodeInfo) -> Option<(String, Color)> {
     }
 }
 
-/// btop-style panel: square corners, a superscript index + name tab at top-left,
-/// and optional right-aligned tab hints. `┌¹cpu┐…`
-fn bpanel(idx: u32, title: &str, tabs: &str) -> Block<'static> {
+/// btop-style panel: rounded corners, a `┐¹title` notch-tab at top-left (red
+/// superscript index + white title), optional right-aligned tab hints, and the
+/// border drawn in the panel's own box colour (cpu/mem/net/proc).
+fn bpanel(idx: u32, title: &str, tabs: &str, box_color: Color) -> Block<'static> {
     let mut b = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(DIM))
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(box_color))
         .title(Line::from(vec![
-            Span::styled(superscript(idx), Style::default().fg(Color::White)),
-            Span::styled(title.to_string(), Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(superscript(idx), Style::default().fg(HI).add_modifier(Modifier::BOLD)),
+            Span::styled(title.to_string(), Style::default().fg(TITLE).add_modifier(Modifier::BOLD)),
         ]));
     if !tabs.is_empty() {
         b = b.title(
-            Line::from(Span::styled(tabs.to_string(), Style::default().fg(DIM))).right_aligned(),
+            Line::from(Span::styled(tabs.to_string(), Style::default().fg(box_color))).right_aligned(),
         );
     }
     b
@@ -647,44 +668,40 @@ fn superscript(n: u32) -> String {
     n.to_string().chars().filter_map(|c| c.to_digit(10)).map(|d| S[d as usize]).collect()
 }
 
-/// btop gradient: green → yellow → red across 0.0..=1.0.
-fn grad(f: f64) -> Color {
+/// Interpolate a 3-stop gradient (start → mid → end) at `f` in 0.0..=1.0.
+fn grad3(g: Grad, f: f64) -> Color {
     let f = f.clamp(0.0, 1.0);
     let lerp = |a: u8, b: u8, t: f64| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
-    if f < 0.5 {
-        let t = f / 0.5;
-        Color::Rgb(lerp(0x58, 0xe3, t), lerp(0xd6, 0xc4, t), lerp(0x8a, 0x4f, t))
-    } else {
-        let t = (f - 0.5) / 0.5;
-        Color::Rgb(lerp(0xe3, 0xe3, t), lerp(0xc4, 0x5c, t), lerp(0x4f, 0x5c, t))
-    }
+    let (a, b) = if f < 0.5 { (g[0], g[1]) } else { (g[1], g[2]) };
+    let t = if f < 0.5 { f / 0.5 } else { (f - 0.5) / 0.5 };
+    Color::Rgb(lerp(a.0, b.0, t), lerp(a.1, b.1, t), lerp(a.2, b.2, t))
 }
 
-/// A gradient block meter `width` cells wide filled to `pct` (0..=100), each
-/// filled cell coloured by its position along the bar (btop-style).
-fn meter_spans(pct: f64, width: usize) -> Vec<Span<'static>> {
+/// A btop meter `width` cells wide filled to `pct`: filled cells are `■` along
+/// the gradient (start→value), empty cells are grey `■` (meter_bg).
+fn meter_spans(pct: f64, width: usize, g: Grad) -> Vec<Span<'static>> {
     let pct = pct.clamp(0.0, 100.0);
     let filled = ((pct / 100.0) * width as f64).round() as usize;
     (0..width)
         .map(|i| {
             if i < filled {
                 let frac = if width > 1 { i as f64 / (width - 1) as f64 } else { 0.0 };
-                Span::styled("█", Style::default().fg(grad(frac)))
+                Span::styled("■", Style::default().fg(grad3(g, frac)))
             } else {
-                Span::styled("─", Style::default().fg(Color::Rgb(0x30, 0x38, 0x38)))
+                Span::styled("■", Style::default().fg(METER_BG))
             }
         })
         .collect()
 }
 
-/// One btop-style labelled meter line: `label  NN% ███───  value`.
-fn meter_line(label: &str, pct: f64, value: &str, bar_w: usize) -> Line<'static> {
+/// One btop-style labelled meter line: `label  NN% ■■■■■■  value`.
+fn meter_line(label: &str, pct: f64, value: &str, bar_w: usize, g: Grad) -> Line<'static> {
     let mut spans = vec![
         Span::styled(format!("{label:<8}"), Style::default().fg(DIM)),
-        Span::styled(format!("{pct:>3.0}% "), Style::default().fg(Color::White)),
+        Span::styled(format!("{pct:>3.0}% "), Style::default().fg(MAIN)),
     ];
-    spans.extend(meter_spans(pct, bar_w));
-    spans.push(Span::styled(format!("  {value}"), Style::default().fg(Color::White)));
+    spans.extend(meter_spans(pct, bar_w, g));
+    spans.push(Span::styled(format!("  {value}"), Style::default().fg(MAIN)));
     Line::from(spans)
 }
 
@@ -781,6 +798,7 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &App) {
         1,
         "cpu",
         &format!(" up {}d {:02}h{:02}m ", up / 86400, (up % 86400) / 3600, (up % 3600) / 60),
+        CPU_BOX,
     );
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -794,7 +812,7 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &App) {
     let grows = parts[0].height as usize;
     let glines: Vec<Line> = braille_graph(&as_slice(&app.cpu_hist), 100, gcols, grows)
         .into_iter()
-        .map(|s| Line::from(Span::styled(s, Style::default().fg(grad(cpu_now as f64 / 100.0)))))
+        .map(|s| Line::from(Span::styled(s, Style::default().fg(grad3(GRAD_CPU, cpu_now as f64 / 100.0)))))
         .collect();
     f.render_widget(Paragraph::new(glines), parts[0]);
 
@@ -804,9 +822,9 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &App) {
     let brand = if brand.is_empty() { format!("{} cores", cpus.len()) } else { brand };
     let cbox = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(DIM))
-        .title(Span::styled(truncate(&brand, core_w.saturating_sub(2) as usize), Style::default().fg(CYAN)));
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(CPU_BOX))
+        .title(Span::styled(truncate(&brand, core_w.saturating_sub(2) as usize), Style::default().fg(TITLE)));
     let cinner = cbox.inner(parts[1]);
     f.render_widget(cbox, parts[1]);
 
@@ -819,14 +837,14 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lines), cinner);
 }
 
-/// One per-core row: `C0   52% ███───`.
+/// One per-core row: `C0   52% ■■■■■■`.
 fn core_row(label: &str, pct: f64, bar_w: usize) -> Line<'static> {
     let mut spans = vec![
         Span::styled(format!("{label:<4}"), Style::default().fg(DIM)),
-        Span::styled(format!("{pct:>3.0}% "), Style::default().fg(Color::White)),
+        Span::styled(format!("{pct:>3.0}% "), Style::default().fg(MAIN)),
     ];
     if bar_w > 0 {
-        spans.extend(meter_spans(pct, bar_w));
+        spans.extend(meter_spans(pct, bar_w, GRAD_CPU));
     }
     Line::from(spans)
 }
@@ -834,7 +852,7 @@ fn core_row(label: &str, pct: f64, bar_w: usize) -> Line<'static> {
 /// Memory panel (btop-style): Total line + gradient meters for used/avail/free
 /// plus swap.
 fn draw_mem(f: &mut Frame, area: Rect, app: &App) {
-    let block = bpanel(2, "mem", "");
+    let block = bpanel(2, "mem", "", MEM_BOX);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let bar_w = (inner.width as usize).saturating_sub(22).clamp(4, 40);
@@ -850,14 +868,14 @@ fn draw_mem(f: &mut Frame, area: Rect, app: &App) {
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Total   ", Style::default().fg(DIM)),
-            Span::styled(human_bytes(total), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(human_bytes(total), Style::default().fg(TITLE).add_modifier(Modifier::BOLD)),
         ]),
-        meter_line("Used", pct(used), &human_bytes(used), bar_w),
-        meter_line("Avail", pct(avail), &human_bytes(avail), bar_w),
-        meter_line("Free", pct(free), &human_bytes(free), bar_w),
+        meter_line("Used", pct(used), &human_bytes(used), bar_w, GRAD_USED),
+        meter_line("Avail", pct(avail), &human_bytes(avail), bar_w, GRAD_AVAIL),
+        meter_line("Free", pct(free), &human_bytes(free), bar_w, GRAD_FREE),
     ];
     if stotal > 0 {
-        lines.push(meter_line("Swap", sused as f64 / stotal as f64 * 100.0, &human_bytes(sused), bar_w));
+        lines.push(meter_line("Swap", sused as f64 / stotal as f64 * 100.0, &human_bytes(sused), bar_w, GRAD_USED));
     }
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -866,13 +884,13 @@ fn draw_mem(f: &mut Frame, area: Rect, app: &App) {
 fn draw_net(f: &mut Frame, app_area: Rect, app: &App) {
     let down = *app.down_hist.back().unwrap_or(&0);
     let up = *app.up_hist.back().unwrap_or(&0);
-    let block = bpanel(4, "net", &format!(" ↓{down} ↑{up} KiB/s "));
+    let block = bpanel(4, "net", &format!(" ↓{down} ↑{up} KiB/s "), NET_BOX);
     let inner = block.inner(app_area);
     f.render_widget(block, app_area);
     let nmax = app.down_hist.iter().copied().max().unwrap_or(1).max(1);
     let glines: Vec<Line> = braille_graph(&as_slice(&app.down_hist), nmax, inner.width as usize, inner.height as usize)
         .into_iter()
-        .map(|s| Line::from(Span::styled(s, Style::default().fg(Color::Rgb(0xc8, 0x8a, 0xf0)))))
+        .map(|s| Line::from(Span::styled(s, Style::default().fg(Color::Rgb(0xb0, 0xa9, 0xde)))))
         .collect();
     f.render_widget(Paragraph::new(glines), inner);
 }
@@ -899,7 +917,7 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &mut App) {
         };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(wait, Style::default().fg(DIM))))
-                .block(bpanel(5, "chain-activity", &format!(" {src} "))),
+                .block(bpanel(5, "chain-activity", &format!(" {src} "), PROC_BOX)),
             area,
         );
         return;
@@ -926,14 +944,14 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &mut App) {
     let mode = if app.feed_follow { "live" } else { "scroll" };
     let sel = app.feed_state.selected().map(|i| i + 1).unwrap_or(len);
     let tabs = format!(" {src} · {sel}/{len} · {mode} ");
-    let block = bpanel(5, "chain-activity", &tabs);
+    let block = bpanel(5, "chain-activity", &tabs, PROC_BOX);
     let inner = block.inner(area);
     // When following, suppress the selection bar (pure live tail); when the user
-    // scrolls, highlight the selected line.
+    // scrolls, highlight the selected line (btop selected_bg).
     let hl = if app.feed_follow {
         Style::default()
     } else {
-        Style::default().bg(Color::Rgb(0x14, 0x3a, 0x3a)).add_modifier(Modifier::BOLD)
+        Style::default().bg(SEL_BG).add_modifier(Modifier::BOLD)
     };
     let list = List::new(items).block(block).highlight_style(hl);
     f.render_stateful_widget(list, area, &mut app.feed_state);
@@ -955,7 +973,7 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &mut App) {
 /// state as labelled rows and gradient meters, with the animated miner.
 fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     let n = &app.node;
-    let block = bpanel(3, "node", &format!(" {} ", n.network));
+    let block = bpanel(3, "node", &format!(" {} ", n.network), PROC_BOX);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -976,38 +994,38 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     // height + state
     lines.push(Line::from(vec![
         Span::styled("height  ", Style::default().fg(DIM)),
-        Span::styled(n.height.to_string(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(n.height.to_string(), Style::default().fg(TITLE).add_modifier(Modifier::BOLD)),
         Span::styled("   diff ", Style::default().fg(DIM)),
-        Span::styled(n.difficulty.clone(), Style::default().fg(Color::White)),
+        Span::styled(n.difficulty.clone(), Style::default().fg(MAIN)),
     ]));
     if n.synced {
         lines.push(Line::from(vec![
             Span::styled("state   ", Style::default().fg(DIM)),
-            Span::styled("● synced", Style::default().fg(Color::Green)),
+            Span::styled("● synced", Style::default().fg(Color::Rgb(0xb5, 0xe6, 0x85))),
         ]));
     } else if n.fork_stuck {
         lines.push(Line::from(vec![
             Span::styled("state   ", Style::default().fg(DIM)),
-            Span::styled("● FORK-STUCK", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled("● FORK-STUCK", Style::default().fg(HI).add_modifier(Modifier::BOLD)),
         ]));
     } else {
         let pct = n.height as f64 / n.target_height.max(n.height).max(1) as f64 * 100.0;
-        lines.push(meter_line("sync", pct, &format!("{}/{}", n.height, n.target_height), bar_w));
+        lines.push(meter_line("sync", pct, &format!("{}/{}", n.height, n.target_height), bar_w, GRAD_CPU));
     }
 
     // peers meter (target ~16 outbound) + privacy
-    lines.push(meter_line("peers", (n.peers as f64 / 16.0 * 100.0).min(100.0), &format!("{}/16", n.peers), bar_w));
+    lines.push(meter_line("peers", (n.peers as f64 / 16.0 * 100.0).min(100.0), &format!("{}/16", n.peers), bar_w, GRAD_PROCESS));
     let privacy = if n.peers >= 3 {
-        Span::styled("● Baffle adequate", Style::default().fg(Color::Green))
+        Span::styled("● Baffle adequate", Style::default().fg(Color::Rgb(0xb5, 0xe6, 0x85)))
     } else {
-        Span::styled("● Baffle size-limited", Style::default().fg(Color::Yellow))
+        Span::styled("● Baffle size-limited", Style::default().fg(Color::Rgb(0xff, 0xd7, 0x7a)))
     };
     lines.push(Line::from(vec![Span::styled("privacy ", Style::default().fg(DIM)), privacy]));
 
     // hashrate meter (relative to the session peak) + mempool
     let hmax = app.hash_hist.iter().copied().max().unwrap_or(1).max(1) as f64;
     if n.is_mining {
-        lines.push(meter_line("hashR", n.hashrate / hmax * 100.0, &human_hashrate(n.hashrate), bar_w));
+        lines.push(meter_line("hashR", n.hashrate / hmax * 100.0, &human_hashrate(n.hashrate), bar_w, GRAD_CPU));
     } else {
         lines.push(Line::from(vec![
             Span::styled("hashR   ", Style::default().fg(DIM)),
@@ -1016,9 +1034,9 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     }
     lines.push(Line::from(vec![
         Span::styled("blocks  ", Style::default().fg(DIM)),
-        Span::styled(n.blocks_found.to_string(), Style::default().fg(Color::White)),
+        Span::styled(n.blocks_found.to_string(), Style::default().fg(MAIN)),
         Span::styled("   mempool ", Style::default().fg(DIM)),
-        Span::styled(format!("{} tx", n.mempool), Style::default().fg(Color::White)),
+        Span::styled(format!("{} tx", n.mempool), Style::default().fg(MAIN)),
     ]));
 
     // animated miner / block-found flash + solo ETA
