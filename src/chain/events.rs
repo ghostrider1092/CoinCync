@@ -18,10 +18,7 @@ impl Blockchain {
         hash: &Hash,
         details: serde_json::Value,
     ) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = crate::clock::unix_now(); // E1: single-source clock
         let event = ChainEvent {
             event_type,
             height,

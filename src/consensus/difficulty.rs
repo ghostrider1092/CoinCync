@@ -85,7 +85,7 @@ use crate::constants::{
     EMERGENCY_DROP_FACTOR, EMERGENCY_TIME_MULTIPLIER, MAX_DIFFICULTY_ADJ_DEN,
     MAX_DIFFICULTY_ADJ_NUM, MIN_DIFFICULTY_ADJ_DEN, MIN_DIFFICULTY_ADJ_NUM, TARGET_BLOCK_TIME,
 };
-use crate::primitives::Hash;
+use crate::primitives::{Difficulty, Hash};
 
 /// Absolute minimum network difficulty — the consensus floor below which ASERT
 /// cannot drive the chain. Equivalent to a target ceiling of `u128::MAX / 500`.
@@ -175,9 +175,18 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
     };
     let tip_target = target_to_u128(&tip.target);
 
+    // #191 FIX (defect 1 — sliding-anchor re-charge): ASERT must apply the
+    // exponent to the ANCHOR's target, not the tip's. The tip's target already
+    // contains every prior per-block adjustment, so basing the exponent on it
+    // re-charges a one-time idle gap on each of the next SHORT/LONG blocks the
+    // gap sits inside the window — the compounding that collapsed difficulty by
+    // ~13 halvings to the floor. Canonical aserti3-2d bases it on the fixed
+    // anchor target so the gap is paid ONCE as height advances (T·Δh offsets
+    // the gap in Δt). The per-block ±2x clamp + the MIN_DIFFICULTY floor below
+    // remain the rails.
     let short_anchor = get_anchor(blocks, DIFFICULTY_SHORT_WINDOW as usize);
     let short_target = apply_asert(
-        tip_target,
+        target_to_u128(&short_anchor.target),
         short_anchor,
         tip,
         TARGET_BLOCK_TIME,
@@ -186,7 +195,7 @@ pub fn calculate_difficulty(blocks: &[DifficultyBlock], current_height: u64) -> 
 
     let long_anchor = get_anchor(blocks, DIFFICULTY_LONG_WINDOW as usize);
     let long_target = apply_asert(
-        tip_target,
+        target_to_u128(&long_anchor.target),
         long_anchor,
         tip,
         TARGET_BLOCK_TIME,
@@ -473,7 +482,18 @@ pub fn min_target() -> Hash {
     Hash::from_bytes(bytes)
 }
 
-pub fn target_to_difficulty(target: &Hash) -> u128 {
+/// The work-factor of a target as a typed [`Difficulty`] — the public boundary
+/// for fork-choice / reporting consumers. The internal ASERT retarget math stays
+/// in `u128` (see [`target_to_difficulty_raw`]); the newtype deliberately has no
+/// `Mul`/`Div`, so it is applied only where a difficulty is compared/accumulated,
+/// not inside the arithmetic.
+pub fn target_to_difficulty(target: &Hash) -> Difficulty {
+    Difficulty::new(target_to_difficulty_raw(target))
+}
+
+/// Raw `u128` work-factor of a target — the internal computation the retarget
+/// math uses directly.
+fn target_to_difficulty_raw(target: &Hash) -> u128 {
     u128_max_target() / target_to_u128(target)
 }
 
@@ -493,14 +513,14 @@ pub fn estimate_hashrate(blocks: &[DifficultyBlock]) -> f64 {
     }
     let total_work: f64 = blocks
         .iter()
-        .map(|b| target_to_difficulty(&b.target) as f64)
+        .map(|b| target_to_difficulty_raw(&b.target) as f64)
         .sum();
     total_work / time_span
 }
 
 /// Calculate difficulty from target (convenience function).
 pub fn calculate_difficulty_from_target(target: &Hash) -> u128 {
-    target_to_difficulty(target)
+    target_to_difficulty_raw(target)
 }
 
 #[cfg(test)]
@@ -562,7 +582,7 @@ mod tests {
             .map(|i| make_block(i, i * TARGET_BLOCK_TIME))
             .collect();
         let new_target = calculate_difficulty(&blocks, 20);
-        let diff = target_to_difficulty(&new_target);
+        let diff = target_to_difficulty(&new_target).as_u128();
         assert!(diff < 10);
     }
 
@@ -572,8 +592,8 @@ mod tests {
             .map(|i| make_block(i, i * (TARGET_BLOCK_TIME / 2)))
             .collect();
         let new_target = calculate_difficulty(&blocks, 20);
-        let old_diff = target_to_difficulty(&blocks.last().unwrap().target);
-        let new_diff = target_to_difficulty(&new_target);
+        let old_diff = target_to_difficulty(&blocks.last().unwrap().target).as_u128();
+        let new_diff = target_to_difficulty(&new_target).as_u128();
         assert!(new_diff >= old_diff);
     }
 
@@ -599,6 +619,100 @@ mod tests {
         );
     }
 
+    /// Build a block carrying an explicit u128 target, so a simulation can
+    /// control difficulty headroom above the floor (the `make_block_realistic`
+    /// fixed target sits below the MIN_DIFFICULTY floor and leaves no room to
+    /// observe a *bounded* ease).
+    fn block_with_target(height: u64, timestamp: u64, target: u128) -> DifficultyBlock {
+        DifficultyBlock {
+            height,
+            timestamp,
+            target: u128_to_target(target),
+        }
+    }
+
+    /// Regression for #191 (consensus: difficulty collapse after an idle gap).
+    ///
+    /// A single long inter-block gap followed by fast blocks drove difficulty
+    /// down ~13 halvings to the MIN_DIFFICULTY floor and PINNED it there for
+    /// dozens of blocks — a one-miner flood. Root cause: `apply_asert` based the
+    /// ASERT exponent on the *tip's* target, so the one-time gap, which stays
+    /// inside the sliding SHORT/LONG window for 8/144 blocks, was re-charged on
+    /// top of the already-halved tip every block → compounding to the floor.
+    ///
+    /// The fix bases the exponent on the FIXED anchor target (canonical
+    /// aserti3-2d), so the gap is paid ONCE as height advances. This simulates
+    /// the reported trace — a steady chain, one ~3.2h gap, then 1s blocks — and
+    /// asserts the ease is bounded and difficulty recovers, never collapsing to
+    /// the floor. (Pre-fix, this chain pins at difficulty 500 for ~87 blocks;
+    /// post-fix the minimum is ~31k with ZERO floor blocks — verified against a
+    /// numeric replica of the retarget loop.)
+    #[test]
+    fn idle_gap_does_not_collapse_difficulty_to_floor_191() {
+        // Steady target with ample headroom above the floor: difficulty ≈ 2^18.
+        const T0: u128 = 1u128 << 110;
+        const GAP: u64 = 11_522; // the reported idle gap (seconds)
+        let t0_diff = target_to_difficulty_raw(&u128_to_target(T0));
+        assert!(
+            t0_diff > MIN_DIFFICULTY * 50,
+            "test precondition: steady difficulty must sit well above the floor"
+        );
+
+        // A long steady chain on the 120s target → ASERT at equilibrium.
+        let mut blocks: Vec<DifficultyBlock> = Vec::new();
+        let mut ts = 0u64;
+        for h in 0..200u64 {
+            blocks.push(block_with_target(h, ts, T0));
+            ts += TARGET_BLOCK_TIME;
+        }
+
+        // The gap block itself was mined at the steady target (its difficulty
+        // was fixed by the pre-gap chain); only its TIMESTAMP jumps.
+        let gap_h = blocks.len() as u64;
+        let gap_target = target_to_u128(&calculate_difficulty(&blocks, gap_h));
+        ts = blocks.last().unwrap().timestamp + GAP;
+        blocks.push(block_with_target(gap_h, ts, gap_target));
+
+        // Now mine fast blocks (1s apart). Each block's target is whatever the
+        // retarget produces from the history so far — this is the series #191
+        // showed collapsing to the floor.
+        let mut series: Vec<u128> = Vec::new();
+        for _ in 0..160u64 {
+            let h = blocks.len() as u64;
+            let target = target_to_u128(&calculate_difficulty(&blocks, h));
+            ts = blocks.last().unwrap().timestamp + 1;
+            blocks.push(block_with_target(h, ts, target));
+            series.push(target_to_difficulty_raw(&u128_to_target(target)));
+        }
+
+        let min_diff = *series.iter().min().unwrap();
+        let floor_blocks = series.iter().filter(|&&d| d <= MIN_DIFFICULTY * 2).count();
+
+        // (1) NEVER collapses to the floor — the core #191 defect. Pre-fix this
+        // is 500 (== floor); post-fix the minimum is ~31k.
+        assert_eq!(
+            floor_blocks, 0,
+            "difficulty must never reach the MIN_DIFFICULTY floor after an idle gap \
+             (got {floor_blocks} floor blocks; min diff = {min_diff}, floor = {MIN_DIFFICULTY})"
+        );
+        // (2) The ease is BOUNDED (the one-time gap is paid once, not compounded
+        // ~13 halvings). A 3.2h gap over an 8-block window is ~3.3 halvings, so
+        // the trough must stay within a small factor of the steady difficulty.
+        assert!(
+            min_diff > t0_diff / 16,
+            "ease must be bounded to a few halvings, not a collapse: \
+             min={min_diff} steady={t0_diff}"
+        );
+        // (3) Difficulty RECOVERS: with 1s blocks continuing (120x too fast), the
+        // tail must climb back above the steady difficulty, not sit at the floor.
+        let tail = *series.last().unwrap();
+        assert!(
+            tail >= t0_diff,
+            "difficulty must recover (and rise) as fast blocks continue: \
+             tail={tail} steady={t0_diff}"
+        );
+    }
+
     #[test]
     fn startup_grace_ignores_a_stale_genesis_timestamp() {
         // Regression (docs/design/difficulty-oscillation-analysis.md §7): with a
@@ -610,13 +724,13 @@ mod tests {
         // stale but whose real blocks land on the 120s target, and assert
         // difficulty holds near the initial value instead of collapsing.
         const STALE: u64 = 30 * 24 * 3600; // genesis 30 days before block 1
-        let init_diff = target_to_difficulty(&make_block_realistic(0, 0).target);
+        let init_diff = target_to_difficulty(&make_block_realistic(0, 0).target).as_u128();
         let mut blocks = vec![make_block_realistic(0, 0)]; // genesis at ts=0
         for i in 1..=20u64 {
             // real blocks on the 120s target, offset by the stale genesis gap
             blocks.push(make_block_realistic(i, STALE + i * TARGET_BLOCK_TIME));
         }
-        let new_diff = target_to_difficulty(&calculate_difficulty(&blocks, 20));
+        let new_diff = target_to_difficulty(&calculate_difficulty(&blocks, 20)).as_u128();
         // On-target real blocks must keep difficulty ~stable near init and must
         // NOT collapse toward the floor (which is what happened when genesis was
         // the anchor: time_error ≈ the 30-day gap → difficulty → MIN_DIFFICULTY).
@@ -1021,7 +1135,7 @@ mod tests {
             "emergency drop must not ease target past the max_t cap"
         );
         assert!(
-            target_to_difficulty(&result) >= MIN_DIFFICULTY,
+            target_to_difficulty(&result).as_u128() >= MIN_DIFFICULTY,
             "emergency drop must not push difficulty below the MIN_DIFFICULTY floor"
         );
     }
@@ -1159,7 +1273,7 @@ mod tests {
         let zero = Hash::from_bytes([0u8; 32]);
         assert_eq!(target_to_u128(&zero), 1);
         // And the difficulty derived from a zero target is u128::MAX, no panic.
-        assert_eq!(target_to_difficulty(&zero), u128::MAX);
+        assert_eq!(target_to_difficulty(&zero).as_u128(), u128::MAX);
     }
 
     /// `calculate_difficulty_from_target` is an exact alias of
@@ -1167,7 +1281,7 @@ mod tests {
     #[test]
     fn calculate_difficulty_from_target_equals_target_to_difficulty() {
         for t in [max_target(), min_target(), make_block_realistic(0, 0).target] {
-            assert_eq!(calculate_difficulty_from_target(&t), target_to_difficulty(&t));
+            assert_eq!(calculate_difficulty_from_target(&t), target_to_difficulty(&t).as_u128());
         }
     }
 }

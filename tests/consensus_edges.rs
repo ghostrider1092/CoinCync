@@ -216,8 +216,8 @@ fn base_header(height: u64, timestamp: u64, prev_hash: Hash) -> BlockHeader {
     BlockHeader {
         network_magic: expected_magic(),
         version: 1,
-        height,
-        timestamp,
+        height: coincync::primitives::Height::new(height),
+        timestamp: timestamp.into(),
         prev_hash,
         tx_root: Hash::zero(),
         anchor: Hash::zero(),
@@ -421,7 +421,7 @@ fn block_with_oversized_coinbase_rejected() {
         extra: vec![],
     };
 
-    let child_header = base_header(101, parent.timestamp + 120, parent.hash());
+    let child_header = base_header(101, parent.timestamp.as_secs() + 120, parent.hash());
     let child = Block::new(child_header, vec![coinbase]);
 
     let utxos = UtxoSet::new();
@@ -456,7 +456,7 @@ fn child_block_skipping_one_height_rejected() {
     let parent_block = Block::new(parent.clone(), Vec::new());
 
     // Child at 52 (skipping 51)
-    let child = base_header(52, parent.timestamp + 120, parent.hash());
+    let child = base_header(52, parent.timestamp.as_secs() + 120, parent.hash());
     let child_block = Block::new(child, Vec::new());
 
     let utxos = UtxoSet::new();
@@ -473,7 +473,7 @@ fn block_with_version_0_rejected() {
     let parent = base_header(10, 2_000_000, Hash::zero());
     let parent_block = Block::new(parent.clone(), Vec::new());
 
-    let mut child = base_header(11, parent.timestamp + 120, parent.hash());
+    let mut child = base_header(11, parent.timestamp.as_secs() + 120, parent.hash());
     child.version = 0;
     let child_block = Block::new(child, Vec::new());
 
@@ -510,7 +510,7 @@ fn block_with_two_coinbase_txs_rejected() {
         extra: vec![2],
     };
 
-    let child_header = base_header(11, parent.timestamp + 120, parent.hash());
+    let child_header = base_header(11, parent.timestamp.as_secs() + 120, parent.hash());
     let child = Block::new(child_header, vec![cb1, cb2]);
 
     let utxos = UtxoSet::new();

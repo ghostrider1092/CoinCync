@@ -55,8 +55,8 @@ fn chk_height_tip_agree(c: &Blockchain) -> Result<(), String> {
     // The reported height must match the tip block's own height (the split-state
     // bug class: stats.height and tip.height drifting apart).
     let tip = c.get_block_by_height(c.height()).ok_or("no block at reported height")?;
-    if tip.header.height != c.height() {
-        return Err(format!("stats height {} != tip block height {}", c.height(), tip.header.height));
+    if tip.header.height.as_u64() != c.height() {
+        return Err(format!("stats height {} != tip block height {}", c.height(), tip.header.height.as_u64()));
     }
     Ok(())
 }

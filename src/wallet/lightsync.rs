@@ -24,7 +24,7 @@
 //!   Audit **Gap 2** (checkpoint *authentication*): a consumer must call
 //!   [`SyncCheckpoint::authenticate`] and only fast-skip on
 //!   [`CheckpointAuth::Authenticated`] — this validates a server-provided
-//!   checkpoint against the binary's hardcoded `CONSENSUS_CHECKPOINTS` set.
+//!   checkpoint against the binary's hardcoded consensus checkpoints.
 //!   Full miner-signed checkpoints remain the v1.0.1 solution; until then an
 //!   unhardcoded height is `Unverifiable` and must fall back to a full scan.
 //!
@@ -66,7 +66,7 @@
 //!   `scan_digests_parallel_advances_last_scanned_to_final_height`.
 //! - **§5 `SyncCheckpoint::authenticate` (audit Gap 2)** — INVARIANT: a
 //!   server checkpoint is trusted for fast-skip only when its hash matches a
-//!   hardcoded `CONSENSUS_CHECKPOINTS` entry (`Authenticated`); a mismatch is
+//!   hardcoded consensus-checkpoint entry (`Authenticated`); a mismatch is
 //!   `Forged` and an unknown height is `Unverifiable`, both of which must fall
 //!   back to a full scan. THREAT: a forged checkpoint making the wallet skip
 //!   real blocks and miss owned incoming txs. TESTS:
@@ -126,6 +126,13 @@ pub struct OutputDigest {
     pub tx_hash: Hash,
     /// Reference: output index within the transaction (1 byte)
     pub output_index: u8,
+    /// Integrated-address encrypted payment ID from the transaction's `extra`
+    /// (issue #50). Non-empty only on the tx's FIRST output, whose
+    /// `tx_public_key` is the ECDH key the payment ID was encrypted to, so a
+    /// light client that owns that output can recover it without full scanning.
+    /// Empty when the transaction carries no payment ID.
+    #[serde(default)]
+    pub encrypted_payment_id: Vec<u8>,
     /// True if this output belongs to a coinbase transaction (audit H-4).
     /// Coinbase outputs carry a PLAINTEXT amount, a zero-blinding commitment, and
     /// a public-data view tag — so a light client must detect them by direct
@@ -139,6 +146,8 @@ pub struct OutputDigest {
 
 impl OutputDigest {
     /// Create an OutputDigest from a TxOutput and its transaction context.
+    /// The encrypted payment ID (if any) is attached separately in
+    /// [`BlockDigest::from_block`], which has the transaction-level `extra`.
     /// `is_coinbase` is attached separately in [`BlockDigest::from_block`],
     /// which has the transaction-level context.
     pub fn from_output(output: &TxOutput, tx_hash: Hash, output_index: u8) -> Self {
@@ -150,14 +159,15 @@ impl OutputDigest {
             encrypted_amount: output.encrypted_amount.clone(),
             tx_hash,
             output_index,
+            encrypted_payment_id: Vec::new(),
             is_coinbase: false,
         }
     }
 
     /// Estimated serialized size in bytes
     pub fn estimated_size() -> usize {
-        // 32 + 1 + 32 + 32 + 8 + 32 + 1 = ~138 with overhead
-        138
+        // 32 + 1 + 32 + 32 + 8 + 32 + 1 + ~9 (payment id) = ~147 with overhead
+        147
     }
 }
 
@@ -193,6 +203,8 @@ impl BlockDigest {
 
         for tx in &block.transactions {
             let tx_hash = tx.hash();
+            let first_output_pos = outputs.len();
+            let mut any_output = false;
             let is_coinbase = tx.is_coinbase();
             for (idx, output) in tx.outputs.iter().enumerate() {
                 if idx > 255 {
@@ -203,6 +215,28 @@ impl BlockDigest {
                 // coinbase detection path (plaintext amount, no view-tag gate).
                 digest.is_coinbase = is_coinbase;
                 outputs.push(digest);
+                any_output = true;
+            }
+            // Integrated-address payment ID (issue #50, jun review): the builder
+            // encrypts the ID with the ECDH channel of the *recipient* output —
+            // the first output carrying a recipient view key — which is NOT
+            // necessarily this tx's output 0 (a dummy/decoy output can precede
+            // it). Attaching the blob only to `first_output_pos` would leave the
+            // recipient (owning a later output) unable to recover it, since each
+            // output has its own tx_public_key / ECDH key.
+            //
+            // from_block cannot tell which output is the recipient (that needs
+            // the recipient's view key), so carry the encrypted blob on EVERY
+            // output of the tx. On scan, only the output the wallet actually owns
+            // decrypts to a valid PAYMENT_ID_LEN plaintext; the copies on decoy
+            // outputs fail the length filter and yield None. Small, and correct
+            // regardless of output ordering.
+            if any_output {
+                if let Some(enc) = crate::transaction::payment_id::find_encrypted(&tx.extra) {
+                    for out in &mut outputs[first_output_pos..] {
+                        out.encrypted_payment_id = enc.clone();
+                    }
+                }
             }
         }
 
@@ -210,7 +244,7 @@ impl BlockDigest {
             height: block.height(),
             hash,
             prev_hash: block.header.prev_hash,
-            timestamp: block.header.timestamp,
+            timestamp: block.header.timestamp.as_secs(),
             output_count: outputs.len() as u16,
             outputs,
         }
@@ -276,7 +310,7 @@ impl SyncCheckpoint {
     }
 
     /// Authenticate this (server-provided) checkpoint against the binary's
-    /// hardcoded `CONSENSUS_CHECKPOINTS` set — the interim mitigation for
+    /// hardcoded consensus checkpoints — the interim mitigation for
     /// **audit Gap 2** (checkpoint authentication) until miner-signed
     /// checkpoints are wired (v1.0.1).
     ///
@@ -289,10 +323,9 @@ impl SyncCheckpoint {
     /// and [`Forged`](CheckpointAuth::Forged) must both fall back to a normal
     /// scan (and `Forged` should additionally distrust the peer).
     pub fn authenticate(&self, network: crate::config::NetworkType) -> CheckpointAuth {
-        self.authenticate_against(crate::constants::expected_checkpoint_hash(
-            network,
-            self.height,
-        ))
+        self.authenticate_against(
+            crate::constants::expected_checkpoint_hash(network, self.height).as_ref(),
+        )
     }
 
     /// Core of [`authenticate`](Self::authenticate), split out so the
@@ -498,6 +531,27 @@ impl LightWalletSync {
                     continue;
                 }
 
+                // Integrated-address payment ID (issue #50): if this output
+                // carries the encrypted extra entry (set on the tx's first
+                // output), recover it over the same ECDH channel the full
+                // scanner uses, so light-wallet users don't lose it.
+                let payment_id = if output.encrypted_payment_id.is_empty() {
+                    None
+                } else {
+                    crate::crypto::decrypt_memo(
+                        &output.encrypted_payment_id,
+                        keys.view_secret.as_bytes(),
+                        output.tx_public_key.as_bytes(),
+                    )
+                    .ok()
+                    .filter(|v| v.len() == crate::transaction::payment_id::PAYMENT_ID_LEN)
+                    .map(|v| {
+                        let mut a = [0u8; 8];
+                        a.copy_from_slice(&v);
+                        a
+                    })
+                };
+
                 // Reconstruct TxOutput for DecryptedOutput compatibility
                 let tx_output = TxOutput {
                     stealth_address: output.stealth_address,
@@ -519,6 +573,7 @@ impl LightWalletSync {
                     shared_secret,
                     key_epoch: keys.epoch,
                     subaddress_index: matched_subaddr,
+                    payment_id,
                 });
             }
         }
@@ -743,6 +798,7 @@ fn detect_coinbase_digest(output: &OutputDigest, keys: &ScanKeys) -> Option<Decr
         shared_secret: [0u8; 32],
         key_epoch: keys.epoch,
         subaddress_index: None, // coinbase always to the primary address
+        payment_id: None,       // coinbase carries no integrated-address payment ID
     })
 }
 
@@ -829,6 +885,26 @@ fn scan_output_digest_with_keys(
                 continue;
             }
 
+            // Integrated-address payment ID (issue #50, jun review): recover it
+            // on the SUBADDRESS path too — otherwise subaddress recipients
+            // silently lose it. Same ECDH channel as the primary path.
+            let payment_id = if output.encrypted_payment_id.is_empty() {
+                None
+            } else {
+                crate::crypto::decrypt_memo(
+                    &output.encrypted_payment_id,
+                    key_set.view_secret.as_bytes(),
+                    output.tx_public_key.as_bytes(),
+                )
+                .ok()
+                .filter(|v| v.len() == crate::transaction::payment_id::PAYMENT_ID_LEN)
+                .map(|v| {
+                    let mut a = [0u8; 8];
+                    a.copy_from_slice(&v);
+                    a
+                })
+            };
+
             let tx_output = TxOutput {
                 stealth_address: output.stealth_address,
                 tx_public_key: output.tx_public_key,
@@ -849,6 +925,7 @@ fn scan_output_digest_with_keys(
                 shared_secret,
                 key_epoch: key_set.epoch,
                 subaddress_index: matched_subaddr,
+                payment_id,
             });
         }
     }
@@ -1043,8 +1120,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
-            timestamp: 1000,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx_hash,
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1088,8 +1165,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
-            timestamp: 1000,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1122,6 +1199,142 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_digest_recovers_payment_id() {
+        // issue #50: light-sync must recover the integrated-address payment ID
+        // instead of silently dropping it.
+        let (view_secret, spend_public) = make_test_keys();
+        let view_public = PublicKey::from_bytes(
+            CurveSecretScalar::from_bytes(*view_secret.as_bytes())
+                .to_public()
+                .to_bytes(),
+        );
+        let amount = 3_000_000u64;
+        let (output, tx_secret) = create_test_output(&view_secret, &spend_public, amount, 0);
+
+        // Encrypt a payment ID to the recipient over the output's ECDH channel
+        // (exactly as TransactionBuilder::with_payment_id does) and place the
+        // tagged entry in tx.extra.
+        let pid = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let enc = crate::crypto::encrypt_memo(&pid, tx_secret.as_bytes(), view_public.as_bytes())
+            .expect("encrypt payment id");
+        let extra = crate::transaction::payment_id::encode_extra(&enc);
+
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![output],
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+        let header = BlockHeader {
+            network_magic: test_magic(),
+            version: 1,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
+            prev_hash: Hash::from_bytes([0u8; 32]),
+            tx_root: tx.hash(),
+            anchor: Hash::from_bytes([0u8; 32]),
+            algorithm: 0,
+            nonce: 0,
+            target: Hash::from_bytes([0xFF; 32]),
+            miner_pubkey: spend_public,
+            supply_commitment: [0u8; 32],
+            checkpoint_vote: None,
+            spark_set_root: [0u8; 32],
+            mw_kernel_root: [0u8; 32],
+        };
+        let block = Block::new(header, vec![tx]);
+        let digest = BlockDigest::from_block(&block);
+        assert!(
+            !digest.outputs[0].encrypted_payment_id.is_empty(),
+            "digest must carry the encrypted payment id on the first output"
+        );
+
+        let keys = ScanKeys::new(view_secret, spend_public, 0);
+        let mut sync = LightWalletSync::new(vec![keys]);
+        let found = sync.scan_digest(&digest);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].payment_id,
+            Some(pid),
+            "light-sync must recover the integrated-address payment id"
+        );
+    }
+
+    #[test]
+    fn test_scan_digest_recovers_payment_id_with_dummy_output_first() {
+        // jun #50 review: a decoy/dummy output can precede the integrated-address
+        // recipient, so the builder encrypts the payment ID to the recipient's
+        // channel (output[1]) while from_block historically attached the blob
+        // only to output[0]. The recipient (owning output[1]) must still recover
+        // it — from_block now carries the blob on every output of the tx.
+        let (view_secret, spend_public) = make_test_keys();
+        let view_public = PublicKey::from_bytes(
+            CurveSecretScalar::from_bytes(*view_secret.as_bytes())
+                .to_public()
+                .to_bytes(),
+        );
+
+        // Dummy output at index 0, owned by someone else (fresh random keys).
+        let (other_view, other_spend) = make_test_keys();
+        let (dummy_out, _dummy_secret) =
+            create_test_output(&other_view, &other_spend, 1_000_000, 0);
+
+        // Recipient output at index 1, owned by the test wallet.
+        let amount = 3_000_000u64;
+        let (recip_out, recip_secret) = create_test_output(&view_secret, &spend_public, amount, 1);
+
+        // Payment ID encrypted to the RECIPIENT output's ECDH channel (index 1).
+        let pid = [9u8, 8, 7, 6, 5, 4, 3, 2];
+        let enc =
+            crate::crypto::encrypt_memo(&pid, recip_secret.as_bytes(), view_public.as_bytes())
+                .expect("encrypt payment id");
+        let extra = crate::transaction::payment_id::encode_extra(&enc);
+
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![dummy_out, recip_out], // dummy FIRST, recipient second
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+        let header = BlockHeader {
+            network_magic: test_magic(),
+            version: 1,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
+            prev_hash: Hash::from_bytes([0u8; 32]),
+            tx_root: tx.hash(),
+            anchor: Hash::from_bytes([0u8; 32]),
+            algorithm: 0,
+            nonce: 0,
+            target: Hash::from_bytes([0xFF; 32]),
+            miner_pubkey: spend_public,
+            supply_commitment: [0u8; 32],
+            checkpoint_vote: None,
+            spark_set_root: [0u8; 32],
+            mw_kernel_root: [0u8; 32],
+        };
+        let block = Block::new(header, vec![tx]);
+        let digest = BlockDigest::from_block(&block);
+
+        let keys = ScanKeys::new(view_secret, spend_public, 0);
+        let mut sync = LightWalletSync::new(vec![keys]);
+        let found = sync.scan_digest(&digest);
+        assert_eq!(found.len(), 1, "recipient output (index 1) is found");
+        assert_eq!(found[0].amount, amount);
+        assert_eq!(
+            found[0].payment_id,
+            Some(pid),
+            "payment id recovered even though a dummy output precedes the recipient"
+        );
+    }
+
+    #[test]
     fn test_scan_digest_rejects_others() {
         // Create output for one key pair
         let (view_secret1, spend_public1) = make_test_keys();
@@ -1140,8 +1353,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
-            timestamp: 1000,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1194,8 +1407,8 @@ mod tests {
             let header = BlockHeader {
                 network_magic: test_magic(),
                 version: 1,
-                height: h,
-                timestamp: 1000 + h * 30,
+                height: crate::primitives::Height::new(h),
+                timestamp: crate::primitives::Timestamp::from_secs(1000 + h * 30),
                 prev_hash,
                 tx_root: tx.hash(),
                 anchor: Hash::from_bytes([0u8; 32]),
@@ -1248,8 +1461,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height,
-            timestamp: 1000 + height * 30,
+            height: crate::primitives::Height::new(height),
+            timestamp: crate::primitives::Timestamp::from_secs(1000 + height * 30),
             prev_hash,
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1460,8 +1673,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height: 1,
-            timestamp: 1000,
+            height: crate::primitives::Height::new(1),
+            timestamp: crate::primitives::Timestamp::from_secs(1000),
             prev_hash: Hash::from_bytes([0u8; 32]),
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),
@@ -1521,8 +1734,8 @@ mod tests {
         let header = BlockHeader {
             network_magic: test_magic(),
             version: 1,
-            height,
-            timestamp: 1000 + height,
+            height: crate::primitives::Height::new(height),
+            timestamp: crate::primitives::Timestamp::from_secs(1000 + height),
             prev_hash,
             tx_root: tx.hash(),
             anchor: Hash::from_bytes([0u8; 32]),

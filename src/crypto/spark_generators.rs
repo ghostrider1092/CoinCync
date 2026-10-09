@@ -56,7 +56,6 @@ pub fn gen_kv() -> RistrettoPoint {
 pub fn gen_u() -> RistrettoPoint {
     nums(b"COINCYNC_SPARK_GEN_U_v1")
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

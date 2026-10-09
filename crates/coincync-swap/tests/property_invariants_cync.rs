@@ -16,7 +16,8 @@
 //! on: the recipient's "effective spend pubkey" computed in two
 //! different ways MUST be the same. If it fails:
 //!
-//! 1. Alice locks CYNC at `P + T` (recipient pubkey method)
+//! 1. After the BTC-first safety gate passes, Alice locks CYNC at `P + T`
+//!    (recipient pubkey method)
 //! 2. Bob later derives spend secret `s + t` (combined scalar method)
 //! 3. Bob computes `(s+t)·G` and tries to spend the output at `P + T`
 //! 4. Math fails → Bob has the WRONG key → Bob cannot spend Alice's
@@ -131,20 +132,19 @@ proptest! {
             "derive_swap_spender_secret should be commutative");
     }
 
-    /// **compute_swap_lock_recipient round-trips view + amount + lock_height.**
+    /// **compute_swap_lock_recipient round-trips the shared view key and amount.**
     ///
     /// The recipient bundle must carry the inputs through verbatim
-    /// (view pub, amount, lock_height) and must produce a
+    /// (shared view pub, amount) and must produce a
     /// spend_public_bytes that matches what `derive_swap_recipient_spend_pub`
     /// would give. This is the integration property — the bundle is
     /// just a structured wrapper.
     #[test]
     fn lock_recipient_passes_through_metadata(
         counterparty_spend_pub_bytes in arb_ristretto_canonical(),
-        counterparty_view_pub in any::<[u8; 32]>(),
+        shared_view_secret in arb_ristretto_canonical(),
         adaptor_secret in arb_ristretto_canonical(),
         amount in 1u64..u64::MAX, // non-zero per the input check
-        lock_height in proptest::option::of(any::<u64>()),
     ) {
         // The "counterparty spend pub" must be a valid Ristretto point.
         // We pick a secret + compute the point so the test input is
@@ -155,17 +155,15 @@ proptest! {
             .expect("filtered");
         let t_pub = cync_adaptor_point_from_secret(&adaptor_secret)
             .expect("filtered");
+        let shared_view_pub = cync_adaptor_point_from_secret(&shared_view_secret)
+            .expect("filtered");
 
         let bundle = compute_swap_lock_recipient(
-            &p_pub, &counterparty_view_pub, &t_pub, amount, lock_height,
+            &p_pub, &t_pub, &shared_view_pub, amount,
         ).expect("valid inputs must produce a bundle");
 
-        // View pub passes through unchanged.
-        prop_assert_eq!(bundle.view_public_bytes, counterparty_view_pub);
-        // Amount passes through.
+        prop_assert_eq!(bundle.view_public_bytes, shared_view_pub);
         prop_assert_eq!(bundle.amount_atomic, amount);
-        // Lock height passes through.
-        prop_assert_eq!(bundle.lock_height, lock_height);
 
         // spend_public matches independent derivation.
         let expected_spend = derive_swap_recipient_spend_pub(&p_pub, &t_pub)
@@ -181,15 +179,13 @@ proptest! {
     #[test]
     fn lock_recipient_rejects_zero_amount(
         counterparty_spend in arb_ristretto_canonical(),
-        counterparty_view in any::<[u8; 32]>(),
+        shared_view_secret in arb_ristretto_canonical(),
         adaptor_secret in arb_ristretto_canonical(),
-        lock_height in proptest::option::of(any::<u64>()),
     ) {
         let p_pub = cync_adaptor_point_from_secret(&counterparty_spend).unwrap();
         let t_pub = cync_adaptor_point_from_secret(&adaptor_secret).unwrap();
-        let result = compute_swap_lock_recipient(
-            &p_pub, &counterparty_view, &t_pub, 0u64, lock_height,
-        );
+        let shared_view_pub = cync_adaptor_point_from_secret(&shared_view_secret).unwrap();
+        let result = compute_swap_lock_recipient(&p_pub, &t_pub, &shared_view_pub, 0u64);
         prop_assert!(result.is_err(),
             "compute_swap_lock_recipient must reject amount = 0");
     }

@@ -366,37 +366,28 @@ pub struct CyncAdaptorSig {
 /// derived from all four points, so the prover can't independently
 /// produce two unrelated proofs and concatenate them.
 ///
-/// **What this does NOT yet prove:** that the two discrete logs are
+/// **What this does not prove by itself:** that the two discrete logs are
 /// the *same number*. A strict "same-secret-across-curves" binding
 /// requires either (a) range-bounded secrets + Bulletproofs range
 /// proofs (Comit / xmr-btc-swap approach) or (b) Noether's
 /// bit-decomposition tree of commitments (DLEQ Across Groups, 2018).
-/// Both are multi-week follow-up slices that build on top of the
-/// primitive shipped here.
+/// The production safety gate supplies that property with the shipped
+/// Noether bit-decomposition proof in [`crate::strict_dleq`].
 ///
-/// **Why this is still useful in the swap context:** the strict
-/// same-secret binding is enforced *operationally* by the adaptor
-/// signatures themselves â€” if Alice tries to claim BTC with a secret
-/// that doesn't match the CYNC adaptor point, the
-/// [`cync_decrypt_adaptor`] result will not produce a valid CLSAG
-/// when Bob tries to use it. The DLEQ proof here is the
-/// **pre-commitment sanity check** that catches obvious mismatches
-/// before either party broadcasts. The cryptographic backstop is
-/// the adaptors themselves.
+/// **Why this remains useful:** it is the strict proof's inexpensive fast
+/// floor, rejecting obvious mismatches before the bit-level verification.
+/// It is not sufficient on its own to authorize a CYNC lock.
 ///
-/// The wire shape will not change when the strict variant lands:
-/// it adds extra fields (range commitments, bit-tree nodes), it
-/// does not modify the four fields here.
+/// The strict proof embeds this unchanged wire shape and adds bit commitments
+/// plus linear-combination openings.
 ///
 /// **Strict-binding variant design spec.** See
 /// `docs/cip/CIP-001-atomic-swap.md` §"Pre-audit hardening:
 /// strict-binding cross-curve DLEQ (Noether 2018)" for the full
 /// construction, wire format (`CrossCurveDlProofStrict`),
 /// Cargo-feature plan (`strict-dleq`), and proof-size budget
-/// (~81 KB per proof). The strict variant is deferred until the
-/// audit team's preference is known; this fast variant is
-/// operationally sufficient (the adaptors enforce same-secret
-/// binding via the spend path).
+/// (~81 KB per proof). The strict variant is enabled by default and mandatory
+/// in [`crate::safety::verify_pre_cync_lock`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CrossCurveDlProof {
     /// Commitment on the secp256k1 side: `A_btc = kÂ·G_btc`. 33-byte
@@ -430,6 +421,36 @@ impl CrossCurveDlProof {
         out[65..97].copy_from_slice(&self.s_btc);
         out[97..129].copy_from_slice(&self.s_cync);
         out
+    }
+
+    /// Decode the fixed canonical wire form produced by
+    /// [`canonical_bytes`](Self::canonical_bytes).
+    ///
+    /// This performs the structural length check only. Curve-point and scalar
+    /// canonicality are deliberately checked by [`verify_cross_curve_proof`]
+    /// so every decoded proof follows the same verification path.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != Self::CANONICAL_LEN {
+            return Err(Error::Verification(
+                "cross-curve proof has wrong canonical length",
+            ));
+        }
+
+        let mut a_btc = [0u8; 33];
+        let mut a_cync = [0u8; 32];
+        let mut s_btc = [0u8; 32];
+        let mut s_cync = [0u8; 32];
+        a_btc.copy_from_slice(&bytes[..33]);
+        a_cync.copy_from_slice(&bytes[33..65]);
+        s_btc.copy_from_slice(&bytes[65..97]);
+        s_cync.copy_from_slice(&bytes[97..129]);
+
+        Ok(Self {
+            a_btc,
+            a_cync,
+            s_btc,
+            s_cync,
+        })
     }
 }
 
@@ -681,6 +702,22 @@ pub fn verify_pre_sig(
         .r_point
         .combine(adaptor_pt)
         .map_err(|_| Error::Verification("R + T combine failed"))?;
+
+    // #247: the decrypted signature is `((R+T).x, s_pre + t)`, and a BIP-340
+    // verifier lifts `(R+T).x` to the point with EVEN y. If `R + T` has odd y,
+    // the adaptor equation `s_pre·G == R + e·X` below can still hold while the
+    // completed signature can NEVER satisfy BIP-340 — so a counterparty could
+    // hand over a pre-signature that passes the safety gate (which checks the
+    // claim and refund adaptors with `verify_pre_sig` alone) yet is forever
+    // uncompletable, bricking that path. An honest signer already retries the
+    // nonce until the parity is even; the verifier must enforce the same.
+    let (_, r_plus_t_parity) = r_plus_t.x_only_public_key();
+    if r_plus_t_parity != secp256k1::Parity::Even {
+        return Err(Error::Verification(
+            "R + T has odd y; pre-signature can never be completed under BIP-340",
+        ));
+    }
+
     let e = bip340_challenge(&r_plus_t, signer_x, msg)?;
 
     // Lift signer_x to a full PublicKey with even y (BIP-340 convention).
@@ -1398,6 +1435,58 @@ mod tests {
             create_pre_sig(&seckey, &msg, &adaptor_pt, &nonce).expect("create_pre_sig");
         verify_pre_sig(&pre_sig, &signer_x, &adaptor_pt, &msg)
             .expect("verify_pre_sig should accept a freshly-created pre-sig");
+    }
+
+    #[test]
+    fn verify_pre_sig_rejects_odd_y_r_plus_t() {
+        // #247: a pre-sig built with the low-level `create_pre_sig` and a nonce
+        // whose `R + T` has ODD y satisfies the adaptor equation `s_pre·G ==
+        // R + e·X`, but its decrypted signature `((R+T).x, s_pre + t)` can never
+        // verify under BIP-340 (which lifts `(R+T).x` with even y). The verifier
+        // must reject such a pre-sig so the safety gate is never handed an
+        // uncompletable claim/refund adaptor. This test fixes the keys and only
+        // varies the nonce parity, so acceptance of the even case and rejection
+        // of the odd case isolate the parity check as the sole cause.
+        let secp = Secp256k1::new();
+        let (seckey, _, t_sk, msg) = test_keys(0x0DD_17); // "ODD-IT"
+        let adaptor_pt = PublicKey::from_secret_key(&secp, &t_sk);
+
+        let parity_of = |nonce: &SecretKey| {
+            let r_point = PublicKey::from_secret_key(&secp, nonce);
+            let r_plus_t = r_point.combine(&adaptor_pt).expect("R + T combine");
+            r_plus_t.x_only_public_key().1
+        };
+
+        // Find one even-y and one odd-y nonce for the same (key, T, msg).
+        let mut rng = StdRng::seed_from_u64(0x0DD_17);
+        let mut even_nonce = None;
+        let mut odd_nonce = None;
+        while even_nonce.is_none() || odd_nonce.is_none() {
+            let (nonce, _) = secp.generate_keypair(&mut rng);
+            match parity_of(&nonce) {
+                secp256k1::Parity::Even if even_nonce.is_none() => even_nonce = Some(nonce),
+                secp256k1::Parity::Odd if odd_nonce.is_none() => odd_nonce = Some(nonce),
+                _ => {}
+            }
+        }
+
+        // Even-y R + T: accepted (the construction is otherwise valid).
+        let (even_sig, even_x) =
+            create_pre_sig(&seckey, &msg, &adaptor_pt, &even_nonce.unwrap())
+                .expect("create_pre_sig (even)");
+        verify_pre_sig(&even_sig, &even_x, &adaptor_pt, &msg)
+            .expect("verify_pre_sig must accept an even-y R + T pre-signature");
+
+        // Odd-y R + T: rejected, specifically for the parity.
+        let (odd_sig, odd_x) =
+            create_pre_sig(&seckey, &msg, &adaptor_pt, &odd_nonce.unwrap())
+                .expect("create_pre_sig (odd)");
+        let err = verify_pre_sig(&odd_sig, &odd_x, &adaptor_pt, &msg)
+            .expect_err("verify_pre_sig must reject an odd-y R + T pre-signature");
+        assert!(
+            matches!(err, Error::Verification(m) if m.contains("odd y")),
+            "expected an odd-y parity rejection, got: {err:?}"
+        );
     }
 
     #[test]

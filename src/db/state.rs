@@ -47,6 +47,7 @@
 //!   chain). TESTS: `put_get_delete_generic_kv_and_reserved_key_guard`.
 
 use super::{deserialize, serialize};
+use crate::config::NetworkType;
 use crate::db::shim::{Db, Tree};
 use crate::error::{Error, Result};
 use crate::primitives::Hash;
@@ -122,6 +123,10 @@ impl StateDb {
     /// State key constants
     pub(super) const KEY_CHAIN_STATE: &'static [u8] = b"chain_state";
     const KEY_GENESIS_HASH: &'static [u8] = b"genesis_hash";
+    /// Explicit human-readable marker of which network wrote this data-dir
+    /// (`"mainnet"` / `"testnet"` / `"regtest"`). Written at genesis init,
+    /// checked on load by the self-preflight guard. See src/preflight.rs.
+    const KEY_NETWORK: &'static [u8] = b"network";
 
     /// Create new state database
     pub fn new(db: &Db) -> Result<Self> {
@@ -192,6 +197,33 @@ impl StateDb {
     pub fn set_genesis_hash(&self, hash: &Hash) -> Result<()> {
         self.state
             .insert(Self::KEY_GENESIS_HASH, hash.as_bytes())
+            .map_err(|e| Error::DatabaseError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Get the stored network marker, if any. Returns `None` for a data-dir
+    /// written before the marker existed (legacy) or one that was never stamped.
+    /// An unrecognized marker value is treated as `None` (legacy) rather than an
+    /// error, so an old/foreign stamp cannot wedge startup — the genesis check is
+    /// the hard guarantee; this marker is defense-in-depth + a clear signal.
+    pub fn get_network(&self) -> Result<Option<NetworkType>> {
+        match self.state.get(Self::KEY_NETWORK) {
+            Ok(Some(data)) => Ok(match data.as_ref() {
+                b"mainnet" => Some(NetworkType::Mainnet),
+                b"testnet" => Some(NetworkType::Testnet),
+                b"regtest" => Some(NetworkType::Regtest),
+                _ => None,
+            }),
+            Ok(None) => Ok(None),
+            Err(e) => Err(Error::DatabaseError(e.to_string())),
+        }
+    }
+
+    /// Stamp the network marker for this data-dir. Idempotent; safe to call on a
+    /// legacy data-dir to lazily record its network.
+    pub fn set_network(&self, network: NetworkType) -> Result<()> {
+        self.state
+            .insert(Self::KEY_NETWORK, network.name().as_bytes())
             .map_err(|e| Error::DatabaseError(e.to_string()))?;
         Ok(())
     }
@@ -386,6 +418,40 @@ mod tests {
         let loaded = state_db.get_state().unwrap().unwrap();
         assert_eq!(loaded.height, 100);
         assert_eq!(loaded.total_supply, 1_000_000_000);
+    }
+
+    #[test]
+    fn network_marker_roundtrips_and_defaults_to_none() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let state_db = StateDb::new(&db).unwrap();
+
+        // Unset on a fresh (legacy-like) data-dir.
+        assert_eq!(state_db.get_network().unwrap(), None);
+
+        for net in [
+            NetworkType::Mainnet,
+            NetworkType::Testnet,
+            NetworkType::Regtest,
+        ] {
+            state_db.set_network(net).unwrap();
+            assert_eq!(state_db.get_network().unwrap(), Some(net));
+        }
+    }
+
+    #[test]
+    fn network_marker_unknown_value_reads_as_none() {
+        let dir = tempdir().unwrap();
+        let db = crate::db::shim::open(dir.path()).unwrap();
+        let state_db = StateDb::new(&db).unwrap();
+
+        // A foreign/garbage marker must not wedge startup: it reads as None
+        // (legacy), so the genesis check remains the hard guarantee.
+        state_db
+            .state
+            .insert(StateDb::KEY_NETWORK, &b"martian-net"[..])
+            .unwrap();
+        assert_eq!(state_db.get_network().unwrap(), None);
     }
 
     #[test]

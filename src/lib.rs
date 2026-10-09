@@ -38,7 +38,9 @@ compile_error!(
 );
 
 // ── Foundation ──────────────────────────────────────────────
+pub mod clock;
 pub mod constants;
+pub mod diagnostics;
 pub mod error;
 
 // Kani proof harnesses for top-level helpers in constants.rs.
@@ -46,13 +48,19 @@ pub mod error;
 pub mod build_info;
 pub mod config;
 pub mod helpers;
+/// Boot-time self-preflight guards (compiled-network vs runtime `--network`,
+/// data-dir network marker). Fail-fast, no consensus impact. See
+/// `docs/design/self-preflight-boot-guard.md`.
+pub mod preflight;
 #[cfg(kani)]
 mod kani_proofs;
 pub mod prelude;
 
 // ── Primitives + types ──────────────────────────────────────
 pub mod decoy;
+pub mod flight_recorder;
 pub mod primitives;
+pub mod rng;
 pub mod transaction;
 
 // ── Consensus + emission ────────────────────────────────────
@@ -63,6 +71,13 @@ pub mod emission;
 pub mod chain;
 pub mod mempool;
 pub mod metrics;
+/// Network-adjusted time (audit M-4) for the future-block timestamp cap, with
+/// clock-poisoning defenses (per-netgroup dedup, sample-after-validate,
+/// out-of-range→0). See `src/net_time.rs`.
+pub mod net_time;
+/// Portable, versioned chain-vitals health schema (`get_vitals`). Observability
+/// only, no consensus impact. See `docs/design/chain-vitals-schema.md`.
+pub mod vitals;
 
 // ── Crypto + wallet ─────────────────────────────────────────
 pub mod crypto;

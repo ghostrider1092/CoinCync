@@ -415,6 +415,14 @@ pub struct AddressManager {
     tried: HashSet<SocketAddr>,
     /// Tried addresses ordered from least to most recently failed.
     tried_order: VecDeque<SocketAddr>,
+    /// GOOD/"tried"-table (Bitcoin new/tried model): addresses we have
+    /// successfully connected to at least once (populated by `mark_success`).
+    /// `get_next` prefers these over never-connected ("new") gossip, so an
+    /// address-book eclipse — flooding the book with attacker-controlled
+    /// untried addresses — cannot starve dialing of proven-good peers. A subset
+    /// of the book (`known_addrs`); pruned alongside book eviction/purge.
+    /// See docs/design/addrman-new-tried.md.
+    good: HashSet<SocketAddr>,
     /// Self-addresses (detected via nonce match) — never connect to these
     self_addresses: HashSet<SocketAddr>,
     /// ANCHORS (Bitcoin Core model): our known-good outbound peers from the
@@ -453,6 +461,7 @@ impl AddressManager {
             known_addrs: HashSet::new(),
             tried: HashSet::new(),
             tried_order: VecDeque::new(),
+            good: HashSet::new(),
             self_addresses: HashSet::new(),
             anchors: Vec::new(),
             failures: HashMap::new(),
@@ -546,6 +555,7 @@ impl AddressManager {
                 .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
             if let Some(evicted) = self.addresses.pop() {
                 self.known_addrs.remove(&evicted.addr);
+                self.good.remove(&evicted.addr);
             }
         }
 
@@ -574,6 +584,33 @@ impl AddressManager {
         // Also remove from the address list entirely
         self.addresses.retain(|a| a.addr != addr);
         self.known_addrs.remove(&addr);
+        self.good.remove(&addr);
+    }
+
+    /// Select a feeler-probe candidate: a NEW (never-connected) address to
+    /// test-connect so it can be promoted into the GOOD table before we need
+    /// it, keeping the book fresh even when all outbound slots are full. Returns
+    /// a not-yet-good, not-currently-tried, non-self, non-manual/anchor address
+    /// (feelers exist to validate the *unproven* pool). `None` when every book
+    /// address is already good or tried. Most-recently-seen first.
+    pub fn select_feeler_candidate(&mut self) -> Option<SocketAddr> {
+        self.addresses
+            .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
+        self.addresses
+            .iter()
+            .map(|a| a.addr)
+            .find(|addr| {
+                !self.good.contains(addr)
+                    && !self.tried.contains(addr)
+                    && !self.self_addresses.contains(addr)
+                    && !self.manual.contains(addr)
+                    && !self.anchors.contains(addr)
+            })
+    }
+
+    /// Number of proven-good ("tried"-table) addresses. Observability/tests.
+    pub fn good_count(&self) -> usize {
+        self.good.len()
     }
 
     /// Get next address to try connecting
@@ -603,7 +640,23 @@ impl AddressManager {
         self.addresses
             .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
 
-        // Find first address not in tried set and not a self-address
+        // GOOD/"tried" TABLE NEXT (new/tried anti-eclipse): before any
+        // never-connected ("new") address, prefer an address we have
+        // successfully connected to before. This is what stops an address-book
+        // eclipse — a flood of attacker-controlled untried gossip cannot crowd
+        // proven-good peers out of the dialer, because good peers are always
+        // tried first. Skipped once tried this cycle (re-prioritized when the
+        // tried set clears below).
+        for addr in &self.addresses {
+            if self.good.contains(&addr.addr)
+                && !self.tried.contains(&addr.addr)
+                && !self.self_addresses.contains(&addr.addr)
+            {
+                return Some(addr.addr);
+            }
+        }
+
+        // Then a NEW (never-connected) address not in tried set and not a self-address
         for addr in &self.addresses {
             if !self.tried.contains(&addr.addr) && !self.self_addresses.contains(&addr.addr) {
                 return Some(addr.addr);
@@ -672,6 +725,7 @@ impl AddressManager {
             self.tried.remove(&addr);
             self.tried_order.retain(|candidate| *candidate != addr);
             self.failures.remove(&addr);
+            self.good.remove(&addr);
         }
     }
 
@@ -681,6 +735,13 @@ impl AddressManager {
         self.tried_order.retain(|candidate| *candidate != addr);
         // Reset failure count — a successful connect proves the address is alive.
         self.failures.remove(&addr);
+        // Promote into the GOOD/"tried" table: a proven-reachable peer that
+        // get_next prefers over never-connected gossip (new/tried anti-eclipse).
+        // Only track addresses that are (or can be) in the book, so `good` stays
+        // a subset bounded by max_addresses.
+        if self.known_addrs.contains(&addr) || self.manual.contains(&addr) {
+            self.good.insert(addr);
+        }
 
         // Update last_seen
         if let Some(peer) = self.addresses.iter_mut().find(|a| a.addr == addr) {
@@ -1439,6 +1500,62 @@ mod tests {
     /// `get_next` priority order across all three tiers in a single scan:
     /// manual (--addnode) first, then anchors, then the discovered book (by
     /// last_seen). Each tier is skipped once tried this cycle.
+    #[test]
+    fn good_addresses_are_preferred_over_new_after_anchors() {
+        let mut mgr = AddressManager::new(100);
+        let new_addr: SocketAddr = "203.0.113.10:28080".parse().unwrap();
+        let good_addr: SocketAddr = "203.0.113.20:28080".parse().unwrap();
+        mgr.add(PeerAddress::new(new_addr));
+        mgr.add(PeerAddress::new(good_addr));
+        mgr.mark_success(good_addr); // promote into the GOOD/"tried" table
+        assert_eq!(mgr.good_count(), 1);
+        assert_eq!(
+            mgr.get_next(),
+            Some(good_addr),
+            "proven-good peer must be dialed before a never-connected one"
+        );
+    }
+
+    #[test]
+    fn a_flood_of_new_addresses_cannot_starve_a_good_peer() {
+        // Address-book eclipse simulation: one proven-good peer, then a flood of
+        // diverse never-connected addresses. The good peer must still be dialed
+        // first — new gossip cannot crowd the tried table out of the dialer.
+        let mut mgr = AddressManager::new(1000);
+        let good_addr: SocketAddr = "203.0.113.20:28080".parse().unwrap();
+        mgr.add(PeerAddress::new(good_addr));
+        mgr.mark_success(good_addr);
+        for o in 0..60u16 {
+            let a: SocketAddr = format!("198.{o}.0.1:28080").parse().unwrap();
+            mgr.add(PeerAddress::new(a));
+        }
+        assert_eq!(mgr.get_next(), Some(good_addr));
+    }
+
+    #[test]
+    fn feeler_candidate_is_an_unproven_address() {
+        let mut mgr = AddressManager::new(100);
+        let good_addr: SocketAddr = "203.0.113.20:28080".parse().unwrap();
+        let new_addr: SocketAddr = "203.0.113.30:28080".parse().unwrap();
+        mgr.add(PeerAddress::new(good_addr));
+        mgr.add(PeerAddress::new(new_addr));
+        mgr.mark_success(good_addr);
+        assert_eq!(
+            mgr.select_feeler_candidate(),
+            Some(new_addr),
+            "feeler probes the unproven pool, never a good peer"
+        );
+
+        let mut only_good = AddressManager::new(100);
+        only_good.add(PeerAddress::new(good_addr));
+        only_good.mark_success(good_addr);
+        assert_eq!(
+            only_good.select_feeler_candidate(),
+            None,
+            "nothing to feel when every address is already good"
+        );
+    }
+
     #[test]
     fn get_next_priority_order_manual_then_anchors_then_book() {
         let mut mgr = AddressManager::new(100);

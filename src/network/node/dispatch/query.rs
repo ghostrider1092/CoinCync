@@ -57,14 +57,34 @@
 
 use dashmap::DashMap;
 use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 use tracing::warn;
 
 use crate::chain::SharedBlockchain;
 use crate::error::Result;
-use crate::network::peer::PeerId;
+use crate::network::peer::{PeerId, PeerInfo};
 use crate::network::protocol::{Message, MessageType};
+use crate::network::scoring::{MisbehaviorType, PeerScorer};
 
 use super::super::broadcast::send_to_peer;
+
+/// Score a peer for a malformed light-query request, matching the misbehavior
+/// ladder every sibling handler feeds. A short/invalid GetFilters or
+/// GetOutputDigests previously cost the peer nothing, letting it stream
+/// malformed queries with no reputation penalty.
+async fn score_query_violation(
+    peers: &DashMap<PeerId, PeerInfo>,
+    scorer: &RwLock<PeerScorer>,
+    peer_id: &PeerId,
+) {
+    if let Some(addr) = peers.get(peer_id).map(|p| p.addr) {
+        scorer
+            .write()
+            .await
+            .get_or_create(addr)
+            .record_misbehavior(MisbehaviorType::ProtocolViolation);
+    }
+}
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -108,12 +128,20 @@ pub(super) async fn handle_get_filters(
     peer_id: PeerId,
     payload: &[u8],
     magic: [u8; 4],
+    peers: &DashMap<PeerId, PeerInfo>,
+    scorer: &RwLock<PeerScorer>,
     chain: &SharedBlockchain,
     senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
 ) -> Result<()> {
     // Network/Archive nodes serve compact block filters to personal nodes.
     // Request contains (start_height: u64, end_height: u64).
-    if payload.len() >= 16 {
+    if payload.len() < 16 {
+        // Malformed (too short) — score it like every sibling handler does.
+        warn!("GetFilters: short payload ({} bytes) from peer {:?}", payload.len(), &peer_id[..4]);
+        score_query_violation(peers, scorer, &peer_id).await;
+        return Ok(());
+    }
+    {
         let start = u64::from_le_bytes(
             payload[0..8]
                 .try_into()
@@ -133,6 +161,7 @@ pub(super) async fn handle_get_filters(
                 end,
                 &peer_id[..4]
             );
+            score_query_violation(peers, scorer, &peer_id).await;
             return Ok(());
         }
         let chain_height = chain.height();
@@ -195,6 +224,8 @@ pub(super) async fn handle_get_output_digests(
     peer_id: PeerId,
     payload: &[u8],
     magic: [u8; 4],
+    peers: &DashMap<PeerId, PeerInfo>,
+    scorer: &RwLock<PeerScorer>,
     chain: &SharedBlockchain,
     senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
 ) -> Result<()> {
@@ -215,6 +246,7 @@ pub(super) async fn handle_get_output_digests(
             "GetOutputDigests from {:?}: payload too short",
             &peer_id[..4]
         );
+        score_query_violation(peers, scorer, &peer_id).await;
         return Ok(());
     }
     let start = u64::from_le_bytes(
@@ -495,5 +527,32 @@ mod handler_tests {
             .unwrap();
 
         assert!(srx.try_recv().is_ok(), "KeyImageStatus response sent");
+    }
+}
+
+#[cfg(test)]
+mod query_scoring_tests {
+    use super::*;
+    use crate::network::scoring::PeerScore;
+
+    // A malformed light-query must feed the misbehavior ladder (previously it
+    // cost the peer nothing — Finding 2 of the hardening survey).
+    #[tokio::test]
+    async fn malformed_query_scores_the_peer() {
+        let peers: DashMap<PeerId, PeerInfo> = DashMap::new();
+        let peer_id: PeerId = [9u8; 32];
+        let addr = "127.0.0.1:40001".parse().unwrap();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let before = PeerScore::default().reputation;
+        score_query_violation(&peers, &scorer, &peer_id).await;
+        let after = scorer
+            .read()
+            .await
+            .get(&addr)
+            .map(|s| s.reputation)
+            .expect("peer was scored");
+        assert!(after < before, "a malformed light-query must cost the peer reputation");
     }
 }

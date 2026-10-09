@@ -31,6 +31,67 @@ impl ShadowEvictChain for crate::chain::Blockchain {
     }
 }
 
+/// #149: whether the mempool needs a FULL `shadow_evict_invalid` revalidation
+/// after applying a block at `new_height`.
+///
+/// `remove_confirmed` already drops mined txs + key-image shadow-conflicts. The
+/// O(mempool) full sweep is only needed when a remaining tx's consensus VALIDITY
+/// can change WITHOUT a key-image collision — exactly the two cases the
+/// `shadow_evict_invalid` doc lists:
+/// 1. a **reorg** (`is_reorg`) — the UTXO set / member heights change under
+///    already-admitted txs; and
+/// 2. crossing the **output-age hard-fork** height — age-gated inputs that were
+///    valid become invalid.
+///
+/// On a normal tip extension neither holds (the UTXO set only grows, ring
+/// members only age up, spends surface as key-image conflicts), so the sweep is
+/// skipped. On current networks the age fork is at genesis (mainnet) or never
+/// (testnet/regtest), so this reduces to `is_reorg` today; the age check is a
+/// forward-safe guard for any network that sets a finite mid-chain fork height.
+/// A FUTURE fork that gates mempool-tx validity MUST be added here.
+pub fn needs_full_revalidation_after_block(
+    is_reorg: bool,
+    net: crate::config::NetworkType,
+    new_height: u64,
+) -> bool {
+    is_reorg
+        || net.min_output_age(new_height) != net.min_output_age(new_height.saturating_sub(1))
+}
+
+#[cfg(test)]
+mod revalidation_gate_tests {
+    use super::needs_full_revalidation_after_block;
+    use crate::config::NetworkType;
+
+    #[test]
+    fn needs_full_revalidation_after_block_149() {
+        // A reorg ALWAYS needs the full sweep (UTXO set changes under txs).
+        for net in [NetworkType::Testnet, NetworkType::Regtest, NetworkType::Mainnet] {
+            assert!(
+                needs_full_revalidation_after_block(true, net, 1_000),
+                "reorg must force a full mempool revalidation"
+            );
+        }
+        // A NORMAL tip extension (no reorg) skips the sweep at every non-boundary
+        // height. On testnet the output-age fork never activates, so a normal
+        // extend never needs the sweep.
+        let net = NetworkType::Testnet;
+        for h in [1u64, 100, 10_000, 1_000_000] {
+            assert!(
+                !needs_full_revalidation_after_block(false, net, h),
+                "normal tip extension at height {h} must skip the O(mempool) sweep"
+            );
+        }
+        // The predicate keys the boundary off `min_output_age` changing between
+        // h-1 and h: a network with a finite mid-chain output-age fork flips this
+        // true at the crossing height even without a reorg.
+        assert_eq!(
+            needs_full_revalidation_after_block(false, net, 5),
+            net.min_output_age(5) != net.min_output_age(4),
+        );
+    }
+}
+
 const MAX_CHAIN_GENERATION_ATTEMPTS: usize = 4;
 
 trait GenerationSource {
@@ -158,25 +219,12 @@ impl AuditEvent {
 }
 
 fn unix_now() -> u64 {
-    // Monotonic-max fallback: SystemTime::duration_since(UNIX_EPOCH) can
-    // theoretically fail (system clock set before 1970, which doesn't
-    // happen on a running system) or step backwards (NTP correction).
-    // The original `unwrap_or(0)` would mark fresh mempool entries as
-    // 56 years old, triggering immediate eviction by the TTL sweep.
-    // Track the last good value and return max(now, last) so a clock
-    // hiccup never produces an artificially-ancient timestamp. Costs
-    // one relaxed atomic CAS per call — negligible vs the syscall.
-    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let last = LAST.load(std::sync::atomic::Ordering::Relaxed);
-    let out = now.max(last);
-    if out > last {
-        LAST.store(out, std::sync::atomic::Ordering::Relaxed);
-    }
-    out
+    // Single source of truth (E1): monotonic-nondecreasing unix time so an NTP
+    // backwards step never marks a fresh mempool entry as ancient (which would
+    // trigger immediate TTL eviction). The monotonic-max logic now lives in the
+    // canonical clock, which is also override-aware for the simulator. See
+    // src/clock.rs.
+    crate::clock::unix_now_monotonic()
 }
 
 /// A transaction in the mempool with metadata
@@ -189,6 +237,20 @@ pub struct MempoolEntry {
     pub size: usize,
     pub added_time: u64,
     pub height_added: u64,
+}
+
+/// A lightweight mempool transaction summary built from cached `MempoolEntry`
+/// metadata (hash, fee, size) plus cheap-by-reference reads (type, in/out counts)
+/// — for RPC listings that need only summary fields, avoiding a full
+/// `Transaction` clone and hash/size recomputation. See issue #118.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxSummary {
+    pub hash: Hash,
+    pub tx_type: crate::transaction::TxType,
+    pub inputs: usize,
+    pub outputs: usize,
+    pub fee: Amount,
+    pub size: usize,
 }
 
 impl MempoolEntry {
@@ -1019,6 +1081,51 @@ impl Mempool {
         result
     }
 
+    /// Lightweight summaries mirroring [`Mempool::get_block_transactions`]'s
+    /// selection (same fee-ordered, size-capped, key-image-deduped set), but
+    /// returning cached-metadata [`TxSummary`]s instead of cloning full
+    /// transactions or recomputing each hash/size. See issue #118.
+    pub fn get_transaction_summaries(
+        &self,
+        max_size: usize,
+        max_count: usize,
+    ) -> Vec<TxSummary> {
+        let mut result = Vec::new();
+        let mut total_size = 0;
+        let mut selected_key_images: HashSet<KeyImage> = HashSet::new();
+
+        for (_, tx_hash) in self.by_fee.iter().rev() {
+            if result.len() >= max_count {
+                break;
+            }
+            if let Some(entry) = self.transactions.get(tx_hash) {
+                if total_size + entry.size <= max_size {
+                    let tx_key_images = entry.tx.key_images();
+                    let has_conflict = tx_key_images
+                        .iter()
+                        .any(|ki| selected_key_images.contains(ki));
+                    if has_conflict {
+                        continue;
+                    }
+                    for ki in &tx_key_images {
+                        selected_key_images.insert(*ki);
+                    }
+                    result.push(TxSummary {
+                        hash: entry.tx_hash,
+                        tx_type: entry.tx.tx_type,
+                        inputs: entry.tx.input_count(),
+                        outputs: entry.tx.output_count(),
+                        fee: entry.fee,
+                        size: entry.size,
+                    });
+                    total_size += entry.size;
+                }
+            }
+        }
+
+        result
+    }
+
     /// Get all transaction hashes
     pub fn get_hashes(&self) -> Vec<Hash> {
         self.transactions.keys().copied().collect()
@@ -1491,6 +1598,17 @@ impl SharedMempool {
 
     pub fn get_block_transactions(&self, max_size: usize, max_count: usize) -> Vec<Transaction> {
         self.read_lock().get_block_transactions(max_size, max_count)
+    }
+
+    /// Cached-metadata summaries (issue #118) — see
+    /// [`Mempool::get_transaction_summaries`]. JSON is built by the caller after
+    /// this returns, so the read lock is released before serialization.
+    pub fn get_transaction_summaries(
+        &self,
+        max_size: usize,
+        max_count: usize,
+    ) -> Vec<TxSummary> {
+        self.read_lock().get_transaction_summaries(max_size, max_count)
     }
 
     pub fn stats(&self) -> MempoolStats {

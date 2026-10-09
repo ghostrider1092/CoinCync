@@ -56,7 +56,7 @@ Update the height / build / dates before launch week. Numbers in this file are c
 
 **Q: Where's the source code?**
 > Canonical: **git.coincync.network/coincync/cync-protocol** (self-hosted Forgejo)
-> Public mirror: github.com/ghostrider1092/Coincync-Testnet-
+> Public mirror: github.com/ghostrider1092/CoinCync
 >
 > MIT licensed. Build with `cargo build --release --features "randomx testnet"`.
 
@@ -140,7 +140,7 @@ Update the height / build / dates before launch week. Numbers in this file are c
 > Build from source (see #node-setup pinned message). Run `./target/release/coincync-node --network testnet`. DNS seeds auto-discover: `seed1.coincync.network`, `seed2.coincync.network`, `seed3.coincync.network`.
 
 **Q: My node is at height 0 / not syncing.**
-> Check (1) port 28080 outbound is allowed by your firewall, (2) `dig seed1.coincync.network` returns an IP, (3) the seed IPs are reachable from your network with `nc -zv 66.135.23.193 28080`. Post the last 50 lines of node logs in #testnet if still stuck.
+> Check (1) port 28080 outbound is allowed by your firewall, (2) `dig seed2.coincync.network` (or `seed3`) returns an IP, (3) the live seed is reachable from your network with `nc -zv 2.29.34.197 28080` (note: `seed1.coincync.network` currently points at a dead host, #148). Post the last 50 lines of node logs in #testnet if still stuck.
 
 **Q: What ports do I need open?**
 > **Outbound:** 28080/tcp (P2P). **Inbound:** 28080/tcp if you want others to connect to you (recommended but optional). **Local only:** 28081 (RPC, default 127.0.0.1). Don't expose 28081 publicly without auth.
@@ -289,7 +289,7 @@ Update the height / build / dates before launch week. Numbers in this file are c
 ## Bug reporting
 
 **Q: I found a bug. Where do I report it?**
-> Non-security: open an issue on **github.com/ghostrider1092/Coincync-Testnet-** with the bug-report template (auto-fills environment + repro). The template asks for node version, OS, repro steps, last 200 lines of logs.
+> Non-security: open an issue on **github.com/ghostrider1092/CoinCync** with the bug-report template (auto-fills environment + repro). The template asks for node version, OS, repro steps, last 200 lines of logs.
 >
 > Security-sensitive (consensus, privacy, key handling, wallet integrity): email **CyncLabs@proton.me**, NOT a public issue. Proton auto-publishes a PGP key at the address; plaintext fine for non-critical reports.
 

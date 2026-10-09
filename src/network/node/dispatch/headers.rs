@@ -98,12 +98,12 @@ fn header_history(
         };
 
         history.push(DifficultyBlock {
-            height: header.height,
-            timestamp: header.timestamp,
+            height: header.height.as_u64(),
+            timestamp: header.timestamp.as_secs(),
             target: header.target,
         });
 
-        if header.height == 0 {
+        if header.height.as_u64() == 0 {
             break;
         }
         cursor = header.prev_hash;
@@ -178,7 +178,7 @@ fn validate_header_batch(
                 MisbehaviorType::ProtocolViolation,
             ));
         }
-        if header.version < crate::constants::block_version_at_height(header.height)
+        if header.version < crate::constants::block_version_at_height(header.height.as_u64())
             || header.version < parent.version
         {
             return Err(reject(
@@ -195,7 +195,7 @@ fn validate_header_batch(
         if header
             .checkpoint_vote
             .as_ref()
-            .is_some_and(|(height, _)| *height >= header.height)
+            .is_some_and(|(height, _)| *height >= header.height.as_u64())
         {
             return Err(reject(
                 "checkpoint vote references a future height".into(),
@@ -205,12 +205,12 @@ fn validate_header_batch(
 
         let checkpoint_match = match chain.network() {
             crate::config::NetworkType::Mainnet => {
-                crate::mainnet::verify_checkpoint(header.height, &header.hash())
+                crate::mainnet::verify_checkpoint(header.height.as_u64(), &header.hash())
             }
             crate::config::NetworkType::Testnet
             | crate::config::NetworkType::Regtest
             | crate::config::NetworkType::Beta => {
-                crate::testnet::verify_checkpoint(header.height, &header.hash())
+                crate::testnet::verify_checkpoint(header.height.as_u64(), &header.hash())
             }
         };
         if checkpoint_match == Some(false) {
@@ -232,7 +232,7 @@ fn validate_header_batch(
                 .collect();
             timestamps.sort_unstable();
             let median = timestamps[timestamps.len() / 2];
-            if header.timestamp <= median {
+            if header.timestamp.as_secs() <= median {
                 return Err(reject(
                     "timestamp does not exceed median-time-past".into(),
                     MisbehaviorType::ProtocolViolation,
@@ -246,7 +246,7 @@ fn validate_header_batch(
             // but honors the regtest pin/ease). Calling `calculate_difficulty`
             // directly here diverged from the miner + block validator on regtest
             // and rejected every peer header, wedging regtest multi-node sync.
-            let expected_target = chain.expected_next_target(&history, header.height);
+            let expected_target = chain.expected_next_target(&history, header.height.as_u64());
             if header.target != expected_target {
                 return Err(reject(
                     format!(
@@ -261,8 +261,8 @@ fn validate_header_batch(
 
         verify_pow(
             &header.prev_hash,
-            header.height,
-            header.timestamp,
+            header.height.as_u64(),
+            header.timestamp.as_secs(),
             header.nonce,
             &header.tx_root,
             &header.target,
@@ -278,6 +278,32 @@ fn validate_header_batch(
     }
 
     Ok(hashes)
+}
+
+/// #158: resolve the GetHeaders response start height from a block locator.
+///
+/// Returns `(deepest common MAIN-CHAIN ancestor in the locator).height + 1`, or
+/// `0` (genesis) if nothing matches. `block_height(hash)` yields the height of
+/// ANY stored block (including side chains); `main_chain_hash_at(h)` yields the
+/// hash of our MAIN-CHAIN block at height `h`. A locator entry only counts when
+/// those agree — i.e. the entry is on our main chain — so the headers we return
+/// descend from it and connect for the requester. Matching a side-chain entry
+/// (as the old code did) made us send main-chain headers whose parent a forked
+/// requester lacked ("does not connect"), wedging it forever. The locator always
+/// ends at genesis, which is on-chain, so a match is guaranteed.
+fn locator_start_height(
+    locator: &[Hash],
+    block_height: impl Fn(&Hash) -> Option<u64>,
+    main_chain_hash_at: impl Fn(u64) -> Option<Hash>,
+) -> u64 {
+    for hash in locator {
+        if let Some(h) = block_height(hash) {
+            if main_chain_hash_at(h) == Some(*hash) {
+                return h + 1;
+            }
+        }
+    }
+    0
 }
 
 pub(super) async fn handle_get_headers(
@@ -313,13 +339,15 @@ pub(super) async fn handle_get_headers(
 
         // Database reads can stall without yielding to other async tasks.
         let headers = tokio::task::block_in_place(|| {
-            let mut start_height = 0u64;
-            for hash in &msg.locator {
-                if let Some(block) = chain.get_block(hash) {
-                    start_height = block.height() + 1;
-                    break;
-                }
-            }
+            // #158: start the response at the deepest COMMON MAIN-CHAIN ancestor
+            // in the locator (see `locator_start_height`). Matching a side-chain
+            // block here would send headers the requester can't connect, wedging
+            // a forked peer in an endless EMERGENCY-TIER-3 loop.
+            let start_height = locator_start_height(
+                &msg.locator,
+                |hash| chain.get_block(hash).map(|b| b.height()),
+                |h| chain.get_block_hash(h),
+            );
             let mut headers = Vec::new();
             for h in start_height..start_height + MAX_HEADERS_RESPONSE as u64 {
                 if let Some(block) = chain.get_block_by_height(h) {
@@ -351,13 +379,67 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn locator_start_height_skips_side_chain_matches_158() {
+        let g = Hash::from_bytes([0u8; 32]);
+        let a1 = Hash::from_bytes([1u8; 32]);
+        let a2 = Hash::from_bytes([2u8; 32]);
+        let s2 = Hash::from_bytes([0x52u8; 32]); // a stored SIDE block, also at h=2
+
+        // Our MAIN chain: g@0, a1@1, a2@2. s2 is a side block at height 2.
+        let block_height = |h: &Hash| -> Option<u64> {
+            if *h == g {
+                Some(0)
+            } else if *h == a1 {
+                Some(1)
+            } else if *h == a2 {
+                Some(2)
+            } else if *h == s2 {
+                Some(2)
+            } else {
+                None
+            }
+        };
+        let main_chain_hash_at = |h: u64| -> Option<Hash> {
+            match h {
+                0 => Some(g),
+                1 => Some(a1),
+                2 => Some(a2),
+                _ => None,
+            }
+        };
+
+        // A forked requester's locator leads with its own fork tip s2 (a side
+        // block for us), then the common main-chain ancestor a1, then genesis.
+        // We MUST skip s2 and start from a1+1 = 2, so the headers we send (from
+        // a2, whose parent is a1) connect for the requester. Pre-fix this matched
+        // s2 and started at 3, sending a3 whose parent (a2) the requester lacked.
+        assert_eq!(
+            locator_start_height(&[s2, a1, g], block_height, main_chain_hash_at),
+            2,
+            "#158: must skip the side-chain locator entry and start from the \
+             common main-chain ancestor + 1"
+        );
+        // A locator whose tip IS on our main chain starts right after it.
+        assert_eq!(
+            locator_start_height(&[a2, a1, g], block_height, main_chain_hash_at),
+            3
+        );
+        // A locator of only unknown hashes falls back to genesis.
+        let unknown = Hash::from_bytes([0xFFu8; 32]);
+        assert_eq!(
+            locator_start_height(&[unknown], block_height, main_chain_hash_at),
+            0
+        );
+    }
+
     fn mine_easy_header(mut header: BlockHeader) -> BlockHeader {
         header.algorithm = PowAlgorithm::RandomX as u8;
         // audit §1: bind the header fields into the anchor (binding excludes
         // anchor/nonce, so compute it before setting them).
         let binding = header.pow_binding();
         header.anchor =
-            compute_full_anchor(&header.prev_hash, header.height, header.timestamp, &binding)
+            compute_full_anchor(&header.prev_hash, header.height.as_u64(), header.timestamp.as_secs(), &binding)
                 .expect("anchor")
                 .mixed_hash;
 
@@ -368,7 +450,7 @@ mod tests {
                 &header.anchor,
                 nonce,
                 &header.tx_root,
-                header.height,
+                header.height.as_u64(),
             )
             .expect("RandomX available in default/testnet builds");
             if pow.meets_difficulty(&header.target) {
@@ -387,10 +469,10 @@ mod tests {
 
     fn first_header(genesis: &crate::consensus::Block) -> BlockHeader {
         let mut header = genesis.header.clone();
-        header.height = 1;
+        header.height = crate::primitives::Height::new(1);
         header.version = crate::constants::block_version_at_height(1);
         header.prev_hash = genesis.hash();
-        header.timestamp = genesis.header.timestamp + crate::constants::TARGET_BLOCK_TIME;
+        header.timestamp = crate::primitives::Timestamp::from_secs(genesis.header.timestamp.as_secs() + crate::constants::TARGET_BLOCK_TIME);
         header.target = Hash::from_bytes([0xFE; 32]);
         mine_easy_header(header)
     }
@@ -409,13 +491,13 @@ mod tests {
         let first = first_header(&genesis);
         let history = [
             DifficultyBlock {
-                height: genesis.header.height,
-                timestamp: genesis.header.timestamp,
+                height: genesis.header.height.as_u64(),
+                timestamp: genesis.header.timestamp.as_secs(),
                 target: genesis.header.target,
             },
             DifficultyBlock {
-                height: first.height,
-                timestamp: first.timestamp,
+                height: first.height.as_u64(),
+                timestamp: first.timestamp.as_secs(),
                 target: first.target,
             },
         ];
@@ -427,10 +509,10 @@ mod tests {
         };
 
         let mut second = first.clone();
-        second.height = 2;
+        second.height = crate::primitives::Height::new(2);
         second.version = crate::constants::block_version_at_height(2);
         second.prev_hash = first.hash();
-        second.timestamp += crate::constants::TARGET_BLOCK_TIME;
+        second.timestamp = second.timestamp + std::time::Duration::from_secs(crate::constants::TARGET_BLOCK_TIME);
         second.target = claimed;
 
         let error = validate_header_batch(&chain, &[first, second]).expect_err("target mismatch");
@@ -448,7 +530,7 @@ mod tests {
         let (chain, genesis) = setup();
         let first = first_header(&genesis);
         let mut second = first.clone();
-        second.height = 2;
+        second.height = crate::primitives::Height::new(2);
         second.prev_hash = genesis.hash();
 
         let error =
@@ -508,8 +590,16 @@ pub(super) async fn handle_headers(
                 }
                 return Ok(());
             }
-            let mut sync_guard = sync.write().await;
-            if !sync_guard.validate_header_nonce(headers_msg.nonce, &peer_id) {
+            // #184: gate on the nonce under a READ lock — cheap and DoS-safe
+            // (reject unsolicited / cross-peer headers before any expensive work)
+            // — but do NOT consume it yet, so `headers_request_time` stays set and
+            // the driver will not re-request during the slow validation below (the
+            // 60s headers timeout comfortably covers the ~24-46s batch verify).
+            if !sync
+                .read()
+                .await
+                .is_header_nonce_outstanding(headers_msg.nonce, &peer_id)
+            {
                 debug!(
                     "Ignoring Headers nonce={} from peer {:?}: not outstanding for this peer \
                      (cross-peer, stale generation, or already consumed)",
@@ -519,6 +609,11 @@ pub(super) async fn handle_headers(
                 return Ok(());
             }
 
+            // #184: verify the header batch WITHOUT holding the ChainSync lock.
+            // This is ~2000 sequential RandomX verifications (~24-46s in light
+            // mode); holding the write lock across it froze the entire sync driver,
+            // so a fresh node advanced only ~100 blocks per batch. Off the lock,
+            // block downloads keep flowing while the headers validate.
             let hashes = match validate_header_batch(chain, &headers_msg.headers) {
                 Ok(hashes) => hashes,
                 Err(error) => {
@@ -529,7 +624,6 @@ pub(super) async fn handle_headers(
                         headers_msg.headers[error.index].height,
                         error.reason.as_str(),
                     );
-                    drop(sync_guard);
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                         scorer
                             .write()
@@ -541,10 +635,24 @@ pub(super) async fn handle_headers(
                 }
             };
 
+            // #184: re-acquire the write lock only now — to consume the nonce and
+            // queue the validated hashes. If the nonce is gone (a rare >60s timeout
+            // reset, or a duplicate consumed it during validation), discard: the
+            // driver has already moved on.
+            let mut sync_guard = sync.write().await;
+            if !sync_guard.validate_header_nonce(headers_msg.nonce, &peer_id) {
+                debug!(
+                    "Dropping validated Headers nonce={} from peer {:?}: no longer outstanding \
+                     (timed out or superseded during validation)",
+                    headers_msg.nonce,
+                    &peer_id[..4]
+                );
+                return Ok(());
+            }
             let max_header_height = headers_msg
                 .headers
                 .last()
-                .map(|header| header.height)
+                .map(|header| header.height.as_u64())
                 .unwrap_or(0);
             sync_guard.update_peer_height(max_header_height);
             sync_guard.update_peer_height_for(peer_id, max_header_height);

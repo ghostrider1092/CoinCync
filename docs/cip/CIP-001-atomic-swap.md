@@ -13,7 +13,7 @@
 
 A trustless atomic swap protocol allowing direct exchange of CYNC for BTC (and vice versa) without any third-party custodian, exchange, or bridge. The protocol is modeled on the well-studied Comit / Farcaster XMR↔BTC swap design, which has been in production since 2021. CYNC's ring-signature scheme is structurally similar enough to Monero's that the cryptographic techniques transfer directly.
 
-The protocol uses **adaptor signatures** rather than HTLCs on the privacy chain, so a CYNC-side observer cannot distinguish swap transactions from ordinary CYNC transactions. The Bitcoin side is a standard P2WPKH/P2TR transaction with adaptor-signed witnesses. Both chains see normal-looking transactions; only the swap participants know they are linked.
+The protocol uses **adaptor signatures** rather than HTLCs on the privacy chain, so a CYNC-side observer cannot distinguish swap transactions from ordinary CYNC transactions. The Bitcoin lock is a P2TR output with dedicated 2-of-2 success and CSV-refund leaves whose adaptor-bound signatures reveal the missing CYNC share.
 
 ---
 
@@ -29,7 +29,7 @@ This CIP defines the protocol so an implementation can begin with a clear specif
 
 ## Status & Implementation
 
-**Substantial portions are now implemented (last updated 2026-05-17).** What's real today in `crates/coincync-swap/`:
+**Substantial portions are now implemented (last updated 2026-08-24).** What's real today in `crates/coincync-swap/`:
 
 | Component | Status | Module | Tests |
 | --- | --- | --- | --- |
@@ -39,21 +39,19 @@ This CIP defines the protocol so an implementation can begin with a clear specif
 | `AdaptorSecret` byte-order discipline (secp BE / Ristretto LE) | ✅ shipped | `adaptor.rs::AdaptorSecret` | encoding tag + transparent accessors |
 | `AdaptorSecret` constant-time comparison | ✅ shipped | `subtle::ConstantTimeEq` backing `PartialEq` | side-channel-safe |
 | BTC RPC client (broadcast + watch + block count) | ✅ shipped | `btc.rs::{BtcChain, BitcoinCoreRpc, MockBtcChain}` | async trait; mock for tests |
-| BTC tx construction — lock (with optional script-tree refund branch) | ✅ shipped | `btc.rs::build_lock_tx` | 10 tests; key-path + script-path; dust + overflow + network-mismatch rejection |
-| BTC tx construction — claim (key-path spend, tweaked-output-key) | ✅ shipped | `btc.rs::build_claim_tx` | full BIP-340 verification at construction time |
-| BTC tx construction — refund (script-path spend, CSV-locked) | ✅ shipped | `btc.rs::build_refund_tx` | 3-element witness, BIP-68 sequence |
-| Sighash split for adaptor pre-signing | ✅ shipped | `btc.rs::claim_sighash` / `refund_sighash` | BIP-341 key-path + script-path |
+| Legacy BTC construction primitives | ✅ diagnostic only | `btc.rs::build_{lock,claim,refund}_tx` | retained for compatibility and primitive tests; not accepted by the production safety gate |
+| BTC-first two-path safety contract | ✅ shipped | `safety.rs` | no key path; exact 2-of-2 success/refund templates, signatures, CSV, and share reveals verified |
 | CYNC RPC client (broadcast + watch + block count) | ✅ shipped | `cync.rs::{CyncChain, CyncNodeRpc, MockCyncChain}` | targets `coincync-node` v1.0.8 RPC surface |
 | CYNC swap key-derivation (recipient pubkey + spender secret) | ✅ shipped | `cync.rs::derive_swap_*` | round-trips through real CYNC stealth scheme |
 | End-to-end happy-path protocol composition | ✅ shipped | `tests/swap_happy_path_e2e.rs` | walks Alice + Bob through full 17-step flow against mock chains |
 | Coordinator state machine + persistence | ✅ shipped | `coordinator.rs` + `state.rs` | 10 integration tests in `tests/integration_full_flow.rs` |
-| Strict-binding cross-curve DLEQ (Noether 2018) | ⏳ deferred | — | dual-response shipped today is sufficient for operational binding; strict version is multi-week |
+| Strict-binding cross-curve DLEQ (Noether 2018) | ✅ shipped and mandatory | `strict_dleq.rs`, `safety.rs` | canonical decoder + pre-CYNC-lock verification gate |
 | CLSAG ring-binding for the CYNC adaptor | ⏳ deferred | — | requires modifying audited `coincync::crypto::clsag` |
 | BTC tx construction — `bitcoin` crate integration | ✅ shipped | uses real `bitcoin 0.32` types | |
 | `cync::build_lock_tx` (full tx construction) | ⏳ wallet's job | — | CYNC tx construction is too wallet-entangled (decoys, blinding, CLSAG ring composition) to live in this crate; the swap-specific glue (key-derivation helpers above) is sufficient |
 | Dual-testnet smoke (bitcoind regtest + coincync-node testnet) | ⏳ operational | — | needs running daemons; not a code slice |
 
-**Test totals:** 129 unit + integration tests pass across the swap crate; the end-to-end test exercises every primitive in one Alice/Bob walkthrough.
+**Test status:** 231 library tests plus the swap integration/property suites cover the primitives, BTC-first state ordering, persistence migration, both safe Bitcoin paths, and evidence tampering.
 
 **Mainnet launch blocker:** working CYNC↔BTC swaps must ship before v1.0 mainnet, per `project_atomic_swap_mainnet_blocker.md`. Public testnet ships without it. The cryptographic primitives are now all in place — what remains is operational integration (wallet UI, dual-testnet smoke, audit) rather than fundamental construction.
 
@@ -63,10 +61,10 @@ This CIP defines the protocol so an implementation can begin with a clear specif
 
 The two parties in any single swap:
 
-- **Alice** — sells CYNC, buys BTC. Locks her CYNC first.
-- **Bob** — sells BTC, buys CYNC. Locks his BTC after observing Alice's CYNC lock confirmed.
+- **Alice** — sells CYNC, buys BTC. Locks CYNC only after Bob's BTC contract is confirmed and fully verified.
+- **Bob** — sells BTC, buys CYNC. Creates the first on-chain lock.
 
-The roles are asymmetric. Alice locks first because the BTC side has shorter timelocks (necessary so that Alice can refund if Bob disappears, before Bob can refund). The asymmetry is structural and cannot be removed without breaking refund safety.
+The roles are asymmetric. Bitcoin locks first because a CYNC joint-key output has no native timeout branch. Alice therefore never risks CYNC until the Bitcoin output, both spend templates, both adaptor pre-signatures, and both strict cross-curve share bindings have passed the pre-lock gate.
 
 ---
 
@@ -75,13 +73,13 @@ The roles are asymmetric. Alice locks first because the BTC side has shorter tim
 ```text
                     Negotiated
                         │
-                        │  Alice broadcasts CYNC lock
+                        │  Bob broadcasts verified BTC lock
                         ▼
-                  AliceLocked ─────────── timeout ──→ Refunded (Alice)
+                    BobLocked ─────────── timeout ──→ Refunded (Bob)
                         │
-                        │  Bob observes confirmations, broadcasts BTC lock
+                        │  Alice verifies both paths, broadcasts CYNC lock
                         ▼
-                   BobLocked ─────────── timeout ──→ Refunded (both)
+                  AliceLocked ─── BTC refund ──→ BtcRefunded ──→ Refunded (Alice)
                         │
                         │  Alice claims BTC, revealing the secret
                         ▼
@@ -92,7 +90,7 @@ The roles are asymmetric. Alice locks first because the BTC side has shorter tim
                    Completed
 ```
 
-Two terminal states: `Completed` (both sides claimed) and `Refunded` (timeouts elapsed; both sides recovered original funds). A failed swap loses no money — that's the entire point of "atomic".
+The on-chain terminal states are `Completed` and `Refunded`; `Aborted` is available only from `Negotiated`, before Bitcoin moves on-chain. Once Bitcoin is locked, a local abort cannot hide the outstanding refund obligation.
 
 ---
 
@@ -137,7 +135,7 @@ Verifier:
 
 The dual-response shape sidesteps the field-order mismatch (`n ≠ ℓ`) that the single-response Maxwell construction runs into: a single `s` can't satisfy both verification equations without range-bounding `t`, which would require Bulletproofs-style range proofs. Two independent responses, one per field, work without that machinery.
 
-**Soundness caveat — documented honestly.** This construction proves the prover knows discrete logs of `T_btc` (base `G_btc`) and `T_cync` (base `G_cync`), and used a shared nonce commitment `k`. It does NOT directly prove the two discrete logs are the *same* number. The full strict-binding variant (Noether's 2018 *Discrete Logarithm Equality Across Groups*, or Comit's range-bounded-secrets approach) is multi-week follow-up work. **In the swap context, strict binding is enforced operationally:** Alice's BTC claim signature reveals `t` to Bob; Bob's CYNC spend secret then equals `bob + t` and either successfully opens the CYNC lock (correct `t`, swap completes) or fails (wrong `t`, Alice gets nothing valuable). The DLEQ is the pre-commitment sanity check; the adaptors themselves are the cryptographic backstop.
+The compact dual-response proof remains available as a fast rejection floor, but it is not accepted by the fund-locking safety gate on its own. The gate requires the strict Noether proof for each party so the Bitcoin adaptor point and CYNC spend share are cryptographically bound to the same scalar before either contract can authorize a CYNC lock.
 
 ### Pre-audit hardening: strict-binding cross-curve DLEQ (Noether 2018)
 
@@ -180,7 +178,7 @@ Proof size (N=252):
   verify cost: ~2 · 252 · 2 = ~1008 group ops per curve.
 ```
 
-**Wire format** (planned `CrossCurveDlProofStrict`):
+**Wire format** (`CrossCurveDlProofStrict`):
 
 ```rust
 pub struct CrossCurveDlProofStrict {
@@ -210,13 +208,13 @@ pub struct BitCommitmentProof {
 }
 ```
 
-**Cargo feature gating.** The strict construction sits behind `[features] strict-dleq` in `coincync-swap/Cargo.toml`. The default flow continues to use `prove_cross_curve` (fast, operationally sound, dual-response Schoenmakers) until the audit firm asks for the cryptographic-level upgrade. Both code paths coexist; the swap state machine accepts whichever variant the counterparty sends and verifies accordingly.
+**Cargo feature gating.** `strict-dleq` remains a named feature for build control but is enabled by default. Disabling it removes the production safety module and therefore cannot produce the capability required by `Swap::apply_pre_cync_lock`.
 
 **Implementation footprint estimate:** ~600 lines of crypto code (Pedersen helpers + Chaum-Pedersen OR-proof + bit decomposition + linear-combination check) + ~150 lines of tests (round-trip + tamper-rejection per layer + length validation) + the proof-size jump from ~256 bytes to ~81 KB on the wire. Bandwidth budget: a swap is at most a few proofs over the lifetime, ~250 KB total transferred is fine.
 
 **Alternative considered:** Comit's range-bounded-secrets approach (`t < 2^k` enforced by Bulletproofs range proof; then a single-response Maxwell DLEQ works) yields a smaller proof (~2 KB) but pulls in a Bulletproofs library dep we'd otherwise avoid. Noether's approach is dep-light at the cost of bigger proofs — the right trade for our crate-isolation posture.
 
-**Decision pending the audit firm:** Resolved when the audit team is selected. If they accept "operationally sufficient via the adaptors themselves," the dual-response Schoenmakers proof ships unchanged. If they require cryptographic-level same-secret binding, the strict variant lands behind the feature flag per the spec above.
+**Decision:** strict same-secret binding is mandatory for the pre-CYNC-lock gate; the compact proof is retained only as the strict proof's fast floor.
 
 ---
 
@@ -226,15 +224,16 @@ secp256k1 and Ristretto255 disagree on scalar serialization (big-endian vs littl
 
 ### Refund signatures
 
-The BTC refund uses Taproot script-path spending. The lock tx has a single-leaf script tree:
+The BTC lock has no key-path spend. A deterministically derived NUMS internal key commits to two Tapscript leaves:
 
 ```text
-<csv_blocks> OP_CSV OP_DROP <bob_xonly_pubkey> OP_CHECKSIG
+success: <alice_claim> OP_CHECKSIG <bob_claim> OP_CHECKSIGADD 2 OP_NUMEQUAL
+refund:  <csv> OP_CSV OP_DROP <alice_refund> OP_CHECKSIG <bob_refund> OP_CHECKSIGADD 2 OP_NUMEQUAL
 ```
 
-After `csv_blocks` (BIP-68 blocks-relative form), Bob can spend via the script path with a Schnorr signature under his refund key. The lock's internal key remains Alice's adaptor-bound spending key (for the happy-path key-path claim). When the script tree is present, Bitcoin consensus enforces the *tweaked output key* `Q = K + tweak·G` where `tweak = TaggedHash("TapTweak", K.x || merkle_root)`; the `tweaked_claim_secret` helper does this arithmetic for the signer side, and `build_claim_tx`'s verifier uses the same `TaprootBuilder` path the lock used so the tweaked key is bit-for-bit consistent.
+On success Alice signs normally and Bob's signature is adapted to Alice's CYNC share. On refund Bob signs normally and Alice's signature is adapted to Bob's CYNC share. The second signature on each leaf prevents either signer from bypassing the adaptor path, while the unknown-discrete-log internal key removes the key-path escape entirely. Final claim/refund signatures are re-verified against their exact script-path sighash before the revealed share can advance protocol state.
 
-CYNC refund is currently outside this crate's scope — the swap protocol's CYNC-side refund relies on standard CYNC timelock outputs constructed by the wallet's transaction builder, with the recipient derived via the swap key-derivation helpers in `cync.rs`.
+CYNC has no alternate-key timelock output. Its lock is an ordinary output owned by the joint spend key `S_a + S_b`. A successful Bitcoin claim reveals Alice's share to Bob; a Bitcoin refund reveals Bob's share to Alice. The older single-key helpers in `btc.rs` do not enforce this invariant and are excluded from the state-machine-aware lock, claim, and refund commands.
 
 ---
 
@@ -251,17 +250,17 @@ CYNC refund is currently outside this crate's scope — the swap protocol's CYNC
    - Pre-signed refund transactions for each chain
 4. Both parties verify the cross-curve proof. **Mandatory abort if verification fails.**
 
-### 2. Alice locks CYNC
+### 2. Bob locks BTC
 
-1. Alice constructs a CYNC transaction whose output is a stealth address spendable by Bob's pub key + the adaptor secret (success path) or by Alice's refund key after `cync_timeout_blocks` (refund path).
-2. Alice broadcasts to the CoinCync network.
-3. Bob's coordinator watches for the txid + N confirmations (typically 10).
+1. Bob constructs the key-path-disabled P2TR lock with the negotiated 2-of-2 success and CSV-refund leaves.
+2. Bob binds both exact spend templates to their adaptor pre-signatures and strict cross-curve share proofs, then broadcasts the verified lock.
+3. Alice's coordinator watches for the exact txid, output, amount, and confirmation depth (typically 6).
 
-### 3. Bob locks BTC
+### 3. Alice verifies safety and locks CYNC
 
-1. After seeing Alice's lock confirmed, Bob constructs a Bitcoin P2WPKH transaction whose unlock condition is Alice's adaptor-decrypted signature (success) or Bob's refund signature after `btc_timeout_blocks` (refund).
-2. Bob broadcasts to the Bitcoin network.
-3. Alice's coordinator watches for the txid + N confirmations (typically 6).
+1. Alice independently verifies the Bitcoin lock, both exact spend destinations and fees, both strict share proofs, and both adaptor pre-signatures.
+2. Only a successful verification capability may authorize the wallet to construct the ordinary CYNC transaction to joint spend key `S_a + S_b` and the shared view key.
+3. Alice broadcasts to the CoinCync network; Bob watches for the expected output and confirmation depth (typically 10).
 
 ### 4. Alice claims BTC
 
@@ -279,10 +278,10 @@ The swap is now `Completed`. Both parties have what they wanted; no third party 
 
 If at any non-terminal stage a counterparty disappears:
 
-- After `cync_timeout_blocks` without progress past `AliceLocked`, Alice broadcasts her refund transaction; the CYNC lock returns to her.
-- After `btc_timeout_blocks` without progress past `BobLocked`, Bob broadcasts his refund transaction; the BTC lock returns to him.
+- After `btc_timeout_blocks` without an Alice claim, Bob broadcasts the pre-agreed Bitcoin refund. That final signature must reveal Bob's CYNC share, allowing Alice to sweep the joint CYNC output.
+- If Bob disappears before locking Bitcoin, Alice has not locked CYNC and can abort without an on-chain recovery.
 
-The asymmetric timeout requirement (`btc_timeout_blocks < cync_timeout_blocks`) ensures Alice can always refund if Bob never broadcasts, and Bob can always refund if Alice never claims.
+`cync_timeout_blocks` is a coordination deadline expressed in CYNC block-time units, not an on-chain CYNC timelock. It provides scheduling margin around the Bitcoin refund race but grants no spending authority by itself.
 
 ---
 
@@ -317,9 +316,9 @@ Getting this wrong loses funds. Implementation must include exhaustive test case
 What's shipped (refreshed 2026-05-17):
 
 1. ✅ **Cryptographic primitives** — BTC + CYNC adaptors, dual-response cross-curve DLEQ, byte-order discipline, constant-time comparison. All real, end-to-end tested.
-2. ✅ **BTC lock + claim + refund tx construction** — `build_lock_tx` (optional script-tree refund), `build_claim_tx` (full BIP-340 verification), `build_refund_tx` (script-path spend with BIP-68 sequence).
+2. ✅ **BTC lock + claim + refund tx construction** — `safety.rs` builds the mandatory no-key-path two-leaf contract and verifies exact 2-of-2 claim/refund spends; older single-key helpers remain diagnostic only.
 3. ✅ **BTC RPC + CYNC RPC** — async traits + Bitcoin Core JSON-RPC impl + `coincync-node` JSON-RPC impl + in-memory mocks for unit tests.
-4. ✅ **CYNC swap key-derivation** — `derive_swap_recipient_spend_pub` + `derive_swap_spender_secret` + round-trip through real stealth scheme. Wallet drives full CYNC tx construction with these helpers wired into its existing builder.
+4. ✅ **CYNC joint-key derivation** — `combine_spend_public_shares` + `combine_spend_secret_shares` + round-trip through the real stealth scheme. Identity and zero-share combinations are rejected.
 5. ✅ **Coordinator session + state persistence** — already shipped in `coordinator.rs` + `state.rs` with 10 integration tests.
 6. ✅ **End-to-end protocol composition test** — `tests/swap_happy_path_e2e.rs` walks the 17-step Alice/Bob flow against mock chains.
 
@@ -327,14 +326,15 @@ Also shipped (continuing the same numbering as the list above):
 
 - ✅ **CLI `cyncswap`** — 32 subcommands total: 24 cryptographic-primitive wrappers + 6 state-machine orchestration handlers (`lock-cync`, `lock-btc`, `claim-btc`, `claim-cync`, `refund-btc`, `refund-cync`) + 2 housekeeping (`status`, `cancel`). All 6 orchestration commands follow the same posture: load state → role-check → state-check → hex-validate → broadcast → apply-transition → save. Broadcast-first-then-save means no on-chain side effect on pre-broadcast failure.
 - ✅ **Refund-path e2e test** — `tests/swap_happy_path_e2e.rs::refund_path_bob_recovers_btc_via_csv_branch` exercises the BIP-341 script-path spend through Bob's CSV refund branch, including the adversarial sub-test that confirms `build_refund_tx` is key-binding (rejects sigs under any key other than `refund_branch.bob_pubkey`).
-- ✅ **CYNC swap-recipient helper** — `cync::compute_swap_lock_recipient(...) → SwapLockRecipient` bundles the wallet-ready (spend_pubkey, view_pubkey, amount, lock_height) for the lock output. The wallet drops the bundle straight into its existing `TransactionBuilder::add_output(...)` without coincync-swap needing a `coincync` lib dep (avoids the heavy compile-graph reverse-direction).
+- ✅ **CYNC swap-recipient helper** — `cync::compute_swap_lock_recipient(...) → SwapLockRecipient` bundles the joint spend key, validated shared view key, and amount. It never applies a CYNC `lock_height`.
+- ✅ **Wallet transaction bridge** — the opt-in root `cyncswap` feature converts the bundle into the normal `SpendCoordinator` pipeline and reconstructs a temporary joint `KeyEpoch` after a Bitcoin adaptor reveals the missing share. Lock and sweep construction therefore reuse ordinary decoy selection, CLSAG signing, and serialization.
 - ✅ **Dual-testnet smoke harness** — `scripts/cyncswap-dual-testnet-smoke.sh` operator-driven script with three scenarios (`happy` / `refund-btc` / `refund-cync`) walking the 6 orchestration commands + 8 cryptographic-primitive subcommands against a live `bitcoind regtest` + `coincync-node` testnet pair. Pauses at each wallet-signing step for the operator to paste signed-tx hex; cryptographic steps (adaptor pre-sigs, decrypt, recover, DLEQ) run automatically.
 
 What's still ahead:
 
-1. ⏳ **Wallet integration** — embed the swap into the Tauri wallet UI as a first-class flow, consuming the swap key-derivation helpers + `SwapLockRecipient` bundle on the CYNC side.
-2. ✅ **Strict-binding cross-curve DLEQ (Noether 2018) implementation** — full stack shipped in `crates/coincync-swap/src/strict_dleq.rs` (NUMS generators, Pedersen commits, bit decomposition, per-bit Chaum-Pedersen OR-proofs, linear-combination openings, full `prove_cross_curve_strict` / `verify_cross_curve_strict` entrypoints). 58 unit tests pass including end-to-end round-trip and tamper-rejection at every layer. **Gated behind Cargo feature `strict-dleq`** (off by default; flip on for the audit cycle). Default build: 121 tests, no binary-size impact. With feature: 179 tests. Remaining: ⏳ protocol-layer wire upgrade to accept either the dual-response or strict variant at runtime (~30 LOC, depends on the audit-team selection deciding which variant to ship at mainnet).
-3. ⏳ **CLSAG ring-binding** — fold the adaptor into the CLSAG c-value so the CYNC spend reveals `t` cryptographically rather than relying on the BTC-side reveal. Touches audited `coincync::crypto::clsag` code; treat as consensus-adjacent.
+1. ✅ **Protocol safety gate + wallet orchestration** — BTC-first ordering, no-key-path two-leaf 2-of-2 contract, strict proof verification for both shares, exact claim/refund adaptor binding, final-signature share recovery, CLI evidence checks, and wallet capability gating are implemented.
+2. ✅ **Strict-binding cross-curve DLEQ (Noether 2018) implementation** — full stack shipped in `crates/coincync-swap/src/strict_dleq.rs`, including canonical encode/decode and mandatory use by the fund-locking safety gate.
+3. ✅ **Ordinary CLSAG joint-key spend** — no CLSAG adaptor or consensus change is required; Bitcoin adaptor signatures reveal the missing CYNC share.
 4. ⏳ **Coordinator transport** — `coordinator::{listen, connect, handshake}` still return `NotImplemented`. The message-level `HandshakeSession` state machine is complete; what's missing is the TCP+Noise (and later Tor) wrapper.
 5. ⏳ **Audit + testnet exercise + bug bounty round** — before mainnet launch.
 
@@ -362,16 +362,17 @@ To shorten time-to-liquidity at mainnet launch:
 
 ## Open Questions
 
-1. ~~**Schnorr-only or ECDSA-fallback?**~~ **Resolved 2026-05-17:** Schnorr-only. Implementation targets BIP-340; the Taproot-key-path claim transaction uses Schnorr witnesses exclusively. ECDSA fallback was punted — Bitcoin Core has shipped Taproot since 2021 and the audit window is shorter without ECDSA's parity-handling cases.
+1. ~~**Schnorr-only or ECDSA-fallback?**~~ **Resolved 2026-05-17:** Schnorr-only. Both Taproot script paths use BIP-340 witnesses exclusively. ECDSA fallback was punted — Bitcoin Core has shipped Taproot since 2021 and the audit window is shorter without ECDSA's parity-handling cases.
 2. **Timeout values.** The 24-hour wall-time symmetry above is a starting point; production values should be informed by miner-extractable-value and network-stability research. Open until the testnet exercise produces real data.
 3. ~~**Coordinator transport.**~~ **Resolved 2026-05-17 (late evening):** Plain TCP + Noise XX over TCP + Noise XX over Tor (SOCKS5 dial) — three composable transports, operator picks per use case. All three shipped in `crates/coincync-swap/src/coordinator.rs` with loopback integration tests for each. See [`docs/cyncswap-transport-setup.md`](../cyncswap-transport-setup.md) for the operator-facing setup guide. libp2p was rejected as overkill — adds many MB of deps + heavy abstraction for what's effectively a 2-party point-to-point handshake.
 4. **Wallet UX.** Do we ship the swap as a separate `cyncswap` binary, embed it in the Tauri wallet, or both? Recommend both — separate binary for power users + scripts, embedded UI for retail.
-5. **Strict-binding DLEQ before audit?** Open. The shipped dual-response Schoenmakers proof is operationally sufficient (the adaptors themselves enforce same-secret binding via the spend path), but a cryptographer-led audit may want the stronger same-secret-cross-curve property. Decision happens when the audit firm is selected.
+5. ~~**Strict-binding DLEQ before audit?**~~ **Resolved 2026-08-24:** required by default for every pre-CYNC-lock safety verification.
 
 ---
 
 ## Changelog
 
+- **2026-08-24** — Switched the fund-locking protocol to BTC-first. Added a key-path-disabled two-leaf Taproot contract whose success and CSV refund leaves are both 2-of-2; bound Bob's success signature to Alice's CYNC share and Alice's refund signature to Bob's share; made strict DLEQ default; added canonical proof decoding, exact lock/template/adaptor verification, final-signature share-recovery capabilities, CLI gates, and wallet capability requirements. Direct state transitions can no longer bypass CYNC-lock or share-reveal verification.
 - **2026-05-04** — Draft created alongside `crates/coincync-swap/` skeleton.
 - **2026-05-17** — Major refresh. Status table reflects ~70% of cryptographic + chain-integration construction shipped: Schnorr adaptors (BTC + CYNC), dual-response cross-curve DLEQ, AdaptorSecret byte-order discipline + constant-time comparison, full BTC tx construction (lock with optional script-tree refund, claim with full BIP-340 verification, refund with BIP-68 sequence), BTC + CYNC RPC clients with mock impls, CYNC swap key-derivation, 17-step end-to-end protocol composition test. Cryptographic Primitives section rewritten with construction details suitable for cryptographic review. Implementation Plan split into ✅ shipped / ⏳ ahead. Open Question 1 (Schnorr vs ECDSA) resolved as Schnorr-only.
 - **2026-05-17 (afternoon)** — Mainnet-blocker push slice. Shipped: all 6 CLI state-machine orchestration handlers (`lock-cync`, `lock-btc`, `claim-btc`, `claim-cync`, `refund-btc`, `refund-cync`), refund-path e2e composition test with key-binding adversarial check, `SwapLockRecipient` wallet-bridge helper, dual-testnet smoke harness script (`scripts/cyncswap-dual-testnet-smoke.sh`). Added §"Pre-audit hardening: strict-binding cross-curve DLEQ (Noether 2018)" with full construction spec, wire format (`CrossCurveDlProofStrict`), Cargo-feature plan, and ~81 KB proof-size budget — implementation deferred until the audit team's preference is confirmed. **Test count: 130 swap-crate tests pass, 0 failures, 0 warnings.**

@@ -23,6 +23,43 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── get_mempool_health ─────────────────────────────────────
+    // Versioned mempool-health schema (the mempool analog of get_vitals):
+    // occupancy/utilization, fee-rate percentiles (the effective floor under
+    // pressure), and the oldest pending tx age. Read-only, non-consensus.
+    module
+        .register_method("get_mempool_health", |_params, state, _ext| {
+            let mp = state.mempool.stats();
+            let fees = state.mempool.fee_percentiles();
+            let oldest = state.mempool.oldest_timestamp();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let oldest_age = if oldest > 0 && now >= oldest {
+                now - oldest
+            } else {
+                0
+            };
+            let utilization = if mp.max_size > 0 {
+                mp.size_bytes as f64 / mp.max_size as f64
+            } else {
+                0.0
+            };
+            Ok::<_, ErrorObjectOwned>(json!({
+                "schema_version":     1u32,
+                "tx_count":           mp.tx_count,
+                "bytes":              mp.size_bytes,
+                "max_bytes":          mp.max_size,
+                "utilization":        utilization,
+                "total_fees":         mp.total_fee.as_atomic(),
+                "min_fee_per_byte":   crate::constants::MIN_FEE_PER_BYTE,
+                "fee_percentiles":    { "p25": fees.p25, "p50": fees.p50, "p75": fees.p75 },
+                "oldest_tx_age_secs": oldest_age,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── get_mempool_transactions ──────────────────────────────
     //
     // Returns individual transaction details from the mempool so
@@ -31,28 +68,31 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         .register_method("get_mempool_transactions", |_params, state, _ext| {
             // Layer 2: mempool iteration up to 500 txs under block_in_place
             // keeps the worker thread reusable during the fetch.
-            let txs = tokio::task::block_in_place(|| {
-                state.mempool.get_block_transactions(
+            // #118: fetch lightweight summaries (cached hash/size/fee, no full-tx
+            // clone or hash/size recomputation) under block_in_place; the read
+            // lock is released before we build JSON below.
+            let summaries = tokio::task::block_in_place(|| {
+                state.mempool.get_transaction_summaries(
                     crate::constants::MAX_BLOCK_SIZE,
                     500, // max 500 txs
                 )
             });
-            let tx_list: Vec<Value> = txs
+            let tx_list: Vec<Value> = summaries
                 .iter()
-                .map(|tx| {
-                    let kind = match tx.tx_type {
+                .map(|s| {
+                    let kind = match s.tx_type {
                         crate::transaction::TxType::Coinbase => "coinbase",
                         crate::transaction::TxType::Transfer => "transfer",
                         crate::transaction::TxType::Churn => "churn",
                         crate::transaction::TxType::Shielded => "shielded",
                     };
                     json!({
-                        "hash":    hex::encode(tx.hash().as_bytes()),
+                        "hash":    hex::encode(s.hash.as_bytes()),
                         "kind":    kind,
-                        "inputs":  tx.input_count(),
-                        "outputs": tx.output_count(),
-                        "fee":     tx.fee.as_atomic(),
-                        "size":    tx.size(),
+                        "inputs":  s.inputs,
+                        "outputs": s.outputs,
+                        "fee":     s.fee.as_atomic(),
+                        "size":    s.size,
                     })
                 })
                 .collect();

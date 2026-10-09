@@ -153,6 +153,7 @@ pub struct SendRequest {
     pub(super) fee_multiplier: f64,
     pub(super) memo: Option<Vec<u8>>,
     pub(super) extra: Vec<u8>,
+    pub(super) payment_id: Option<[u8; 8]>,
 }
 
 impl SendRequest {
@@ -163,7 +164,13 @@ impl SendRequest {
             fee_multiplier: 1.0,
             memo: None,
             extra: Vec::new(),
+            payment_id: None,
         }
+    }
+
+    pub fn with_payment_id(mut self, payment_id: Option<[u8; 8]>) -> Self {
+        self.payment_id = payment_id;
+        self
     }
 
     pub fn with_fee_multiplier(mut self, fee_multiplier: f64) -> Self {
@@ -264,6 +271,7 @@ pub struct PreparedPrivacyTransaction {
     pub(super) view_public: PublicKey,
     pub(super) memo: Option<Vec<u8>>,
     pub(super) extra: Vec<u8>,
+    pub(super) payment_id: Option<[u8; 8]>,
 }
 
 impl PreparedPrivacyTransaction {

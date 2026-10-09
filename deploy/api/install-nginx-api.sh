@@ -37,6 +37,18 @@ server {
         proxy_set_header Content-Type application/json;
     }
 
+    # JSON-RPC (testnet, explicit) — the path the README / docs / wallet clients
+    # use (api.coincync.network/rpc/testnet). Same upstream as the default /rpc
+    # above; an exact "= /rpc" match does NOT cover "/rpc/testnet", so without
+    # this block the documented path 404s.
+    location = /rpc/testnet {
+        rewrite ^ / break;
+        proxy_pass http://127.0.0.1:28081;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header Content-Type application/json;
+    }
+
     # JSON-RPC (mainnet, prelaunch-safe if upstream absent -> 502)
     location = /rpc/mainnet {
         rewrite ^ / break;

@@ -1,5 +1,5 @@
 [workspace]
-members  = [".", "crates/auxpow", "crates/bridge", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality", "crates/orchard-side", "crates/spark-connector", "crates/tick"]
+members  = [".", "crates/auxpow", "crates/bridge", "crates/coincync-dbg", "crates/coincync-rig", "crates/coincync-swap", "crates/coincync-frost-coordinator", "crates/coincync-rolling-finality", "crates/orchard-side", "crates/spark-connector", "crates/tick"]
 # crates/cynchub: CIP-002 skeleton (post-mainnet merge-mined liquidity layer).
 # Doesn't define the workspace's "randomx"/"testnet" features, so workspace-
 # wide builds with --features error on its Cargo.toml. Build standalone:
@@ -51,12 +51,29 @@ path = "src/bin/sign_snapshot.rs"
 name = "coincync-tick"
 path = "src/bin/coincync-tick.rs"
 
+[[bin]]
+# Explain CoinCync diagnostic codes (like `rustc --explain`). Read-only; prints
+# from the compile-time diagnostics catalog. See src/bin/diag.rs.
+name = "coincync-diag"
+path = "src/bin/diag.rs"
+
 [features]
 default = ["randomx"]
 testnet = ["randomx"]
 mainnet = ["randomx"]
 randomx = ["randomx-rs"]
 metrics = []
+# CIP-Fee-Reservoir "water battery": the PURE charge/discharge/decay rule in
+# `consensus::fee_market` (reservoir_step). Off by default — not wired into the
+# coinbase claim, header commitment, or reorg state (that is the activation-
+# gated follow-up). Gated so production builds are unaffected; lets the rule be
+# built, modelled, and reviewed ahead of any activation decision.
+fee-reservoir = []
+# CIP-Cross-Chain-Onramp: the peg-in turnstile SEAM (design scaffold only —
+# PegAttestation type + PegAttestor trait + FailClosedAttestor). Off by default,
+# fail-closed, nothing wired. Lets the interfaces be reviewed ahead of the
+# post-audit implementation without touching production builds.
+crosschain-onramp = []
 # Rolling soft-finality (CIP-009.D) consensus-layer adapter. Off by
 # default: compiles in `src/consensus/rolling_finality.rs` and pulls
 # the `coincync-rolling-finality` crate only when explicitly enabled.
@@ -65,6 +82,9 @@ metrics = []
 # touching the consensus-locked files (`src/constants.rs`,
 # `src/consensus/validation.rs`).
 rolling-finality = ["dep:coincync-rolling-finality"]
+# Wallet-side CYNC atomic-swap transaction integration. Off by default
+# until the protocol safety gate and dedicated audit are complete.
+cyncswap = ["dep:coincync-swap"]
 # Test/diagnostic knobs. Opt-in, off by default.
 test-vdf        = []
 test-utilities  = []
@@ -92,6 +112,7 @@ sketch-cut-through        = []   # CIP-003 (also see existing src/crypto/mw_cutt
 sketch-block-aggregation  = []   # CIP-003 (pairs with cut-through)
 sketch-kernel-offsets     = []   # CIP-004
 sketch-lelantus-spark     = []   # CIP-005 (gates src/crypto/lelantus_spark.rs)
+sketch-privacy-manifold   = []   # Underground manifold — uniform-face tx envelope (gates src/crypto/privacy_manifold.rs)
 sketch-gk-proof           = []   # CIP-Shielded 2c#1 (gates src/crypto/groth_kohlweiss.rs)
 shielded-soak-stub        = []   # CIP-Shielded: inert prover/verifier for the assembly-line soak (NEVER production)
 # CIP-Shielded: use the vendored Firo libspark FFI backend as the shielded engine.
@@ -181,7 +202,7 @@ rcgen                = "0.13"
 
 # â”€â”€ Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Migrated to RocksDB via the db::shim layer â€” see src/db/shim.rs.
-rocksdb  = { version = "0.22", features = ["multi-threaded-cf", "lz4"] }
+rocksdb  = { version = "0.23", features = ["multi-threaded-cf", "lz4"] }
 bech32   = "0.11"
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 redb     = "2"
@@ -298,6 +319,7 @@ tick                  = { path = "crates/tick" }
 # `ed25519` + `wire-codec` crate features are the production set:
 # real signature verification and the coinbase wire codec.
 coincync-rolling-finality = { path = "crates/coincync-rolling-finality", features = ["ed25519", "wire-codec"], optional = true }
+coincync-swap             = { path = "crates/coincync-swap", optional = true }
 
 [dev-dependencies]
 criterion         = "0.8"

@@ -63,10 +63,9 @@ mod query;
 mod relay;
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock must be after the Unix epoch")
-        .as_secs()
+    // Single source of truth (E1): read through the canonical clock so the
+    // simulation harness can make this deterministic. See src/clock.rs.
+    crate::clock::unix_now()
 }
 
 /// Process received message
@@ -188,6 +187,10 @@ pub(super) async fn process_message(
             control::handle_chain_work(peer_id, payload, peers, sync, chain).await?;
         }
 
+        MessageType::ConsensusFingerprint => {
+            control::handle_consensus_fingerprint(peer_id, payload, peers, chain).await?;
+        }
+
         MessageType::Verack => {
             control::handle_verack(peer_id, magic, peers, senders, dandelion, sync, chain).await?;
         }
@@ -279,11 +282,13 @@ pub(super) async fn process_message(
 
         // ─── Personal Node (Tier 1) Protocol ─────────────────────────────
         MessageType::GetFilters => {
-            query::handle_get_filters(peer_id, payload, magic, chain, senders).await?;
+            query::handle_get_filters(peer_id, payload, magic, peers, scorer, chain, senders)
+                .await?;
         }
 
         MessageType::GetOutputDigests => {
-            query::handle_get_output_digests(peer_id, payload, magic, chain, senders).await?;
+            query::handle_get_output_digests(peer_id, payload, magic, peers, scorer, chain, senders)
+                .await?;
         }
 
         MessageType::GetFilterCheckpoints => {

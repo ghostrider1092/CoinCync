@@ -425,11 +425,45 @@ impl SparkStore {
         // `open_with_db` replay reconstructs the rewound state rather
         // than resurrecting the disconnected block's coins/serials.
         if let Some(p) = &self.persistence {
+            // R-63 parity (was silent `let _ = remove()`): a swallowed delete
+            // failure here lets `open_with_db` resurrect the disconnected block's
+            // coins/serials, diverging the committed spark root or freezing a live
+            // coin via a stale serial. Mirror KernelStore::rewind — log loudly so
+            // the operator knows a reindex is required.
+            let mut remove_failures = 0usize;
             for c in &removed_coins {
-                let _ = p.coins.remove(c.coin_id.to_be_bytes());
+                if let Err(e) = p.coins.remove(c.coin_id.to_be_bytes()) {
+                    remove_failures += 1;
+                    tracing::error!(
+                        target: "storage::spark",
+                        coin_id = c.coin_id,
+                        error = %e,
+                        "R-63: rewind failed to remove on-disk spark coin {} — disk \
+                         may replay an orphan coin on next open, corrupting the \
+                         committed spark root. Reindex required.",
+                        c.coin_id
+                    );
+                }
             }
             for s in &removed_serials {
-                let _ = p.serials.remove(s);
+                if let Err(e) = p.serials.remove(s) {
+                    remove_failures += 1;
+                    tracing::error!(
+                        target: "storage::spark",
+                        error = %e,
+                        "R-63: rewind failed to remove an on-disk spark serial — a \
+                         resurrected serial on next open can freeze a live coin. \
+                         Reindex required."
+                    );
+                }
+            }
+            if remove_failures > 0 {
+                tracing::error!(
+                    target: "storage::spark",
+                    remove_failures = remove_failures,
+                    "R-63: {} spark row removes failed during rewind",
+                    remove_failures
+                );
             }
         }
 
@@ -439,6 +473,42 @@ impl SparkStore {
     /// Returns true if the serial has already been used to spend.
     pub fn is_serial_spent(&self, serial: &[u8; 32]) -> bool {
         self.spent_serials.read().contains_key(serial)
+    }
+
+    /// Resolve accumulator indices (coin ids) to their on-chain commitment
+    /// points, for the PUBLIC verification of a Spark spend.
+    ///
+    /// Coins are appended in `coin_id` order (see `add_coin` / `open_with_db`),
+    /// so a coin's `coin_id` equals its position in the accumulator vector: each
+    /// index is looked up at that position and the stored commitment
+    /// decompressed. As a defence against a future sparse or mis-replayed
+    /// accumulator, the entry found at the position must actually carry the
+    /// requested `coin_id`, otherwise the lookup fails closed.
+    ///
+    /// Errors ([`Error::SparkVerifyFailed`]) if any index is out of range, does
+    /// not match its position, or its stored commitment is not a canonical curve
+    /// point — a spend proof referencing an unknown or malformed coin can never
+    /// be accepted.
+    pub fn commitments_for(
+        &self,
+        indices: &[u64],
+    ) -> Result<Vec<curve25519_dalek::ristretto::RistrettoPoint>> {
+        use curve25519_dalek::ristretto::CompressedRistretto;
+        let coins = self.coins.read();
+        let mut out = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            let entry = coins
+                .get(idx as usize)
+                .ok_or(Error::SparkVerifyFailed)?;
+            if entry.coin_id != idx {
+                return Err(Error::SparkVerifyFailed);
+            }
+            let point = CompressedRistretto(entry.commitment)
+                .decompress()
+                .ok_or(Error::SparkVerifyFailed)?;
+            out.push(point);
+        }
+        Ok(out)
     }
 
     /// Current accumulator size (coin count).

@@ -109,9 +109,9 @@ need to either:
 Three things to check, in order:
 
 1. **Outbound port 28080**:
-   `nc -zv 66.135.23.193 28080` should connect.
+   `nc -zv 2.29.34.197 28080` should connect (the live public seed).
 2. **DNS seed resolution**:
-   `dig seed1.coincync.network` returns a valid A record.
+   `dig seed2.coincync.network` (or `seed3`) returns a valid A record — these resolve to the live seed `2.29.34.197`. (`seed1.coincync.network` currently resolves to a dead host, #148.)
 3. **Peer count**: in the node's `get_info`, `peer_count` should be
    ≥ 1 within a minute of startup. Zero peers means firewalls or
    seed-discovery problems.
@@ -307,7 +307,7 @@ Forgejo (and `git.coincync.network` will be the canonical source).
 
 | What | Where |
 |---|---|
-| Bug in the protocol / wallet / node | <https://github.com/ghostrider1092/Coincync-Testnet-/issues> with the bug-report template |
+| Bug in the protocol / wallet / node | <https://github.com/ghostrider1092/CoinCync/issues> with the bug-report template |
 | Security vulnerability (consensus, privacy, key handling) | `CyncLabs@proton.me` (Proton auto-publishes a PGP key at the address — fetch from inbox profile or keys.openpgp.org; plaintext fine for non-critical reports) — DO NOT file publicly |
 | "Just a question" | Discord `#faq` (read pins first) |
 | Reproducibility check failure | Open an issue with both your `sha256sum` and the published hash |

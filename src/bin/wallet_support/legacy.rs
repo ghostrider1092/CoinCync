@@ -132,6 +132,29 @@ enum Command {
         password: Option<String>,
     },
 
+    /// Generate an integrated address: this wallet's address plus an 8-byte
+    /// payment ID, so a sender's payment can be associated with an account /
+    /// invoice. Share the printed address; the payment ID is recovered
+    /// (encrypted) when the payment is received.
+    IntegratedAddress {
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// 16-hex (8-byte) payment ID. Omit for a random one.
+        #[arg(long)]
+        payment_id: Option<String>,
+    },
+
+    /// List the wallet's unspent outputs (amount, height, subaddress, spent).
+    /// Reads the persisted UTXO sidecar — run `scan` first to populate it.
+    Utxos {
+        /// Wallet password. Use `-` to read from stdin.
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Also show already-spent outputs (default: unspent only).
+        #[arg(long)]
+        include_spent: bool,
+    },
+
     /// Print the master seed as hex (requires password).
     ShowSeed {
         /// Wallet password. Use `-` to read from stdin (recommended for
@@ -213,6 +236,24 @@ enum Command {
         /// + report — no node needed.
         #[arg(long)]
         demo: bool,
+        /// WATCH-ONLY: scan with an exported view key `<s1hex>:<p2hex>` (see
+        /// `shielded-view-key`) instead of unlocking this wallet's seed. Reports
+        /// balance without any spend authority; no password needed.
+        #[arg(long)]
+        view_key: Option<String>,
+        /// Wallet password. Use `-` to read from stdin. Reads
+        /// `COINCYNC_WALLET_PASSWORD` env if neither flag nor stdin is provided.
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+    },
+
+    /// Export this wallet's WATCH-ONLY shielded view key as `<s1hex>:<p2hex>`.
+    ///
+    /// The holder can scan/report shielded balance (`shielded-balance
+    /// --view-key`) but CANNOT spend. EXPERIMENTAL / regtest-gated; present only
+    /// in a `sketch-gk-proof + libspark-ffi` build.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    ShieldedViewKey {
         /// Wallet password. Use `-` to read from stdin. Reads
         /// `COINCYNC_WALLET_PASSWORD` env if neither flag nor stdin is provided.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
@@ -227,12 +268,18 @@ enum Command {
         /// stdin is provided; otherwise prompts interactively.
         #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
         password: Option<String>,
-        /// Recipient spend public key (64-hex).
+        /// Recipient address string (standard, subaddress, or integrated). When
+        /// given, its spend/view keys, address type, and any embedded payment ID
+        /// are used directly, so --to-spend/--to-view/--payment-id/--subaddress are
+        /// not needed. This is the way to pay an integrated address.
         #[arg(long)]
-        to_spend: String,
-        /// Recipient view public key (64-hex).
+        address: Option<String>,
+        /// Recipient spend public key (64-hex). Not needed when --address is given.
         #[arg(long)]
-        to_view: String,
+        to_spend: Option<String>,
+        /// Recipient view public key (64-hex). Not needed when --address is given.
+        #[arg(long)]
+        to_view: Option<String>,
         /// Amount to send, in atomic CYNC units.
         #[arg(long)]
         amount: u64,
@@ -274,6 +321,11 @@ enum Command {
         /// is set; ignored otherwise.
         #[arg(long)]
         recovery_timeout: Option<u64>,
+        /// Integrated-address payment ID (16-hex / 8 bytes). Carried encrypted
+        /// in tx.extra and recovered by the recipient on scan. Use when paying
+        /// an exchange that issued you an integrated address.
+        #[arg(long)]
+        payment_id: Option<String>,
         /// Treasury allowlist policy file (from `treasury allow`). When set, the
         /// send is REFUSED unless the recipient (spend+view) is on the list — a
         /// guard against a compromised host or operator redirecting funds. This
@@ -811,6 +863,14 @@ async fn main() {
         }
         Command::AddressInfo { address, json } => cmd_address_info(&address, json),
         Command::Balance { password } => cmd_balance(&wallet_path, password).await,
+        Command::IntegratedAddress {
+            password,
+            payment_id,
+        } => cmd_integrated_address(&wallet_path, password, payment_id, network).await,
+        Command::Utxos {
+            password,
+            include_spent,
+        } => cmd_utxos(&wallet_path, password, include_spent).await,
         Command::ShowSeed { password } => cmd_show_seed(&wallet_path, password).await,
         Command::Scan {
             password,
@@ -830,8 +890,14 @@ async fn main() {
             password,
         } => cmd_shielded_send(&wallet_path, password, &cli.node, to, amount, demo).await,
         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-        Command::ShieldedBalance { demo, password } => {
-            cmd_shielded_balance(&wallet_path, password, &cli.node, demo).await
+        Command::ShieldedBalance {
+            demo,
+            view_key,
+            password,
+        } => cmd_shielded_balance(&wallet_path, password, &cli.node, demo, view_key).await,
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        Command::ShieldedViewKey { password } => {
+            cmd_shielded_view_key(&wallet_path, password).await
         }
         Command::Send {
             password,
@@ -844,13 +910,18 @@ async fn main() {
             memo,
             recovery_address,
             recovery_timeout,
+            // Integrated-address payment IDs and --address parsing are handled by
+            // the v2 send path (`dispatch_v2` intercepts `Send` before this legacy
+            // arm is reached), so this superseded path ignores those flags.
+            payment_id: _,
+            address: _,
             policy,
         } => {
             cmd_send(
                 &wallet_path,
                 password,
-                to_spend,
-                to_view,
+                to_spend.unwrap_or_default(),
+                to_view.unwrap_or_default(),
                 amount,
                 fee_multiplier,
                 split_output,
@@ -922,32 +993,22 @@ async fn main() {
             message,
         } => cmd_multisig_aggregate(&commitments, &shares, &key_shares, &message).await,
         Command::Subaddress { action } => {
-            // W-1 launch-safety gate (2026-08-16): subaddress-received funds are
-            // currently UNSPENDABLE — the spend-side one-time-secret / key-image
-            // derivation omits the per-subaddress offset m_i, so coins sent to a
-            // subaddress can be detected but never spent. Disable subaddresses on
-            // mainnet until the fix ships with a verified receive->spend
-            // round-trip test. Kept enabled on testnet/regtest so the fix can be
-            // developed and tested there. See project_full_audit_2026-08-16 (W-1).
-            if matches!(network, Network::Mainnet) {
-                Err(
-                    "subaddresses are disabled on mainnet in this release: \
-                     funds received at a subaddress would be permanently unspendable. \
-                     Use your main address (`address` command). Subaddresses remain \
-                     available on testnet/regtest."
-                        .to_string(),
-                )
-            } else {
-                match action {
-                    SubaddressAction::List { password } => {
-                        cmd_subaddress_list(&wallet_path, password, network).await
-                    }
-                    SubaddressAction::Create {
-                        password,
-                        account,
-                        label,
-                    } => cmd_subaddress_create(&wallet_path, password, account, label, network).await,
+            // W-1 gate LIFTED: the spend-side one-time-secret / key-image
+            // derivation now applies the per-subaddress offset m_i (W-A fix),
+            // so subaddress-received funds are spendable on mainnet too —
+            // verified by the receive->spend->validate round-trip test
+            // `real_crypto_subaddress_output_spendable_e2e`. The prior
+            // mainnet-disable arm has been removed.
+            // See project_full_audit_2026-08-16 (W-1) for history.
+            match action {
+                SubaddressAction::List { password } => {
+                    cmd_subaddress_list(&wallet_path, password, network).await
                 }
+                SubaddressAction::Create {
+                    password,
+                    account,
+                    label,
+                } => cmd_subaddress_create(&wallet_path, password, account, label, network).await,
             }
         }
         Command::Disclose { action } => match action {
@@ -1625,7 +1686,6 @@ fn network_label(n: Network) -> &'static str {
         Network::Mainnet => "mainnet",
         Network::Testnet => "testnet",
         Network::Regtest => "regtest",
-        Network::Beta => "beta",
     }
 }
 
@@ -1808,7 +1868,7 @@ async fn cmd_address(
 
     let prim_network = match network {
         Network::Mainnet => coincync::primitives::Network::Mainnet,
-        Network::Testnet | Network::Regtest | Network::Beta => coincync::primitives::Network::Testnet,
+        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
     };
     let addr =
         coincync::primitives::Address::new(prim_network, epoch.spend_public, epoch.view_public);
@@ -1870,6 +1930,75 @@ fn cmd_address_info(address: &str, json: bool) -> Result<(), String> {
     Ok(())
 }
 
+async fn cmd_integrated_address(
+    path: &PathBuf,
+    password: Option<String>,
+    payment_id_hex: Option<String>,
+    network: Network,
+) -> Result<(), String> {
+    use rand::RngCore;
+    if !wallet_exists(path) {
+        return Err(format!("no wallet at {:?}", path));
+    }
+    let password = resolve_password(password, false)?;
+    let data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {}", e))?;
+    let keys = WalletKeys::from_seed(data.seed);
+    let epoch = keys
+        .current()
+        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
+
+    // Payment ID: parse the supplied 16-hex, or generate a random 8 bytes.
+    let mut pid = [0u8; 8];
+    match payment_id_hex {
+        Some(h) => {
+            let bytes = hex::decode(h.trim())
+                .map_err(|e| format!("invalid --payment-id hex: {e}"))?;
+            if bytes.len() != 8 {
+                return Err(format!(
+                    "payment id must be 8 bytes (16 hex), got {}",
+                    bytes.len()
+                ));
+            }
+            pid.copy_from_slice(&bytes);
+        }
+        None => rand::rngs::OsRng.fill_bytes(&mut pid),
+    }
+
+    // jun #50 review: derive the address prefix from the wallet's PERSISTED
+    // network, not the CLI --network flag — otherwise a mainnet wallet run with
+    // `--network testnet` would emit a testnet-prefixed address from mainnet
+    // keys (and vice versa). Warn if the flag disagrees so the mismatch is
+    // visible rather than silently ignored.
+    let prim_network = match data.network.as_str() {
+        "mainnet" => coincync::primitives::Network::Mainnet,
+        "testnet" | "regtest" => coincync::primitives::Network::Testnet,
+        other => return Err(format!("wallet has unknown network '{other}'")),
+    };
+    let flag_network = match network {
+        Network::Mainnet => "mainnet",
+        Network::Testnet => "testnet",
+        Network::Regtest => "regtest",
+    };
+    if data.network != flag_network {
+        eprintln!(
+            "warning: --network {flag_network} ignored; using the wallet's own network '{}'",
+            data.network
+        );
+    }
+    let mut addr =
+        coincync::primitives::Address::new(prim_network, epoch.spend_public, epoch.view_public);
+    addr.address_type = coincync::primitives::AddressType::Integrated;
+    addr.payment_id = Some(pid);
+
+    println!("Integrated address: {}", addr);
+    println!("Payment ID:         {}", hex::encode(pid));
+    println!();
+    println!("Share the integrated address with the sender. When they pay it,");
+    println!("the payment ID is carried encrypted and recovered on your scan.");
+    Ok(())
+}
+
 async fn cmd_balance(path: &PathBuf, password: Option<String>) -> Result<(), String> {
     let password = resolve_password(password, false)?;
     let data =
@@ -1881,6 +2010,73 @@ async fn cmd_balance(path: &PathBuf, password: Option<String>) -> Result<(), Str
     println!("(P1 note: balance computed from wallet file state only.");
     println!(" The file doesn't persist UTXOs yet — P2 work will add a");
     println!(" real chain-scan-via-RPC path and UTXO materialisation.)");
+    Ok(())
+}
+
+async fn cmd_utxos(
+    path: &PathBuf,
+    password: Option<String>,
+    include_spent: bool,
+) -> Result<(), String> {
+    use coincync::wallet::Wallet;
+
+    let password = resolve_password(password, false)?;
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {}", e))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {}", e))?;
+
+    let mut utxos = wallet.all_utxos();
+    // Stable order: by height, then tx_hash/index, so output is deterministic
+    // and matches the index used by `disclose balance`.
+    utxos.sort_by(|a, b| {
+        a.height
+            .cmp(&b.height)
+            .then(a.tx_hash.as_bytes().cmp(b.tx_hash.as_bytes()))
+            .then(a.output_index.cmp(&b.output_index))
+    });
+
+    println!(
+        "{:>4}  {:>18}  {:>8}  {:>10}  {:>6}  {:>18}  {}",
+        "idx", "amount (CYNC)", "height", "subaddr", "spent", "tx:out", "payment_id"
+    );
+    let mut shown = 0usize;
+    let mut spendable_atomic: u128 = 0;
+    for (i, u) in utxos.iter().enumerate() {
+        if u.spent && !include_spent {
+            continue;
+        }
+        let subaddr = match (u.subaddress_account, u.subaddress_index) {
+            (Some(a), Some(idx)) => format!("{}/{}", a, idx),
+            _ => "main".to_string(),
+        };
+        let pid = match u.payment_id {
+            Some(p) => hex::encode(p),
+            None => "-".to_string(),
+        };
+        if !u.spent {
+            spendable_atomic += u.amount.as_atomic() as u128;
+        }
+        println!(
+            "{:>4}  {:>18.6}  {:>8}  {:>10}  {:>6}  {}:{}  {}",
+            i,
+            u.amount.as_atomic() as f64 / 1e12,
+            u.height,
+            subaddr,
+            if u.spent { "yes" } else { "no" },
+            &hex::encode(u.tx_hash.as_bytes())[..12],
+            u.output_index,
+            pid,
+        );
+        shown += 1;
+    }
+    println!();
+    println!(
+        "{} output(s) shown; unspent total {:.6} CYNC{}",
+        shown,
+        spendable_atomic as f64 / 1e12,
+        if include_spent { "" } else { " (run with --include-spent to see spent)" }
+    );
     Ok(())
 }
 
@@ -1949,11 +2145,27 @@ async fn cmd_shielded_send(
         load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {e}"))?;
     let seed = data.seed;
 
+    // The mole notice: this transaction is about to burrow underground (into the
+    // shielded pool), leaving no transparent trace of sender/recipient/amount.
+    mole_notice(amount);
+
     if demo {
         shielded_send_demo(&seed, &to, amount)
     } else {
         shielded_send_live(&seed, node, &to, amount).await
     }
+}
+
+/// The "mole" notice: announce that a transaction is going UNDERGROUND (shielded).
+/// Printed to stderr so it never pollutes machine-readable stdout. ASCII only —
+/// the Windows console mangles non-ASCII.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+fn mole_notice(amount: u64) {
+    eprintln!("=====================================================");
+    eprintln!(" [MOLE] The mole has started.");
+    eprintln!("        {amount} atomic is burrowing underground (shielded)");
+    eprintln!("        - no transparent trace of sender, recipient, or amount.");
+    eprintln!("=====================================================");
 }
 
 /// Self-contained REGTEST run: bootstrap a local pool, fund this wallet, build +
@@ -2082,13 +2294,14 @@ fn report_built_transfer(
 /// it for this wallet's notes. Returns `(anchor_height, ordered cover coins,
 /// owned notes as (spend_index, value, serial_context))`. Shared by
 /// `shielded-send` (live) and `shielded-balance` (live).
+/// Fetch + parse the node's anchored cover set: returns `(anchor_height,
+/// entries[(index, coin, ctx)], cover_coins)` in canonical order. Shared by the
+/// seed scan and the watch-only view-key scan.
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-async fn scan_live_cover_set(
-    seed: &[u8],
+async fn fetch_live_cover_set(
     node: &str,
-) -> Result<(u64, Vec<spark_connector::CoinBytes>, Vec<(usize, u64, Vec<u8>)>), String> {
-    use spark_connector::ffi::LibsparkBackend;
-    use spark_connector::{CoinBytes, SparkBackend};
+) -> Result<(u64, Vec<(usize, Vec<u8>, Vec<u8>)>, Vec<spark_connector::CoinBytes>), String> {
+    use spark_connector::CoinBytes;
 
     // Anchor at the node's current tip.
     let info = rpc_call(node, "get_info", serde_json::json!([]))
@@ -2114,7 +2327,6 @@ async fn scan_live_cover_set(
         .cloned()
         .unwrap_or_default();
 
-    // Rebuild the ordered cover set + per-coin serial contexts from the response.
     let mut entries: Vec<(usize, Vec<u8>, Vec<u8>)> = Vec::with_capacity(arr.len());
     for e in &arr {
         let index = e
@@ -2133,8 +2345,19 @@ async fn scan_live_cover_set(
     }
     entries.sort_by_key(|(i, _, _)| *i);
     let cover_coins: Vec<CoinBytes> = entries.iter().map(|(_, c, _)| CoinBytes(c.clone())).collect();
+    Ok((anchor_height, entries, cover_coins))
+}
 
-    // Scan the fetched set for coins this wallet owns.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+async fn scan_live_cover_set(
+    seed: &[u8],
+    node: &str,
+) -> Result<(u64, Vec<spark_connector::CoinBytes>, Vec<(usize, u64, Vec<u8>)>), String> {
+    use spark_connector::ffi::LibsparkBackend;
+    use spark_connector::{CoinBytes, SparkBackend};
+
+    let (anchor_height, entries, cover_coins) = fetch_live_cover_set(node).await?;
+    // Scan the fetched set for coins this wallet owns (seed-based).
     let backend = LibsparkBackend;
     let mut owned: Vec<(usize, u64, Vec<u8>)> = Vec::new(); // (spend_index, value, ctx)
     for (pos, (_, coin, ctx)) in entries.iter().enumerate() {
@@ -2145,13 +2368,77 @@ async fn scan_live_cover_set(
     Ok((anchor_height, cover_coins, owned))
 }
 
+/// Parse a `<s1hex>:<p2hex>` view key string into its exported material.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+fn parse_view_key(s: &str) -> Result<spark_connector::ffi::IncomingViewKeyBytes, String> {
+    let (s1_hex, p2_hex) = s
+        .split_once(':')
+        .ok_or("view key must be <s1hex>:<p2hex> (see `shielded-view-key`)")?;
+    let s1 = hex::decode(s1_hex.trim()).map_err(|e| format!("bad s1 hex: {e}"))?;
+    let p2 = hex::decode(p2_hex.trim()).map_err(|e| format!("bad p2 hex: {e}"))?;
+    if s1.len() != 32 || p2.len() != 34 {
+        return Err(format!(
+            "view key wrong size (s1={} bytes need 32, p2={} bytes need 34)",
+            s1.len(),
+            p2.len()
+        ));
+    }
+    Ok(spark_connector::ffi::IncomingViewKeyBytes { s1, p2 })
+}
+
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+async fn cmd_shielded_view_key(path: &PathBuf, password: Option<String>) -> Result<(), String> {
+    use spark_connector::ffi::export_incoming_view_key;
+
+    let password = resolve_password(password, false)?;
+    let data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {e}"))?;
+    let vk = export_incoming_view_key(&data.seed).ok_or("view key export failed")?;
+    // <s1hex>:<p2hex> — share this to let a watch-only wallet report balance.
+    // It carries NO spend authority.
+    println!("{}:{}", hex::encode(&vk.s1), hex::encode(&vk.p2));
+    Ok(())
+}
+
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
 async fn cmd_shielded_balance(
     path: &PathBuf,
     password: Option<String>,
     node: &str,
     demo: bool,
+    view_key: Option<String>,
 ) -> Result<(), String> {
+    // Watch-only path: scan the live cover set with an exported view key — no
+    // wallet unlock, no seed, no spend authority.
+    if let Some(vk_str) = view_key {
+        if demo {
+            return Err("--view-key cannot be combined with --demo".into());
+        }
+        let vk = parse_view_key(&vk_str)?;
+        let (anchor_height, entries, _cover) = fetch_live_cover_set(node).await?;
+        let mut total = 0u64;
+        let mut vals = Vec::new();
+        for (_, coin, ctx) in &entries {
+            if let Ok(Some(id)) =
+                spark_connector::ffi::identify_view_only(&vk, &spark_connector::CoinBytes(coin.clone()), ctx)
+            {
+                total += id.value;
+                vals.push(id.value);
+            }
+        }
+        vals.sort_unstable();
+        println!("Shielded balance [watch-only] (anchor height {anchor_height}):");
+        println!("  Cover set:     {} coin(s)", entries.len());
+        println!("  Owned notes:   {}", vals.len());
+        println!("  Balance:       {total} atomic");
+        if !vals.is_empty() {
+            println!("  Note values:   {vals:?}");
+        } else {
+            println!("  (no owned notes at this anchor — shielded pool is empty until activation)");
+        }
+        return Ok(());
+    }
+
     let password = resolve_password(password, false)?;
     let data =
         load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {e}"))?;
@@ -2925,7 +3212,7 @@ async fn cmd_multisig_gen(
     // Build group address
     let prim_network = match network {
         Network::Mainnet => coincync::primitives::Network::Mainnet,
-        Network::Testnet | Network::Regtest | Network::Beta => coincync::primitives::Network::Testnet,
+        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
     };
     let group_addr = coincync::primitives::Address::new(
         prim_network,
@@ -3448,7 +3735,7 @@ async fn cmd_subaddress_list(
 
     let prim_network = match network {
         Network::Mainnet => coincync::primitives::Network::Mainnet,
-        Network::Testnet | Network::Regtest | Network::Beta => coincync::primitives::Network::Testnet,
+        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
     };
 
     println!("Subaddresses for wallet {:?}:", path);
@@ -3517,7 +3804,7 @@ async fn cmd_subaddress_create(
 
     let prim_network = match network {
         Network::Mainnet => coincync::primitives::Network::Mainnet,
-        Network::Testnet | Network::Regtest | Network::Beta => coincync::primitives::Network::Testnet,
+        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
     };
 
     // Persist the updated subaddress set back into the wallet file.

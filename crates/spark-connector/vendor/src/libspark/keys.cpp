@@ -119,6 +119,14 @@ IncomingViewKey::IncomingViewKey(const FullViewKey& full_view_key) {
 	this->P2 = full_view_key.get_P2();
 }
 
+// CoinCync addition: reconstruct a watch-only incoming view key from exported
+// (s1, P2). See keys.h — enables view-only scanning without a seed/spend key.
+IncomingViewKey::IncomingViewKey(const Params* params, const Scalar& s1, const GroupElement& P2) {
+	this->params = params;
+	this->s1 = s1;
+	this->P2 = P2;
+}
+
 const Params* IncomingViewKey::get_params() const {
 	return this->params;
 }

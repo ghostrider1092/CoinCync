@@ -270,6 +270,26 @@ impl NetworkType {
         }
     }
 
+    /// Height at which `BlockHeader.supply_commitment` begins being PRODUCED
+    /// (non-zero) and ENFORCED (validated). Below this height the field stays
+    /// `[0u8; 32]` and is not checked, so pre-fork chains are unaffected — this
+    /// is a hard fork (see `docs/design/cip-supply-commitment-enforcement.md`).
+    ///
+    /// GATED OFF on every network (`u64::MAX`) until an activation height is
+    /// explicitly cleared: producing/validating is a pure no-op until then, so
+    /// the rule can land, build, and be tested without changing any live chain.
+    /// Mirrors the shielded-activation "finite under clearance, else u64::MAX"
+    /// pattern. Do NOT set a finite height without audit-gate clearance —
+    /// activating a new consensus rule on testnet is a coordinated hard fork.
+    /// Mirrored by `constants::SUPPLY_COMMITMENT_ENFORCE_HEIGHT` with a
+    /// compile-time drift-guard, matching the other activation heights.
+    pub const fn supply_commitment_enforce_height(&self) -> u64 {
+        match self {
+            NetworkType::Mainnet => u64::MAX,
+            NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => u64::MAX,
+        }
+    }
+
     /// Minimum age (in blocks) a ring-member/decoy output must have, resolved
     /// from the runtime network. Mirrors `constants::min_output_age_at_height`
     /// but keyed on this network's hard-fork height rather than the compile-time
@@ -282,15 +302,34 @@ impl NetworkType {
         }
     }
 
-    /// The consensus-checkpoint table for this network, resolved at runtime so a
-    /// binary built for one network but run as another uses the correct
-    /// checkpoints. Regtest reuses testnet's (empty) table. Both tables are
-    /// empty pre-launch; mainnet is populated via the release process.
-    pub const fn consensus_checkpoints(&self) -> &'static [(u64, [u8; 32])] {
+    /// The consensus-checkpoint set for this network, as `(height, hash_bytes)`
+    /// ordered by height (genesis first).
+    ///
+    /// This is the **single source of truth** for hardcoded checkpoints. It
+    /// resolves from the canonical per-network functions — `mainnet_checkpoints()`
+    /// / `testnet_checkpoints()`, which both prepend genesis and (for testnet)
+    /// expand `TESTNET_CHECKPOINT_LIST`. Every consumer — the two block-validation
+    /// paths, the consensus fingerprint, `snapshot-import`, light-wallet auth and
+    /// the RPC checkpoint view — goes through here (directly or via
+    /// `constants::expected_checkpoint_hash`), so a checkpoint added to the
+    /// canonical list is reflected everywhere at once. Previously the fingerprint
+    /// and `expected_checkpoint_hash` read a *separate* empty constant table, so a
+    /// populated testnet list was silently invisible to them (issue #173).
+    ///
+    /// Resolved at runtime from the RUNTIME network, so a binary built for one
+    /// network but run as another uses the correct checkpoints. Regtest reuses
+    /// testnet's.
+    pub fn consensus_checkpoints(&self) -> Vec<(u64, [u8; 32])> {
         match self {
-            NetworkType::Mainnet => crate::constants::MAINNET_CONSENSUS_CHECKPOINTS,
+            NetworkType::Mainnet => crate::mainnet::mainnet_checkpoints()
+                .into_iter()
+                .map(|c| (c.height, *c.hash.as_bytes()))
+                .collect(),
             NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => {
-                crate::constants::TESTNET_CONSENSUS_CHECKPOINTS
+                crate::testnet::testnet_checkpoints()
+                    .into_iter()
+                    .map(|c| (c.height, *c.hash.as_bytes()))
+                    .collect()
             }
         }
     }

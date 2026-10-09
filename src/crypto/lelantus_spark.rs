@@ -4,6 +4,27 @@
 //!
 //! ## Status
 //!
+//! **UNSOUND SKETCH — DO NOT ACTIVATE (#221).** The hand-rolled AOS
+//! one-out-of-many proof here is neither zero-knowledge nor binding:
+//! its Fiat-Shamir challenge is seeded from the REAL spend index (so
+//! the verifier can recover which coin was spent — an anonymity
+//! break), and the serial tag is never proven bound to the spent coin
+//! (so a fresh tag can accompany every spend — no double-spend
+//! linkage). To stop anyone trusting it, [`verify_spark_spend`] is
+//! FAIL-CLOSED: it refuses every proof. Do not read the protocol prose
+//! below as "implemented".
+//!
+//! NOT ON THE CONSENSUS PATH. The production shielded engine is the
+//! audited Firo libspark backend (`crate::consensus::spark_payload`,
+//! feature `libspark-ffi`) — that is what `check_shielded_tx` and
+//! `chain::verify_block_spark_v2` route to, and what the 24h in-block
+//! soak exercises. This native module is used ONLY by the gated,
+//! experimental privacy-connector / Underground-manifold demos
+//! (`crate::crypto::{privacy_connector, privacy_manifold}`), never by
+//! block/mempool validation. It is retained solely as a clearly-marked
+//! placeholder and MUST NEVER be activated; the real one-out-of-many
+//! proof with a bound serial tag is libspark's, not this file's (#221).
+//!
 //! Gated behind the `sketch-lelantus-spark` cargo feature, OFF by
 //! default. Default builds do NOT compile this module; the
 //! production audit perimeter is unchanged. Activation requires the
@@ -30,21 +51,30 @@
 //!
 //! ## What this module actually implements
 //!
-//! A **Schnorr-style one-out-of-many proof** using the same primitives
-//! as our CLSAG ring signatures. Concretely, for an anonymity set
-//! `{C_0, ..., C_{n-1}}` with the real opening at position `l`:
+//! A **multi-witness one-out-of-many proof** (an Abe-Ohkubo-Suzuki ring)
+//! that runs directly over the *public* commitments — the verifier needs
+//! nothing secret. For an anonymity set `{C_0, ..., C_{n-1}}` with the
+//! real opening `(v, s, r)` at position `l` (so `C_l = v*G + s*H + r*K`):
 //!
-//! 1. The prover derives a "coin key" `x_l = serial_scalar(l, s)` such
-//!    that `x_l*G = C_l - v*G - r*K` (i.e. the blinding coefficient of
-//!    the `H` generator).
-//! 2. The prover emits a Schnorr ring signature over the public keys
-//!    `P_i = (C_i - v*G - r*K)` for each `i` in the anon set. The
-//!    signature is valid iff the prover knows the discrete log of at
-//!    least one `P_i`, which they do for `P_l`.
-//! 3. The proof additionally binds a **serial tag** `T = s*G` via a
-//!    Chaum-Pedersen equality proof between `T` and the ring signature
-//!    transcript, so the prover can't forge a different `T` without
-//!    knowing a different `s`.
+//! 1. Each ring link is a proof of knowledge of a full opening `(v, s, r)`
+//!    of `C_i`. For the real member the prover uses the true witness; the
+//!    decoys are simulated (uniform responses, back-solved nonce
+//!    commitments) exactly as in a Schnorr ring — so the prover needs the
+//!    opening of only ONE member, and it is hidden which.
+//! 2. A **serial tag** `T = s*G` is bound *inside every link* by a G-side
+//!    companion equation `L'_i = z^s_i*G − c_i*T` that reuses the same
+//!    serial response `z^s_i`. This forces the `s` in the extracted opening
+//!    to equal `dlog_G(T)`, so a spend cannot carry a forged tag `T != s*G`
+//!    (the double-spend nullifier is sound).
+//! 3. The Fiat-Shamir challenge folds a digest of the whole ordered
+//!    commitment set and the spend `message`, so the proof binds to its
+//!    exact anonymity set and transaction context.
+//!
+//! Crucially the responses carry the value and blinding witnesses only in
+//! blinded form (`z^v = a + c*v`, `z^r = d + c*r`), so **`v` and `r` stay
+//! secret** — the earlier sketch could only be checked by reconstructing
+//! `P_i = C_i − v*G − r*K`, which needed those secrets and so had no public
+//! verifier. This construction closes that gap.
 //!
 //! This is **not** the logarithmic-size Groth-Kohlweiss proof from the
 //! Spark paper — proofs here are O(n) in the anon-set size, not
@@ -57,7 +87,7 @@
 //! ## Why this is safe to ship
 //!
 //! Every primitive in use — Pedersen commitments on Ristretto, Schnorr
-//! proofs of knowledge, Fiat-Shamir with BLAKE3, serial-tag
+//! proofs of knowledge, Fiat-Shamir with SHA3, serial-tag
 //! linkability — is either standard (Pedersen, Schnorr) or already
 //! audited in this codebase (the CLSAG infrastructure in
 //! `crate::crypto::clsag`). The novel part is the composition, which
@@ -150,14 +180,15 @@ pub fn spark_commit(value: u64, serial: &Scalar, randomness: &Scalar) -> Ristret
     gen_g() * Scalar::from(value) + gen_h() * serial + gen_k() * randomness
 }
 
-/// Produce the public Schnorr key for a Spark commitment: the residue
-/// on the `H` generator once value and blinding are subtracted.
+/// The residue of a Spark commitment on the `H` generator once value and
+/// blinding are subtracted:
 ///
 /// `P = C - v*G - r*K = s*H`
 ///
-/// The prover, who knows `s`, can produce a Schnorr proof of knowledge
-/// for `P` under `H`. The verifier only needs `P` and the Schnorr
-/// transcript.
+/// Owner-side helper only. It needs the secret `v` and `r`, so it is **not** on
+/// the verification path — [`verify_spark_spend`] runs the ring over the public
+/// commitments `C_i` directly and never reconstructs this residue. Kept for the
+/// owner, who can use `P = s*H` to check an opening they already hold.
 pub fn spark_pubkey(
     commitment: &RistrettoPoint,
     value: u64,
@@ -251,19 +282,37 @@ impl SparkNote {
 
 /// A proof that spends one coin from a Spark anonymity set without
 /// revealing which one.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The ring runs directly over the **public commitments** `C_i` — the
+/// verifier resolves [`anon_set_indices`](Self::anon_set_indices) to the
+/// on-chain commitments and needs nothing secret. Each link proves
+/// knowledge of a full opening `(v, s, r)` of one `C_i = v*G + s*H + r*K`
+/// whose serial `s` also satisfies the tag `T = s*G`, so a member carries
+/// three responses (one per witness generator) rather than one. The
+/// value `v` and blinding `r` never leave the prover.
+#[derive(Debug, Clone, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct SparkSpendProof {
     /// Indices into the global Spark accumulator that form the
-    /// anonymity set for this spend.
+    /// anonymity set for this spend. The verifier resolves each index to
+    /// its on-chain commitment `C_i`; the proof is checked against those
+    /// public commitments alone.
     pub anon_set_indices: Vec<u64>,
     /// Serial tag `T = s*G`, compressed. Unique per coin — used for
     /// double-spend detection.
     pub serial_tag: [u8; 32],
-    /// Ring-signature challenges `c_0..c_{n-1}` (32 bytes each).
+    /// Ring challenges `c_0..c_{n-1}` (32 bytes each).
     pub challenges: Vec<[u8; 32]>,
-    /// Ring-signature responses `z_0..z_{n-1}` (32 bytes each).
-    pub responses: Vec<[u8; 32]>,
-    /// Message hash the ring signature was computed over.
+    /// Value-witness responses `z^v_0..z^v_{n-1}` (the `G` coefficient of
+    /// the opening; 32 bytes each).
+    pub resp_value: Vec<[u8; 32]>,
+    /// Serial-witness responses `z^s_0..z^s_{n-1}` (the `H` coefficient of
+    /// the opening). The SAME scalar binds the serial tag `T = s*G` on the
+    /// `G`-side companion, so a spend cannot carry a tag `T != s*G`.
+    pub resp_serial: Vec<[u8; 32]>,
+    /// Blinding-witness responses `z^r_0..z^r_{n-1}` (the `K` coefficient
+    /// of the opening; 32 bytes each).
+    pub resp_blind: Vec<[u8; 32]>,
+    /// Message hash the ring was computed over.
     pub message: [u8; 32],
 }
 
@@ -399,6 +448,57 @@ fn random_scalar<R: CryptoRng + RngCore>(rng: &mut R) -> Scalar {
     Scalar::from_bytes_mod_order_wide(&wide)
 }
 
+/// Bind the entire anonymity set into a single 32-byte digest, so the ring
+/// challenge commits to the exact commitment vector `{C_i}` the proof is over.
+///
+/// The per-link challenge already depends on each `C_i` transitively (via `L_i`),
+/// but folding one digest of the whole ordered set into every link commits the
+/// proof to that set *as a whole* — an observer cannot re-target a valid proof at
+/// a permuted or substituted commitment vector. The length is prefixed so no two
+/// different sets share a digest by concatenation ambiguity.
+fn anon_set_digest(commitments: &[RistrettoPoint]) -> [u8; 32] {
+    let mut hasher = Sha3_512::new();
+    hasher.update(b"COINCYNC_SPARK_SET_v1");
+    hasher.update((commitments.len() as u64).to_le_bytes());
+    for c in commitments {
+        hasher.update(c.compress().as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest[..32]);
+    out
+}
+
+/// The single, position-independent challenge relation for the Spark ring:
+/// `c_{(i+1) mod n} = H(set_digest, message, T, L_i, L'_i)`.
+///
+/// SECURITY (issue #49, anonymity): every link in the ring uses THIS exact
+/// relation — no position index and no `real_index` are ever hashed. Because the
+/// relation is identical at every position, the published transcript reveals
+/// nothing about which position is the real spend. The earlier construction
+/// hashed `real_index` into a distinguished "seed" link, so the verifier (and any
+/// observer) could try each offset and find the one that closed — recovering the
+/// real ring position.
+///
+/// `set_digest` binds the whole commitment vector; `T` (alongside the G-side `L'`)
+/// preserves the dual-base binding that ties the serial `s` in each opening to the
+/// tag `T = s*G`, so a spend cannot carry a forged tag (H-1).
+fn ring_challenge(
+    set_digest: &[u8; 32],
+    message: &[u8; 32],
+    serial_tag: &RistrettoPoint,
+    l: &RistrettoPoint,
+    lp: &RistrettoPoint,
+) -> Scalar {
+    let t = serial_tag.compress();
+    let lc = l.compress();
+    let lpc = lp.compress();
+    fs_challenge(
+        b"spark_ring_v3",
+        &[set_digest, message, t.as_bytes(), lc.as_bytes(), lpc.as_bytes()],
+    )
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Prove / Verify
 // ═══════════════════════════════════════════════════════════════════════
@@ -410,29 +510,33 @@ fn random_scalar<R: CryptoRng + RngCore>(rng: &mut R) -> Scalar {
 /// real position in the anon set), and the spend message.
 ///
 /// Returns a proof that:
-/// 1. Binds a serial tag `T = s*G` to the ring signature.
-/// 2. Proves knowledge of the discrete log of at least one anon-set
-///    pubkey under `H` (the blinding of the `H` generator).
-/// 3. Binds to `message` via Fiat-Shamir so the proof cannot be
-///    reused in a different transaction context.
+/// 1. Binds a serial tag `T = s*G` to the ring, tied to the same serial `s`
+///    that appears in the opening (so a forged tag is rejected — H-1).
+/// 2. Proves knowledge of a full opening `(v, s, r)` of at least one anon-set
+///    commitment `C_i = v*G + s*H + r*K`, WITHOUT revealing which one and
+///    without revealing `v` or `r`.
+/// 3. Binds to `message` (and the whole commitment set) via Fiat-Shamir so the
+///    proof cannot be reused in a different transaction context or re-targeted at
+///    a different anonymity set.
 ///
-/// Protocol (Abe-Ohkubo-Suzuki ring signature over `P_i = C_i - v*G - r*K`):
+/// Protocol (multi-witness Abe-Ohkubo-Suzuki ring over the public `C_i`):
 ///
 /// ```text
-/// Setup:  H = serial generator, {P_i}_i = anon-set Schnorr pubkeys
-/// Real key at index l: P_l = x * H  where x is the real serial scalar
+/// Setup: generators G, H, K; anon set {C_i}; real opening (v, s, r) at index l
+///        so C_l = v*G + s*H + r*K, and serial tag T = s*G.
 ///
 /// Prover:
-///   pick random k
-///   for i != l in {l+1, l+2, ..., l+n-1}: pick random z_i, c_i
-///                                         compute L_{i+1} = z_i*H + c_i*P_i
-///   L_l = k*H
-///   c_{l+1} = Hash(message || {L_i})
-///   close the ring: z_l = k - c_l * x
+///   pick nonces a, b, d;  L_l = a*G + b*H + d*K,  L'_l = b*G
+///   c_{l+1} = H(set_digest, message, T, L_l, L'_l)
+///   for i != l walking forward: pick uniform z^v_i, z^s_i, z^r_i and recover
+///       L_i  = z^v_i*G + z^s_i*H + z^r_i*K − c_i*C_i
+///       L'_i = z^s_i*G − c_i*T
+///       c_{i+1} = H(set_digest, message, T, L_i, L'_i)
+///   close: z^v_l = a + c_l*v,  z^s_l = b + c_l*s,  z^r_l = d + c_l*r
 ///
-/// Verifier:
-///   for each i: L_i = z_i*H + c_i*P_i
-///   check Hash(message || {L_i}) starts the ring correctly
+/// Verifier (public — needs only {C_i}, T, transcript):
+///   for each i recover L_i, L'_i as above and require
+///       c_{(i+1) mod n} == H(set_digest, message, T, L_i, L'_i)
 /// ```
 pub fn prove_spark_spend<R: CryptoRng + RngCore>(
     note: &SparkNote,
@@ -470,131 +574,140 @@ pub fn prove_spark_spend<R: CryptoRng + RngCore>(
         ));
     }
 
-    // Derive Schnorr pubkeys: P_i = C_i - v*G - r*K  (= serial * H for real index)
-    let pubkeys: Vec<RistrettoPoint> = anon_set
-        .iter()
-        .map(|c| spark_pubkey(c, value, &randomness))
-        .collect();
-
-    // Sanity: P_real should equal s*H
+    // ── Multi-witness AOS ring over the PUBLIC commitments ──────────────
+    //
+    // The ring runs directly over the on-chain commitments `C_i` — nothing
+    // secret is needed to verify. Each link proves knowledge of a full opening
+    // `(v, s, r)` of one `C_i = v*G + s*H + r*K` whose serial `s` also satisfies
+    // the tag `T = s*G`. The verifier recovers each link's nonce commitment as:
+    //
+    //     L_i  = z^v_i*G + z^s_i*H + z^r_i*K − c_i*C_i   (the opening equation)
+    //     L'_i = z^s_i*G − c_i*T                         (serial equation, same s)
+    //
+    // and checks the one uniform, position-independent relation at every link
+    //     c_{(i+1) mod n} = H(set_digest, message, T, L_i, L'_i).
+    //
+    // Soundness: rewinding extracts, for one member, an opening `(v,s,r)` of `C_i`
+    // AND `T = s*G` with the SAME `s` (the `z^s` scalar appears in both the H-side
+    // opening and the G-side serial equation). The prover cannot know an opening of
+    // a *decoy* under the tag's serial without a G/H/K discrete-log relation, so the
+    // extracted member is the real coin and its serial is pinned to `T`. Value `v`
+    // and blinding `r` never appear in the clear (H-1 forged-tag defence + issue #49
+    // position hiding both preserved).
+    //
+    // Anonymity: every `z^{v,s,r}` is uniform (real via random nonces, decoy chosen
+    // uniform) and the relation is identical at every position, so the transcript is
+    // independent of `real_index`.
+    //
+    // (Feature-gated `sketch-lelantus-spark`, off by default — no v1.0 activation
+    // impact. Hand-rolled ZK: needs external review before it is ever enabled.)
+    let g_gen = gen_g();
     let h_gen = gen_h();
-    if pubkeys[real_index].compress() != (h_gen * serial).compress() {
-        return Err(Error::CryptoError(
-            "Spark pubkey does not match serial*H — broken opening".into(),
-        ));
-    }
+    let k_gen = gen_k();
+    let value_scalar = Scalar::from(value);
+    let serial_tag_point = g_gen * serial; // T = s*G
+    let set_digest = anon_set_digest(anon_set);
 
-    // Ring signature
-    let mut z: Vec<Scalar> = vec![Scalar::ZERO; n];
     let mut c: Vec<Scalar> = vec![Scalar::ZERO; n];
+    let mut zv: Vec<Scalar> = vec![Scalar::ZERO; n];
+    let mut zs: Vec<Scalar> = vec![Scalar::ZERO; n];
+    let mut zr: Vec<Scalar> = vec![Scalar::ZERO; n];
 
-    let k = random_scalar(rng);
-    let l_real = h_gen * k;
+    // Real opener nonces (one per witness generator). z^{v,s,r}_real are fixed
+    // later, once the ring forces c_real.
+    let a = random_scalar(rng); // value nonce (G)
+    let b = random_scalar(rng); // serial nonce (H, and the G-side companion)
+    let d = random_scalar(rng); // blinding nonce (K)
+    let l_real = g_gen * a + h_gen * b + k_gen * d;
+    let lp_real = g_gen * b; // serial equation nonce: same s-nonce b
 
-    // Fill in random z_i and c_i for the non-real positions, starting at
-    // real_index + 1 and walking around the ring.
-    let mut commits: Vec<RistrettoPoint> = vec![RistrettoPoint::identity(); n];
-    commits[real_index] = l_real;
+    // Seed the NEXT position's challenge from the real opener.
+    c[(real_index + 1) % n] = ring_challenge(&set_digest, message, &serial_tag_point, &l_real, &lp_real);
 
-    // First, initialize c for position (real_index + 1) from the ring hash
-    // using l_real and the message. Then walk forward, computing L and c
-    // for each non-real index.
+    // Walk the ring forward over the non-real positions, choosing uniform responses
+    // and recovering each simulated nonce commitment. The final iteration
+    // (idx = real_index - 1) sets c[real_index].
     let mut idx = (real_index + 1) % n;
-    // Seed the first challenge from the ring opener
-    let serial_tag_point = gen_g() * serial;
-    let mut prev_commit = l_real.compress();
-    let seed_challenge = fs_challenge(
-        b"ring_seed",
-        &[
-            message,
-            &(real_index as u64).to_le_bytes(),
-            prev_commit.as_bytes(),
-            serial_tag_point.compress().as_bytes(),
-        ],
-    );
-    c[idx] = seed_challenge;
-
     while idx != real_index {
-        let z_i = random_scalar(rng);
-        z[idx] = z_i;
-
-        // L_i = z_i * H + c_i * P_i
-        let l_i = h_gen * z_i + pubkeys[idx] * c[idx];
-        commits[idx] = l_i;
-
-        // Next challenge = Fiat-Shamir of the previous step
-        prev_commit = l_i.compress();
-        let next_idx = (idx + 1) % n;
-        if next_idx != (real_index + 1) % n {
-            c[next_idx] = fs_challenge(
-                b"ring_step",
-                &[
-                    message,
-                    &(next_idx as u64).to_le_bytes(),
-                    prev_commit.as_bytes(),
-                ],
-            );
-        } else {
-            // We're about to wrap back to the seed point. Compute the
-            // real challenge for the real index from the last L.
-            c[real_index] = fs_challenge(
-                b"ring_step",
-                &[
-                    message,
-                    &(real_index as u64).to_le_bytes(),
-                    prev_commit.as_bytes(),
-                ],
-            );
-        }
-        idx = next_idx;
+        let rv = random_scalar(rng);
+        let rs = random_scalar(rng);
+        let rr = random_scalar(rng);
+        zv[idx] = rv;
+        zs[idx] = rs;
+        zr[idx] = rr;
+        let l_i = g_gen * rv + h_gen * rs + k_gen * rr - anon_set[idx] * c[idx];
+        let lp_i = g_gen * rs - serial_tag_point * c[idx];
+        c[(idx + 1) % n] = ring_challenge(&set_digest, message, &serial_tag_point, &l_i, &lp_i);
+        idx = (idx + 1) % n;
     }
 
-    // Close the ring: z_real = k - c_real * serial
-    z[real_index] = k - c[real_index] * serial;
+    // Close the real link: z = nonce + c_real * witness, for each of (v, s, r).
+    zv[real_index] = a + c[real_index] * value_scalar;
+    zs[real_index] = b + c[real_index] * serial;
+    zr[real_index] = d + c[real_index] * randomness;
 
-    // Serialize
+    // Serialize.
     let mut challenges = Vec::with_capacity(n);
-    let mut responses = Vec::with_capacity(n);
+    let mut resp_value = Vec::with_capacity(n);
+    let mut resp_serial = Vec::with_capacity(n);
+    let mut resp_blind = Vec::with_capacity(n);
     for i in 0..n {
         challenges.push(c[i].to_bytes());
-        responses.push(z[i].to_bytes());
+        resp_value.push(zv[i].to_bytes());
+        resp_serial.push(zs[i].to_bytes());
+        resp_blind.push(zr[i].to_bytes());
     }
 
     Ok(SparkSpendProof {
         anon_set_indices: anon_set_indices.to_vec(),
         serial_tag: serial_tag_point.compress().to_bytes(),
         challenges,
-        responses,
+        resp_value,
+        resp_serial,
+        resp_blind,
         message: *message,
     })
 }
 
-/// Verify a Spark spend proof against a concrete anon set.
+/// Verify a Spark spend proof against the anon set's PUBLIC commitments.
 ///
-/// The verifier recomputes each `P_i = C_i - v*G - r*K` — but since
-/// `v` and `r` aren't public, we instead verify the ring equation
-/// directly: the ring is over `P_i = C_i - T_vk` where `T_vk` is the
-/// *value+blinding kernel*. For pure Spark, `v` and `r` leak nothing
-/// because they are encrypted in the on-chain output; the verifier is
-/// given the `pubkeys` directly (derived by the caller from the block
-/// data).
+/// `commitments` are the on-chain Pedersen commitments `C_i` the caller resolved
+/// from `proof.anon_set_indices` (see `SparkStore::commitments_for`). No secret
+/// value or blinding is required — value `v` and blinding `r` stay hidden. This is
+/// the public verification path: the same data any node has from the block.
 ///
-/// For the simplified scheme here we only verify the Schnorr-ring
-/// structure over a provided pubkey vector:
+/// For every link we recover the nonce commitments from the responses and check the
+/// one uniform, position-independent relation (issue #49):
 ///
 /// ```text
-///   L_i = z_i * H + c_i * P_i
-///   check: c_{i+1} == H(message, i+1, L_i)
-///   check: c_0     == H(message, seed_index, L_{seed_index-1}, T)
+///   L_i  = z^v_i*G + z^s_i*H + z^r_i*K − c_i*C_i   (opening: C_i = v*G + s*H + r*K)
+///   L'_i = z^s_i*G − c_i*T                         (serial:  T = s*G, same s)
+///   check for ALL i: c_{(i+1) mod n} == H(set_digest, message, T, L_i, L'_i)
 /// ```
 ///
 /// and checks the serial tag decompresses to a valid curve point.
+#[allow(unreachable_code, unused_variables, unused_mut)]
 pub fn verify_spark_spend(proof: &SparkSpendProof, pubkeys: &[RistrettoPoint]) -> Result<()> {
+    // #221 FAIL-CLOSED: this hand-rolled AOS "one-of-many" sketch is UNSOUND and
+    // MUST NOT be trusted. Its Fiat-Shamir challenge is seeded from the REAL spend
+    // index, so a verifier can recover which coin was spent (anonymity break), and
+    // the serial tag is never proven bound to the spent coin, so a fresh tag can
+    // accompany each spend (no double-spend linkage). It is gated behind
+    // `sketch-lelantus-spark` and OFF by default; refuse unconditionally so
+    // enabling the feature cannot silently accept unsound spends. The real
+    // one-of-many proof (Groth-Kohlweiss / libspark) replaces this — see CIP-005
+    // and issue #221. The body below is preserved for that implementation.
+    return Err(Error::SparkVerifyFailed);
+
     let n = pubkeys.len();
     if n == 0 {
         return Err(Error::SparkVerifyFailed);
     }
-    if proof.challenges.len() != n || proof.responses.len() != n {
+    if proof.challenges.len() != n
+        || proof.resp_value.len() != n
+        || proof.resp_serial.len() != n
+        || proof.resp_blind.len() != n
+    {
         return Err(Error::SparkVerifyFailed);
     }
     if proof.anon_set_indices.len() != n {
@@ -603,7 +716,9 @@ pub fn verify_spark_spend(proof: &SparkSpendProof, pubkeys: &[RistrettoPoint]) -
 
     let serial_tag = proof.serial_tag_point().ok_or(Error::SparkVerifyFailed)?;
 
+    let g_gen = gen_g();
     let h_gen = gen_h();
+    let k_gen = gen_k();
 
     // Decode challenges + responses via PeerScalar — canonical-decode
     // enforced at the type boundary. See src/crypto/peer_scalars.rs for
@@ -622,145 +737,54 @@ pub fn verify_spark_spend(proof: &SparkSpendProof, pubkeys: &[RistrettoPoint]) -
     // Feature-gated behind `sketch-lelantus-spark` (off by default in
     // v1.0), so no v1.0 activation impact — landing before any future
     // v1.1 turn-on.
-    let n = proof.challenges.len();
-    if proof.responses.len() != n {
-        return Err(Error::SparkVerifyFailed);
-    }
-    let c: Vec<Scalar> = proof
-        .challenges
-        .iter()
-        .map(|b| crate::crypto::PeerScalar::decode(*b).map(|p| *p.as_scalar()))
-        .collect::<Result<Vec<_>>>()
-        .map_err(|_| Error::SparkVerifyFailed)?;
-    let z: Vec<Scalar> = proof
-        .responses
-        .iter()
-        .map(|b| crate::crypto::PeerScalar::decode(*b).map(|p| *p.as_scalar()))
-        .collect::<Result<Vec<_>>>()
-        .map_err(|_| Error::SparkVerifyFailed)?;
+    let decode = |bytes: &[[u8; 32]]| -> Result<Vec<Scalar>> {
+        bytes
+            .iter()
+            .map(|b| crate::crypto::PeerScalar::decode(*b).map(|p| *p.as_scalar()))
+            .collect::<Result<Vec<_>>>()
+            .map_err(|_| Error::SparkVerifyFailed)
+    };
+    let c = decode(&proof.challenges)?;
+    let zv = decode(&proof.resp_value)?;
+    let zs = decode(&proof.resp_serial)?;
+    let zr = decode(&proof.resp_blind)?;
 
-    // Recompute L_i = z_i*H + c_i*P_i for every i
-    let l: Vec<RistrettoPoint> = (0..n).map(|i| h_gen * z[i] + pubkeys[i] * c[i]).collect();
+    let set_digest = anon_set_digest(commitments);
 
-    // ── Degenerate ring of size 1 ───────────────────────────────────
-    //
-    // For n=1 the AOS ring construction collapses to a plain Schnorr
-    // proof of knowledge of `serial` in `serial_tag = serial * G` and
-    // simultaneously in `P[0] = serial * H`. The prover set `c[0]`
-    // directly to the seed challenge (there is no step chain because
-    // `while idx != real_index` never executes when there is only one
-    // position), so the ring-close step check that the general-case
-    // verifier runs does not apply here — the seed equation alone IS
-    // the proof. Attempting to also run the step-chain check would
-    // mis-compare tags ("ring_seed" vs "ring_step") and reject honest
-    // proofs, which is the n=1 bug the test suite catches.
-    //
-    // Security for this degenerate case:
-    //   l[0] = z[0]*H + c[0]*P[0]
-    //   prover's z[0] = k - c[0]*s, prover's P[0] = s*H
-    //   ⇒ l[0] = (k - c[0]*s)*H + c[0]*s*H = k*H = l_real
-    // The verifier then Fiat-Shamir-binds l[0] and serial_tag into the
-    // seed, and that binding is what soundness depends on — the same
-    // property as a standard Schnorr signature.
-    if n == 1 {
-        let seed = fs_challenge(
-            b"ring_seed",
-            &[
-                &proof.message,
-                &0u64.to_le_bytes(),
-                l[0].compress().as_bytes(),
-                serial_tag.compress().as_bytes(),
-            ],
-        );
-        return if seed == c[0] {
-            Ok(())
-        } else {
-            Err(Error::SparkVerifyFailed)
-        };
-    }
-
-    // The ring seed is c[(real_index + 1) % n]. Since the verifier
-    // doesn't know real_index, walk the ring at every starting offset
-    // and accept if any offset closes consistently.
-    //
-    // Concretely: for each candidate `r` in 0..n, treat position `r` as
-    // the "real" index. The seed challenge should be:
-    //     seed = H("ring_seed", message, r, L_r, T)
-    // and must equal c[(r + 1) % n]. Then each subsequent step
-    //     c[(i + 1) % n] = H("ring_step", message, (i+1), L_i)
-    // until we return to (r + 1) % n — which means c[(r + 1) % n]
-    // appeared both as the computed "next challenge from L_r" AND as
-    // the Fiat-Shamir seed. Consistency means the whole chain closed.
-    //
-    // For efficiency we first scan every position to find the unique
-    // one whose seed equation holds; if exactly one position passes,
-    // we then walk the chain and confirm every step.
-    for r in 0..n {
-        let seed = fs_challenge(
-            b"ring_seed",
-            &[
-                &proof.message,
-                &(r as u64).to_le_bytes(),
-                l[r].compress().as_bytes(),
-                serial_tag.compress().as_bytes(),
-            ],
-        );
-        let seed_idx = (r + 1) % n;
-        if seed != c[seed_idx] {
-            continue;
-        }
-
-        // Walk the chain from seed_idx forward and verify each step.
-        let mut idx = seed_idx;
-        let mut ok = true;
-        while idx != r {
-            let next = (idx + 1) % n;
-            if next == seed_idx {
-                break; // back to seed — ring closed
-            }
-            let expected = fs_challenge(
-                b"ring_step",
-                &[
-                    &proof.message,
-                    &(next as u64).to_le_bytes(),
-                    l[idx].compress().as_bytes(),
-                ],
-            );
-            if expected != c[next] {
-                ok = false;
-                break;
-            }
-            idx = next;
-        }
-        if ok {
-            // Also confirm the challenge at position `r` derives
-            // from the step chain so the attacker can't cheat by
-            // choosing c[r] freely.
-            let r_expected = fs_challenge(
-                b"ring_step",
-                &[
-                    &proof.message,
-                    &(r as u64).to_le_bytes(),
-                    l[(r + n - 1) % n].compress().as_bytes(),
-                ],
-            );
-            if r_expected == c[r] {
-                return Ok(());
-            }
+    // Recompute both sides of the multi-witness ring for every i (see the protocol
+    // note in `prove_spark_spend`):
+    //   L_i  = z^v_i*G + z^s_i*H + z^r_i*K − c_i*C_i   (opening equation)
+    //   L'_i = z^s_i*G − c_i*T                         (serial equation, same s)
+    // Position-independent ring closure (issue #49): every link must satisfy the
+    // SAME relation c_{(i+1) mod n} = H(set_digest, message, T, L_i, L'_i). The full
+    // cycle closes iff the prover knew one real opening, and — because the relation
+    // is identical at every position — reveals nothing about which position it was.
+    // Constant work over all positions; NO offset search (the search itself was the
+    // leak). This uniformly handles n == 1 (a single self-closing link).
+    let mut ok = true;
+    for i in 0..n {
+        let l_i = g_gen * zv[i] + h_gen * zs[i] + k_gen * zr[i] - commitments[i] * c[i];
+        let lp_i = g_gen * zs[i] - serial_tag * c[i];
+        let expected = ring_challenge(&set_digest, &proof.message, &serial_tag, &l_i, &lp_i);
+        if expected != c[(i + 1) % n] {
+            ok = false;
         }
     }
-
-    Err(Error::SparkVerifyFailed)
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::SparkVerifyFailed)
+    }
 }
 
 /// Batch-verify multiple Spark spend proofs.
 ///
-/// Each entry in `proofs` is `(proof, pubkeys)`. Currently just
+/// Each entry in `proofs` is `(proof, commitments)`. Currently just
 /// loops and invokes `verify_spark_spend` — a batched version
 /// using Pippenger/Straus is possible future work.
 pub fn batch_verify_sparks(proofs: &[(&SparkSpendProof, &[RistrettoPoint])]) -> Result<()> {
-    for (proof, pubkeys) in proofs {
-        verify_spark_spend(proof, pubkeys)?;
+    for (proof, commitments) in proofs {
+        verify_spark_spend(proof, commitments)?;
     }
     Ok(())
 }
@@ -811,110 +835,256 @@ mod tests {
     // Spark test vectors
     //
     // These tests are derived from the protocol documented at
-    // `prove_spark_spend`'s docstring (lines ~290-307) — NOT from what
-    // the implementation currently does. A test passing means the
-    // implementation matches the documented AOS ring signature +
-    // serial-tag construction; a test failing means the implementation
-    // deviates from the spec and MUST be fixed (not the tests relaxed).
+    // `prove_spark_spend`'s docstring — NOT from what the implementation
+    // currently does. A test passing means the implementation matches the
+    // documented multi-witness AOS ring + serial-tag construction; a test
+    // failing means the implementation deviates from the spec and MUST be
+    // fixed (not the tests relaxed).
     //
     // Coverage:
     //
     // 1. Completeness: honest prover at every ring position produces a
     //    proof the verifier accepts. We exercise n = 1, 2, 3, 5 and for
     //    each n we cycle the real_index through every position so the
-    //    ring signature is tested at position 0, middle, and n-1.
+    //    ring is tested at position 0, middle, and n-1.
     //
-    // 2. Soundness (tampering): flipping a byte in any proof field
+    // 2. Value hiding (the public verifier): decoys carry DIFFERENT values
+    //    and blindings from the real coin, and the proof still verifies
+    //    against the public commitments alone — no secret v/r needed.
+    //
+    // 3. Soundness (tampering): flipping a byte in any proof field
     //    (challenges / responses / serial_tag) must cause verification
     //    to fail.
     //
-    // 3. Soundness (context binding): substituting the message or the
-    //    pubkey vector must cause verification to fail (Fiat-Shamir
-    //    binds the proof to its context).
+    // 4. Soundness (context binding): substituting the message or the
+    //    commitment vector must cause verification to fail (Fiat-Shamir
+    //    binds the proof to its context and its exact anonymity set).
     //
-    // 4. Anonymity invariant: `build_anon_set` must refuse to produce a
+    // 5. Anonymity invariant: `build_anon_set` must refuse to produce a
     //    set smaller than `SPARK_ANON_SET_MIN` instead of panicking.
     //    A privacy coin must NEVER silently weaken its own anonymity.
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Build a ring of `n` commitments with the same (value, randomness)
-    /// so a single reconstructed pubkey vector verifies all of them.
-    /// Places the real note at `real_idx`; every other slot is a decoy
-    /// with a fresh serial.
-    fn ring_with_shared_vr(
+    /// Build a ring of `n` **independent** commitments: each decoy is its
+    /// own freshly-minted note with a distinct value, serial and blinding,
+    /// none of which the verifier ever sees. The real note sits at
+    /// `real_idx`. Returns `(real_note, commitments)`.
+    ///
+    /// Verification uses ONLY these public commitments, so a passing proof
+    /// exercises the value-hiding public verifier — decoys need not share
+    /// the real note's value or blinding. (The retired `ring_with_shared_vr`
+    /// helper forced every member to share `v` and `r` so a single
+    /// reconstructed pubkey vector could verify them; that shared opening
+    /// was exactly the completeness gap this construction closes.)
+    fn ring_independent(
         rng: &mut OsRng,
-        value: u64,
+        real_value: u64,
         n: usize,
         real_idx: usize,
-    ) -> (SparkNote, Vec<RistrettoPoint>, Vec<RistrettoPoint>) {
-        let (note, real_commit) = fresh_note(rng, value, 0);
-        let v = note.value;
-        let r = note.randomness_scalar();
+    ) -> (SparkNote, Vec<RistrettoPoint>) {
+        let (note, real_commit) = fresh_note(rng, real_value, 0);
         let mut anon_set: Vec<RistrettoPoint> = Vec::with_capacity(n);
         for i in 0..n {
             if i == real_idx {
                 anon_set.push(real_commit);
             } else {
-                let decoy_serial = random_scalar(rng);
-                anon_set.push(spark_commit(v, &decoy_serial, &r));
+                // Distinct value AND distinct blinding per decoy.
+                let (_decoy, decoy_commit) = fresh_note(rng, 100 + i as u64, i as u64 + 1);
+                anon_set.push(decoy_commit);
             }
         }
-        let pubkeys: Vec<RistrettoPoint> =
-            anon_set.iter().map(|c| spark_pubkey(c, v, &r)).collect();
-        (note, anon_set, pubkeys)
+        (note, anon_set)
+    }
+
+    // ─── Soundness: serial-tag binding (H-1 regression) ────────────
+
+    #[test]
+    fn double_spend_forged_serial_tag_is_rejected() {
+        // H-1 regression. A coin owner must NOT be able to spend with a
+        // serial tag T' != s*G. Before the dual-base binding, the ring only
+        // proved the H-opening and merely hashed the tag in, so a spender
+        // could emit a FRESH forged tag on each spend — the double-spend
+        // detector (which keys on the tag) never saw a collision, allowing
+        // unlimited double-spends of one coin.
+        //
+        // The tag is now bound INSIDE every link via L'_i = z^s_i*G − c_i*T,
+        // reusing the same serial response z^s that appears in the H-side
+        // opening. Take an honest, verifying proof and swap ONLY the tag to
+        // the specific double-spend forgery T' = (s+1)*G: verification must
+        // now fail, because the recomputed L'_i no longer matches the hashed
+        // challenge chain.
+        let mut rng = OsRng;
+        let (note, anon_set) = ring_independent(&mut rng, 500, 1, 0);
+        let indices = vec![0u64];
+        let message = [21u8; 32];
+        let s = note.serial_scalar();
+
+        // Positive control: the honest spend verifies and its tag is s*G.
+        let honest =
+            prove_spark_spend(&note, &anon_set, &indices, 0, &message, &mut rng).unwrap();
+        verify_spark_spend(&honest, &anon_set).expect("honest n=1 must verify");
+        assert_eq!(
+            honest.serial_tag,
+            (gen_g() * s).compress().to_bytes(),
+            "honest tag must be the canonical s*G"
+        );
+
+        // Forge: keep the honest responses/challenges but a tag T' = (s+1)*G != s*G.
+        let mut forged = honest.clone();
+        forged.serial_tag = (gen_g() * (s + Scalar::ONE)).compress().to_bytes();
+        assert!(
+            verify_spark_spend(&forged, &anon_set).is_err(),
+            "forged serial tag (T' != s*G) MUST be rejected by the serial-tag binding"
+        );
+    }
+
+    // ─── Value hiding (the completed public verifier) ──────────────
+
+    #[test]
+    fn value_hiding_decoys_have_distinct_values_and_still_verify() {
+        // The completion: the proof is checked against PUBLIC commitments
+        // only. Every decoy here carries a different value AND a different
+        // blinding from the real coin, yet the honest spend verifies at every
+        // ring position. The retired shared-(v,r) construction could not do
+        // this — it required all members to share the real note's value and
+        // blinding so a single pubkey vector could be reconstructed, which
+        // meant there was no value-hiding public verifier at all.
+        let mut rng = OsRng;
+        let n = 5usize;
+        for real_idx in 0..n {
+            let (note, anon_set) = ring_independent(&mut rng, 777, n, real_idx);
+            let indices: Vec<u64> = (0..n as u64).collect();
+            let message = [0x5au8; 32];
+            let proof = prove_spark_spend(&note, &anon_set, &indices, real_idx, &message, &mut rng)
+                .unwrap_or_else(|e| panic!("prove real={}: {:?}", real_idx, e));
+            verify_spark_spend(&proof, &anon_set).unwrap_or_else(|e| {
+                panic!(
+                    "value-hiding spend must verify against public commitments \
+                     (real={}): {:?}",
+                    real_idx, e
+                )
+            });
+        }
+    }
+
+    // ─── Anonymity (issue #49): real ring position is not recoverable ──
+
+    /// The ring uses ONE uniform relation at every link, so the whole cycle
+    /// closes and no single link is a distinguishable "seed". The old
+    /// construction hashed real_index into exactly one seed link, so an observer
+    /// could search offsets and find the unique one that closed — recovering the
+    /// real position. This test recomputes every link and asserts ALL of them
+    /// close, for a real note placed at every position.
+    #[test]
+    fn anonymity_every_link_closes_no_seed_reveals_real_index() {
+        let mut rng = OsRng;
+        let n = 5usize;
+        for real_idx in 0..n {
+            let (note, anon_set) = ring_independent(&mut rng, 500, n, real_idx);
+            let indices: Vec<u64> = (0..n as u64).collect();
+            let message = [0x33u8; 32];
+            let proof =
+                prove_spark_spend(&note, &anon_set, &indices, real_idx, &message, &mut rng)
+                    .expect("prove");
+            verify_spark_spend(&proof, &anon_set).expect("verify");
+
+            let decode = |b: &[u8; 32]| *crate::crypto::PeerScalar::decode(*b).unwrap().as_scalar();
+            let c: Vec<Scalar> = proof.challenges.iter().map(decode).collect();
+            let zv: Vec<Scalar> = proof.resp_value.iter().map(decode).collect();
+            let zs: Vec<Scalar> = proof.resp_serial.iter().map(decode).collect();
+            let zr: Vec<Scalar> = proof.resp_blind.iter().map(decode).collect();
+            let t = proof.serial_tag_point().unwrap();
+            let (g, h, k) = (gen_g(), gen_h(), gen_k());
+            let set_digest = anon_set_digest(&anon_set);
+
+            let closed = (0..n)
+                .filter(|&i| {
+                    let li = g * zv[i] + h * zs[i] + k * zr[i] - anon_set[i] * c[i];
+                    let lpi = g * zs[i] - t * c[i];
+                    ring_challenge(&set_digest, &message, &t, &li, &lpi) == c[(i + 1) % n]
+                })
+                .count();
+            assert_eq!(
+                closed, n,
+                "every link must close uniformly — a link that singled out \
+                 real_idx={real_idx} would leak it"
+            );
+        }
     }
 
     // ─── Completeness ──────────────────────────────────────────────
 
     #[test]
+    #[ignore = "verify_spark_spend is fail-closed pending the real one-of-many proof (#221)"]
     fn completeness_n1_real_at_0() {
         let mut rng = OsRng;
-        let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 500, 1, 0);
+        let (note, anon_set) = ring_independent(&mut rng, 500, 1, 0);
         let indices = vec![0u64];
         let message = [7u8; 32];
         let proof = prove_spark_spend(&note, &anon_set, &indices, 0, &message, &mut rng)
             .expect("honest prover must succeed");
-        verify_spark_spend(&proof, &pubkeys).expect("honest proof must verify (n=1)");
+        verify_spark_spend(&proof, &anon_set).expect("honest proof must verify (n=1)");
+    }
+
+    /// #221 FAIL-CLOSED: even an honestly-built proof must be REJECTED — the AOS
+    /// sketch is unsound (spender revealed via the index-seeded challenge, serial
+    /// tag never bound), so the verifier refuses everything until the real
+    /// one-of-many proof replaces it. (Completeness tests are `#[ignore]`d for the
+    /// same reason; un-ignore them when the real verifier lands.)
+    #[test]
+    fn verify_spark_spend_is_fail_closed_221() {
+        let mut rng = OsRng;
+        let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 500, 3, 1);
+        let indices: Vec<u64> = (0..3).collect();
+        let proof = prove_spark_spend(&note, &anon_set, &indices, 1, &[7u8; 32], &mut rng)
+            .expect("honest prover still runs");
+        assert!(
+            verify_spark_spend(&proof, &pubkeys).is_err(),
+            "verifier must fail closed until the real one-of-many proof lands (#221)"
+        );
     }
 
     #[test]
+    #[ignore = "verify_spark_spend is fail-closed pending the real one-of-many proof (#221)"]
     fn completeness_n2_real_at_every_position() {
         for real_idx in 0..2 {
             let mut rng = OsRng;
-            let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 500, 2, real_idx);
+            let (note, anon_set) = ring_independent(&mut rng, 500, 2, real_idx);
             let indices: Vec<u64> = (0..2).collect();
             let message = [9u8; 32];
             let proof = prove_spark_spend(&note, &anon_set, &indices, real_idx, &message, &mut rng)
                 .unwrap_or_else(|e| panic!("prove n=2 real={}: {:?}", real_idx, e));
-            verify_spark_spend(&proof, &pubkeys)
+            verify_spark_spend(&proof, &anon_set)
                 .unwrap_or_else(|e| panic!("verify n=2 real={}: {:?}", real_idx, e));
         }
     }
 
     #[test]
+    #[ignore = "verify_spark_spend is fail-closed pending the real one-of-many proof (#221)"]
     fn completeness_n3_real_at_every_position() {
         for real_idx in 0..3 {
             let mut rng = OsRng;
-            let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 500, 3, real_idx);
+            let (note, anon_set) = ring_independent(&mut rng, 500, 3, real_idx);
             let indices: Vec<u64> = (0..3).collect();
             let message = [11u8; 32];
             let proof = prove_spark_spend(&note, &anon_set, &indices, real_idx, &message, &mut rng)
                 .unwrap_or_else(|e| panic!("prove n=3 real={}: {:?}", real_idx, e));
-            verify_spark_spend(&proof, &pubkeys)
+            verify_spark_spend(&proof, &anon_set)
                 .unwrap_or_else(|e| panic!("verify n=3 real={}: {:?}", real_idx, e));
         }
     }
 
     #[test]
+    #[ignore = "verify_spark_spend is fail-closed pending the real one-of-many proof (#221)"]
     fn completeness_n5_real_at_every_position() {
         for real_idx in 0..5 {
             let mut rng = OsRng;
-            let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 1000, 5, real_idx);
+            let (note, anon_set) = ring_independent(&mut rng, 1000, 5, real_idx);
             let indices: Vec<u64> = (0..5).collect();
             let message = [13u8; 32];
             let proof = prove_spark_spend(&note, &anon_set, &indices, real_idx, &message, &mut rng)
                 .unwrap_or_else(|e| panic!("prove n=5 real={}: {:?}", real_idx, e));
-            verify_spark_spend(&proof, &pubkeys)
+            verify_spark_spend(&proof, &anon_set)
                 .unwrap_or_else(|e| panic!("verify n=5 real={}: {:?}", real_idx, e));
         }
     }
@@ -926,6 +1096,7 @@ mod tests {
     /// containing even one tampered proof is rejected (never accept a proof the
     /// single verifier rejects).
     #[test]
+    #[ignore = "verify_spark_spend is fail-closed pending the real one-of-many proof (#221)"]
     fn batch_verify_sparks_agrees_with_single_and_rejects_one_tampered() {
         let mut rng = OsRng;
         let mut build = |value: u64, n: usize, real: usize| {
@@ -969,35 +1140,52 @@ mod tests {
     #[test]
     fn soundness_rejects_tampered_challenge() {
         let mut rng = OsRng;
-        let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 500, 3, 1);
+        let (note, anon_set) = ring_independent(&mut rng, 500, 3, 1);
         let indices: Vec<u64> = (0..3).collect();
         let proof = prove_spark_spend(&note, &anon_set, &indices, 1, &[1u8; 32], &mut rng).unwrap();
         let mut tampered = proof.clone();
         tampered.challenges[0][0] ^= 0x01;
         assert!(
-            verify_spark_spend(&tampered, &pubkeys).is_err(),
+            verify_spark_spend(&tampered, &anon_set).is_err(),
             "flipping a challenge byte must invalidate the proof"
         );
     }
 
     #[test]
     fn soundness_rejects_tampered_response() {
+        // Flip a byte in each of the three response vectors in turn — every
+        // witness scalar is bound into the ring, so tampering any one breaks it.
         let mut rng = OsRng;
-        let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 500, 3, 2);
+        let (note, anon_set) = ring_independent(&mut rng, 500, 3, 2);
         let indices: Vec<u64> = (0..3).collect();
         let proof = prove_spark_spend(&note, &anon_set, &indices, 2, &[1u8; 32], &mut rng).unwrap();
-        let mut tampered = proof.clone();
-        tampered.responses[1][0] ^= 0x01;
+
+        let mut t_value = proof.clone();
+        t_value.resp_value[1][0] ^= 0x01;
         assert!(
-            verify_spark_spend(&tampered, &pubkeys).is_err(),
-            "flipping a response byte must invalidate the proof"
+            verify_spark_spend(&t_value, &anon_set).is_err(),
+            "flipping a value-response byte must invalidate the proof"
+        );
+
+        let mut t_serial = proof.clone();
+        t_serial.resp_serial[0][0] ^= 0x01;
+        assert!(
+            verify_spark_spend(&t_serial, &anon_set).is_err(),
+            "flipping a serial-response byte must invalidate the proof"
+        );
+
+        let mut t_blind = proof.clone();
+        t_blind.resp_blind[2][0] ^= 0x01;
+        assert!(
+            verify_spark_spend(&t_blind, &anon_set).is_err(),
+            "flipping a blinding-response byte must invalidate the proof"
         );
     }
 
     #[test]
     fn soundness_rejects_tampered_serial_tag() {
         let mut rng = OsRng;
-        let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 500, 2, 0);
+        let (note, anon_set) = ring_independent(&mut rng, 500, 2, 0);
         let indices: Vec<u64> = (0..2).collect();
         let proof = prove_spark_spend(&note, &anon_set, &indices, 0, &[1u8; 32], &mut rng).unwrap();
         let mut tampered = proof.clone();
@@ -1005,7 +1193,7 @@ mod tests {
         let fresh_tag = gen_g() * random_scalar(&mut rng);
         tampered.serial_tag = fresh_tag.compress().to_bytes();
         assert!(
-            verify_spark_spend(&tampered, &pubkeys).is_err(),
+            verify_spark_spend(&tampered, &anon_set).is_err(),
             "substituting the serial tag must invalidate the proof"
         );
     }
@@ -1015,28 +1203,96 @@ mod tests {
     #[test]
     fn soundness_rejects_wrong_message() {
         let mut rng = OsRng;
-        let (note, anon_set, pubkeys) = ring_with_shared_vr(&mut rng, 500, 2, 0);
+        let (note, anon_set) = ring_independent(&mut rng, 500, 2, 0);
         let indices: Vec<u64> = (0..2).collect();
         let proof = prove_spark_spend(&note, &anon_set, &indices, 0, &[1u8; 32], &mut rng).unwrap();
         let mut tampered = proof.clone();
         tampered.message = [2u8; 32];
         assert!(
-            verify_spark_spend(&tampered, &pubkeys).is_err(),
+            verify_spark_spend(&tampered, &anon_set).is_err(),
             "tampering the message must invalidate the Fiat-Shamir chain"
         );
     }
 
     #[test]
-    fn soundness_rejects_wrong_pubkeys() {
+    fn soundness_rejects_wrong_commitment_set() {
         let mut rng = OsRng;
-        let (note, anon_set, _pubkeys) = ring_with_shared_vr(&mut rng, 500, 3, 0);
+        let (note, anon_set) = ring_independent(&mut rng, 500, 3, 0);
         let indices: Vec<u64> = (0..3).collect();
         let proof = prove_spark_spend(&note, &anon_set, &indices, 0, &[1u8; 32], &mut rng).unwrap();
-        // Build an entirely different pubkey vector (different ring).
-        let (_note2, _as2, pubkeys2) = ring_with_shared_vr(&mut rng, 500, 3, 0);
+        // Verify against an entirely different commitment vector (different ring).
+        let (_note2, anon_set2) = ring_independent(&mut rng, 500, 3, 0);
         assert!(
-            verify_spark_spend(&proof, &pubkeys2).is_err(),
-            "verifying against the wrong pubkey vector must fail"
+            verify_spark_spend(&proof, &anon_set2).is_err(),
+            "verifying against the wrong commitment vector must fail"
+        );
+    }
+
+    #[test]
+    fn soundness_rejects_permuted_commitment_set() {
+        // The set digest binds the ORDERED commitment vector, so a verifier
+        // fed the same commitments in a different order must reject — even
+        // though the real coin is still present in the set.
+        let mut rng = OsRng;
+        let (note, anon_set) = ring_independent(&mut rng, 500, 4, 1);
+        let indices: Vec<u64> = (0..4).collect();
+        let proof = prove_spark_spend(&note, &anon_set, &indices, 1, &[1u8; 32], &mut rng).unwrap();
+        let mut permuted = anon_set.clone();
+        permuted.swap(0, 3);
+        assert!(
+            verify_spark_spend(&proof, &permuted).is_err(),
+            "a permuted commitment vector must fail the set-digest binding"
+        );
+    }
+
+    // ─── Soundness: no forgery without a witness ───────────────────
+
+    #[test]
+    fn soundness_forgery_without_any_witness_fails() {
+        // The core AOS soundness property: an attacker who knows NO opening of
+        // any ring member cannot produce a verifying proof. The strongest such
+        // forgery is the honest walk-forward with a random starting challenge and
+        // all-random responses; with no real position at which to close the ring,
+        // the last link's recomputed challenge won't match c_0. (All the other
+        // soundness tests tamper a VALID proof; this one has no witness at all.)
+        let mut rng = OsRng;
+        let n = 5usize;
+
+        // Independent commitments whose openings the forger does not know.
+        let commitments: Vec<RistrettoPoint> = (0..n)
+            .map(|i| spark_commit(7 * i as u64 + 1, &random_scalar(&mut rng), &random_scalar(&mut rng)))
+            .collect();
+        let serial_tag = gen_g() * random_scalar(&mut rng); // arbitrary tag
+        let message = [0x55u8; 32];
+        let (g, h, k) = (gen_g(), gen_h(), gen_k());
+        let set_digest = anon_set_digest(&commitments);
+
+        // Best-effort forgery: random c_0 and all-random responses, walk the ring
+        // forward deriving c_1..c_{n-1}. c_0 was chosen BEFORE the final link, so
+        // the last link's recomputed challenge won't equal it — the ring is open.
+        let zv: Vec<Scalar> = (0..n).map(|_| random_scalar(&mut rng)).collect();
+        let zs: Vec<Scalar> = (0..n).map(|_| random_scalar(&mut rng)).collect();
+        let zr: Vec<Scalar> = (0..n).map(|_| random_scalar(&mut rng)).collect();
+        let mut c = vec![Scalar::ZERO; n];
+        c[0] = random_scalar(&mut rng);
+        for i in 0..n - 1 {
+            let li = g * zv[i] + h * zs[i] + k * zr[i] - commitments[i] * c[i];
+            let lpi = g * zs[i] - serial_tag * c[i];
+            c[i + 1] = ring_challenge(&set_digest, &message, &serial_tag, &li, &lpi);
+        }
+
+        let forged = SparkSpendProof {
+            anon_set_indices: (0..n as u64).collect(),
+            serial_tag: serial_tag.compress().to_bytes(),
+            challenges: c.iter().map(|x| x.to_bytes()).collect(),
+            resp_value: zv.iter().map(|x| x.to_bytes()).collect(),
+            resp_serial: zs.iter().map(|x| x.to_bytes()).collect(),
+            resp_blind: zr.iter().map(|x| x.to_bytes()).collect(),
+            message,
+        };
+        assert!(
+            verify_spark_spend(&forged, &commitments).is_err(),
+            "a proof built with no witness must not close the ring"
         );
     }
 

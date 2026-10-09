@@ -208,25 +208,16 @@ impl Address {
         let address_type = AddressType::from_byte(data[1])
             .ok_or_else(|| Error::InvalidAddress("bad type".into()))?;
 
-        // W-1/W-B launch-safety gate: subaddresses are DISABLED on mainnet in
-        // this release. Funds received at a subaddress are permanently
-        // unspendable (the spend-side one-time-secret / key-image derivation
-        // omits the per-subaddress offset m_i). Rejecting the type at the
-        // parse boundary closes the whole surface at once — no mainnet
-        // send-to-subaddress, core-send, or scan path can act on one, since
-        // every one of them routes address strings through here. Subaddresses
-        // remain available on testnet/regtest so the real spend-side fix can be
-        // developed + round-trip tested. See project_full_audit_2026-08-16 (W-1)
-        // and the sweep finding W-B (the prior legacy.rs generation-only gate
-        // did not cover send/parse). Remove this gate when the spend fix ships.
-        if network == Network::Mainnet && address_type == AddressType::Subaddress {
-            return Err(Error::InvalidAddress(
-                "subaddresses are disabled on mainnet in this release (funds \
-                 received at a subaddress would be permanently unspendable); \
-                 use a standard address"
-                    .into(),
-            ));
-        }
+        // W-1/W-B gate LIFTED: the spend-side one-time-secret / key-image
+        // derivation now applies the per-subaddress offset m_i (the W-A fix in
+        // wallet::subaddress::compute_subaddress_spend_secret, used by both the
+        // scanner and the send path), so subaddress-received funds are
+        // spendable. Verified end-to-end by the receive->spend->validate
+        // round-trip test `real_crypto_subaddress_output_spendable_e2e`
+        // (tests/full_pipeline_real_crypto.rs) plus the key-image regression
+        // `subaddress_output_is_spendable_wa_regression` (wallet::scanner). The
+        // mainnet parse-boundary rejection this comment used to guard has been
+        // removed. See project_full_audit_2026-08-16 (W-1) / W-B for history.
 
         // M-3 FIX: Reject oversized payloads — each address type has a fixed length
         // (including the 4-byte checksum already stripped into `bytes`).
@@ -474,13 +465,14 @@ mod tests {
     }
 
     #[test]
-    fn mainnet_subaddress_rejected_but_testnet_subaddress_accepted() {
+    fn subaddress_roundtrips_on_mainnet_and_testnet_after_w1_gate_lift() {
         let (_s1, spend) = generate_ec_keypair();
         let (_s2, view) = generate_ec_keypair();
 
-        // W-1/W-B launch-safety gate: a mainnet subaddress must be rejected at
-        // the parse boundary (funds received at one would be permanently
-        // unspendable in this release).
+        // W-1/W-B gate LIFTED (this PR): the spend-side one-time-secret /
+        // key-image derivation now applies the per-subaddress offset m_i, so
+        // subaddress-received funds are spendable and a mainnet subaddress
+        // parses (round-trips) instead of being rejected at the parse boundary.
         let mainnet_sub = Address {
             network: Network::Mainnet,
             address_type: AddressType::Subaddress,
@@ -488,11 +480,10 @@ mod tests {
             view_public_key: view,
             payment_id: None,
         };
-        let err = Address::from_bytes(&mainnet_sub.to_bytes()).unwrap_err();
-        assert!(matches!(err, Error::InvalidAddress(_)));
+        let parsed = Address::from_bytes(&mainnet_sub.to_bytes()).unwrap();
+        assert_eq!(parsed, mainnet_sub);
 
-        // The same subaddress on testnet is still accepted — the gate is
-        // mainnet-only so the spend-side fix can be developed/round-tripped.
+        // Testnet subaddress round-trips too (always did).
         let testnet_sub = Address {
             network: Network::Testnet,
             address_type: AddressType::Subaddress,

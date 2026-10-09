@@ -180,3 +180,7 @@ docs/audit/.coverage-history.json
 # Python bytecode cache (audit tool)
 __pycache__/
 *.pyc
+
+# Local 24h-soak harness output (pure run/build artifacts — never tracked)
+.localnet-soak24/
+target-soak/

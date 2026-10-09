@@ -216,6 +216,13 @@ const RPC_ALLOWED_METHODS: &[&str] = &[
     // ── P0 (currently registered on jsonrpsee server) ──────
     // Node info — exercised by explorer and TUIs.
     "get_info",
+    // Stable, versioned health subset for monitoring / LB health checks /
+    // partition detectors (crate::vitals). Read-only, non-sensitive.
+    "get_vitals",
+    // Non-consensus difficulty / block-interval telemetry. Read-only.
+    "get_difficulty_health",
+    // Non-consensus mempool-health schema. Read-only.
+    "get_mempool_health",
     "get_blockchain_info",
     "get_network_info",
     "get_sync_status",

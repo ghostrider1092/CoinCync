@@ -47,6 +47,10 @@ const CRITICAL_FILES: &[&str] = &[
     "src/consensus/block.rs",  // block-level validation (merkle, coinbase, key images)
     "src/primitives/hash.rs",  // merkle_root + difficulty<->target encoding
     "src/consensus/finality.rs", // max-reorg-depth / finality rule
+    // Added 2026-09-29: further consensus surface that was still unlocked.
+    "src/config.rs",           // per-network params + ALL consensus activation heights + magic bytes
+    "src/emission/supply.rs",  // SupplyStats + calculate_supply_commitment (supply accounting)
+    "src/consensus/mod.rs",    // consensus module root: shared consensus constants / re-exports
 ];
 
 fn main() {

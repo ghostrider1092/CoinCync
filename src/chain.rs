@@ -377,6 +377,11 @@ mod events;
 /// spentness against real chain state so auditors can anchor-verify packages.
 mod compliance_view;
 pub use compliance_view::NodeChainView;
+/// Block-application helpers (issue #108). First `add_block` decomposition
+/// slice: the pre-application classifier (`classify_incoming`). Pure reads +
+/// the orphan-event record; called under `apply_lock` by `add_block` exactly
+/// where the inline checks ran, so lock scope is unchanged.
+mod apply;
 
 /// Blockchain state machine with interior mutability
 pub struct Blockchain {
@@ -1170,15 +1175,15 @@ impl Blockchain {
                     );
                 }
                 RewindOutcome::Stranded { remaining } => {
+                    // Coded diagnostic (merged from main): stable code + invariant +
+                    // enforcing location + fix pointer; `coincync-diag explain CYNC-STOR-001`.
                     tracing::error!(
-                        "{}_store.rewind() FAILED at h={} with {} element(s) still \
-                         held — a disconnected block's Phase-2 state cannot be rolled \
-                         back and is now inconsistent with the reorged chain. \
-                         shielded/spark/MW MUST NOT be activated until rewind \
-                         checkpoints are restart-durable (phase-2-reorg-rewind).",
-                        name,
-                        height,
-                        remaining
+                        "
+{}",
+                        crate::diagnostics::Report::new(crate::diagnostics::CYNC_STOR_001)
+                            .at(format!("height {height}, {name} store"))
+                            .expected("0 elements after rewind")
+                            .got(format!("{remaining} element(s) stranded above the new tip"))
                     );
                 }
             }
@@ -1361,7 +1366,17 @@ impl Blockchain {
         // FINALITY: Refuse to rollback past a checkpoint.
         // Checkpoints are final — no amount of hashpower can undo them.
         if let Some(ref db) = self.db {
-            if let Ok(Some(state)) = db.state.get_state() {
+            let state_res = db.state.get_state();
+            if let Err(ref e) = state_res {
+                // Don't let a DB read error silently disable the finality-rollback
+                // guard — surface it loudly. (Hardcoded checkpoints and the
+                // fork-point finality floor still apply independently.)
+                tracing::error!(
+                    "finality guard: chain-state read failed while checking rollback to {}: {}",
+                    target_height, e
+                );
+            }
+            if let Ok(Some(state)) = state_res {
                 if target_height < state.last_checkpoint {
                     tracing::error!(
                         "FINALITY VIOLATION: attempted rollback to {} but checkpoint at {} is final",
@@ -1562,7 +1577,7 @@ impl Blockchain {
                         hash: new_tip_hash,
                         height: target_height,
                         difficulty: calculate_difficulty_from_target(&tip_block.header.target),
-                        timestamp: tip_block.header.timestamp,
+                        timestamp: tip_block.header.timestamp.as_secs(),
                     };
                 } else {
                     inner.tip.hash = new_tip_hash;
@@ -1646,6 +1661,74 @@ impl Blockchain {
         self.add_block(block)
     }
 
+    /// TEST-ONLY: seed a linear main chain of `n_blocks` empty blocks on top of
+    /// the current tip (genesis), writing them straight to the block store +
+    /// height index and advancing the tip WITHOUT consensus validation (no PoW,
+    /// no signatures). For load/perf tests that need a mature chain height — e.g.
+    /// exercising `get_difficulty_health`'s 144-block window scan — without
+    /// minutes of real RandomX mining. Timestamps are spaced `block_time` apart
+    /// and a fixed target gives a constant, non-degenerate difficulty.
+    ///
+    /// Gated behind `test`/`test-utilities`; never compiled into a release node.
+    #[cfg(any(test, feature = "test-utilities"))]
+    pub fn seed_linear_chain_for_testing(&self, n_blocks: u64, block_time: u64) {
+        use crate::consensus::header::BlockHeader;
+        use crate::primitives::PublicKey;
+
+        // Target ~2^-16 of max ⇒ difficulty ≈ 65_536 (finite, positive).
+        let mut tb = [0xffu8; 32];
+        tb[0] = 0;
+        tb[1] = 0;
+        let target = Hash::from_bytes(tb);
+
+        let mut inner = self.inner.write();
+        let magic = self.network.magic_bytes();
+        let base_ts = inner.tip.timestamp;
+        let start_height = inner.tip.height + 1;
+        let mut prev_hash = inner.tip.hash;
+        let mut last_hash = prev_hash;
+
+        for h in start_height..(start_height + n_blocks) {
+            let header = BlockHeader {
+                network_magic: magic,
+                version: 1,
+                height: crate::primitives::Height::new(h),
+                timestamp: crate::primitives::Timestamp::from_secs(base_ts + (h - start_height + 1) * block_time),
+                prev_hash,
+                tx_root: Hash::zero(),
+                anchor: Hash::zero(),
+                algorithm: 0,
+                nonce: 0,
+                target,
+                miner_pubkey: PublicKey::from_bytes([0u8; 32]),
+                supply_commitment: [0u8; 32],
+                checkpoint_vote: None,
+                spark_set_root: [0u8; 32],
+                mw_kernel_root: [0u8; 32],
+            };
+            let block = Block::new(header, Vec::new());
+            let hash = block.hash();
+            if let Some(ref db) = self.db {
+                let _ = db.blocks.insert(&block);
+                let _ = db.blocks.set_height_hash(h, &hash);
+            }
+            inner.height_to_hash.insert(h, hash);
+            prev_hash = hash;
+            last_hash = hash;
+        }
+
+        let final_height = start_height + n_blocks - 1;
+        inner.tip = ChainTip {
+            hash: last_hash,
+            height: final_height,
+            difficulty: calculate_difficulty_from_target(&target),
+            timestamp: base_ts + n_blocks * block_time,
+        };
+        inner.stats.height = final_height;
+        inner.stats.tip_hash = last_hash;
+        inner.stats.total_blocks = final_height + 1;
+    }
+
     /// Add block to chain
     pub fn add_block(&self, block: Block) -> Result<BlockStatus> {
         // Serialize the ENTIRE block-application operation against other writers
@@ -1657,49 +1740,32 @@ impl Blockchain {
         let _state_update = self.begin_state_update();
         let hash = block.hash();
 
-        // Check if already known
-        {
-            let inner = self.inner.read();
-            if inner.blocks.contains_key(&hash) {
-                return Ok(BlockStatus::AlreadyKnown);
-            }
-        }
-        if let Some(ref db) = self.db {
-            if db.blocks.contains(&hash)? {
-                return Ok(BlockStatus::AlreadyKnown);
-            }
-        }
-
-        // Check parent exists
+        // Cheap pre-checks (already-known / orphan) + parent resolution, run
+        // under apply_lock exactly where the inline checks used to (issue #108,
+        // see chain/apply.rs::classify_incoming — no lock-lifetime change).
+        let parent = match self.classify_incoming(&block, &hash)? {
+            apply::IncomingClass::AlreadyKnown => return Ok(BlockStatus::AlreadyKnown),
+            apply::IncomingClass::Orphan => return Ok(BlockStatus::Orphan),
+            apply::IncomingClass::Proceed { parent } => parent,
+        };
         let parent_hash = block.header.prev_hash;
-        let parent = self.get_block(&parent_hash);
-
-        if parent.is_none() && block.header.height > 0 {
-            self.record_event(
-                ChainEventType::OrphanReceived,
-                block.header.height,
-                &hash,
-                serde_json::json!({}),
-            );
-            return Ok(BlockStatus::Orphan);
-        }
 
         // Validate block height
-        let expected_height = if block.header.height == 0 {
+        let expected_height = if block.header.height.as_u64() == 0 {
             0
         } else {
-            parent.as_ref().map(|p| p.header.height + 1).unwrap_or(0)
+            parent.as_ref().map(|p| p.header.height.as_u64() + 1).unwrap_or(0)
         };
 
-        if block.header.height != expected_height {
+        if block.header.height.as_u64() != expected_height {
             return Ok(BlockStatus::Invalid(format!(
                 "Invalid height: expected {}, got {}",
-                expected_height, block.header.height
+                expected_height, block.header.height.as_u64()
             )));
         }
 
         let tip_hash = self.tip_hash();
-        let is_main_chain = parent_hash == tip_hash || block.header.height == 0;
+        let is_main_chain = parent_hash == tip_hash || block.header.height.as_u64() == 0;
 
         // SECURITY: Enforce hardcoded checkpoints (below).
         //
@@ -1725,18 +1791,18 @@ impl Blockchain {
         // Also check hardcoded checkpoints for the active runtime network.
         let hardcoded_checkpoint_match = match self.network {
             crate::config::NetworkType::Mainnet => {
-                crate::mainnet::verify_checkpoint(block.header.height, &hash)
+                crate::mainnet::verify_checkpoint(block.header.height.as_u64(), &hash)
             }
             crate::config::NetworkType::Testnet
             | crate::config::NetworkType::Regtest
             | crate::config::NetworkType::Beta => {
-                crate::testnet::verify_checkpoint(block.header.height, &hash)
+                crate::testnet::verify_checkpoint(block.header.height.as_u64(), &hash)
             }
         };
         if let Some(false) = hardcoded_checkpoint_match {
             return Ok(BlockStatus::Invalid(format!(
                 "Hardcoded checkpoint mismatch at height {}",
-                block.header.height,
+                block.header.height.as_u64(),
             )));
         }
 
@@ -1786,11 +1852,46 @@ impl Blockchain {
                 drop(inner);
                 self.record_event(
                     ChainEventType::BlockRejected,
-                    block.header.height,
+                    block.header.height.as_u64(),
                     &hash,
                     serde_json::json!({"reason": &errors}),
                 );
                 return Ok(BlockStatus::Invalid(errors));
+            }
+
+            // #supply-commitment: for a TIP-EXTENDING block the active-tip stats
+            // (`inner.stats`) ARE the parent's cumulative supply, so validate the
+            // block's commitment against the post-apply totals here — BEFORE any
+            // mutation, so a mismatch rejects cleanly. Gated OFF today
+            // (enforce_height = u64::MAX) → no-op. A competing FORK block is NOT
+            // checked here (inner.stats is the active tip, not its parent); it is
+            // validated at the reorg apply site where the rewound stats equal its
+            // parent's cumulative supply.
+            if is_main_chain {
+                let post_emitted = inner.stats.total_supply.saturating_add(
+                    calculate_block_reward(block.header.height.as_u64()).as_atomic() as u128,
+                );
+                let post_burned = inner
+                    .stats
+                    .total_burned
+                    .saturating_add(block_fee_burn(self.network, &block));
+                if let Err(e) = check_supply_commitment(
+                    self.network.supply_commitment_enforce_height(),
+                    block.header.height.as_u64(),
+                    &block.header.supply_commitment,
+                    post_emitted,
+                    post_burned,
+                ) {
+                    tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], e);
+                    drop(inner);
+                    self.record_event(
+                        ChainEventType::BlockRejected,
+                        block.header.height.as_u64(),
+                        &hash,
+                        serde_json::json!({"reason": &e}),
+                    );
+                    return Ok(BlockStatus::Invalid(e));
+                }
             }
         }
 
@@ -1809,12 +1910,12 @@ impl Blockchain {
         // self-isolation of a drifted node. For a main-chain block the parent
         // lineage IS the by-height ancestry, so this is behaviour-identical
         // on the common path. Mirrors the fork-aware difficulty window below.
-        if block.header.height >= 11 {
+        if block.header.height.as_u64() >= 11 {
             if let Some(mtp) = self.median_time_past_of_lineage(block.header.prev_hash) {
-                if block.header.timestamp <= mtp {
+                if block.header.timestamp.as_secs() <= mtp {
                     return Ok(BlockStatus::Invalid(format!(
                         "Block timestamp {} is not greater than median-time-past {} (median of last 11 blocks on its own chain)",
-                        block.header.timestamp, mtp
+                        block.header.timestamp.as_secs(), mtp
                     )));
                 }
             }
@@ -1827,22 +1928,22 @@ impl Blockchain {
         // from constructing a fork with trivially easy targets (the old code used
         // main-chain history for ALL blocks, which could produce wrong expectations
         // for fork blocks OR allow fork blocks to bypass proper difficulty validation).
-        if block.header.height >= 1 {
+        if block.header.height.as_u64() >= 1 {
             let difficulty_blocks = if is_main_chain {
-                self.get_difficulty_blocks(block.header.height)
+                self.get_difficulty_blocks(block.header.height.as_u64())
             } else {
                 // DB-sourced fork window — deterministic across all nodes
                 // (fix for chain.rs:2056; replaces the volatile in-memory-cache
                 // walk that made two nodes compute different windows/targets for
                 // the same fork block → consensus split).
-                self.fork_difficulty_window(block.header.prev_hash, block.header.height)
+                self.fork_difficulty_window(block.header.prev_hash, block.header.height.as_u64())
             };
 
             // `test-fast-pow` (INSECURE test feature) skips the ASERT target
             // match so the instant-mining harness can use a trivial target.
             if difficulty_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
                 let expected_target =
-                    self.expected_next_target(&difficulty_blocks, block.header.height);
+                    self.expected_next_target(&difficulty_blocks, block.header.height.as_u64());
                 if block.header.target != expected_target {
                     return Ok(BlockStatus::Invalid(format!(
                         "Difficulty target mismatch: expected {}, got {}",
@@ -1881,7 +1982,7 @@ impl Blockchain {
                 // is stale — the block is now a fork, not a main-chain extension.
                 // We do NOT update height_to_hash or DB height index, since the block
                 // lost the race. It falls through to the fork-evaluation path below.
-                if inner.tip.hash != tip_hash && block.header.height > 0 {
+                if inner.tip.hash != tip_hash && block.header.height.as_u64() > 0 {
                     tracing::warn!(
                         "Tip changed during block processing (was {}, now {}), re-evaluating block {}",
                         tip_hash.to_hex()[..8].to_string(),
@@ -1891,14 +1992,14 @@ impl Blockchain {
                     true
                 } else {
                     // Race check passed — safe to apply as main chain.
-                    inner.height_to_hash.insert(block.header.height, hash);
+                    inner.height_to_hash.insert(block.header.height.as_u64(), hash);
                     inner.tip = ChainTip {
                         hash,
-                        height: block.header.height,
+                        height: block.header.height.as_u64(),
                         difficulty,
-                        timestamp: block.header.timestamp,
+                        timestamp: block.header.timestamp.as_secs(),
                     };
-                    inner.stats.height = block.header.height;
+                    inner.stats.height = block.header.height.as_u64();
                     inner.stats.total_blocks += 1;
                     inner.stats.total_transactions += block.transactions.len() as u64;
                     inner.stats.difficulty = difficulty;
@@ -1910,7 +2011,7 @@ impl Blockchain {
                     // here (total_burned is tracked separately). So total_supply
                     // == sum of the deterministic emission schedule, which is
                     // exactly what get_supply_info exposes as verifiable.
-                    let emission = calculate_block_reward(block.header.height);
+                    let emission = calculate_block_reward(block.header.height.as_u64());
                     // AUDIT (2026-07-01): checked_add + panic for symmetry with the
                     // reorg-rollback path's checked_sub + panic (fixed same day).
                     // saturating_add silently clamps at u64::MAX; if emission ever
@@ -1986,22 +2087,22 @@ impl Blockchain {
                     // store BEFORE this block's state is applied, so a later
                     // reorg `rewind` rolls them back to exactly this
                     // pre-block boundary. Inert while the stores are None.
-                    self.checkpoint_phase2_stores(block.header.height);
+                    self.checkpoint_phase2_stores(block.header.height.as_u64());
 
                     // SECURITY (CC-001): Apply block's UTXO mutations to track spent/unspent
-                    let batch = UtxoSet::batch_from_block(block.header.height, &block.transactions);
+                    let batch = UtxoSet::batch_from_block(block.header.height.as_u64(), &block.transactions);
                     inner.utxos.apply_batch(batch);
 
                     // Shielded (Spark) apply: serial-tag double-spend + accumulator
                     // append into the ShieldedStore (inert while None / gated off).
-                    self.apply_shielded_txs(&block.transactions, block.header.height);
+                    self.apply_shielded_txs(&block.transactions, block.header.height.as_u64());
                     // Feed the libspark v2 pool (add_coin per mint, mark_tag_spent
                     // per spend). Inert unless both features + the pool store.
                     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                    self.apply_spark_v2_txs(&block.transactions, block.header.height);
+                    self.apply_spark_v2_txs(&block.transactions, block.header.height.as_u64());
 
                     // Bound memory: evict output_index entries older than 1000 blocks
-                    inner.utxos.evict_old_outputs(block.header.height, 1000);
+                    inner.utxos.evict_old_outputs(block.header.height.as_u64(), 1000);
 
                     // SECURITY: Evict old blocks from in-memory cache to prevent
                     // unbounded RAM growth. Older blocks fall back to database lookup.
@@ -2029,19 +2130,19 @@ impl Blockchain {
                     for output in &tx.outputs {
                         let entry = OutputIndexEntry {
                             commitment: output.commitment,
-                            height: block.header.height,
+                            height: block.header.height.as_u64(),
                             is_coinbase,
                             lock_height: output.lock_height,
                         };
                         let bytes = crate::db::serialize(&entry).map_err(|e| {
                             Error::Internal(format!(
                                 "serialize OutputIndexEntry failed at height {}: {}",
-                                block.header.height, e
+                                block.header.height.as_u64(), e
                             ))
                         })?;
                         output_additions.push((*output.stealth_address.as_bytes(), bytes));
                     }
-                    tx_index_adds.push((*tx.hash().as_bytes(), block.header.height, tx_idx as u32));
+                    tx_index_adds.push((*tx.hash().as_bytes(), block.header.height.as_u64(), tx_idx as u32));
                 }
 
                 // Index transactions for O(1) lookup by hash.
@@ -2085,25 +2186,25 @@ impl Blockchain {
 
                     // Auto-record checkpoint every CHECKPOINT_INTERVAL blocks
                     let mut last_checkpoint_height = 0u64;
-                    if block.header.height > 0
-                        && block.header.height % crate::constants::CHECKPOINT_INTERVAL == 0
+                    if block.header.height.as_u64() > 0
+                        && block.header.height.as_u64() % crate::constants::CHECKPOINT_INTERVAL == 0
                     {
-                        if let Err(e) = db.state.add_checkpoint(block.header.height, &hash) {
+                        if let Err(e) = db.state.add_checkpoint(block.header.height.as_u64(), &hash) {
                             tracing::error!(
                                 "Failed to record checkpoint at height {}: {}",
-                                block.header.height,
+                                block.header.height.as_u64(),
                                 e
                             );
                         } else {
-                            last_checkpoint_height = block.header.height;
+                            last_checkpoint_height = block.header.height.as_u64();
                             tracing::info!(
                                 "Auto-checkpoint recorded: height={}, hash={}",
-                                block.header.height,
+                                block.header.height.as_u64(),
                                 hash.to_hex()[..16].to_string()
                             );
                             self.record_event(
                                 ChainEventType::CheckpointRecorded,
-                                block.header.height,
+                                block.header.height.as_u64(),
                                 &hash,
                                 serde_json::json!({}),
                             );
@@ -2112,7 +2213,16 @@ impl Blockchain {
 
                     // Compute last_checkpoint from DB if we didn't just set one
                     if last_checkpoint_height == 0 {
-                        if let Ok(Some(prev_state)) = db.state.get_state() {
+                        let prev_res = db.state.get_state();
+                        if let Err(ref e) = prev_res {
+                            // A DB read error here silently leaves last_checkpoint
+                            // at 0 (weaker tracking); log rather than swallow.
+                            tracing::warn!(
+                                "checkpoint tracking: chain-state read failed at height {}, leaving last_checkpoint=0: {}",
+                                block.header.height.as_u64(), e
+                            );
+                        }
+                        if let Ok(Some(prev_state)) = prev_res {
                             last_checkpoint_height = prev_state.last_checkpoint;
                         }
                     }
@@ -2120,7 +2230,7 @@ impl Blockchain {
                     let stats = self.stats();
                     let state = ChainStateData {
                         tip_hash: hash,
-                        height: block.header.height,
+                        height: block.header.height.as_u64(),
                         total_difficulty: stats.total_difficulty,
                         total_supply: stats.total_supply,
                         total_burned: stats.total_burned as u64,
@@ -2130,7 +2240,7 @@ impl Blockchain {
                         panic!(
                             "CONSENSUS PERSISTENCE FAILURE: could not serialize chain state at \
                              height {} (tip {}): {}. In-memory tip already advanced; halting.",
-                            block.header.height,
+                            block.header.height.as_u64(),
                             hash.to_hex(),
                             e
                         )
@@ -2147,7 +2257,7 @@ impl Blockchain {
                     // reviewer-gated enhancement.)
                     db.commit_block_atomic(
                         &output_additions,
-                        (block.header.height, *hash.as_bytes()),
+                        (block.header.height.as_u64(), *hash.as_bytes()),
                         &tx_index_adds,
                         &state_bytes,
                     )
@@ -2158,7 +2268,7 @@ impl Blockchain {
                              advanced; halting to preserve on-disk state (SIGTERM handler flushes \
                              RocksDB cleanly) so restart re-derives consistently rather than \
                              running with in-memory ahead of disk.",
-                            block.header.height,
+                            block.header.height.as_u64(),
                             hash.to_hex(),
                             e
                         )
@@ -2176,12 +2286,12 @@ impl Blockchain {
                 // pruning.
                 if let Some(ref ct) = self.cut_through {
                     let mut engine = ct.lock();
-                    let prunable = engine.process(block.header.height);
+                    let prunable = engine.process(block.header.height.as_u64());
                     if !prunable.is_empty() {
                         tracing::debug!(
                             "MW cut-through: {} commitments prunable at height {}",
                             prunable.len(),
-                            block.header.height
+                            block.header.height.as_u64()
                         );
                     }
                 }
@@ -2195,7 +2305,7 @@ impl Blockchain {
                 // is `None` or the feature is off.
                 #[cfg(feature = "rolling-finality")]
                 if let Some(ref rf) = self.rolling_finality {
-                    if block.header.height >= self.network.rolling_finality_enable_height() {
+                    if block.header.height.as_u64() >= self.network.rolling_finality_enable_height() {
                         // CIP-009.D attestations live in the coinbase
                         // transaction's `extra` field. Pre-activation
                         // miners typically have no coinbase or an empty
@@ -2207,7 +2317,28 @@ impl Blockchain {
                             .first()
                             .filter(|tx| tx.is_coinbase())
                             .map_or(&[][..], |tx| &tx.extra);
-                        let _ = rf.on_accepted_block(block.header.height, coinbase_extra);
+                        // The tracker's soft-final state is updated inside
+                        // on_accepted_block regardless of the returned outcome; we
+                        // only need to surface the diagnostic variants (previously
+                        // dropped with `let _ =`) rather than silently ignore a
+                        // malformed/rejected attestation during the ENABLE phase.
+                        use crate::consensus::rolling_finality::OnBlockOutcome;
+                        match rf.on_accepted_block(block.header.height.as_u64(), coinbase_extra) {
+                            OnBlockOutcome::Malformed(e) => tracing::warn!(
+                                "finality: malformed CIP-009.D attestation in block {}: {:?}",
+                                block.header.height.as_u64(), e
+                            ),
+                            OnBlockOutcome::Rejected(e) => tracing::warn!(
+                                "finality: attestation rejected in block {}: {:?}",
+                                block.header.height.as_u64(), e
+                            ),
+                            OnBlockOutcome::NewlyFinalized { height, .. } => tracing::info!(
+                                "finality: soft-final height advanced to {} (via block {})",
+                                height, block.header.height.as_u64()
+                            ),
+                            // NoAttestation (normal in ENABLE) / Recorded: nothing to surface.
+                            OnBlockOutcome::NoAttestation | OnBlockOutcome::Recorded => {}
+                        }
                     }
                 }
 
@@ -2225,7 +2356,7 @@ impl Blockchain {
                 let stats_snapshot = inner_stats_for_log(&self.inner);
                 tracing::info!(
                     target: "chain::commit",
-                    height = block.header.height,
+                    height = block.header.height.as_u64(),
                     block_hash = %hash.to_hex(),
                     difficulty = difficulty,
                     total_difficulty = stats_snapshot.0,
@@ -2236,7 +2367,7 @@ impl Blockchain {
 
                 self.record_event(
                     ChainEventType::BlockAccepted,
-                    block.header.height,
+                    block.header.height.as_u64(),
                     &hash,
                     serde_json::json!({
                         "tx_count": block.transactions.len(),
@@ -2250,7 +2381,7 @@ impl Blockchain {
                 // instead of stalling the pipeline for the build. No-op away
                 // from a boundary; idempotent.
                 #[cfg(feature = "randomx")]
-                crate::consensus::prewarm_next_epoch_if_near(block.header.height);
+                crate::consensus::prewarm_next_epoch_if_near(block.header.height.as_u64());
 
                 return Ok(BlockStatus::Accepted);
             }
@@ -2322,7 +2453,7 @@ impl Blockchain {
                 // SECURITY (H-16 FIX): Hybrid reorg defense — three tiers.
                 // Tier 1 (≤10): unconditional. Tier 2 (11-100): MESS exponential cost.
                 // Tier 3 (>100): hard reject.
-                let reorg_depth = block.header.height.saturating_sub(fork_point);
+                let reorg_depth = block.header.height.as_u64().saturating_sub(fork_point);
                 // F31 SEV-A fix: pass the RUNTIME network's max reorg depth,
                 // not the compile-time-feature-derived value. See
                 // Blockchain::max_reorg_depth doc-comment for the 2026-07-04
@@ -2351,7 +2482,7 @@ impl Blockchain {
                 // is `None` or the feature is off.
                 #[cfg(feature = "rolling-finality")]
                 if let Some(ref rf) = self.rolling_finality {
-                    if block.header.height >= self.network.rolling_finality_enforce_height()
+                    if block.header.height.as_u64() >= self.network.rolling_finality_enforce_height()
                         && rf.would_reorg_violate_finality(fork_point)
                     {
                         let soft_final = rf.current_soft_final_height().unwrap_or(0);
@@ -2417,7 +2548,7 @@ impl Blockchain {
                     let interval = crate::constants::CHECKPOINT_INTERVAL;
                     let finality_floor = tip_height.saturating_sub(interval);
                     if finality_floor > 0 && fork_point < finality_floor {
-                        let depth = block.header.height.saturating_sub(fork_point);
+                        let depth = block.header.height.as_u64().saturating_sub(fork_point);
                         tracing::error!(
                             "Rejecting reorg: fork point {} is before finality floor {} (depth {})",
                             fork_point,
@@ -2438,7 +2569,7 @@ impl Blockchain {
 
                 tracing::warn!(
                     "Fork at height {} has more work ({} > {}), performing reorg (depth: {})",
-                    block.header.height,
+                    block.header.height.as_u64(),
                     fork_cumulative,
                     current_total_difficulty,
                     reorg_depth
@@ -2619,12 +2750,12 @@ impl Blockchain {
                         // against fork-chain history. We build DifficultyBlock entries
                         // from main-chain blocks below the fork point, plus already-
                         // validated fork blocks above the fork point.
-                        if fork_block.header.height >= 1 {
+                        if fork_block.header.height.as_u64() >= 1 {
                             let window = 144u64;
-                            let start = fork_block.header.height.saturating_sub(window);
+                            let start = fork_block.header.height.as_u64().saturating_sub(window);
                             let mut diff_blocks = Vec::new();
 
-                            for h in start..fork_block.header.height {
+                            for h in start..fork_block.header.height.as_u64() {
                                 if h <= fork_point {
                                     // Below fork point: use main-chain blocks
                                     if let Some(ref db) = self.db {
@@ -2635,7 +2766,7 @@ impl Blockchain {
                                         if let Ok(Some(b)) = db.blocks.get_by_height(h) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
-                                                timestamp: b.header.timestamp,
+                                                timestamp: b.header.timestamp.as_secs(),
                                                 target: b.header.target,
                                             });
                                         }
@@ -2643,7 +2774,7 @@ impl Blockchain {
                                         if let Some(b) = inner.blocks.get(hash) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
-                                                timestamp: b.header.timestamp,
+                                                timestamp: b.header.timestamp.as_secs(),
                                                 target: b.header.target,
                                             });
                                         }
@@ -2654,8 +2785,8 @@ impl Blockchain {
                                     if offset < fork_idx {
                                         let fb = &fork_blocks[offset];
                                         diff_blocks.push(DifficultyBlock {
-                                            height: fb.header.height,
-                                            timestamp: fb.header.timestamp,
+                                            height: fb.header.height.as_u64(),
+                                            timestamp: fb.header.timestamp.as_secs(),
                                             target: fb.header.target,
                                         });
                                     }
@@ -2664,16 +2795,16 @@ impl Blockchain {
 
                             if diff_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
                                 let expected_target = self
-                                    .expected_next_target(&diff_blocks, fork_block.header.height);
+                                    .expected_next_target(&diff_blocks, fork_block.header.height.as_u64());
                                 if fork_block.header.target != expected_target {
                                     tracing::warn!(
                                         "Fork block {} at height {} has wrong difficulty target",
                                         fork_block.hash().to_hex(),
-                                        fork_block.header.height
+                                        fork_block.header.height.as_u64()
                                     );
                                     reorg_error = Some(format!(
                                         "Fork block difficulty mismatch at height {}: expected {}, got {}",
-                                        fork_block.header.height,
+                                        fork_block.header.height.as_u64(),
                                         expected_target.to_hex()[..16].to_string(),
                                         fork_block.header.target.to_hex()[..16].to_string(),
                                     ));
@@ -2724,11 +2855,44 @@ impl Blockchain {
                             ));
                             break;
                         }
+                        // #supply-commitment: validate this fork block's
+                        // commitment against its POST-apply cumulative supply
+                        // BEFORE applying it. inner.stats here is this block's
+                        // PARENT cumulative (the fork point, or the prior fork
+                        // block already applied earlier in this loop), so
+                        // post_emitted/post_burned are its resulting totals. On
+                        // mismatch, abort the reorg via the same reorg_error +
+                        // break path any invalid fork block uses — no partial
+                        // mutation for this block. Gated OFF today.
+                        {
+                            let post_emitted = inner.stats.total_supply.saturating_add(
+                                calculate_block_reward(fork_block.header.height.as_u64()).as_atomic() as u128,
+                            );
+                            let post_burned = inner
+                                .stats
+                                .total_burned
+                                .saturating_add(block_fee_burn(self.network, fork_block));
+                            if let Err(e) = check_supply_commitment(
+                                self.network.supply_commitment_enforce_height(),
+                                fork_block.header.height.as_u64(),
+                                &fork_block.header.supply_commitment,
+                                post_emitted,
+                                post_burned,
+                            ) {
+                                tracing::warn!(
+                                    "Fork block {} rejected during reorg: {}",
+                                    fork_block.hash().to_hex(),
+                                    e
+                                );
+                                reorg_error = Some(format!("Invalid fork block: {}", e));
+                                break;
+                            }
+                        }
 
                         let fork_hash = fork_block.hash();
                         inner
                             .height_to_hash
-                            .insert(fork_block.header.height, fork_hash);
+                            .insert(fork_block.header.height.as_u64(), fork_hash);
 
                         // Phase 2 store reorg checkpoint (site 4: reorg
                         // connect of fork blocks). Checkpoint each store
@@ -2742,13 +2906,13 @@ impl Blockchain {
                         // The site-5a rollback guard keys on height_to_hash,
                         // so a mapped block must always own one checkpoint.
                         // Inert while stores are None.
-                        self.checkpoint_phase2_stores(fork_block.header.height);
+                        self.checkpoint_phase2_stores(fork_block.header.height.as_u64());
 
                         // Defer canonical DB mappings until the final atomic
                         // reorg commit, after every fork block has validated.
                         // Apply fork block's UTXO mutations
                         let batch = UtxoSet::batch_from_block(
-                            fork_block.header.height,
+                            fork_block.header.height.as_u64(),
                             &fork_block.transactions,
                         );
                         inner.utxos.apply_batch(batch);
@@ -2756,17 +2920,17 @@ impl Blockchain {
                         // (inert while None / gated off).
                         self.apply_shielded_txs(
                             &fork_block.transactions,
-                            fork_block.header.height,
+                            fork_block.header.height.as_u64(),
                         );
                         // Feed the libspark v2 pool for the adopted fork block.
                         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
                         self.apply_spark_v2_txs(
                             &fork_block.transactions,
-                            fork_block.header.height,
+                            fork_block.header.height.as_u64(),
                         );
 
                         // Add this fork block's emission to supply
-                        let emission = calculate_block_reward(fork_block.header.height);
+                        let emission = calculate_block_reward(fork_block.header.height.as_u64());
                         // AUDIT (2026-07-01): checked_add + panic for symmetry with the
                         // reorg-rollback path's checked_sub + panic (fixed same day).
                         // saturating_add silently clamps at u64::MAX; if emission ever
@@ -2847,6 +3011,33 @@ impl Blockchain {
                         }
                     }
 
+                    // #supply-commitment: also validate the reorg TIP's
+                    // commitment. All fork blocks are applied, so inner.stats is
+                    // the tip's parent cumulative supply. On mismatch, set
+                    // reorg_error so the unconditional rollback below undoes the
+                    // partially-applied reorg — the same cleanup fork-block and
+                    // tip-validation failures use. Gated OFF today. Guarded on
+                    // `reorg_error.is_none()` so a prior failure's message wins.
+                    if reorg_error.is_none() {
+                        let post_emitted = inner.stats.total_supply.saturating_add(
+                            calculate_block_reward(block.header.height.as_u64()).as_atomic() as u128,
+                        );
+                        let post_burned = inner
+                            .stats
+                            .total_burned
+                            .saturating_add(block_fee_burn(self.network, &block));
+                        if let Err(e) = check_supply_commitment(
+                            self.network.supply_commitment_enforce_height(),
+                            block.header.height.as_u64(),
+                            &block.header.supply_commitment,
+                            post_emitted,
+                            post_burned,
+                        ) {
+                            tracing::warn!("Reorg tip block {} rejected: {}", hash.to_hex(), e);
+                            reorg_error = Some(format!("Invalid reorg tip block: {}", e));
+                        }
+                    }
+
                     // Tracks whether the path-A rollback below actually ran, so the
                     // triggering-block difficulty rollback (path B) can be gated on
                     // it instead of on `inner.tip.hash != pre_reorg_tip.hash` — see
@@ -2869,7 +3060,7 @@ impl Blockchain {
                         for fork_block in fork_blocks.iter().rev() {
                             if inner
                                 .height_to_hash
-                                .get(&fork_block.header.height)
+                                .get(&fork_block.header.height.as_u64())
                                 .map_or(false, |h| *h == fork_block.hash())
                             {
                                 let disconnect =
@@ -2880,9 +3071,9 @@ impl Blockchain {
                                 // blocks). Pairs with the site-4 checkpoint
                                 // taken when each fork block was connected
                                 // just above. Inert while stores are None.
-                                self.rewind_phase2_stores(fork_block.header.height);
+                                self.rewind_phase2_stores(fork_block.header.height.as_u64());
                                 // Subtract the emission we added for this fork block
-                                let emission = calculate_block_reward(fork_block.header.height);
+                                let emission = calculate_block_reward(fork_block.header.height.as_u64());
                                 // Burn accumulator, in lockstep with the supply
                                 // subtract below (undoing this fork block's add).
                                 let fee_burn = block_fee_burn(self.network, fork_block);
@@ -2961,7 +3152,7 @@ impl Blockchain {
                         // applied fork mapping is cleaned up.
                         let highest_fork_height = fork_blocks
                             .iter()
-                            .map(|b| b.header.height)
+                            .map(|b| b.header.height.as_u64())
                             .max()
                             .unwrap_or(pre_reorg_tip.height);
                         let removal_top = pre_reorg_tip.height.max(highest_fork_height);
@@ -3007,12 +3198,12 @@ impl Blockchain {
                     // Only continue if fork blocks validated successfully
                     if reorg_error.is_none() {
                         // SECURITY (A6-REORG-DIFFICULTY): Also validate triggering block's difficulty
-                        if block.header.height >= 1 {
+                        if block.header.height.as_u64() >= 1 {
                             let window = 144u64;
-                            let start = block.header.height.saturating_sub(window);
+                            let start = block.header.height.as_u64().saturating_sub(window);
                             let mut diff_blocks = Vec::new();
 
-                            for h in start..block.header.height {
+                            for h in start..block.header.height.as_u64() {
                                 if h <= fork_point {
                                     if let Some(ref db) = self.db {
                                         // DB-sourced (deterministic across nodes). Heights
@@ -3022,7 +3213,7 @@ impl Blockchain {
                                         if let Ok(Some(b)) = db.blocks.get_by_height(h) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
-                                                timestamp: b.header.timestamp,
+                                                timestamp: b.header.timestamp.as_secs(),
                                                 target: b.header.target,
                                             });
                                         }
@@ -3030,7 +3221,7 @@ impl Blockchain {
                                         if let Some(b) = inner.blocks.get(hash) {
                                             diff_blocks.push(DifficultyBlock {
                                                 height: h,
-                                                timestamp: b.header.timestamp,
+                                                timestamp: b.header.timestamp.as_secs(),
                                                 target: b.header.target,
                                             });
                                         }
@@ -3040,8 +3231,8 @@ impl Blockchain {
                                     if offset < fork_blocks.len() {
                                         let fb = &fork_blocks[offset];
                                         diff_blocks.push(DifficultyBlock {
-                                            height: fb.header.height,
-                                            timestamp: fb.header.timestamp,
+                                            height: fb.header.height.as_u64(),
+                                            timestamp: fb.header.timestamp.as_secs(),
                                             target: fb.header.target,
                                         });
                                     }
@@ -3050,15 +3241,15 @@ impl Blockchain {
 
                             if diff_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
                                 let expected_target =
-                                    self.expected_next_target(&diff_blocks, block.header.height);
+                                    self.expected_next_target(&diff_blocks, block.header.height.as_u64());
                                 if block.header.target != expected_target {
                                     tracing::warn!(
                                         "Reorg tip block {} at height {} has wrong difficulty target",
-                                        hash.to_hex(), block.header.height
+                                        hash.to_hex(), block.header.height.as_u64()
                                     );
                                     reorg_error = Some(format!(
                                         "Reorg tip difficulty mismatch at height {}: expected {}, got {}",
-                                        block.header.height,
+                                        block.header.height.as_u64(),
                                         expected_target.to_hex()[..16].to_string(),
                                         block.header.target.to_hex()[..16].to_string(),
                                     ));
@@ -3097,8 +3288,8 @@ impl Blockchain {
                             // every fork block was checkpointed at site 4
                             // and every one is rewound here, unguarded).
                             // Inert while stores are None.
-                            self.rewind_phase2_stores(fork_block.header.height);
-                            let emission = calculate_block_reward(fork_block.header.height);
+                            self.rewind_phase2_stores(fork_block.header.height.as_u64());
+                            let emission = calculate_block_reward(fork_block.header.height.as_u64());
                             // Burn accumulator, in lockstep with the supply
                             // subtract below (undoing this fork block's add).
                             let fee_burn = block_fee_burn(self.network, fork_block);
@@ -3145,7 +3336,7 @@ impl Blockchain {
 
                         // Remove fork block height mappings
                         for h in
-                            (fork_point + 1..=pre_reorg_tip.height.max(block.header.height)).rev()
+                            (fork_point + 1..=pre_reorg_tip.height.max(block.header.height.as_u64())).rev()
                         {
                             inner.height_to_hash.remove(&h);
                         }
@@ -3183,10 +3374,10 @@ impl Blockchain {
                         // ends one short per reorg and a later disconnect through this
                         // tip rewinds the wrong boundary (mainnet blocker once the
                         // shielded/spark/kernel stores activate; inert while None).
-                        self.checkpoint_phase2_stores(block.header.height);
+                        self.checkpoint_phase2_stores(block.header.height.as_u64());
                         // Apply the new tip block (the triggering block)
                         let tip_batch =
-                            UtxoSet::batch_from_block(block.header.height, &block.transactions);
+                            UtxoSet::batch_from_block(block.header.height.as_u64(), &block.transactions);
                         inner.utxos.apply_batch(tip_batch);
 
                         // Add triggering block's emission to supply.
@@ -3203,7 +3394,7 @@ impl Blockchain {
                         // 2 SEV-A subtract sites on this file. Both categories
                         // are now uniform. Grep-verified: 0 remaining
                         // `total_supply.saturating_add` in this file.
-                        let tip_emission = calculate_block_reward(block.header.height);
+                        let tip_emission = calculate_block_reward(block.header.height.as_u64());
                         inner.stats.total_supply = inner
                             .stats
                             .total_supply
@@ -3235,11 +3426,11 @@ impl Blockchain {
                         // Update tip to the new fork head
                         inner.tip = ChainTip {
                             hash,
-                            height: block.header.height,
+                            height: block.header.height.as_u64(),
                             difficulty: fork_difficulty,
-                            timestamp: block.header.timestamp,
+                            timestamp: block.header.timestamp.as_secs(),
                         };
-                        inner.stats.height = block.header.height;
+                        inner.stats.height = block.header.height.as_u64();
                         inner.stats.difficulty = fork_difficulty;
                         inner.stats.tip_hash = hash;
                         inner.stats.total_difficulty = fork_cumulative;
@@ -3328,7 +3519,7 @@ impl Blockchain {
                                 }
                             };
 
-                        inner.height_to_hash.insert(block.header.height, hash);
+                        inner.height_to_hash.insert(block.header.height.as_u64(), hash);
                     }
                 }
 
@@ -3389,7 +3580,7 @@ impl Blockchain {
                              oi: &mut Vec<([u8; 32], Vec<u8>)>,
                              hs: &mut Vec<(u64, [u8; 32])>,
                              ti: &mut Vec<([u8; 32], u64, u32)>| -> Result<()> {
-                                let h = b.header.height;
+                                let h = b.header.height.as_u64();
                                 hs.push((h, *b.hash().as_bytes()));
                                 for (idx, tx) in b.transactions.iter().enumerate() {
                                     let is_coinbase = tx.is_coinbase();
@@ -3429,7 +3620,7 @@ impl Blockchain {
                         )?;
 
                         // 3. Compute stale heights to remove (above new tip)
-                        let new_tip_height = block.header.height;
+                        let new_tip_height = block.header.height.as_u64();
                         let height_removals: Vec<u64> = if new_tip_height < pre_reorg_tip.height {
                             (new_tip_height + 1..=pre_reorg_tip.height).collect()
                         } else {
@@ -3486,10 +3677,10 @@ impl Blockchain {
                         for fork_block in &fork_blocks {
                             self.persist_output_index(
                                 &fork_block.transactions,
-                                fork_block.header.height,
+                                fork_block.header.height.as_u64(),
                             );
                         }
-                        self.persist_output_index(&block.transactions, block.header.height);
+                        self.persist_output_index(&block.transactions, block.header.height.as_u64());
                     }
                     Ok(())
                 })(); // R-34: close the write-guard scope before handling errors
@@ -3503,7 +3694,7 @@ impl Blockchain {
                          Halting so restart reloads that durable state instead of serving a \
                          divergent tip.",
                         hash.to_hex(),
-                        block.header.height,
+                        block.header.height.as_u64(),
                         error
                     );
                 }
@@ -3512,9 +3703,9 @@ impl Blockchain {
                 let stats_snapshot = inner_stats_for_log(&self.inner);
                 tracing::warn!(
                     target: "chain::commit",
-                    height = block.header.height,
+                    height = block.header.height.as_u64(),
                     block_hash = %hash.to_hex(),
-                    reorg_depth = block.header.height.saturating_sub(fork_point),
+                    reorg_depth = block.header.height.as_u64().saturating_sub(fork_point),
                     total_difficulty = stats_snapshot.0,
                     tip = %hash.to_hex(),
                     supply_atomic = %stats_snapshot.1,
@@ -3532,7 +3723,7 @@ impl Blockchain {
 
                 self.record_event(
                     ChainEventType::Reorg,
-                    block.header.height,
+                    block.header.height.as_u64(),
                     &hash,
                     serde_json::json!({
                         "reorg_depth": reorg_depth,
@@ -3549,13 +3740,13 @@ impl Blockchain {
                 tracing::warn!(
                     "Block {} at height {} is a fork (less work: {} <= {})",
                     hash.to_hex()[..16].to_string(),
-                    block.header.height,
+                    block.header.height.as_u64(),
                     fork_cumulative,
                     current_total_difficulty
                 );
                 self.record_event(
                     ChainEventType::ForkDetected,
-                    block.header.height,
+                    block.header.height.as_u64(),
                     &hash,
                     serde_json::json!({
                         "fork_difficulty": fork_cumulative,
@@ -3602,10 +3793,7 @@ impl Blockchain {
     /// Called from `add_block` whenever a peer-sourced block is accepted so
     /// phantom-stall detection can measure the gap since the last real arrival.
     pub fn record_block_received(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = crate::clock::unix_now(); // E1: single-source clock
         self.last_block_received_at
             .store(now, std::sync::atomic::Ordering::Relaxed);
     }
@@ -3741,6 +3929,45 @@ fn calculate_difficulty_from_target(target: &Hash) -> u128 {
     u128::MAX / target_value
 }
 
+/// #supply-commitment: validate a block's `supply_commitment` header field
+/// against the cumulative supply the block LEAVES behind (post-apply).
+///
+/// `post_emitted` / `post_burned` are the running cumulative totals AFTER this
+/// block's coinbase emission and fee burns are applied — i.e. the PARENT's
+/// cumulative supply plus this block's delta. At every point this is called,
+/// the caller holds the parent's cumulative supply (the active-tip stats for a
+/// tip-extending block, or the reorg-apply stats for a fork block), so no
+/// per-height storage is needed.
+///
+/// GATED: below `enforce_height` the header field is expected to stay `[0u8;32]`
+/// and is NOT read, so pre-fork chains are unaffected and the whole rule is a
+/// no-op until an activation height is cleared (today `u64::MAX` everywhere).
+/// Uses the `u128`-exact consensus commitment (the u64 audit helper overflows
+/// past ~18.4M CYNC).
+fn check_supply_commitment(
+    enforce_height: u64,
+    height: u64,
+    header_commitment: &[u8; 32],
+    post_emitted: u128,
+    post_burned: u128,
+) -> std::result::Result<(), String> {
+    if height < enforce_height {
+        return Ok(());
+    }
+    let expected = crate::emission::supply::supply_commitment_consensus(
+        post_emitted,
+        post_burned,
+        crate::constants::MAX_SUPPLY.saturating_sub(post_emitted),
+    );
+    if header_commitment != &expected {
+        return Err(format!(
+            "supply_commitment mismatch at height {height}: header does not match \
+             the post-apply cumulative supply (emitted={post_emitted}, burned={post_burned})"
+        ));
+    }
+    Ok(())
+}
+
 /// Total fees BURNED by `block`, in atomic units.
 ///
 /// Computed EXACTLY as the consensus validator computes the coinbase burn (see
@@ -3761,7 +3988,7 @@ fn calculate_difficulty_from_target(target: &Hash) -> u128 {
 ///     `congested = congestion_pct >= CONGESTION_THRESHOLD` — the same
 ///     `size = block.size()` the validator uses.
 ///   * burn = `distribute_fee(total_fees, congested).burned`.
-fn block_fee_burn(network: crate::config::NetworkType, block: &Block) -> u128 {
+pub(crate) fn block_fee_burn(network: crate::config::NetworkType, block: &Block) -> u128 {
     let total_fees: crate::primitives::Amount = block
         .transactions
         .iter()
@@ -3862,9 +4089,9 @@ mod tests {
     fn state_for_genesis(block: &Block) -> ChainStateData {
         ChainStateData {
             tip_hash: block.hash(),
-            height: block.header.height,
+            height: block.header.height.as_u64(),
             total_difficulty: 1,
-            total_supply: u128::from(calculate_block_reward(block.header.height).as_atomic()),
+            total_supply: u128::from(calculate_block_reward(block.header.height.as_u64()).as_atomic()),
             total_burned: 0,
             last_checkpoint: 0,
         }
@@ -3906,7 +4133,7 @@ mod tests {
     #[test]
     fn test_genesis_block() {
         let genesis = create_genesis_block();
-        assert_eq!(genesis.header.height, 0);
+        assert_eq!(genesis.header.height.as_u64(), 0);
         assert_eq!(genesis.header.prev_hash, Hash::zero());
         assert!(!genesis.transactions.is_empty());
     }
@@ -3917,6 +4144,27 @@ mod tests {
         let genesis_hash = chain.init_genesis().unwrap();
         assert_eq!(chain.height(), 0);
         assert_eq!(chain.tip().hash, genesis_hash);
+    }
+
+    #[test]
+    fn boot_integrity_check_passes_on_genesis_and_seeded_chains() {
+        // Fresh genesis chain: canary passes (height 0 path).
+        let chain = Blockchain::new();
+        chain.init_genesis().unwrap();
+        assert!(chain.boot_integrity_check().is_ok());
+
+        // A DB-backed seeded chain at height > 0: tip retrievable + height index
+        // agrees with the tip, so the canary passes.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let seeded = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        seeded.init_genesis().unwrap();
+        seeded.seed_linear_chain_for_testing(50, 120);
+        assert_eq!(seeded.height(), 50);
+        assert!(
+            seeded.boot_integrity_check().is_ok(),
+            "seeded height-50 chain must pass the integrity canary"
+        );
     }
 
     #[test]
@@ -4120,7 +4368,7 @@ mod tests {
         let mut tip_block = genesis.clone();
         for h in 1..=3u64 {
             let mut b = genesis.clone();
-            b.header.height = h;
+            b.header.height = crate::primitives::Height::new(h);
             b.header.prev_hash = prev;
             b.header.nonce = 1000 + h; // distinct hashes
             let hash = b.hash();
@@ -4160,6 +4408,42 @@ mod tests {
     }
 
     #[test]
+    fn fresh_and_reloaded_genesis_agree_on_total_difficulty() {
+        // Regression lock: a freshly genesis-initialised node MUST advertise
+        // the same cumulative work as the identical node after a restart.
+        // `init_genesis` previously left `inner.stats.total_difficulty` at the
+        // ChainStats::default() of 0 while persisting `total_difficulty: 1` to
+        // the DB, so a fresh node reported 0 but reloaded as 1 — a disagreement
+        // that leaks into ChainWorkMessage and the peer `work_behind` veto until
+        // the first block or a reload self-heals it.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        chain.init_genesis().unwrap();
+
+        // Fresh-init node: the canonical genesis base, matching the saved DB
+        // state and recompute_total_difficulty(0).
+        assert_eq!(
+            chain.stats().total_difficulty,
+            1,
+            "fresh genesis-init node must report total_difficulty == 1"
+        );
+        assert_eq!(chain.recompute_total_difficulty(0), Some(1));
+
+        // Same node after a restart: must agree with the fresh-init value.
+        let reloaded = Blockchain::with_database(db, NetworkType::Testnet);
+        assert_eq!(
+            reloaded.load_from_database_with_outcome().unwrap(),
+            ChainLoadOutcome::Loaded
+        );
+        assert_eq!(
+            reloaded.stats().total_difficulty,
+            chain.stats().total_difficulty,
+            "reloaded node must match fresh-init total_difficulty"
+        );
+    }
+
+    #[test]
     fn mtp_uses_fork_lineage_not_active_chain_by_height() {
         // R-1 regression: Median-Time-Past for a competing-fork block must be
         // computed from the FORK's own ancestors (walk prev_hash), not the
@@ -4173,9 +4457,9 @@ mod tests {
 
         let mk = |prev: Hash, height: u64, ts: u64, nonce: u64| -> Block {
             let mut b = genesis.clone();
-            b.header.height = height;
+            b.header.height = crate::primitives::Height::new(height);
             b.header.prev_hash = prev;
-            b.header.timestamp = ts;
+            b.header.timestamp = crate::primitives::Timestamp::from_secs(ts);
             b.header.nonce = nonce;
             b
         };
@@ -5039,7 +5323,7 @@ mod tests {
             b.transactions[0].is_coinbase(),
             "genesis first tx must be the coinbase"
         );
-        b.header.height = height;
+        b.header.height = crate::primitives::Height::new(height);
         b.header.nonce = nonce;
         let mut txs = vec![b.transactions[0].clone()];
         for &f in fees {
@@ -5047,6 +5331,88 @@ mod tests {
         }
         b.transactions = txs;
         b
+    }
+
+    // ── #supply-commitment: commitment enforcement (helper) ─────────────
+    // Exercise the enforcement LOGIC with an EXPLICIT finite enforce_height, so
+    // the accept / reject / gated-off paths are all covered even though every
+    // network ships gated OFF (enforce_height = u64::MAX).
+
+    #[test]
+    fn check_supply_commitment_below_enforce_height_is_noop() {
+        // Below the enforce height the header field is not read — even all-ones
+        // garbage is accepted, so pre-fork chains are unaffected.
+        let garbage = [0xABu8; 32];
+        assert!(super::check_supply_commitment(100, 99, &garbage, 1_000, 10).is_ok());
+        assert!(super::check_supply_commitment(100, 0, &[0u8; 32], 0, 0).is_ok());
+    }
+
+    #[test]
+    fn check_supply_commitment_accepts_matching_commitment() {
+        let (emitted, burned) = (7_000_000u128, 1_234u128);
+        let expected = crate::emission::supply::supply_commitment_consensus(
+            emitted,
+            burned,
+            crate::constants::MAX_SUPPLY.saturating_sub(emitted),
+        );
+        // At and after the enforce height, a header matching the post-apply
+        // totals is accepted.
+        assert!(super::check_supply_commitment(100, 100, &expected, emitted, burned).is_ok());
+        assert!(super::check_supply_commitment(100, 500, &expected, emitted, burned).is_ok());
+    }
+
+    #[test]
+    fn check_supply_commitment_rejects_tampered_commitment() {
+        let (emitted, burned) = (7_000_000u128, 1_234u128);
+        let good = crate::emission::supply::supply_commitment_consensus(
+            emitted,
+            burned,
+            crate::constants::MAX_SUPPLY.saturating_sub(emitted),
+        );
+        // A one-bit-flipped commitment is rejected at the enforce height.
+        let mut bad = good;
+        bad[0] ^= 0x01;
+        assert!(super::check_supply_commitment(100, 100, &bad, emitted, burned).is_err());
+        // The anti-lie guarantee: a header carrying the commitment for `emitted`
+        // is rejected when the block actually emitted one more unit.
+        assert!(super::check_supply_commitment(100, 100, &good, emitted + 1, burned).is_err());
+    }
+
+    #[test]
+    fn producer_commitment_matches_validator_check() {
+        // The producer (block_builder) and the validator (add_block) MUST agree,
+        // or honest blocks self-reject. Both compute post = parent + (emission,
+        // burn) and hash it with supply_commitment_consensus; both take `burn`
+        // from the SAME block_fee_burn. This test drives that exact path with a
+        // finite enforce height (production ships gated OFF) and asserts the
+        // validator accepts the producer's commitment and rejects a tamper.
+        let parent_emitted: u128 = 5_000_000;
+        let parent_burned: u128 = 999;
+        let height = 200u64;
+        let blk = burn_test_block(height, 7, &[100, 250]);
+        // burn EXACTLY as both producer and validator compute it.
+        let burn = super::block_fee_burn(TEST_NET, &blk);
+        let emission = crate::emission::calculate_block_reward(height).as_atomic() as u128;
+        let post_emitted = parent_emitted + emission;
+        let post_burned = parent_burned + burn;
+        // Producer side: what block_builder writes into the header.
+        let produced = crate::emission::supply::supply_commitment_consensus(
+            post_emitted,
+            post_burned,
+            crate::constants::MAX_SUPPLY.saturating_sub(post_emitted),
+        );
+        // Validator accepts it (enforce_height = 0 here so the check runs).
+        assert!(
+            super::check_supply_commitment(0, height, &produced, post_emitted, post_burned).is_ok(),
+            "validator must accept the producer's commitment — else honest blocks self-reject"
+        );
+        // A tampered commitment is rejected.
+        let mut bad = produced;
+        bad[0] ^= 0xFF;
+        assert!(
+            super::check_supply_commitment(0, height, &bad, post_emitted, post_burned).is_err(),
+            "validator must reject a tampered commitment"
+        );
     }
 
     #[test]
@@ -5328,7 +5694,7 @@ mod tests {
     /// calculate_fork_cumulative_work (they only read header + storage links).
     fn walk_block(height: u64, prev_hash: Hash, nonce: u64) -> Block {
         let mut b = create_genesis_block();
-        b.header.height = height;
+        b.header.height = crate::primitives::Height::new(height);
         b.header.prev_hash = prev_hash;
         b.header.nonce = nonce;
         b
@@ -5450,7 +5816,7 @@ mod tests {
         // Collect from fork tip f4 down to fork_point=1. Returns ascending order,
         // excluding both the tip (f4) and the fork point.
         let collected = chain.collect_fork_chain(&f4, 1);
-        let heights: Vec<u64> = collected.iter().map(|b| b.header.height).collect();
+        let heights: Vec<u64> = collected.iter().map(|b| b.header.height.as_u64()).collect();
         assert_eq!(heights, vec![2, 3]);
 
         // Missing parent link → the walk breaks immediately, returning empty.
