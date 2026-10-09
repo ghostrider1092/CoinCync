@@ -635,7 +635,7 @@ mod tests {
 
         let store = SparkPoolStore::new();
         let seed = b"v2-payload-seed";
-        let n = cover_set_size().unwrap();
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
         // Seed the pool with N coins at height 1 (each keyed by a synthetic outpoint).
         for i in 0..n {
             let outpoint = format!("v2:seed:{i}").into_bytes();
@@ -688,7 +688,7 @@ mod tests {
 
         let store = SparkPoolStore::new();
         let seed = b"ltag-match-seed";
-        let n = cover_set_size().unwrap();
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
         let inputs = vec![vec![0x33u8; 36]];
         let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
         let (mint_payload, contexts) = build_mint_payload(seed, &values, &inputs).unwrap();
@@ -745,7 +745,7 @@ mod tests {
 
         let store = SparkPoolStore::new();
         let seed = b"mint-builder-seed";
-        let n = cover_set_size().unwrap();
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
 
         // Mint N coins via the builder, funded by a synthetic transparent input.
         let mint_inputs = vec![vec![0xEEu8; 36]];
