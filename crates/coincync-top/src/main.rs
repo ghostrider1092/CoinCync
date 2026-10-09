@@ -43,6 +43,7 @@ struct NodeInfo {
     network: String,
     height: u64,
     target_height: u64,
+    top_hash: String,
     synced: bool,
     fork_stuck: bool,
     sync_stall_secs: u64,
@@ -56,6 +57,19 @@ struct NodeInfo {
     blocks_found: u64,
 }
 
+/// A single line in the chain-activity feed (the "processes" panel shows these:
+/// the node's work, reconstructed from RPC state deltas — we're a pure client, so
+/// this is honest derived telemetry, not a tail of the node's own log file).
+#[derive(Clone)]
+struct ChainEvent {
+    ts: String,
+    tag: &'static str,
+    msg: String,
+    color: Color,
+}
+
+const EVENTS_CAP: usize = 300;
+
 struct App {
     sys: System,
     nets: Networks,
@@ -67,10 +81,11 @@ struct App {
     up_hist: VecDeque<u64>,
     // node history
     hash_hist: VecDeque<u64>,
+    mempool_hist: VecDeque<u64>,
     node: NodeInfo,
+    events: VecDeque<ChainEvent>, // chain-activity feed (newest at back)
     last_poll: Instant,
     paused: bool,
-    sort_by: SortKey,
     frame: u64,                   // animation frame (advances ~5x/sec)
     prev_blocks: Option<u64>,     // last blocks_found seen (block-found edge)
     block_flash: Option<Instant>, // when a block was just found (flash window)
@@ -92,10 +107,11 @@ impl App {
             down_hist: VecDeque::from(vec![0; HIST]),
             up_hist: VecDeque::from(vec![0; HIST]),
             hash_hist: VecDeque::from(vec![0; HIST]),
+            mempool_hist: VecDeque::from(vec![0; HIST]),
             node: NodeInfo::default(),
+            events: VecDeque::new(),
             last_poll: Instant::now(),
             paused: false,
-            sort_by: SortKey::Cpu,
             frame: 0,
             prev_blocks: None,
             block_flash: None,
@@ -125,16 +141,100 @@ impl App {
         push(&mut self.up_hist, up / 1024);
 
         // Node RPC (best-effort)
-        self.node = self.poll_node();
+        let fresh = self.poll_node();
+        let prev = std::mem::replace(&mut self.node, fresh);
+        self.derive_events(&prev);
         // Block-found edge → trigger the celebratory flash.
         if self.node.online {
             let bf = self.node.blocks_found;
-            if matches!(self.prev_blocks, Some(prev) if bf > prev) {
+            if matches!(self.prev_blocks, Some(p) if bf > p) {
                 self.block_flash = Some(Instant::now());
             }
             self.prev_blocks = Some(bf);
         }
         push(&mut self.hash_hist, self.node.hashrate.round().max(0.0) as u64);
+        push(&mut self.mempool_hist, self.node.mempool);
+    }
+
+    /// Turn the delta between the previous and current RPC snapshot into
+    /// human-readable activity lines, btop/node-log style.
+    fn derive_events(&mut self, prev: &NodeInfo) {
+        let now = self.node.clone();
+
+        // Online / offline transitions.
+        if now.online && !prev.online {
+            self.push_event("node", Color::Green,
+                format!("rpc up — {} height={}", now.network, now.height));
+        } else if !now.online && prev.online {
+            self.push_event("node", Color::Red, "rpc unreachable — node down?".into());
+        }
+        if !now.online {
+            return;
+        }
+
+        // Chain growth. One commit line per new tip; a big jump is an IBD catch-up.
+        if prev.online && now.height > prev.height {
+            let delta = now.height - prev.height;
+            let short = short_hash(&now.top_hash);
+            if delta == 1 {
+                self.push_event("chain::commit", CYAN,
+                    format!("BLOCK height={} diff={} tip={}", now.height, now.difficulty, short));
+            } else {
+                self.push_event("sync_driver", Color::Yellow,
+                    format!("IBD +{} blocks → height={} tip={}", delta, now.height, short));
+            }
+        }
+
+        // Our miner landed a block.
+        if prev.online && now.blocks_found > prev.blocks_found {
+            self.push_event("miner", Color::Rgb(0x6c, 0xff, 0x6c),
+                format!("⛏ block at height {} — Accepted", now.height));
+        }
+
+        // Peer count moves.
+        if prev.online && now.peers != prev.peers {
+            let (arrow, col) = if now.peers > prev.peers {
+                ("▲", Color::Green)
+            } else {
+                ("▼", Color::Rgb(0xff, 0xb0, 0x5a))
+            };
+            self.push_event("net", col, format!("{} peers {}→{}", arrow, prev.peers, now.peers));
+        }
+
+        // Mempool deltas (only when it actually changes).
+        if prev.online && now.mempool != prev.mempool {
+            if now.mempool > prev.mempool {
+                self.push_event("mempool", DIM,
+                    format!("+{} tx → {} pending", now.mempool - prev.mempool, now.mempool));
+            } else {
+                self.push_event("mempool", DIM,
+                    format!("-{} tx → {} pending", prev.mempool - now.mempool, now.mempool));
+            }
+        }
+
+        // Health edges.
+        if now.fork_stuck && !prev.fork_stuck {
+            self.push_event("sync", Color::Red,
+                format!("FORK-STUCK — behind & stalled {}s", now.sync_stall_secs));
+        } else if !now.fork_stuck && prev.fork_stuck {
+            self.push_event("sync", Color::Green, "fork recovered — progressing".into());
+        }
+        if now.mesh_degraded && !prev.mesh_degraded {
+            self.push_event("net", Color::Red, "mesh degraded — thin peer set".into());
+        } else if !now.mesh_degraded && prev.mesh_degraded {
+            self.push_event("net", Color::Green, "mesh healthy".into());
+        }
+        if now.synced && !prev.synced {
+            self.push_event("sync", Color::Green,
+                format!("fully synced at height {}", now.height));
+        }
+    }
+
+    fn push_event(&mut self, tag: &'static str, color: Color, msg: String) {
+        if self.events.len() >= EVENTS_CAP {
+            self.events.pop_front();
+        }
+        self.events.push_back(ChainEvent { ts: clock_hms(), tag, msg, color });
     }
 
     fn poll_node(&self) -> NodeInfo {
@@ -151,6 +251,7 @@ impl App {
             network: r.get("network").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
             height: r.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
             target_height: r.get("target_height").and_then(|v| v.as_u64()).unwrap_or(0),
+            top_hash: r.get("top_hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             synced: r.get("synced").and_then(|v| v.as_bool()).unwrap_or(false),
             fork_stuck: r.get("fork_stuck").and_then(|v| v.as_bool()).unwrap_or(false),
             sync_stall_secs: r.get("sync_stall_secs").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -180,6 +281,25 @@ fn push(q: &mut VecDeque<u64>, v: u64) {
 
 fn as_slice(q: &VecDeque<u64>) -> Vec<u64> {
     q.iter().copied().collect()
+}
+
+/// Local wall-clock HH:MM:SS with no extra crates (derived from the system clock).
+fn clock_hms() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let d = secs % 86_400;
+    format!("{:02}:{:02}:{:02}", d / 3600, (d % 3600) / 60, d % 60)
+}
+
+/// First 8 + last 4 hex of a block hash, or "…" when unknown.
+fn short_hash(h: &str) -> String {
+    if h.len() <= 14 {
+        if h.is_empty() { "…".into() } else { h.to_string() }
+    } else {
+        format!("{}…{}", &h[..8], &h[h.len() - 4..])
+    }
 }
 
 fn human_bytes(b: u64) -> String {
@@ -282,11 +402,6 @@ fn graph(title: &str, data: &VecDeque<u64>, max: u64, color: Color, area: Rect) 
     Paragraph::new(lines).block(panel(title))
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum SortKey {
-    Cpu,
-    Mem,
-}
 
 /// Human-readable duration from seconds.
 fn human_dur(secs: f64) -> String {
@@ -366,8 +481,6 @@ fn draw(f: &mut Frame, app: &App) {
         Span::styled(" quit  ", Style::default().fg(DIM)),
         Span::styled("space", Style::default().fg(CYAN)),
         Span::styled(" pause  ", Style::default().fg(DIM)),
-        Span::styled("c/m", Style::default().fg(CYAN)),
-        Span::styled(" sort  ", Style::default().fg(DIM)),
     ];
     if app.paused {
         hint.push(Span::styled(
@@ -395,6 +508,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
             format!("   rpc {}", if app.node.online { "●" } else { "○" }),
             Style::default().fg(if app.node.online { Color::Green } else { Color::Red }),
         ),
+        Span::styled(format!("   {}", clock_hms()), Style::default().fg(DIM)),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -460,36 +574,36 @@ fn draw_system(f: &mut Frame, area: Rect, app: &App) {
         rows[3],
     );
 
-    // Processes — sorted by the active key
-    let mut procs: Vec<_> = app.sys.processes().values().collect();
-    match app.sort_by {
-        SortKey::Cpu => procs.sort_by(|a, b| {
-            b.cpu_usage()
-                .partial_cmp(&a.cpu_usage())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }),
-        SortKey::Mem => procs.sort_by(|a, b| b.memory().cmp(&a.memory())),
-    }
+    // Chain activity — the "processes" panel now shows the blockchain working:
+    // a rolling feed of commits, mined blocks, IBD, peer/mempool/health deltas,
+    // reconstructed live from RPC state changes. Newest at the bottom, log-style.
     let rows_n = rows[4].height.saturating_sub(2) as usize;
-    let items: Vec<ListItem> = procs
-        .iter()
-        .take(rows_n)
-        .map(|p| {
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{:>6.1}% ", p.cpu_usage()),
-                    Style::default().fg(load_color(p.cpu_usage() as f64)),
-                ),
-                Span::styled(format!("{:>9} ", human_bytes(p.memory())), Style::default().fg(DIM)),
-                Span::raw(p.name().to_string_lossy().into_owned()),
-            ]))
-        })
-        .collect();
-    let title = match app.sort_by {
-        SortKey::Cpu => "processes  (sort: cpu · press m)",
-        SortKey::Mem => "processes  (sort: mem · press c)",
+    let items: Vec<ListItem> = if app.events.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "waiting for chain activity…",
+            Style::default().fg(DIM),
+        )))]
+    } else {
+        app.events
+            .iter()
+            .rev()
+            .take(rows_n)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|e| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", e.ts), Style::default().fg(DIM)),
+                    Span::styled(format!("{:<13} ", e.tag), Style::default().fg(CYAN)),
+                    Span::styled(e.msg.clone(), Style::default().fg(e.color)),
+                ]))
+            })
+            .collect()
     };
-    f.render_widget(List::new(items).block(panel(title)), rows[4]);
+    f.render_widget(
+        List::new(items).block(panel(&format!("chain activity  ({} events)", app.events.len()))),
+        rows[4],
+    );
 }
 
 fn draw_node(f: &mut Frame, area: Rect, app: &App) {
@@ -497,7 +611,8 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::vertical([
         Constraint::Length(8), // chain
         Constraint::Length(7), // mining
-        Constraint::Min(0),    // peers/privacy
+        Constraint::Length(4), // peers/privacy
+        Constraint::Min(0),    // mempool graph
     ])
     .split(area);
 
@@ -614,6 +729,19 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![Span::styled("privacy ", Style::default().fg(DIM)), privacy]),
     ];
     f.render_widget(Paragraph::new(peers).block(panel("peers")), rows[2]);
+
+    // Mempool — braille area graph of pending-tx count over time.
+    let mmax = app.mempool_hist.iter().copied().max().unwrap_or(1).max(1);
+    f.render_widget(
+        graph(
+            &format!("mempool  ({} tx)", n.mempool),
+            &app.mempool_hist,
+            mmax,
+            Color::Rgb(0xc8, 0x8a, 0xf0),
+            rows[3],
+        ),
+        rows[3],
+    );
 }
 
 fn main() -> anyhow::Result<()> {
@@ -645,8 +773,6 @@ fn run(
                         return Ok(())
                     }
                     KeyCode::Char(' ') => app.paused = !app.paused,
-                    KeyCode::Char('c') | KeyCode::Char('C') => app.sort_by = SortKey::Cpu,
-                    KeyCode::Char('m') | KeyCode::Char('M') => app.sort_by = SortKey::Mem,
                     _ => {}
                 }
             }
