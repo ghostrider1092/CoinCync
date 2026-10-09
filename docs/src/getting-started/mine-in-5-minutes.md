@@ -109,7 +109,7 @@ Check your balance any time:
 
 ## What this is NOT
 
-- **Not real money** — this is testnet CYNC. Has no value. Mainnet launches 2026-10-01.
+- **Not real money** — this is testnet CYNC. Has no value. Mainnet launches 2027-03-01.
 - **Not pool mining** — this is solo mining against the public testnet RPC. A real pool ships with v1.1.
 - **Not a get-rich quick** — testnet mining proves the chain works and earns you a place in the genesis announcement, nothing more.
 

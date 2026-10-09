@@ -1,6 +1,6 @@
 # CoinCync Consensus Specification
 
-**Status:** Living document, v1 (2026-08-17). **Network target:** mainnet 2026-10-01.
+**Status:** Living document, v1 (2026-08-17). **Network target:** mainnet 2027-03-01.
 
 This document specifies the consensus rules a CoinCync node enforces: what makes
 a block valid, what makes a transaction valid, how the emission schedule is

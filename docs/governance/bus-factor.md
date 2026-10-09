@@ -2,7 +2,7 @@
 
 What breaks if the primary maintainer disappears, and who (if anyone) can fix it.
 
-This is the dependency map [`MAINTAINERS.md`](../../MAINTAINERS.md) is trying to close. Every row below is a critical-path responsibility that currently has a single point of failure. The goal between now and the v1.0 mainnet date (2026-10-01) is to drive the **"Backup"** column toward "named person" instead of "none."
+This is the dependency map [`MAINTAINERS.md`](../../MAINTAINERS.md) is trying to close. Every row below is a critical-path responsibility that currently has a single point of failure. The goal between now and the v1.0 mainnet date (2027-03-01) is to drive the **"Backup"** column toward "named person" instead of "none."
 
 **Threat model for this document:** the primary maintainer becomes unavailable for 2-4 weeks with no warning (medical, legal, hardware-loss, hostile state action, fatal accident). For each row, the question is: *what does the project need to do during that window, and does it have the people and access to do it?*
 

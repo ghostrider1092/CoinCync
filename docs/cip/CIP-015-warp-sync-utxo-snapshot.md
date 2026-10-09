@@ -386,7 +386,7 @@ budget. Sequence:
 **Total: ~9-12 months from CIP draft to mainnet activation.**
 
 This timeline is aggressive but achievable IF v1.0 mainnet stays on
-schedule (2026-10-01) and IF cyncswap (CIP-001, v1.1) ships in Q4
+schedule (2027-03-01) and IF cyncswap (CIP-001, v1.1) ships in Q4
 2026 / Q1 2027 without consuming all engineering capacity. If either
 slips, warp sync slips with them.
 

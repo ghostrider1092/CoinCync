@@ -191,7 +191,7 @@ The maintainer will:
 
 ---
 
-## Mainnet (October 1, 2026)
+## Mainnet (March 1, 2027)
 
 This guide is for **testnet** seed nodes. Mainnet seed nodes are a
 separate set with stricter operational requirements — see

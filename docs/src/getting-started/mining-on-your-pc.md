@@ -104,7 +104,7 @@ purpose-built rig.
 
 Testnet CYNC has no monetary value. Treat mining rewards as a way to
 verify your wallet works, send transactions, and stress-test the
-network. **Mainnet launch** is targeted for October 2026; testnet
+network. **Mainnet launch** is targeted for March 2027; testnet
 mining is preparation, not income.
 
 ## Stopping the miner

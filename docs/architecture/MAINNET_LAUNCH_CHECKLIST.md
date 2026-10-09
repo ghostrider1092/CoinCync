@@ -1,6 +1,6 @@
 # Mainnet launch checklist
 
-Operator runbook for the CoinCync mainnet genesis (target **2026-10-01
+Operator runbook for the CoinCync mainnet genesis (target **2027-03-01
 00:00:00 UTC**). This file is referenced from `src/network/dns_seeds.rs`
 (mainnet seed placeholders) and consolidates the go/no-go items that cannot
 be satisfied by code alone.
@@ -31,7 +31,7 @@ Status legend: `[ ]` outstanding · `[x]` done · `[~]` in progress.
 
 ## 2. Genesis  — BLOCKING
 
-- [x] Mainnet genesis timestamp `1790812800` (2026-10-01 UTC) and message
+- [x] Mainnet genesis timestamp `1803859200` (2027-03-01 UTC) and message
   set (`src/mainnet.rs`).
 - [x] Mainnet genesis hash `c9eb73ab…635c` set and guarded by a consistency
   test.
@@ -70,5 +70,5 @@ tagging a mainnet binary:
 ---
 
 *This checklist is intentionally conservative: any BLOCKING item still open
-is a no-go for the 2026-10-01 genesis. Keep it in sync with `ROADMAP.md` and
+is a no-go for the 2027-03-01 genesis. Keep it in sync with `ROADMAP.md` and
 `src/network/dns_seeds.rs`.*

@@ -394,7 +394,7 @@ differences:
 
 2. **Heights are adjusted** for mainnet's actual block-time
    target and observed chain-state-at-launch. If mainnet launches
-   October 2026 at height 0, post-launch `H_enable` ~25 000 puts
+   March 2027 at height 0, post-launch `H_enable` ~25 000 puts
    the activation roughly 60 days after launch.
 
 The mainnet activation CIP will be `CIP-014` or whichever number

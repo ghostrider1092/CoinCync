@@ -61,10 +61,10 @@ let RPC  = _API_BASE + '/api/' + _activeNetwork;
 let REST = _API_BASE + '/api/v1/' + _activeNetwork;
 
 // Mainnet launch is hardcoded in src/mainnet.rs as Unix timestamp
-// 1790812800 (October 1, 2026 00:00:00 UTC). Until then the explorer
+// 1803859200 (March 1, 2027 00:00:00 UTC). Until then the explorer
 // renders a countdown instead of polling the (nonexistent) mainnet
 // backend.
-const MAINNET_LAUNCH_UNIX = 1790812800;
+const MAINNET_LAUNCH_UNIX = 1803859200;
 function isMainnetLaunched() {
   return Math.floor(Date.now() / 1000) >= MAINNET_LAUNCH_UNIX;
 }
@@ -98,7 +98,7 @@ function setNetwork(net) {
     mn.classList.toggle('pre-launch', !isMainnetLaunched());
     mn.title = isMainnetLaunched()
       ? 'Mainnet — live'
-      : 'Mainnet launches October 1, 2026 00:00:00 UTC';
+      : 'Mainnet launches March 1, 2027 00:00:00 UTC';
   }
 
   // Show/hide the launch countdown banner.

@@ -187,7 +187,7 @@ recovery).
 
 Given:
 
-- Mainnet launches October 2026 — 5 months away.
+- Mainnet launches March 2027 — 5 months away.
 - Hashpower at launch is unknown but likely modest.
 - The audit window before mainnet is tight; adding 600-800 LOC of
   novel consensus code at this point is high-risk.

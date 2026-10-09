@@ -127,7 +127,7 @@ The full method inventory is in [JSON-RPC reference](../api/json-rpc.md).
 | Network | P2P port | RPC port | Genesis | Status |
 |---|---|---|---|---|
 | `testnet` | 28080 | 28081 | March 6, 2026 | **live** |
-| `mainnet` | 19080 | 19081 | October 1, 2026 | pre-launch |
+| `mainnet` | 19080 | 19081 | March 1, 2027 | pre-launch |
 | `regtest` | (any) | (any) | local-only | for isolated dev |
 
 ## Try the local explorer

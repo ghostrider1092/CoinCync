@@ -194,7 +194,7 @@ of the FIRST Mode A activation (probably the BOOTSTRAP_MIN_RING_SIZE
 bump). Until then this document is a sketch.
 
 The Mode B counter implementation is also deferred until the first
-contentious change that warrants it. Mainnet launch (October 2026)
+contentious change that warrants it. Mainnet launch (March 2027)
 ships with Mode A only; Mode B follows when the network meets the
 "broad enough that operator coordination is meaningful" threshold,
 roughly: third-party wallets exist that aren't run by the project,

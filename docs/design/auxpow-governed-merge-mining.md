@@ -513,7 +513,7 @@ Adding header fields changes `BlockHeader::hash()`
 `src/testnet.rs` is hash-locked and `expected_genesis_hash()` asserts the
 hardcoded genesis. Therefore:
 
-- **Mainnet** (not yet launched, target 2026-10-01): AuxPoW fields can be
+- **Mainnet** (not yet launched, target 2027-03-01): AuxPoW fields can be
   present from genesis. But per §10 this is **not** a v1.0 change.
 - **Existing testnet** (live at h≈3200+): header changes require a fork height,
   not a retro-genesis change. The `pow_class`/`AuxPow` fields must serialize

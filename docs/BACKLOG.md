@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-06-24
 **Owner:** ghostrider1092
-**Mainnet GA:** 2026-10-01 (hard deadline)
+**Mainnet GA:** 2027-03-01 (hard deadline)
 **Testnet v1.0.12 hard fork:** ~2026-07-01 at h=13_000
 
 This is the **single source of truth** for what to work on next. Read top-to-bottom every session. Don't open new work outside this list without adding it here first.
@@ -41,7 +41,7 @@ This is the **single source of truth** for what to work on next. Read top-to-bot
 
 ---
 
-## ⏰ P1 — pre-mainnet (2026-10-01)
+## ⏰ P1 — pre-mainnet (2027-03-01)
 
 | # | Item | Owner | Done when |
 |---|---|---|---|

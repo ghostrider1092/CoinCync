@@ -122,7 +122,7 @@ Without the length prefixes, an attacker could craft two transactions that seria
 
 ## What's in `extra`
 
-The `extra` field is a free-form byte buffer included in the signing hash. It's typically empty for normal transactions. Coinbase transactions store the genesis message in here for the genesis block (`"CoinCync Mainnet Genesis - Privacy You Can Audit - October 2026"`).
+The `extra` field is a free-form byte buffer included in the signing hash. It's typically empty for normal transactions. Coinbase transactions store the genesis message in here for the genesis block (`"CoinCync Mainnet Genesis - Privacy You Can Audit - March 2027"`).
 
 The protocol does not assign meaning to `extra` for non-coinbase transactions. Wallets that want to embed protocol-level annotations (multi-tx batching IDs, payment IDs, etc.) can do so here, but they should be aware that:
 

@@ -45,8 +45,8 @@ pub const MAINNET_INITIAL_DIFFICULTY: u64 = 64_000;
 // this constant must be recomputed — `test_mainnet_genesis_hash_consistency`
 // below fails fast so CI catches it before it ships.
 pub const MAINNET_GENESIS_HASH: [u8; 32] = [
-    0xc9, 0xeb, 0x73, 0xab, 0x1e, 0xd2, 0xd9, 0xe4, 0x00, 0x42, 0xa9, 0x62, 0x99, 0x0b, 0xba, 0x98,
-    0x11, 0x4b, 0xc5, 0x09, 0xb3, 0x30, 0xbc, 0xda, 0x02, 0x2b, 0x9e, 0xc8, 0xfe, 0x07, 0x63, 0x5c,
+    0xcb, 0x3c, 0x88, 0x3b, 0xd4, 0x57, 0x1f, 0x07, 0xff, 0x6c, 0x04, 0xe7, 0xa8, 0x6e, 0xc7, 0xb2,
+    0x8a, 0xd4, 0xe7, 0xe0, 0x14, 0x30, 0xae, 0xcf, 0xfe, 0xe1, 0x13, 0x4e, 0x19, 0xff, 0x46, 0xc6,
 ];
 
 // AUDIT (2026-07-02): removed the `pub mod emission { ... }` block that
@@ -76,10 +76,10 @@ pub const MAINNET_GENESIS_HASH: [u8; 32] = [
 
 /// Genesis block for mainnet
 pub fn mainnet_genesis() -> Block {
-    let timestamp = 1790812800; // October 1, 2026 00:00:00 UTC
+    let timestamp = 1803859200; // March 1, 2027 00:00:00 UTC
 
     // Genesis message embedded in the block
-    let genesis_message = b"CoinCync Mainnet Genesis - Privacy You Can Audit - October 2026";
+    let genesis_message = b"CoinCync Mainnet Genesis - Privacy You Can Audit - March 2027";
 
     // Create genesis coinbase transaction
     let coinbase_tx = create_genesis_coinbase(genesis_message);
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(genesis.header.height.as_u64(), 0);
         assert!(genesis.header.prev_hash.is_zero());
         assert!(!genesis.transactions.is_empty());
-        assert_eq!(genesis.header.timestamp.as_secs(), 1790812800);
+        assert_eq!(genesis.header.timestamp.as_secs(), 1803859200);
     }
 
     #[test]

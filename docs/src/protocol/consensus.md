@@ -103,7 +103,7 @@ Failing any check returns `BlockValidation { valid: false, errors: [...] }` and 
 
 ### Genesis timestamp exemption
 
-Mainnet genesis has a hardcoded timestamp of `1790812800` (October 1, 2026 00:00:00 UTC). If you run a mainnet node before that date, the genesis block's timestamp is **in the future** by wall-clock time. Without an exemption, `validate_header` would reject the genesis block as "too far in future."
+Mainnet genesis has a hardcoded timestamp of `1803859200` (March 1, 2027 00:00:00 UTC). If you run a mainnet node before that date, the genesis block's timestamp is **in the future** by wall-clock time. Without an exemption, `validate_header` would reject the genesis block as "too far in future."
 
 The fix in `validate_header`:
 

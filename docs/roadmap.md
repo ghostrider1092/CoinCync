@@ -20,7 +20,7 @@
 ## v1.0 — Base chain mainnet (testnet live; mainnet next)
 
 **Status:** Testnet shipped and live. Mainnet ship is the next release.
-**Date:** Testnet went live 2026-04-30, currently running 5 Vultr-hosted nodes (per `project_vultr_fleet`). Mainnet target: October 1, 2026.
+**Date:** Testnet went live 2026-04-30, currently running 5 Vultr-hosted nodes (per `project_vultr_fleet`). Mainnet target: March 1, 2027.
 
 **Headline:** Privacy money chain — mine, send, receive, mainnet-grade. **No cyncswap; no shielded pool.** The base chain ships first, novel cryptographic features ship after each clears its own audit. Same pattern Monero used: chain first (2014), Bulletproofs and CLSAG and other novel crypto later, behind their own audits.
 

@@ -3,7 +3,7 @@
 > Single source of truth for release planning. Read this if you want to know what's coming next, what's coming later, and what's deliberately out of scope until then.
 
 **Last updated:** 2026-06-06
-**Mainnet target:** 2026-10-01 00:00:00 UTC
+**Mainnet target:** 2027-03-01 00:00:00 UTC
 
 This document covers the planned release sequence from the current testnet state through mainnet GA and into the post-mainnet point releases. Plans are subject to change as the project learns from the testnet, the [Crucible](CRUCIBLE.md) community testing program, and external review. Material changes land here via PR with rationale in the commit message.
 
@@ -16,7 +16,7 @@ This document covers the planned release sequence from the current testnet state
 | Latest shipped testnet release | v1.0.10 (in fleet) |
 | Tagged but not yet pushed | v1.0.11-canonical-clsag (in Crucible Cycle 01 testing) |
 | In local development | v1.0.12 (consensus parameter refresh, scratch-chain validated) |
-| Mainnet GA | 2026-10-01 00:00:00 UTC |
+| Mainnet GA | 2027-03-01 00:00:00 UTC |
 | Community testing program | [The Crucible](CRUCIBLE.md) — Cycle 01 active |
 | Funding application | NLnet Commons Fund (cyncswap track) — first-round review |
 
@@ -27,7 +27,7 @@ This document covers the planned release sequence from the current testnet state
 **Version cadence:**
 
 - **v1.0.X** — pre-mainnet testnet point releases, each a focused theme. Consensus-breaking changes batched per release, never sneaked in.
-- **v1.0.0 (mainnet GA)** — frozen consensus as of v1.0.16; tagged on 2026-10-01 launch.
+- **v1.0.0 (mainnet GA)** — frozen consensus as of v1.0.16; tagged on 2027-03-01 launch.
 - **v1.0.X post-GA** — bug fixes and non-consensus refinements only. No consensus changes without a CIP.
 - **v1.1.X** — first major post-mainnet feature train. Currently scoped to atomic swaps (cyncswap).
 - **v1.2.X** — second major train. Currently scoped to the Orchard shielded pool.
@@ -121,7 +121,7 @@ Decision doc: [`docs/decisions/2026-06-06-ring-ramp-and-output-age.md`](docs/dec
 
 Out of MVP scope (deferred to v1.0.15 or later): multisig UI, subaddress UI, dead-man's-switch UI, theming, advanced settings, hardware wallet integration.
 
-Slotted here for adoption-readiness time. Shipping the wallet in v1.0.14 (~late July) gives the community ~10 weeks of real-world testing before mainnet GA on 2026-10-01. Shipping later compresses that window in a way that hurts mainnet user experience.
+Slotted here for adoption-readiness time. Shipping the wallet in v1.0.14 (~late July) gives the community ~10 weeks of real-world testing before mainnet GA on 2027-03-01. Shipping later compresses that window in a way that hurts mainnet user experience.
 
 **IBD speedups** (parallel track, different code paths from the wallet):
 
@@ -168,9 +168,9 @@ Slotted here for adoption-readiness time. Shipping the wallet in v1.0.14 (~late 
 
 ---
 
-## ⭐ Mainnet GA — 2026-10-01 00:00:00 UTC
+## ⭐ Mainnet GA — 2027-03-01 00:00:00 UTC
 
-Genesis block message: *"CoinCync Mainnet Genesis — Privacy You Can Audit — October 2026"*.
+Genesis block message: *"CoinCync Mainnet Genesis — Privacy You Can Audit — March 2027"*.
 
 What ships in v1.0 base chain at mainnet GA:
 
@@ -357,4 +357,4 @@ When plans change, this document gets a PR. The commit message explains what cha
 
 *Privacy-first proof-of-work cryptocurrency. Mine, send, receive, multi-sig. The full 7-feature privacy stack. CIP-009 reorg defense active.*
 
-*Mainnet October 1, 2026.*
+*Mainnet March 1, 2027.*

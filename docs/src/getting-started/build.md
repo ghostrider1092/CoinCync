@@ -56,7 +56,7 @@ The build accepts compile-time features. The defaults are sensible for a testnet
 |---|---|---|
 | `randomx` | **on** | Enables the RandomX PoW backend. **Required** — running without it makes `compute_pow_hash` panic at runtime. There is no non-RandomX fallback; the panic is by design so you can't accidentally ship a PoW-skipping node. |
 | `testnet` | off | Selects testnet network magic, ports, and genesis. Enable when you want a node that talks to the public testnet seed nodes. |
-| `mainnet` | off | Selects mainnet network magic, ports, and genesis. Enable after the October 1, 2026 mainnet launch. |
+| `mainnet` | off | Selects mainnet network magic, ports, and genesis. Enable after the March 1, 2027 mainnet launch. |
 | `metrics` | off | Exports Prometheus metrics on a separate HTTP port. Recommended for production hosts. |
 | `test-utilities` | off | Exposes a few `Mempool::add_skip_crypto`-style helpers used only by integration tests. **Never enable in production builds.** |
 

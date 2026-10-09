@@ -72,13 +72,13 @@ curl -sX POST https://api.coincync.network/rpc \
      -w '\n%{http_code}\n'
 # expect: 403 (or a JSON-RPC error)
 
-# Mainnet pre-launch returns 502 (no upstream until October 2026)
+# Mainnet pre-launch returns 502 (no upstream until March 2027)
 curl -sX POST https://api.coincync.network/rpc/mainnet \
      -H 'content-type: application/json' \
      -d '{"jsonrpc":"2.0","id":1,"method":"get_info"}' -w '\n%{http_code}\n'
 ```
 
-## Mainnet launch (Oct 1, 2026)
+## Mainnet launch (Mar 1, 2027)
 
 The Caddyfile already has the `/rpc/mainnet` upstream pool defined. To activate:
 

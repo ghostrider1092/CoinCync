@@ -21,7 +21,7 @@ Three paste-ready cold emails for v1.0 base-chain audit firm engagement. Same pr
 Hi Cypher Stack team,
 
 I'm reaching out about a cryptographic audit engagement for CoinCync —
-a privacy-first proof-of-work cryptocurrency targeting October 1, 2026
+a privacy-first proof-of-work cryptocurrency targeting March 1, 2027
 mainnet. I've followed your Monero-side work (CLSAG, RingCT, view-key
 analysis) and you're the first firm we want to talk to on this.
 
@@ -93,7 +93,7 @@ Hi OSTIF team,
 
 I'm writing about an audit-coordination engagement for CoinCync, a
 solo-developed open-source privacy-first PoW cryptocurrency targeting
-October 1, 2026 mainnet.
+March 1, 2027 mainnet.
 
 I'm reaching out to OSTIF specifically because:
 
@@ -164,7 +164,7 @@ more detail in whatever intake format you prefer.
 Hi Teserakt team,
 
 I'm reaching out about a cryptographic engineering audit for CoinCync —
-a privacy-first proof-of-work cryptocurrency targeting October 1, 2026
+a privacy-first proof-of-work cryptocurrency targeting March 1, 2027
 mainnet. I've followed your protocol-engineering and side-channel work
 (the E4 IoT crypto stack, the cryptographic-research write-ups) and the
 discipline matches what this engagement needs.
