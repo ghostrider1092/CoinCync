@@ -43,12 +43,10 @@
 //!   random-blinded or wrong-amount coinbase commitment lets a miner pay themselves more than the
 //!   consensus subsidy (coinbase inflation).
 //!   TESTS: `verify_coinbase_output_matches_zero_blinding`.
-//! - **§7 `batch_verify_range_proofs` (bounds: `MAX_AGGREGATION`/`RANGE_BITS`)** — INVARIANT:
-//!   `batch_verify_range_proofs` accepts a set iff every `(commitment, proof)` pair verifies, and
+//! - **§7 aggregation bounds (`MAX_AGGREGATION`/`RANGE_BITS`)** — INVARIANT:
 //!   aggregation refuses length mismatch and any batch exceeding `MAX_AGGREGATION`, with `RANGE_BITS`
 //!   fixing the 64-bit proving width. THREAT: an oversized/mismatched batch is a DoS or padding-abuse
-//!   vector, a lenient batch check lets one bad proof slip through, and a wrong bit width would prove
-//!   the wrong range.
+//!   vector, and a wrong bit width would prove the wrong range.
 //!   TESTS: `create_aggregated_range_proof_rejects_length_mismatch`, `create_aggregated_range_proof_rejects_over_max_aggregation`, `create_aggregated_range_proof_empty_returns_empty_proof`, `range_proof_at_u64_max`.
 //! - **§8 `from_bytes_checked`** — INVARIANT (R-5 / H7-FIX): the checked constructor decompresses and
 //!   rejects non-canonical bytes, `checked_add`/`checked_sub` return `None` on invalid points, and the
@@ -239,8 +237,8 @@ impl PedersenCommitment {
     /// variant to `from_bytes_unchecked` so its danger is
     /// unmissable in code review. Every in-tree caller ALREADY uses
     /// `from_bytes_checked` (verified 2026-07-03 across
-    /// consensus/validation.rs, crypto/disclosure.rs, and
-    /// crypto/parallel_proofs.rs — 5 sites, all validated). This
+    /// consensus/validation.rs and crypto/disclosure.rs, all
+    /// validated). This
     /// unchecked form remains only for the internal borsh
     /// round-trip path where the encoder produced the bytes.
     pub fn from_bytes_unchecked(bytes: [u8; 32]) -> Self {
@@ -490,14 +488,6 @@ pub fn verify_range_proofs(commitments: &[PedersenCommitment], proof: &RangeProo
 }
 
 /// Batch verify multiple independent range proofs
-pub fn batch_verify_range_proofs(
-    commitments_and_proofs: &[(PedersenCommitment, RangeProof)],
-) -> bool {
-    commitments_and_proofs
-        .iter()
-        .all(|(c, p)| verify_range_proof(c, p))
-}
-
 // ─── Bulletproofs+ (BP+) range proofs ────────────────────────────────────────
 //
 // BP+ (Chung et al. 2022) produces proofs ~96 bytes shorter than standard
