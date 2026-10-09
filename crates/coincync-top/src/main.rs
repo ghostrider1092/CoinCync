@@ -244,8 +244,10 @@ impl App {
     }
 
     fn push_event(&mut self, tag: &'static str, color: Color, msg: String) {
+        let (icon, icon_color) = icon_for("INFO", tag, &msg);
         self.push_feed(FeedLine {
             spans: vec![
+                (format!("{icon} "), icon_color),
                 (format!("{} ", clock_hms()), DIM),
                 (format!("{:<13} ", tag), CYAN),
                 (msg, color),
@@ -347,7 +349,9 @@ fn parse_log_line(line: &str) -> FeedLine {
     let t: Vec<&str> = line.split_whitespace().collect();
     // Need at least date, time, level.
     if t.len() < 3 || !looks_like_level(t[2]) {
-        return FeedLine { spans: vec![(line.trim_end().to_string(), Color::White)] };
+        return FeedLine {
+            spans: vec![("▸ ".to_string(), DIM), (line.trim_end().to_string(), Color::White)],
+        };
     }
     let time = t[1];
     let level = t[2];
@@ -382,8 +386,10 @@ fn parse_log_line(line: &str) -> FeedLine {
         Color::White
     };
 
+    let (icon, icon_color) = icon_for(level, module, &msg);
     FeedLine {
         spans: vec![
+            (format!("{icon} "), icon_color),
             (format!("{time} "), DIM),
             (format!("{level:<5} "), level_color),
             (format!("{module}  "), CYAN),
@@ -394,6 +400,44 @@ fn parse_log_line(line: &str) -> FeedLine {
 
 fn looks_like_level(s: &str) -> bool {
     matches!(s, "ERROR" | "ERRO" | "WARN" | "WARNING" | "INFO" | "DEBUG" | "TRACE")
+}
+
+/// Pick a single-width category icon (+ its colour) for a feed line, from the
+/// severity, module and message. All glyphs are BMP width-1 so the columns stay
+/// aligned line-to-line.
+fn icon_for(level: &str, module: &str, msg: &str) -> (&'static str, Color) {
+    let gold = Color::Rgb(0xf5, 0xc8, 0x42);
+    let green = Color::Rgb(0x6c, 0xff, 0x6c);
+    match level {
+        "ERROR" | "ERRO" => return ("✖", Color::Red),
+        "WARN" | "WARNING" => return ("⚑", Color::Yellow),
+        _ => {}
+    }
+    if msg.contains("BLOCK_COMMIT") {
+        ("⬢", green) // a block landed on our chain
+    } else if module.contains("miner") || msg.contains("Accepted") {
+        ("✦", gold) // our miner found/accepted a block
+    } else if module.contains("heartbeat") {
+        ("♥", DIM) // maintenance tick
+    } else if module.contains("dispatch") {
+        ("⇣", CYAN) // blocks/data received
+    } else if module.contains("sync_driver") || msg.contains("[IBD]") {
+        ("⇅", gold) // sync traffic
+    } else if module.contains("peer_manager")
+        || module.contains("connection")
+        || msg.contains("handshake")
+        || msg.contains("peer")
+    {
+        ("●", CYAN) // peer/mesh
+    } else if module.contains("randomx") || module.contains("pow") {
+        ("◆", Color::Rgb(0xc8, 0x8a, 0xf0)) // RandomX / PoW
+    } else if module.contains("rpc") || module.contains("rest") || module.contains("metrics") {
+        ("⚙", DIM) // service endpoints
+    } else if module.contains("dandelion") {
+        ("⟐", Color::Rgb(0xc8, 0x8a, 0xf0)) // privacy / Baffle
+    } else {
+        ("▸", DIM)
+    }
 }
 
 /// Follow a node log file (`tail -f`): seed with the recent tail, then stream
