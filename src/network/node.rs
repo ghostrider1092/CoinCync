@@ -1165,6 +1165,14 @@ impl P2PNode {
         self.peers.len()
     }
 
+    /// Highest chain height any connected peer has advertised (Version at
+    /// handshake, ChainWork on every tip change); 0 when none has. Unlike the
+    /// sync layer's best-known height this is NOT clamped to our own height,
+    /// so a miner can tell that every peer is behind it (private fork).
+    pub fn max_peer_height(&self) -> u64 {
+        self.peers.iter().map(|p| p.height).max().unwrap_or(0)
+    }
+
     /// Get current chain height (for sync guard).
     pub async fn chain_height(&self) -> u64 {
         self.chain_state.height().await
