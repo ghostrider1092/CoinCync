@@ -583,6 +583,33 @@ const MSG_RATE_LIMITS: &[(u8, u32)] = &[
                // + per-shard framer caps.
 ];
 
+/// Outcome of recording one message against a peer's per-type rate limiter.
+///
+/// The two fields are deliberately independent because they drive two different
+/// actions that must NOT be collapsed into one boolean:
+///   * `over_limit` governs whether the caller DROPS the message. It is true for
+///     EVERY message over the per-type limit — the limit is only actually
+///     enforced if every excess message is dropped.
+///   * `penalize` governs whether the caller WARNS + penalizes the peer. It is
+///     true at most once per type per window, so a brief legit burst isn't
+///     logged/penalized per-message, while a sustained flooder still accrues one
+///     penalty per window → eventually banned.
+///
+/// Collapsing these (dropping only when penalizing) was the ccbf066 regression:
+/// only the first over-limit message per window was dropped and every later one
+/// was processed, so the rate limit was effectively disabled and a flooder took
+/// ~100s to ban instead of ~10 messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RateLimitCheck {
+    /// The message is over its per-type limit this window → the caller MUST drop
+    /// it. True for every over-limit message, not just the first.
+    pub over_limit: bool,
+    /// First over-limit message of this type this window → the caller should
+    /// warn + penalize now (at most once per type per window). Always implies
+    /// `over_limit`.
+    pub penalize: bool,
+}
+
 impl PeerMessageRateTracker {
     pub fn new() -> Self {
         PeerMessageRateTracker {
@@ -593,18 +620,19 @@ impl PeerMessageRateTracker {
         }
     }
 
-    /// Record a message and return true ONLY on the first message that crosses
-    /// the per-type limit in the current window; every further over-limit
-    /// message of that type in the same window returns false.
+    /// Record a message and classify it against the per-type limit for the
+    /// current window, returning a [`RateLimitCheck`] with two independent bits:
     ///
-    /// The caller (`network::node::runtime`) warns + penalizes on `true`, so
-    /// once-per-window flagging means a flooding peer is warned + penalized once
-    /// per 10s window per type instead of once per message. A sustained flooder
-    /// still accrues a penalty every window → eventually banned (DoS protection
-    /// intact), but a brief legit burst — e.g. a miner on a low-difficulty /
-    /// fast-block network, or reorg reconciliation — gets a single penalty and
-    /// recovers, and the log is no longer flooded with per-message warnings.
-    pub fn record(&mut self, msg_type_id: u8) -> bool {
+    ///   * `over_limit` — true for EVERY message over the limit. The caller
+    ///     (`network::node::runtime`) drops every such message; dropping only
+    ///     some would leave the limit unenforced.
+    ///   * `penalize` — true only on the FIRST over-limit message of this type
+    ///     this window. The caller warns + penalizes on this bit, so a flooding
+    ///     peer is penalized once per 10s window per type (→ eventually banned,
+    ///     DoS protection intact) while a brief legit burst — e.g. a miner on a
+    ///     low-difficulty / fast-block network, or reorg reconciliation — gets a
+    ///     single penalty and recovers without flooding the log.
+    pub fn record(&mut self, msg_type_id: u8) -> RateLimitCheck {
         let now = mono_now();
         if now.saturating_duration_since(self.window_start).as_secs() >= self.window_secs {
             self.counts.clear();
@@ -615,15 +643,19 @@ impl PeerMessageRateTracker {
         let count = self.counts.entry(msg_type_id).or_insert(0);
         *count += 1;
 
-        // Check against per-type limit; flag at most once per type per window.
+        // Check against per-type limit. Over the limit → DROP every such message
+        // (`over_limit` every time), but WARN + PENALIZE at most once per type
+        // per window (`penalize` is `flagged.insert()`, true only the first time
+        // this type is flagged this window).
         for &(type_id, limit) in MSG_RATE_LIMITS {
             if msg_type_id == type_id && *count > limit {
-                // insert() returns true only the first time this type is flagged
-                // this window → exactly one warn+penalty per window per type.
-                return self.flagged.insert(msg_type_id);
+                return RateLimitCheck {
+                    over_limit: true,
+                    penalize: self.flagged.insert(msg_type_id),
+                };
             }
         }
-        false
+        RateLimitCheck::default() // under the limit → process normally
     }
 }
 
@@ -1584,7 +1616,7 @@ mod tests {
         assert_eq!(msg_type_id, 12, "protocol.rs discriminant must be 12");
         let mut exceeded = false;
         for _ in 0..101 {
-            exceeded = tracker.record(msg_type_id);
+            exceeded = tracker.record(msg_type_id).over_limit;
         }
         assert!(
             exceeded,
@@ -1600,8 +1632,43 @@ mod tests {
         // penalized into a ban per-message instead of per-window.
         let mut t = PeerMessageRateTracker::new();
         let id = crate::network::protocol::MessageType::InvBlock as u8; // limit 200
-        let flags = (0..600).filter(|_| t.record(id)).count();
+        let flags = (0..600).filter(|_| t.record(id).penalize).count();
         assert_eq!(flags, 1, "over-limit must flag once per window, not per message");
+    }
+
+    #[test]
+    fn rate_tracker_drops_every_over_limit_message_but_penalizes_once() {
+        // REGRESSION LOCK for the review of ccbf066. The DROP decision and the
+        // WARN+PENALTY decision are two separate concerns and must not collapse
+        // into one boolean:
+        //   * EVERY over-limit message must be dropped (`over_limit`), or the
+        //     rate limit is unenforced — ccbf066 dropped only the first per
+        //     window and processed the rest, so a flooder took ~100s to ban
+        //     instead of ~10 messages.
+        //   * The warn+penalty must fire at most ONCE per type per window
+        //     (`penalize`), so a brief legit burst isn't penalized per-message
+        //     and the log isn't flooded.
+        let mut t = PeerMessageRateTracker::new();
+        let id = crate::network::protocol::MessageType::InvBlock as u8; // limit 200
+        let checks: Vec<RateLimitCheck> = (0..600).map(|_| t.record(id)).collect();
+
+        // Messages 201..=600 (400 of them) are over the limit of 200.
+        let dropped = checks.iter().filter(|c| c.over_limit).count();
+        assert_eq!(dropped, 400, "EVERY over-limit message must be dropped");
+
+        // …but only the first over-limit message warns + penalizes.
+        let penalized = checks.iter().filter(|c| c.penalize).count();
+        assert_eq!(
+            penalized, 1,
+            "warn+penalty must fire once per window, not per message"
+        );
+
+        // `penalize` must always imply `over_limit` (never penalize an
+        // in-limit message).
+        assert!(
+            checks.iter().all(|c| !c.penalize || c.over_limit),
+            "penalize implies over_limit"
+        );
     }
 
     #[test]

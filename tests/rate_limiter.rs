@@ -32,7 +32,7 @@ fn test_under_limit_not_flagged() {
     // Send 49 Version messages (limit is 50) — all should pass
     for _ in 0..49 {
         assert!(
-            !tracker.record(MSG_VERSION),
+            !tracker.record(MSG_VERSION).over_limit,
             "Should not flag under-limit messages"
         );
     }
@@ -44,7 +44,7 @@ fn test_at_limit_flagged() {
 
     // Send exactly 50 Version messages — 50th is at limit, 51st exceeds
     for i in 0..50 {
-        let flagged = tracker.record(MSG_VERSION);
+        let flagged = tracker.record(MSG_VERSION).over_limit;
         assert!(
             !flagged,
             "Message {} should not be flagged (limit is 50)",
@@ -54,7 +54,7 @@ fn test_at_limit_flagged() {
 
     // 51st message should be flagged
     assert!(
-        tracker.record(MSG_VERSION),
+        tracker.record(MSG_VERSION).over_limit,
         "Message 51 should exceed the limit"
     );
 }
@@ -71,30 +71,30 @@ fn test_different_types_independent() {
     // Send 99 GetHeaders messages (under limit of 100)
     for _ in 0..99 {
         assert!(
-            !tracker.record(MSG_GET_HEADERS),
+            !tracker.record(MSG_GET_HEADERS).over_limit,
             "GetHeaders should not be flagged"
         );
     }
 
     // Version is still under limit — 50th is ok
     assert!(
-        !tracker.record(MSG_VERSION),
+        !tracker.record(MSG_VERSION).over_limit,
         "50th Version should not be flagged"
     );
 
     // 51st Version exceeds
     assert!(
-        tracker.record(MSG_VERSION),
+        tracker.record(MSG_VERSION).over_limit,
         "51st Version should be flagged"
     );
 
     // GetHeaders 100th is ok, 101st exceeds
     assert!(
-        !tracker.record(MSG_GET_HEADERS),
+        !tracker.record(MSG_GET_HEADERS).over_limit,
         "100th GetHeaders should not be flagged"
     );
     assert!(
-        tracker.record(MSG_GET_HEADERS),
+        tracker.record(MSG_GET_HEADERS).over_limit,
         "101st GetHeaders should be flagged"
     );
 }
@@ -103,21 +103,28 @@ fn test_different_types_independent() {
 fn test_window_reset() {
     let mut tracker = PeerMessageRateTracker::new();
 
-    // Fill exactly to the limit (50): none flagged yet.
+    // Fill exactly to the limit (50): none over the limit yet.
     for _ in 0..50 {
-        tracker.record(MSG_VERSION);
+        assert!(!tracker.record(MSG_VERSION).over_limit);
     }
-    // The 51st exceeds the limit and is flagged. NOTE: the tracker flags a
-    // type at most ONCE per window (scoring.rs `flagged` set) — so only this
-    // FIRST over-limit record returns true...
+    // The 51st exceeds the limit: it is `over_limit` (the caller DROPS it) AND
+    // the first over-limit message this window, so it also `penalize`s.
+    let first = tracker.record(MSG_VERSION);
+    assert!(first.over_limit, "first over-limit message must be dropped");
+    assert!(first.penalize, "first over-limit message must penalize");
+
+    // A FURTHER over-limit message in the SAME window is STILL `over_limit`
+    // (dropped) but is NOT penalized again. This is the drop-every /
+    // penalize-once split: collapsing them (as ccbf066 did) let every message
+    // after the first flow through, disabling the rate limit.
+    let second = tracker.record(MSG_VERSION);
     assert!(
-        tracker.record(MSG_VERSION),
-        "First over-limit record should be flagged"
+        second.over_limit,
+        "every over-limit message must be dropped, not just the first"
     );
-    // ...and a further over-limit record in the SAME window is not re-flagged.
     assert!(
-        !tracker.record(MSG_VERSION),
-        "Over-limit record should not be re-flagged within the same window"
+        !second.penalize,
+        "the warn+penalty must fire at most once per window"
     );
 
     // Wait for the 10-second window to expire (tracker uses a 10s window
@@ -126,10 +133,9 @@ fn test_window_reset() {
 
     // After window reset, both the counter and the flag clear, so messages
     // are accepted (and unflagged) again.
-    assert!(
-        !tracker.record(MSG_VERSION),
-        "Should accept messages after window reset"
-    );
+    let after = tracker.record(MSG_VERSION);
+    assert!(!after.over_limit, "should accept messages after window reset");
+    assert!(!after.penalize);
 }
 
 #[test]
@@ -139,7 +145,7 @@ fn test_unknown_type_not_rate_limited() {
     // Message type 0xFF is not in MSG_RATE_LIMITS — should never be flagged
     for _ in 0..1000 {
         assert!(
-            !tracker.record(0xFF),
+            !tracker.record(0xFF).over_limit,
             "Unknown message type should not be rate limited"
         );
     }
@@ -152,13 +158,16 @@ fn test_inv_tx_high_limit() {
     // InvTx has a high limit (500 per 10s) — verify it tolerates burst
     for _ in 0..500 {
         assert!(
-            !tracker.record(MSG_INV_TX),
+            !tracker.record(MSG_INV_TX).over_limit,
             "InvTx within 500 limit should pass"
         );
     }
 
     // 501st should exceed
-    assert!(tracker.record(MSG_INV_TX), "501st InvTx should be flagged");
+    assert!(
+        tracker.record(MSG_INV_TX).over_limit,
+        "501st InvTx should be flagged"
+    );
 }
 
 #[test]

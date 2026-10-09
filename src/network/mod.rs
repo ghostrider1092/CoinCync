@@ -62,5 +62,5 @@ pub use dandelion::DandelionRouter;
 pub use node::P2PNode;
 pub use peer::{generate_peer_id, PeerId, PeerInfo};
 pub use protocol::{MessageHeader, MessageType, MAX_MESSAGE_SIZE};
-pub use scoring::PeerMessageRateTracker;
+pub use scoring::{PeerMessageRateTracker, RateLimitCheck};
 pub use traffic_shaping::{TrafficShaper, TrafficShaperConfig, TrafficShapingStats};
