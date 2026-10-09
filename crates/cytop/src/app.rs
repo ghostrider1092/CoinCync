@@ -9,7 +9,9 @@ use ratatui::style::Color;
 use ratatui::widgets::ListState;
 use sysinfo::{Disks, Networks, System};
 
-use crate::collect::{spawn_log_tailer, FeedLine, NodeClient, NodeInfo, EVENTS_CAP};
+use crate::collect::{
+    spawn_gpu_poller, spawn_log_tailer, FeedLine, GpuInfo, NodeClient, NodeInfo, EVENTS_CAP,
+};
 use crate::draw::{clock_hms, icon_for, parse_log_line, short_hash, BRAND};
 use crate::theme::Theme;
 
@@ -23,8 +25,11 @@ pub struct App {
     themes: Vec<(String, Theme)>,
     theme_idx: usize,
     pub theme_name: String,
+    file_theme: Option<(usize, String)>, // (index, path) of a --theme/config file theme
     client: NodeClient,
     pub node: NodeInfo,
+    pub gpu: GpuInfo,
+    gpu_rx: Receiver<GpuInfo>,
     // host history
     pub cpu_hist: VecDeque<u64>,
     pub down_hist: VecDeque<u64>,
@@ -47,7 +52,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(rpc: String, log: Option<String>, themes: Vec<(String, Theme)>, theme_idx: usize) -> Self {
+    pub fn new(
+        rpc: String,
+        log: Option<String>,
+        themes: Vec<(String, Theme)>,
+        theme_idx: usize,
+        file_theme: Option<(usize, String)>,
+    ) -> Self {
         let mut sys = System::new_all();
         sys.refresh_all();
         let theme_idx = theme_idx.min(themes.len().saturating_sub(1));
@@ -61,8 +72,11 @@ impl App {
             themes,
             theme_idx,
             theme_name,
+            file_theme,
             client: NodeClient::new(rpc),
             node: NodeInfo::default(),
+            gpu: GpuInfo::default(),
+            gpu_rx: spawn_gpu_poller(),
             cpu_hist: VecDeque::from(vec![0; HIST]),
             down_hist: VecDeque::from(vec![0; HIST]),
             up_hist: VecDeque::from(vec![0; HIST]),
@@ -91,10 +105,22 @@ impl App {
         self.theme_name = self.themes[self.theme_idx].0.clone();
     }
 
+    /// The theme string to persist: a file path if the active theme came from a
+    /// file, otherwise the built-in name.
+    pub fn config_theme(&self) -> String {
+        match &self.file_theme {
+            Some((i, path)) if *i == self.theme_idx => path.clone(),
+            _ => self.theme_name.clone(),
+        }
+    }
+
     pub fn tick(&mut self) {
         self.sys.refresh_all();
         self.nets.refresh();
         self.disks.refresh();
+        while let Ok(g) = self.gpu_rx.try_recv() {
+            self.gpu = g;
+        }
 
         // CPU average across cores.
         let cpus = self.sys.cpus();

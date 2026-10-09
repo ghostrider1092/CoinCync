@@ -101,6 +101,100 @@ pub struct FeedLine {
 
 pub const EVENTS_CAP: usize = 500;
 
+/// A GPU snapshot. `present=false` when no GPU backend produced data.
+#[derive(Clone, Default)]
+pub struct GpuInfo {
+    pub present: bool,
+    pub name: String,
+    pub util: f64,     // 0..=100
+    pub mem_used: u64, // bytes
+    pub mem_total: u64,
+    pub temp: Option<f64>,  // °C
+    pub power: Option<f64>, // W
+    pub backend: &'static str,
+}
+
+/// Background GPU poller: every ~2s try `nvidia-smi` (rich), then Windows
+/// `typeperf` GPU counters (util only), else report `present=false`. Runs off
+/// the main loop because the CLI calls are slow. Returns the latest-value rx.
+pub fn spawn_gpu_poller() -> Receiver<GpuInfo> {
+    let (tx, rx) = mpsc::channel::<GpuInfo>();
+    std::thread::spawn(move || loop {
+        let info = nvidia_smi().or_else(typeperf_gpu).unwrap_or_default();
+        if tx.send(info).is_err() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2000));
+    });
+    rx
+}
+
+fn nvidia_smi() -> Option<GpuInfo> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().next()?;
+    let f: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+    if f.len() < 4 {
+        return None;
+    }
+    let mib = |s: &str| s.parse::<f64>().ok().map(|v| (v * 1024.0 * 1024.0) as u64);
+    Some(GpuInfo {
+        present: true,
+        name: f[0].to_string(),
+        util: f.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        mem_used: f.get(2).and_then(|s| mib(s)).unwrap_or(0),
+        mem_total: f.get(3).and_then(|s| mib(s)).unwrap_or(0),
+        temp: f.get(4).and_then(|s| s.parse().ok()),
+        power: f.get(5).and_then(|s| s.parse().ok()),
+        backend: "nvidia-smi",
+    })
+}
+
+/// Vendor-agnostic utilisation via Windows PDH through `typeperf` (no extra
+/// deps). Takes the MAX across GPU engine instances, like Task Manager.
+fn typeperf_gpu() -> Option<GpuInfo> {
+    let out = std::process::Command::new("typeperf")
+        .args(["\\GPU Engine(*)\\Utilization Percentage", "-sc", "1"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // typeperf CSV: a header row of quoted counter names, then a data row:
+    // "timestamp","v1","v2",... We take the max numeric value in the data row.
+    let data = text.lines().find(|l| l.starts_with('"') && l.contains(','))?;
+    let mut max = 0.0f64;
+    let mut any = false;
+    for tok in data.split(',').skip(1) {
+        if let Ok(v) = tok.trim().trim_matches('"').parse::<f64>() {
+            any = true;
+            if v > max {
+                max = v;
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+    Some(GpuInfo {
+        present: true,
+        name: "GPU".into(),
+        util: max.clamp(0.0, 100.0),
+        backend: "pdh",
+        ..Default::default()
+    })
+}
+
 /// Follow a node log file (`tail -f`): seed with the recent tail, then stream
 /// new lines. Survives the file not existing yet and truncation/rotation.
 pub fn spawn_log_tailer(path: String) -> Receiver<String> {

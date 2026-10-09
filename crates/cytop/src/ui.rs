@@ -51,7 +51,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_mem(f, left[0], app);
     draw_disks(f, left[1], app);
     draw_node(f, mid[1], app);
-    draw_net(f, mid[2], app);
+    // Right third stacks net over gpu.
+    let right = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(mid[2]);
+    draw_net(f, right[0], app);
+    draw_gpu(f, right[1], app);
     draw_activity(f, body[2], app);
 
     draw_footer(f, rows[3], app);
@@ -227,6 +230,52 @@ fn draw_net(f: &mut Frame, area: Rect, app: &App) {
         .map(|s| Line::from(Span::styled(s, Style::default().fg(t.g("download", 100.0)))))
         .collect();
     f.render_widget(Paragraph::new(glines), inner);
+}
+
+fn draw_gpu(f: &mut Frame, area: Rect, app: &App) {
+    let t = &app.theme;
+    let g = &app.gpu;
+    let title = if g.present && !g.name.is_empty() {
+        truncate(&g.name, 24)
+    } else {
+        "gpu".into()
+    };
+    let tab = if g.present { format!(" {} ", g.backend) } else { String::new() };
+    let block = bpanel(t, 7, &title, &tab, "net_box");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let dim = t.c("inactive_fg");
+
+    if !g.present {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled("gpu  n/a", Style::default().fg(dim))),
+                Line::from(Span::styled("(no nvidia-smi / GPU counters)", Style::default().fg(dim))),
+            ]),
+            inner,
+        );
+        return;
+    }
+
+    let bar_w = (inner.width as usize).saturating_sub(22).clamp(4, 36);
+    let mut lines = vec![meter_line(t, "util", "cpu", g.util, "", bar_w)];
+    if g.mem_total > 0 {
+        let pct = g.mem_used as f64 / g.mem_total as f64 * 100.0;
+        lines.push(meter_line(t, "vram", "used", pct, &format!("{}/{}", human_bytes(g.mem_used), human_bytes(g.mem_total)), bar_w));
+    }
+    let mut tp: Vec<Span> = Vec::new();
+    if let Some(temp) = g.temp {
+        tp.push(Span::styled("temp ", Style::default().fg(dim)));
+        tp.push(Span::styled(format!("{temp:.0}°C  "), Style::default().fg(t.g("cpu", (temp / 100.0 * 100.0).min(100.0)))));
+    }
+    if let Some(pw) = g.power {
+        tp.push(Span::styled("power ", Style::default().fg(dim)));
+        tp.push(Span::styled(format!("{pw:.0} W"), Style::default().fg(t.c("main_fg"))));
+    }
+    if !tp.is_empty() {
+        lines.push(Line::from(tp));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_node(f: &mut Frame, area: Rect, app: &App) {
