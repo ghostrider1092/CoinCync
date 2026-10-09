@@ -17,7 +17,10 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, Paragraph},
+    widgets::{
+        Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState,
+    },
     Frame,
 };
 use sysinfo::{Networks, System};
@@ -91,6 +94,8 @@ struct App {
     mempool_hist: VecDeque<u64>,
     node: NodeInfo,
     events: VecDeque<FeedLine>,   // chain-activity feed (newest at back)
+    feed_state: ListState,        // selection/scroll position in the feed
+    feed_follow: bool,            // auto-stick to the newest line
     log_rx: Option<Receiver<String>>, // node-log tailer channel (when --log set)
     last_poll: Instant,
     paused: bool,
@@ -118,6 +123,8 @@ impl App {
             mempool_hist: VecDeque::from(vec![0; HIST]),
             node: NodeInfo::default(),
             events: VecDeque::new(),
+            feed_state: ListState::default(),
+            feed_follow: true,
             log_rx: cli.log.clone().map(spawn_log_tailer),
             last_poll: Instant::now(),
             paused: false,
@@ -260,6 +267,18 @@ impl App {
             self.events.pop_front();
         }
         self.events.push_back(line);
+    }
+
+    /// Move the feed selection by `delta` lines; re-engages follow at the bottom.
+    fn feed_scroll(&mut self, delta: isize) {
+        let len = self.events.len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.feed_state.selected().unwrap_or(len - 1) as isize;
+        let next = (cur + delta).clamp(0, len as isize - 1) as usize;
+        self.feed_state.select(Some(next));
+        self.feed_follow = next >= len - 1;
     }
 
     /// Drain any node-log lines the tailer thread has queued into the feed.
@@ -669,7 +688,7 @@ fn meter_line(label: &str, pct: f64, value: &str, bar_w: usize) -> Line<'static>
     Line::from(spans)
 }
 
-fn draw(f: &mut Frame, app: &App) {
+fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     // header | alert | body | footer
     let rows = Layout::vertical([
@@ -715,6 +734,10 @@ fn draw(f: &mut Frame, app: &App) {
     let mut hint = vec![
         Span::styled(" q ", Style::default().fg(Color::Black).bg(CYAN)),
         Span::styled(" quit  ", Style::default().fg(DIM)),
+        Span::styled("j/k", Style::default().fg(CYAN)),
+        Span::styled(" scroll  ", Style::default().fg(DIM)),
+        Span::styled("G", Style::default().fg(CYAN)),
+        Span::styled(" live  ", Style::default().fg(DIM)),
         Span::styled("space", Style::default().fg(CYAN)),
         Span::styled(" pause  ", Style::default().fg(DIM)),
     ];
@@ -864,38 +887,68 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Full-width chain-activity feed: the node's own log lines (or RPC-derived
-/// events), newest at the bottom. Spanning the whole terminal so long lines
-/// (block hashes, peer addresses) aren't chopped by a narrow column.
-fn draw_activity(f: &mut Frame, area: Rect, app: &App) {
-    let rows_n = area.height.saturating_sub(2) as usize;
-    let items: Vec<ListItem> = if app.events.is_empty() {
+/// events). Scrollable/selectable like btop's proc panel — j/k to move, End/G
+/// to re-stick to the live tail — with a right-edge scrollbar.
+fn draw_activity(f: &mut Frame, area: Rect, app: &mut App) {
+    let src = if app.log_rx.is_some() { "node log" } else { "rpc" };
+    if app.events.is_empty() {
         let wait = if app.log_rx.is_some() {
             "waiting for node log… (is --log pointing at the node output?)"
         } else {
             "waiting for chain activity…"
         };
-        vec![ListItem::new(Line::from(Span::styled(wait, Style::default().fg(DIM))))]
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(wait, Style::default().fg(DIM))))
+                .block(bpanel(5, "chain-activity", &format!(" {src} "))),
+            area,
+        );
+        return;
+    }
+
+    let len = app.events.len();
+    // Follow the live tail unless the user has scrolled up.
+    if app.feed_follow {
+        app.feed_state.select(Some(len - 1));
+    }
+    let items: Vec<ListItem> = app
+        .events
+        .iter()
+        .map(|e| {
+            ListItem::new(Line::from(
+                e.spans
+                    .iter()
+                    .map(|(t, c)| Span::styled(t.clone(), Style::default().fg(*c)))
+                    .collect::<Vec<_>>(),
+            ))
+        })
+        .collect();
+
+    let mode = if app.feed_follow { "live" } else { "scroll" };
+    let sel = app.feed_state.selected().map(|i| i + 1).unwrap_or(len);
+    let tabs = format!(" {src} · {sel}/{len} · {mode} ");
+    let block = bpanel(5, "chain-activity", &tabs);
+    let inner = block.inner(area);
+    // When following, suppress the selection bar (pure live tail); when the user
+    // scrolls, highlight the selected line.
+    let hl = if app.feed_follow {
+        Style::default()
     } else {
-        app.events
-            .iter()
-            .rev()
-            .take(rows_n)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|e| {
-                ListItem::new(Line::from(
-                    e.spans
-                        .iter()
-                        .map(|(t, c)| Span::styled(t.clone(), Style::default().fg(*c)))
-                        .collect::<Vec<_>>(),
-                ))
-            })
-            .collect()
+        Style::default().bg(Color::Rgb(0x14, 0x3a, 0x3a)).add_modifier(Modifier::BOLD)
     };
-    let src = if app.log_rx.is_some() { "node log" } else { "rpc" };
-    let tabs = format!(" {src} · {} lines ", app.events.len());
-    f.render_widget(List::new(items).block(bpanel(5, "chain-activity", &tabs)), area);
+    let list = List::new(items).block(block).highlight_style(hl);
+    f.render_stateful_widget(list, area, &mut app.feed_state);
+
+    // Right-edge scrollbar reflecting position in the full history.
+    let mut sb = ScrollbarState::new(len).position(app.feed_state.selected().unwrap_or(len - 1));
+    f.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .thumb_style(Style::default().fg(CYAN))
+            .track_style(Style::default().fg(Color::Rgb(0x30, 0x38, 0x38))),
+        inner,
+        &mut sb,
+    );
 }
 
 /// Node panel (btop's "disks" slot, our data): CoinCync chain + mining + mesh
@@ -1024,6 +1077,15 @@ fn run(
                         return Ok(())
                     }
                     KeyCode::Char(' ') => app.paused = !app.paused,
+                    KeyCode::Down | KeyCode::Char('j') => app.feed_scroll(1),
+                    KeyCode::Up | KeyCode::Char('k') => app.feed_scroll(-1),
+                    KeyCode::PageDown => app.feed_scroll(15),
+                    KeyCode::PageUp => app.feed_scroll(-15),
+                    KeyCode::End | KeyCode::Char('G') => app.feed_follow = true,
+                    KeyCode::Home | KeyCode::Char('g') => {
+                        app.feed_follow = false;
+                        app.feed_state.select(Some(0));
+                    }
                     _ => {}
                 }
             }
