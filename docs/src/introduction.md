@@ -9,11 +9,15 @@ CoinCync is a privacy-by-default blockchain. Every transaction hides its sender,
 - **CLSAG ring signatures** — the sender is one of N possible signers, and which one is computationally indistinguishable
 - **Stealth addresses** — every transaction output is a one-time address that only the recipient can recognize
 - **Bulletproofs+ range proofs** — amounts are encrypted, but the network can prove they fall in a valid range without learning the value
-- **MimbleWimble cut-through** (Phase 2, planned) — historical transaction graphs collapse, leaving only unspent commitments
-- **Lelantus Spark anonymity sets** (Phase 2, planned) — large-anonymity-set spend proofs giving up to 16,384-coin rings
+- **MimbleWimble cut-through** (Phase 2, designed) — historical transaction graphs collapse, leaving only unspent commitments
+- **Lelantus Spark shielded pool** (Phase 2, **built & soak‑tested, gated OFF pre‑audit**) — replaces the fixed decoy ring with a pool‑sized anonymity set (production target Firo‑class, 32,768) and a logarithmic‑size spend proof, via the vendored libspark engine
 
-> Activation status: Orchard/Spark phase-2 modules are currently **disabled**
-> on the live public testnet and are not active consensus rules yet.
+> Activation status: the shielded (Lelantus‑Spark) pool is fully implemented and
+> has passed a 24‑hour in‑block consensus soak, but its activation height is
+> `u64::MAX` on **testnet and mainnet** — permanently disabled until an external
+> security audit. It can only be switched on in a feature‑gated build on the
+> isolated **regtest** and **beta** networks. A normal binary is byte‑identical
+> with shielded off on every network.
 
 Mining is **RandomX only** by [Constitution Article V](./governance/constitution.md#article-v--open-mining) — the same CPU-biased, memory-hard PoW algorithm Monero has used in production since 2019. Any laptop can participate. No ASICs, no GPU farms, no permission, no KYC, no stake. See [Consensus & PoW](./protocol/consensus.md) for the full rationale on why a single strong algorithm is stronger than a rotation.
 
@@ -43,6 +47,6 @@ Mining is **RandomX only** by [Constitution Article V](./governance/constitution
 
 ## Status
 
-CoinCync is **pre-launch on mainnet**. The current testnet is live and stable. Mainnet genesis is scheduled for **October 1, 2026 00:00:00 UTC**. Until then, the explorer and API surfaces serve testnet data; mainnet selectors return a launch countdown.
+CoinCync is **pre-launch on mainnet**. The current testnet is live and stable. Mainnet genesis is scheduled for **March 1, 2027 00:00:00 UTC**. Until then, the explorer and API surfaces serve testnet data; mainnet selectors return a launch countdown.
 
 For protocol decisions, design notes, and the why-it-works-this-way reasoning, start with [Privacy model](./protocol/privacy-model.md) and read forward.
