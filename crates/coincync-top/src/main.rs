@@ -669,11 +669,15 @@ fn draw(f: &mut Frame, app: &App) {
         );
     }
 
-    // body: left (system) | right (node)
-    let cols = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
+    // body: top gauges (system | node) over a FULL-WIDTH activity feed, so the
+    // feed grows with the terminal instead of being boxed into the left column.
+    let body = Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(rows[2]);
+    let cols = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(body[0]);
     draw_system(f, cols[0], app);
     draw_node(f, cols[1], app);
+    draw_activity(f, body[1], app);
 
     let mut hint = vec![
         Span::styled(" q ", Style::default().fg(Color::Black).bg(CYAN)),
@@ -773,10 +777,38 @@ fn draw_system(f: &mut Frame, area: Rect, app: &App) {
         rows[3],
     );
 
-    // Chain activity — the "processes" panel now shows the blockchain working:
-    // a rolling feed of commits, mined blocks, IBD, peer/mempool/health deltas,
-    // reconstructed live from RPC state changes. Newest at the bottom, log-style.
+    // Processes — top consumers by CPU (btop-style), filling the left-bottom
+    // now that the chain-activity feed owns the full-width bottom panel.
+    let mut procs: Vec<_> = app.sys.processes().values().collect();
+    procs.sort_by(|a, b| {
+        b.cpu_usage().partial_cmp(&a.cpu_usage()).unwrap_or(std::cmp::Ordering::Equal)
+    });
     let rows_n = rows[4].height.saturating_sub(2) as usize;
+    let items: Vec<ListItem> = procs
+        .iter()
+        .take(rows_n)
+        .map(|p| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:>5.1}% ", p.cpu_usage()),
+                    Style::default().fg(load_color(p.cpu_usage() as f64)),
+                ),
+                Span::styled(format!("{:>9} ", human_bytes(p.memory())), Style::default().fg(DIM)),
+                Span::styled(
+                    p.name().to_string_lossy().into_owned(),
+                    Style::default().fg(Color::White),
+                ),
+            ]))
+        })
+        .collect();
+    f.render_widget(List::new(items).block(panel("processes  (cpu)")), rows[4]);
+}
+
+/// Full-width chain-activity feed: the node's own log lines (or RPC-derived
+/// events), newest at the bottom. Spanning the whole terminal so long lines
+/// (block hashes, peer addresses) aren't chopped by a narrow column.
+fn draw_activity(f: &mut Frame, area: Rect, app: &App) {
+    let rows_n = area.height.saturating_sub(2) as usize;
     let items: Vec<ListItem> = if app.events.is_empty() {
         let wait = if app.log_rx.is_some() {
             "waiting for node log… (is --log pointing at the node output?)"
@@ -802,12 +834,9 @@ fn draw_system(f: &mut Frame, area: Rect, app: &App) {
             })
             .collect()
     };
-    let title = if app.log_rx.is_some() {
-        format!("chain activity · node log  ({} lines)", app.events.len())
-    } else {
-        format!("chain activity · rpc  ({} events)", app.events.len())
-    };
-    f.render_widget(List::new(items).block(panel(&title)), rows[4]);
+    let src = if app.log_rx.is_some() { "node log" } else { "rpc" };
+    let title = format!("chain activity · {src}  ({} lines)", app.events.len());
+    f.render_widget(List::new(items).block(panel(&title)), area);
 }
 
 fn draw_node(f: &mut Frame, area: Rect, app: &App) {
