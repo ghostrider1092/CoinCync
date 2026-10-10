@@ -386,7 +386,11 @@ pub async fn run_solo(
         // 4. Multi-thread nonce search until found OR poll interval elapsed
         let started = Instant::now();
         let deadline = started + Duration::from_secs(poll_interval_secs);
-        let result = mine_parallel(hasher, input, target, threads, deadline, 0).await;
+        // Pass the daemon as the tip source so the search aborts early if the
+        // chain reaches `height` (someone else mined this block) — rebuild on
+        // the new tip instead of hashing a stale template to the deadline.
+        let result =
+            mine_parallel(hasher, input, target, threads, deadline, 0, Some(daemon), height).await;
 
         // 5. Submit if found
         match result {
@@ -425,8 +429,13 @@ pub async fn run_solo(
                     "orchestrator: BLOCK FOUND, submitting"
                 );
 
-                match daemon.submit_block(&block_hex).await {
-                    Ok(_) => {
+                // Ghost-Bridge Stream 4: buffered submit with retry +
+                // stale-share drop (security check #4). A transient RPC/tunnel
+                // failure no longer discards a genuinely-winning block, and a
+                // block the chain has already passed is dropped as stale
+                // instead of retried into a guaranteed orphan.
+                match submit_with_retry(daemon, &block_hex, height).await {
+                    SubmitOutcome::Accepted => {
                         blocks_found = blocks_found.saturating_add(1);
                         if let Some(m) = metrics.as_ref() {
                             m.blocks_accepted_total
@@ -444,12 +453,23 @@ pub async fn run_solo(
                         }
                         info!(blocks_found, "orchestrator: block accepted");
                     }
-                    Err(e) => {
+                    SubmitOutcome::Stale { tip } => {
                         if let Some(m) = metrics.as_ref() {
                             m.blocks_rejected_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        warn!(error = %e, "orchestrator: block submit rejected (likely lost race)");
+                        info!(
+                            height,
+                            tip,
+                            "orchestrator: found block is stale (tip advanced) — dropping, not retrying"
+                        );
+                    }
+                    SubmitOutcome::Failed(e) => {
+                        if let Some(m) = metrics.as_ref() {
+                            m.blocks_rejected_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        warn!(error = %e, "orchestrator: block submit failed after retries (transient RPC/tunnel?)");
                     }
                 }
             }
@@ -481,6 +501,32 @@ pub async fn run_solo(
                     "orchestrator: poll interval elapsed without finding a nonce, refreshing template"
                 );
             }
+            MineResult::Aborted {
+                total_attempts,
+                per_thread_hps,
+            } => {
+                // Record the partial-window hashrate like Timeout, then loop to
+                // rebuild on the new tip (Ghost-Bridge Stream 1 early-abort).
+                let elapsed = started.elapsed().as_secs_f64();
+                let hps = if elapsed > 0.0 {
+                    total_attempts as f64 / elapsed
+                } else {
+                    0.0
+                };
+                if let Some(m) = metrics.as_ref() {
+                    m.hashes_total
+                        .fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
+                    m.current_hashrate_hps
+                        .store(hps as u64, std::sync::atomic::Ordering::Relaxed);
+                    m.record_hashrate_sample(hps as u64);
+                    m.record_per_thread_hashrate(per_thread_hps);
+                }
+                info!(
+                    height,
+                    attempts = total_attempts,
+                    "orchestrator: new tip detected mid-search — abandoning stale template, rebuilding early"
+                );
+            }
         }
     }
 }
@@ -495,6 +541,13 @@ enum MineResult {
         per_thread_hps: Vec<u64>,
     },
     Timeout {
+        total_attempts: u64,
+        per_thread_hps: Vec<u64>,
+    },
+    /// The search was aborted early because the chain tip advanced to/past the
+    /// height we were mining (Ghost-Bridge Stream 1): the template is now stale,
+    /// so we stop and rebuild on the new tip instead of finishing the window.
+    Aborted {
         total_attempts: u64,
         per_thread_hps: Vec<u64>,
     },
@@ -525,6 +578,13 @@ async fn mine_parallel(
     // don't re-test identical nonces. It grows far slower than the slice size
     // (u64::MAX / threads), so threads never cross into each other's slices.
     nonce_base: u64,
+    // Tip-abort (Ghost-Bridge Stream 1). When `Some`, the async race polls this
+    // daemon's tip every 2s and aborts the search the instant the chain reaches
+    // `abort_height` (the height we're mining) — so a new block elsewhere makes
+    // us rebuild immediately instead of hashing a stale template to the
+    // deadline. `None` (stratum/pool) disables it; the pool drives job changes.
+    tip_source: Option<&DaemonClient>,
+    abort_height: u64,
 ) -> MineResult {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -637,7 +697,22 @@ async fn mine_parallel(
     } else {
         deadline.saturating_duration_since(now)
     };
-    let outcome = tokio::time::timeout(timeout, found_rx.recv()).await;
+    // Race three ways: a worker finds a nonce, the deadline fires, or the chain
+    // tip advances to/past `abort_height` (Ghost-Bridge Stream 1 early-abort).
+    // The tip poll runs on THIS async task so it can borrow the daemon client;
+    // the std::thread workers are halted by the `stop` store below regardless of
+    // which arm wins.
+    let mut found: Option<u64> = None;
+    let aborted;
+    tokio::select! {
+        r = tokio::time::timeout(timeout, found_rx.recv()) => {
+            found = match r { Ok(Some(n)) => Some(n), _ => None };
+            aborted = false;
+        }
+        _ = wait_for_new_tip(tip_source, abort_height) => {
+            aborted = true;
+        }
+    }
 
     // Always tell workers to stop, then join. Joining is fast since
     // the loop checks `stop` every iteration.
@@ -658,16 +733,47 @@ async fn mine_parallel(
         .map(|&a| (a as f64 / elapsed_secs) as u64)
         .collect();
 
-    match outcome {
-        Ok(Some(n)) => MineResult::Found {
+    if aborted {
+        MineResult::Aborted {
+            total_attempts: total,
+            per_thread_hps,
+        }
+    } else if let Some(n) = found {
+        MineResult::Found {
             nonce: n,
             total_attempts: total,
             per_thread_hps,
-        },
-        _ => MineResult::Timeout {
+        }
+    } else {
+        MineResult::Timeout {
             total_attempts: total,
             per_thread_hps,
-        },
+        }
+    }
+}
+
+/// Resolve when the chain tip reaches/passes `abort_height` — i.e. the chain
+/// advanced to or beyond the height we're currently mining, so our template is
+/// stale (Ghost-Bridge Stream 1 early-abort). Polls `get_info` every 2s. With
+/// no tip source (stratum/pool mode, which drives job changes itself) it never
+/// resolves, leaving the found/deadline arms to decide the race.
+async fn wait_for_new_tip(tip_source: Option<&DaemonClient>, abort_height: u64) {
+    let d = match tip_source {
+        Some(d) => d,
+        None => {
+            std::future::pending::<()>().await;
+            return;
+        }
+    };
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if let Ok(info) = d.get_info().await {
+            if let Some(tip) = info.get("height").and_then(|v| v.as_u64()) {
+                if tip >= abort_height {
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -688,6 +794,75 @@ impl BackoffState {
     fn reset(&mut self) {
         self.next_secs = 1;
     }
+}
+
+/// Outcome of a buffered block submission (Ghost-Bridge Stream 4).
+enum SubmitOutcome {
+    /// Daemon accepted the block.
+    Accepted,
+    /// The chain tip reached/passed this block's height while we were
+    /// (re)submitting — another block won the race. Dropped as stale rather
+    /// than retried into a guaranteed orphan (replay / stale-share defense).
+    Stale { tip: u64 },
+    /// Every retry failed and the block was NOT observed as stale (e.g. the
+    /// daemon RPC was unreachable the whole window — a dropped tunnel).
+    Failed(String),
+}
+
+/// Submit a found block with a bounded retry buffer (Ghost-Bridge Stream 4 +
+/// security check #4, replay/stale defense).
+///
+/// Why this exists: the old path submitted once and, on ANY error, logged
+/// "likely lost race" and discarded the block. But a *transient* RPC failure
+/// (the node momentarily busy mid-validation, or the miner->node tunnel
+/// blipping) is not a lost race — it drops a genuinely-winning block. Here we:
+///   - retry with capped exponential backoff so transient hiccups don't lose a
+///     real block, and
+///   - before each retry, check the daemon's tip: if it has reached/passed this
+///     block's height, another block already won — stop and drop as stale
+///     instead of hammering the node with a guaranteed-orphan resubmission.
+///
+/// A true lost-race (the node rejects because the tip already advanced) is
+/// caught by the staleness check on the first failure, so it costs at most one
+/// extra `get_info` — not five retries.
+async fn submit_with_retry(
+    daemon: &DaemonClient,
+    block_hex: &str,
+    block_height: u64,
+) -> SubmitOutcome {
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut delay = Duration::from_millis(250);
+    let mut last_err = String::new();
+    for attempt in 1..=MAX_ATTEMPTS {
+        match daemon.submit_block(block_hex).await {
+            Ok(_) => return SubmitOutcome::Accepted,
+            Err(e) => {
+                last_err = e.to_string();
+                // Stale-share drop: if the chain tip has reached/passed this
+                // block's height, the race is already lost — don't retry an
+                // orphan. (If get_info also fails, we can't tell, so we fall
+                // through to a transient-failure retry.)
+                if let Ok(info) = daemon.get_info().await {
+                    if let Some(tip) = info.get("height").and_then(|v| v.as_u64()) {
+                        if tip >= block_height {
+                            return SubmitOutcome::Stale { tip };
+                        }
+                    }
+                }
+                if attempt < MAX_ATTEMPTS {
+                    warn!(
+                        attempt,
+                        height = block_height,
+                        error = %last_err,
+                        "orchestrator: block submit failed, buffering + retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay.saturating_mul(2)).min(Duration::from_secs(4));
+                }
+            }
+        }
+    }
+    SubmitOutcome::Failed(last_err)
 }
 
 /// A job as pushed by a CoinCync stratum pool (`login` result / `job` message).
@@ -848,10 +1023,16 @@ pub async fn run_pool(
         };
         // Short deadline so we pick up newly-pushed jobs promptly.
         let deadline = Instant::now() + Duration::from_secs(4);
-        let result = mine_parallel(hasher, input, job.target, n_threads, deadline, nonce_base).await;
+        // Stratum/pool mode: no daemon tip source — the pool pushes new jobs,
+        // so tip-abort is disabled (None, 0); job supersession is handled below.
+        let result = mine_parallel(
+            hasher, input, job.target, n_threads, deadline, nonce_base, None, 0,
+        )
+        .await;
         let attempts = match &result {
             MineResult::Found { total_attempts, .. } => *total_attempts,
             MineResult::Timeout { total_attempts, .. } => *total_attempts,
+            MineResult::Aborted { total_attempts, .. } => *total_attempts,
         };
         nonce_base = nonce_base.wrapping_add(attempts).wrapping_add(1);
 
