@@ -1736,6 +1736,7 @@ async fn start_node(
                     use std::sync::Arc;
                     let nt = chain_m.network();
                     let mut nonce_base: u64 = 0;
+                    let mut gate_paused_reason: Option<String> = None;
                     loop {
                         // Mine-gate: never build a private fork. Mine on regtest
                         // (always), when synced WITH at least one peer, or with 0
@@ -1753,15 +1754,56 @@ async fn start_node(
                         // 0-peer solo-mine opt-in and let an isolated node mine a
                         // private fork. The predicate + its regression test live in
                         // `mining::solo_mine_gate_allowed`.
+                        //
+                        // A peer that is BEHIND us does not make is_synced false,
+                        // so one stale peer (a frozen seed) used to be enough to
+                        // mine a private fork for hours. Close the gate when our
+                        // tip runs > FORK_DIVERGENCE_MARGIN blocks ahead of every
+                        // connected peer. The height comes straight from the peer
+                        // map: the sync layer's target is max(local, peers) and can
+                        // never show a peer below us.
+                        let peer_count = p2p_m.peer_count();
+                        let local_height = chain_m.height();
+                        let peer_target = p2p_m.max_peer_height();
+                        let synced = chain_m.is_synced();
+                        let diverged = peer_count > 0
+                            && coincync::mining::no_peer_near_tip(
+                                local_height,
+                                peer_target,
+                                coincync::mining::FORK_DIVERGENCE_MARGIN,
+                            );
                         let allowed = coincync::mining::solo_mine_gate_allowed(
                             matches!(nt, coincync::config::NetworkType::Regtest),
-                            p2p_m.peer_count() > 0,
-                            chain_m.is_synced(),
+                            peer_count > 0,
+                            synced,
                             allow_solo_mine,
+                            diverged,
                         );
                         if !allowed {
+                            let reason = if peer_count == 0 {
+                                "no peers (pass --allow-solo-mine only on a bootstrap seed)".to_string()
+                            } else if !synced {
+                                format!("not synced (height {} / peers at {})", local_height, peer_target)
+                            } else if peer_target == 0 {
+                                format!("{} peer(s) connected but none has reported a height yet", peer_count)
+                            } else {
+                                format!(
+                                    "height {} is more than {} blocks ahead of every peer (best {}); \
+                                     our blocks are not being adopted, not mining a private fork",
+                                    local_height,
+                                    coincync::mining::FORK_DIVERGENCE_MARGIN,
+                                    peer_target
+                                )
+                            };
+                            if gate_paused_reason.as_deref() != Some(reason.as_str()) {
+                                warn!("miner: paused: {}", reason);
+                                gate_paused_reason = Some(reason);
+                            }
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             continue;
+                        }
+                        if gate_paused_reason.take().is_some() {
+                            info!("miner: resuming at height {} (peers at {})", local_height, peer_target);
                         }
                         // #186: synced and about to mine — NOW switch to the
                         // full-memory RandomX dataset. Idempotent atomic store;

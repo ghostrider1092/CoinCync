@@ -51,24 +51,9 @@ use coincync::transaction::Transaction;
 use crate::daemon::DaemonClient;
 use crate::hasher::{HashInput, Hasher};
 
-/// How many blocks the local tip may lead the best peer's advertised
-/// height before we treat it as a private fork and refuse to mine.
-/// A healthy solo miner leads by 0–2 blocks (peers adopt each block
-/// within a beat); a sustained lead this large means peers are NOT
-/// adopting our blocks — the 2026-07-08 runaway-fork signature.
-const FORK_DIVERGENCE_MARGIN: u64 = 25;
-
-/// Pure predicate for the miner's fork-divergence gate.
-///
-/// Returns `true` when the local tip has run so far ahead of every peer
-/// that our blocks are provably not being adopted — i.e. we are mining a
-/// private fork and must stop. `peer_target == 0` means "no peer height
-/// reported yet", which is NOT divergence (the separate peer-count gate
-/// covers the empty-mesh case); we return `false` so we don't wedge a
-/// genuinely-fresh node that simply hasn't heard a peer height.
-fn fork_diverged(local_height: u64, peer_target: u64, margin: u64) -> bool {
-    peer_target > 0 && local_height > peer_target.saturating_add(margin)
-}
+// Fork-divergence gate: shared with the built-in miner, see
+// `coincync::mining::{fork_diverged, FORK_DIVERGENCE_MARGIN}`.
+use coincync::mining::{fork_diverged, FORK_DIVERGENCE_MARGIN};
 
 /// One run of the solo mining loop. Returns when the daemon connection
 /// permanently fails or the operator sends ctrl-c (via tokio signal —
@@ -942,7 +927,7 @@ use PowAlgorithm as _PowAlgorithmStillUsedTransitively;
 
 #[cfg(test)]
 mod tests {
-    use super::{fork_diverged, FORK_DIVERGENCE_MARGIN};
+    use coincync::mining::{fork_diverged, FORK_DIVERGENCE_MARGIN};
 
     #[test]
     fn no_peer_height_is_not_divergence() {
