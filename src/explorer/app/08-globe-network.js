@@ -5,7 +5,11 @@
 // `height`    – last known block height (shown in tooltip)
 // `failCount` – consecutive poll failures before we mark offline
 const GNODES = [
-  {label:'hel1', id:'hel1', lat:50.48, lng:12.37, role:'Seed · public P2P', city:'Falkenstein, DE', online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/hel1', _rpc:'http://127.0.0.1:28081'},
+  {label:'hel1', id:'hel1', lat:60.17, lng:24.94, role:'Seed · public P2P + miner', city:'Helsinki, FI', online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/hel1', _rpc:'http://127.0.0.1:28081'},
+  {label:'hel2', id:'hel2', lat:60.19, lng:24.88, role:'Relay · public P2P', city:'Helsinki, FI', online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/hel2', _rpc:'http://127.0.0.1:28082'},
+  {label:'hel3', id:'hel3', lat:60.15, lng:25.00, role:'Relay · public P2P', city:'Helsinki, FI', online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/hel3', _rpc:'http://127.0.0.1:28083'},
+  {label:'hel4', id:'hel4', lat:60.21, lng:24.98, role:'Relay · public P2P', city:'Helsinki, FI', online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/hel4', _rpc:'http://127.0.0.1:28084'},
+  {label:'hel5', id:'hel5', lat:60.13, lng:24.90, role:'Relay · public P2P', city:'Helsinki, FI', online:true, wasOnline:true, height:0, failCount:0, proxy:'/health/hel5', _rpc:'http://127.0.0.1:28085'},
 ];
 
 // How many consecutive failures before a node is considered offline

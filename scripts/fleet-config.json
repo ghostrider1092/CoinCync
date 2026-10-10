@@ -1,16 +1,42 @@
 {
   "_description": "Single source of truth for the CoinCync testnet fleet topology. Every node in `nodes` has every other node added to its --addnode dial list via scripts/render-systemd-unit.sh + scripts/sync-fleet-config.sh. When a node is added, removed, or has its IP changed: (1) edit this file, (2) keep TESTNET_SEED_NODES (src/testnet.rs) and TESTNET_FALLBACK (src/network/dns_seeds.rs) in sync with the seed/relay-role entries here, (3) run scripts/sync-fleet-config.sh, (4) verify every node converges. See docs/operations/fleet-config.md for the runbook.",
-  "_last_changed": "2026-09-07 — migrated the seed from the CPX22 (4 GB) box 2.28.1.75 to a CPX32 (8 GB) box 2.29.34.197 after the smaller box OOM-killed the node. Also cut the seed onto the d2240fea (September 2026 reset) chain. The single live public seed is now 2.29.34.197:28080, matching TESTNET_SEED_NODES / TESTNET_FALLBACK. The residential home node stays DNS-only (privacy) and is intentionally not listed. Append additional Hetzner boxes as seeds #2/#3 are provisioned.",
+  "_last_changed": "2026-10-10 — re-provisioned the testnet backbone from a single seed to a 5-box Hetzner Helsinki (hel1) mesh: seed hel1 (2.29.34.197) + 4 relays hel2 (37.27.185.37), hel3 (77.42.64.199), hel4 (89.167.93.52), hel5 (89.167.113.125), all on the f02ad57 post-#243-relaunch binary (consensus-fingerprint d312f6ee…), fully cross-connected via --addnode. The dedicated full-mem miner rig 62.238.121.186 (CCX13) is NOT a P2P node — it runs coincync-rig against hel2's loopback RPC over the rpc-tunnel-37 SSH tunnel, so it is intentionally EXCLUDED from `nodes`/addnode lists (it has no P2P listener). The residential home node stays DNS-only (privacy) and is intentionally not listed. TODO: sync TESTNET_SEED_NODES (src/testnet.rs) + TESTNET_FALLBACK (src/network/dns_seeds.rs) to add hel2/hel3 as redundant bootstrap, then rebuild + redeploy. Prior: 2026-09-07 migrated the seed from CPX22 2.28.1.75 (OOM) to CPX32 2.29.34.197.",
   "network": "testnet",
   "p2p_port": 28080,
   "rpc_port": 28081,
+  "_deploy_guard": "deploy/fleet/safe-deploy.sh refuses to install a binary onto the fleet unless its `coincync-node --version` runs cleanly (no segfault) AND prints a testnet consensus fingerprint equal to `expected_consensus_fingerprint_testnet` below. It also takes a per-host advisory lock (/run/coincync-deploy.lock) so two operators/sessions can't stomp each other. Bump the expected fingerprint ONLY on an intentional consensus relaunch, in the same commit that changes the locked consensus files.",
+  "expected_consensus_fingerprint_testnet": "d312f6ee720bbe4c4c5ec5047d96acaabc567b1d36a596158a4422ba0d50f09e",
   "_rpc_bind_policy": "Per-host RPC bind address. 127.0.0.1 means loopback-only (RPC only reachable from localhost; safer default; assumes nginx or stunnel for any public exposure). 0.0.0.0 means listen on all interfaces (public RPC). Keep loopback unless the host is intentionally serving public RPC behind nginx.",
   "nodes": {
-    "seed1": {
+    "hel1": {
       "ip": "2.29.34.197",
       "rpc_bind": "127.0.0.1",
       "role": "seed",
-      "notes": "Hetzner (EU, Falkenstein) CPX32 (8 GB) — stable public testnet seed on the d2240fea (September 2026) chain. Sole live public bootstrap node as of 2026-09-07. Replaced the CPX22 (4 GB) box 2.28.1.75, which OOM-killed the node. RPC loopback-only. Must stay in sync with TESTNET_SEED_NODES (src/testnet.rs) and TESTNET_FALLBACK (src/network/dns_seeds.rs)."
+      "notes": "Hetzner Helsinki (hel1) CPX32 (8 GB) — primary public bootstrap seed + solo-miner (--mine). On the d312f6ee chain (f02ad57, post-#243 relaunch). RPC loopback-only. Must stay in sync with TESTNET_SEED_NODES (src/testnet.rs) and TESTNET_FALLBACK (src/network/dns_seeds.rs)."
+    },
+    "hel2": {
+      "ip": "37.27.185.37",
+      "rpc_bind": "127.0.0.1",
+      "role": "relay",
+      "notes": "Hetzner Helsinki CX23 (4 GB) — public relay. Also the RPC target for the dedicated miner rig 62.238.121.186 over the rpc-tunnel-37 SSH tunnel. RPC loopback-only."
+    },
+    "hel3": {
+      "ip": "77.42.64.199",
+      "rpc_bind": "127.0.0.1",
+      "role": "relay",
+      "notes": "Hetzner Helsinki CX23 (4 GB) — public relay. RPC loopback-only."
+    },
+    "hel4": {
+      "ip": "89.167.93.52",
+      "rpc_bind": "127.0.0.1",
+      "role": "relay",
+      "notes": "Hetzner Helsinki CX23 (4 GB) — public relay. RPC loopback-only."
+    },
+    "hel5": {
+      "ip": "89.167.113.125",
+      "rpc_bind": "127.0.0.1",
+      "role": "relay",
+      "notes": "Hetzner Helsinki CPX12 (2 GB) — public relay (newest box). RPC loopback-only."
     }
   },
   "deactivated": {

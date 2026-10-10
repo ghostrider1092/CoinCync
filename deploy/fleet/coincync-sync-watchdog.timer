@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the CoinCync IBD-stall watchdog every 2 minutes
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=120
+AccuracySec=15s
+Unit=coincync-sync-watchdog.service
+
+[Install]
+WantedBy=timers.target

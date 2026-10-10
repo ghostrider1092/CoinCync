@@ -1,0 +1,13 @@
+[Unit]
+Description=CoinCync IBD-stall self-heal watchdog (one-shot, driven by the .timer)
+After=coincync-node.service
+# Don't fight a deploy in progress.
+ConditionPathExists=!/run/coincync-deploy.lock
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/coincync-sync-watchdog.sh
+# Tunables (override with a drop-in if needed):
+Environment=STALL_SECS=300
+Environment=MIN_RESTART_GAP=600
+Nice=10
