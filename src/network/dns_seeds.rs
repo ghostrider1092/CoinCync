@@ -147,7 +147,20 @@ pub const TESTNET_FALLBACK: &[&str] = &[
     // Append re-provisioned VPS boxes here; the home node stays DNS-only.
     // 2026-09-07: migrated 2.28.1.75 (CPX22) -> 2.29.34.197 (CPX32, 8 GB) after
     // the 4 GB box OOM-killed the node. Must match testnet::TESTNET_SEED_NODES.
-    "2.29.34.197:28080", // Hetzner (EU, Falkenstein) — stable public seed
+    // 2026-10-10: fleet taken global. Appended hel2/hel3/hel4 (EU relays),
+    // nbg1 (Nuremberg DE relay) and ash1 (Ashburn US relay) as the backbone
+    // grew from a single box to a 4-country mesh. hel5 (89.167.113.125) was
+    // deleted the same day for a Hetzner slot and stays OUT (now in the
+    // deactivated set). The community tester box (89.34.25.42) is DNS-seed
+    // only — NOT baked in here (DNS is revocable; the fallback stays
+    // project-owned). Kept in sync with testnet::TESTNET_SEED_NODES and
+    // scripts/fleet-config.json by the tests below.
+    "2.29.34.197:28080", // hel1 — Hetzner (EU, Falkenstein) — seed
+    "37.27.185.37:28080", // hel2 — Hetzner (EU, Helsinki) — relay
+    "77.42.64.199:28080", // hel3 — Hetzner (EU, Helsinki) — relay
+    "89.167.93.52:28080", // hel4 — Hetzner (EU, Helsinki) — relay
+    "2.31.63.25:28080",  // nbg1 — Hetzner (DE, Nuremberg) — relay
+    "5.161.214.98:28080", // ash1 — Hetzner (US, Ashburn) — relay
 ];
 
 // NOTE (2026-08-16 dead-code sweep): removed `resolve_seeds`,

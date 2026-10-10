@@ -867,22 +867,37 @@ async fn send_block_spans(
         .filter(|(id, h)| *h > local_height || work_heavier.contains(id))
         .collect();
     // #cold-start-wedge (2026-10-10): if NO peer's CACHED height is ahead of us,
-    // fall back to requesting from all live peers rather than wedging. We only
-    // reach here with a NON-EMPTY `hashes` queue, i.e. some peer advertised these
-    // block headers to us, so at least one connected peer HAS them. During a mass
-    // simultaneous cold-start IBD (e.g. a whole fleet re-sync), `PeerInfo.height`
-    // stays pinned at the handshake value — syncing peers don't relay `NewBlock`,
-    // so the strict `h > local_height` gate below starves and the download queue
-    // wedges: hashes sit in `downloading` with no pending_request and loop
-    // forever through `recover_stuck_downloads` ("Recovered N stuck downloads
-    // (no pending_request)"), height frozen while peers are in fact far ahead.
-    // A fallback peer that cannot serve a span is re-queued + de-scored exactly
-    // like a taller peer that fails to deliver (see `requeue_failed` below), so
-    // this does NOT reintroduce the P-3 same-height-follower wedge — that
-    // guarantee holds because non-deliverers are penalised and retried, not
-    // because they were never asked. And it only engages when real work is
+    // fall back to requesting from peers whose cached height is STALE-LOW (below
+    // our tip) rather than wedging. We only reach here with a NON-EMPTY `hashes`
+    // queue, i.e. some peer advertised these block headers to us, so at least one
+    // connected peer HAS them. During a mass simultaneous cold-start IBD (e.g. a
+    // whole fleet re-sync), `PeerInfo.height` stays pinned at the stale handshake
+    // value — syncing peers don't relay `NewBlock`, so the strict `h > local`
+    // gate above starves and the download queue wedges: hashes sit in
+    // `downloading` with no pending_request and loop forever through
+    // `recover_stuck_downloads` ("Recovered N stuck downloads (no
+    // pending_request)"), height frozen while peers are in fact far ahead.
+    //
+    // CRUCIALLY, the fallback still honours the P-3 §5 invariant: an equal-height
+    // peer with no work claim is NOT a candidate (`*h != local_height`), so two
+    // same-height, same-work followers can never ping-pong span requests at each
+    // other — exactly the case `send_block_spans_rejects_equal_height_equal_work_peer`
+    // pins. We widen eligibility to stale-LOW cached peers (whose real height may
+    // be ahead of their pinned handshake value) and to vetted work-heavier peers;
+    // equal-equal followers stay excluded. A fallback peer that cannot serve a
+    // span is re-queued + de-scored exactly like a taller peer that fails to
+    // deliver (see `requeue_failed` below), so a genuinely-behind stale-low peer
+    // self-corrects out of the candidate set. It only engages when real work is
     // queued (headers beyond our tip exist), never when we are genuinely at tip.
-    let selected: Vec<(PeerId, u64)> = if ahead.is_empty() { peers.to_vec() } else { ahead };
+    let selected: Vec<(PeerId, u64)> = if ahead.is_empty() {
+        peers
+            .iter()
+            .copied()
+            .filter(|(id, h)| *h != local_height || work_heavier.contains(id))
+            .collect()
+    } else {
+        ahead
+    };
     if selected.is_empty() {
         return 0;
     }
