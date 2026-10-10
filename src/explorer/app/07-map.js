@@ -4,7 +4,8 @@ const MNODES=[
   {n:'hel2', id:'hel2',lat:60.19, lng:24.88, role:'Relay (Helsinki, FI)'},
   {n:'hel3', id:'hel3',lat:60.15, lng:25.00, role:'Relay (Helsinki, FI)'},
   {n:'hel4', id:'hel4',lat:60.21, lng:24.98, role:'Relay (Helsinki, FI)'},
-  {n:'hel5', id:'hel5',lat:60.13, lng:24.90, role:'Relay (Helsinki, FI)'},
+  {n:'nbg1', id:'nbg1',lat:49.45, lng:11.08, role:'Relay (Nuremberg, DE)'},
+  {n:'ash1', id:'ash1',lat:39.04, lng:-77.49, role:'Relay (Ashburn, VA US)'},
 ];
 let _mz=null,_ms=null,_md=false;
 function initMap(){

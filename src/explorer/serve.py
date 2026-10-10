@@ -28,7 +28,8 @@ if ALLOW_LIVE_HEALTH:
         '/health/hel2': 'http://127.0.0.1:28082',   # relay (ssh -L tunnel to 37.27.185.37)
         '/health/hel3': 'http://127.0.0.1:28083',   # relay (ssh -L tunnel to 77.42.64.199)
         '/health/hel4': 'http://127.0.0.1:28084',   # relay (ssh -L tunnel to 89.167.93.52)
-        '/health/hel5': 'http://127.0.0.1:28085',   # relay (ssh -L tunnel to 89.167.113.125)
+        '/health/nbg1': 'http://127.0.0.1:28085',   # relay (ssh -L tunnel to 2.31.63.25   Nuremberg DE)
+        '/health/ash1': 'http://127.0.0.1:28086',   # relay (ssh -L tunnel to 5.161.214.98 Ashburn VA US)
     }
 
 class H(http.server.BaseHTTPRequestHandler):

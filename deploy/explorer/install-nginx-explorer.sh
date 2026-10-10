@@ -105,7 +105,8 @@ server {
     location = /health/hel2 { proxy_pass http://127.0.0.1:28082; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # relay 37.27.185.37 (tunnel)
     location = /health/hel3 { proxy_pass http://127.0.0.1:28083; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # relay 77.42.64.199 (tunnel)
     location = /health/hel4 { proxy_pass http://127.0.0.1:28084; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # relay 89.167.93.52 (tunnel)
-    location = /health/hel5 { proxy_pass http://127.0.0.1:28085; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # relay 89.167.113.125 (tunnel)
+    location = /health/nbg1 { proxy_pass http://127.0.0.1:28085; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # relay 2.31.63.25 Nuremberg DE (tunnel)
+    location = /health/ash1 { proxy_pass http://127.0.0.1:28086; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # relay 5.161.214.98 Ashburn VA US (tunnel)
 
     # Keep legacy endpoints alive if external tools still call these.
     location = /api {

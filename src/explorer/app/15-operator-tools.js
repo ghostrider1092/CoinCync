@@ -254,7 +254,8 @@ const FLEET_BOXES = [
   { name:'hel2', region:'Helsinki, Finland', role:'Relay',        proxy:'/health/hel2' },
   { name:'hel3', region:'Helsinki, Finland', role:'Relay',        proxy:'/health/hel3' },
   { name:'hel4', region:'Helsinki, Finland', role:'Relay',        proxy:'/health/hel4' },
-  { name:'hel5', region:'Helsinki, Finland', role:'Relay',        proxy:'/health/hel5' },
+  { name:'nbg1', region:'Nuremberg, Germany',     role:'Relay', proxy:'/health/nbg1' },
+  { name:'ash1', region:'Ashburn, VA (US-East)',  role:'Relay', proxy:'/health/ash1' },
 ];
 
 async function _pollFleetBox(box){

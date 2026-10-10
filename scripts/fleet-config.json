@@ -1,6 +1,6 @@
 {
   "_description": "Single source of truth for the CoinCync testnet fleet topology. Every node in `nodes` has every other node added to its --addnode dial list via scripts/render-systemd-unit.sh + scripts/sync-fleet-config.sh. When a node is added, removed, or has its IP changed: (1) edit this file, (2) keep TESTNET_SEED_NODES (src/testnet.rs) and TESTNET_FALLBACK (src/network/dns_seeds.rs) in sync with the seed/relay-role entries here, (3) run scripts/sync-fleet-config.sh, (4) verify every node converges. See docs/operations/fleet-config.md for the runbook.",
-  "_last_changed": "2026-10-10 — re-provisioned the testnet backbone from a single seed to a 5-box Hetzner Helsinki (hel1) mesh: seed hel1 (2.29.34.197) + 4 relays hel2 (37.27.185.37), hel3 (77.42.64.199), hel4 (89.167.93.52), hel5 (89.167.113.125), all on the f02ad57 post-#243-relaunch binary (consensus-fingerprint d312f6ee…), fully cross-connected via --addnode. The dedicated full-mem miner rig 62.238.121.186 (CCX13) is NOT a P2P node — it runs coincync-rig against hel2's loopback RPC over the rpc-tunnel-37 SSH tunnel, so it is intentionally EXCLUDED from `nodes`/addnode lists (it has no P2P listener). The residential home node stays DNS-only (privacy) and is intentionally not listed. TODO: sync TESTNET_SEED_NODES (src/testnet.rs) + TESTNET_FALLBACK (src/network/dns_seeds.rs) to add hel2/hel3 as redundant bootstrap, then rebuild + redeploy. Prior: 2026-09-07 migrated the seed from CPX22 2.28.1.75 (OOM) to CPX32 2.29.34.197.",
+  "_last_changed": "2026-10-10 (later) — went GLOBAL: deleted hel5 (89.167.113.125, to free a Hetzner slot) and added two out-of-Helsinki relays for geo/jurisdiction diversity — nbg1 (2.31.63.25, Nuremberg DE) and ash1 (5.161.214.98, Ashburn VA US-East). Backbone is now seed hel1 (2.29.34.197) + relays hel2 (37.27.185.37), hel3 (77.42.64.199), hel4 (89.167.93.52), nbg1, ash1 — 4 countries (FI/DE/US), all on the 3217ec6d binary (fingerprint d312f6ee…), cross-connected. The rig 62.238.121.186 stays non-P2P (mines via rpc-tunnel-37 to hel2). First community node arrived: 89.34.25.42 (tester-operated, see community_seeds) — verified reachable + canonical, DNS-seed eligible. TODO: add seed*.coincync.network records across regions; optionally sync TESTNET_SEED_NODES/TESTNET_FALLBACK with a couple owned relays (locked files → rebuild+redeploy). Earlier 2026-10-10: re-provisioned from a single stuck seed to a 5-box Helsinki mesh. Prior 2026-09-07: migrated seed CPX22 2.28.1.75 (OOM) → CPX32 2.29.34.197.",
   "network": "testnet",
   "p2p_port": 28080,
   "rpc_port": 28081,
@@ -32,14 +32,33 @@
       "role": "relay",
       "notes": "Hetzner Helsinki CX23 (4 GB) — public relay. RPC loopback-only."
     },
-    "hel5": {
-      "ip": "89.167.113.125",
+    "nbg1": {
+      "ip": "2.31.63.25",
       "rpc_bind": "127.0.0.1",
       "role": "relay",
-      "notes": "Hetzner Helsinki CPX12 (2 GB) — public relay (newest box). RPC loopback-only."
+      "notes": "Hetzner Nuremberg DE (nbg1) CPX12 (2 GB, Ubuntu 26.04) — public relay. Added 2026-10-10 for intra-EU datacenter diversity (a second German DC, off the Finnish seed). RPC loopback-only."
+    },
+    "ash1": {
+      "ip": "5.161.214.98",
+      "rpc_bind": "127.0.0.1",
+      "role": "relay",
+      "notes": "Hetzner Ashburn, VA US-East (ash) CPX11 (2 GB) — public relay. Added 2026-10-10 for Americas coverage + the transatlantic bridge to the EU backbone. RPC loopback-only."
+    }
+  },
+  "community_seeds": {
+    "_description": "Reachable public nodes run by community members, NOT owned or controlled by the project. OK to point a DNS seed record at them and to --addnode them once verified (inbound-reachable + on the canonical chain), but do NOT hardcode them into TESTNET_SEED_NODES / TESTNET_FALLBACK — DNS is revocable, the baked-in binary fallback must stay project-owned.",
+    "community1": {
+      "ip": "89.34.25.42",
+      "role": "community-seed",
+      "notes": "Tester-operated dedicated node (1 Gb/s, 2 GB RAM, 6 GB swap, 1 vCPU), paid for 1 year, used only for this. Verified 2026-10-10: inbound-reachable on :28080 and at the canonical tip. Operator requested a seed*.coincync.network listing. DNS-seed OK; NOT hardcoded."
     }
   },
   "deactivated": {
+    "hel5": {
+      "ip": "89.167.113.125",
+      "role": "relay",
+      "notes": "Hetzner Helsinki CPX12 (2 GB). Deleted 2026-10-10 to free a Hetzner server-limit slot for the Ashburn (US) box; its role (an EU relay) is covered by hel2-hel4 + nbg1. Old IP must not appear in any addnode list."
+    },
     "_description": "Nodes that were once in the fleet but no longer participate. Kept for historical reference; NOT added to addnode lists. Re-activate by moving back into `nodes`, syncing the code seed lists, and re-running sync-fleet-config.sh.",
     "vultr-seed1": {
       "ip": "216.128.156.239",
