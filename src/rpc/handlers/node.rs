@@ -141,8 +141,10 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 // Raw peer-advertised height (0 if no peer info yet). The rig's
                 // fork-divergence gate reads this to detect a node that has
                 // mined ahead of the network onto a private branch; without it
-                // the gate silently never fires (issue #131).
-                "peer_target_height":      state.chain.peer_advertised_height(),
+                // the gate silently never fires (issue #131). Taken from the
+                // peer map, not the sync target: that one is max(local, peers)
+                // and can never show a peer BELOW us, which is the whole point.
+                "peer_target_height":      state.p2p.as_ref().map(|p| p.max_peer_height()).unwrap_or(0),
                 "top_hash":                hex::encode(tip.hash.as_bytes()),
                 // Back-compat alias: some older clients look for `tip_hash`.
                 "tip_hash":                hex::encode(tip.hash.as_bytes()),

@@ -1152,6 +1152,17 @@ impl P2PNode {
 
     /// Broadcast block announcement
     pub async fn broadcast_block(&self, block: &Block) -> Result<()> {
+        // No block gossip while we are still catching up. Every peer ahead of
+        // us has the block already, and a peer behind us answers each
+        // InvBlock with a GetHeaders whose response it then verifies header
+        // by header (seen live: a seed sent us 8 GetHeaders in 0.4 s, got
+        // 8 x 61 KB of headers back and stopped reading for over 30 s). At
+        // 20-30 applied blocks per second this gossip is also what fills the
+        // peer queues, see broadcast.rs STALL_MIN_DURATION. The 60 s tip
+        // re-announce in maintenance.rs still advertises our tip meanwhile.
+        if !self.chain.is_synced() {
+            return Ok(());
+        }
         broadcast::broadcast_block(self.config.magic, block, &self.broadcast_context()).await
     }
 
@@ -1163,6 +1174,14 @@ impl P2PNode {
     /// Get connected peer count
     pub fn peer_count(&self) -> usize {
         self.peers.len()
+    }
+
+    /// Highest chain height any connected peer has advertised (Version at
+    /// handshake, ChainWork on every tip change); 0 when none has. Unlike the
+    /// sync layer's best-known height this is NOT clamped to our own height,
+    /// so a miner can tell that every peer is behind it (private fork).
+    pub fn max_peer_height(&self) -> u64 {
+        self.peers.iter().map(|p| p.height).max().unwrap_or(0)
     }
 
     /// Get current chain height (for sync guard).
