@@ -17,15 +17,19 @@ LOCAL_RPC = os.environ.get('COINCYNC_EXPLORER_RPC', 'http://127.0.0.1:28081').st
 LOCAL_REST = os.environ.get('COINCYNC_EXPLORER_REST', 'http://127.0.0.1:28083').strip() or 'http://127.0.0.1:28083'
 HEALTH = {}
 if ALLOW_LIVE_HEALTH:
-    # 2026-06-06: rewritten to live Vultr fleet. Old routes (lon,
-    # nyc1, fra, nyc3, ams, syd, ric, tor, atl, sfo) pointed at boxes
-    # that no longer exist.
+    # 2026-10-10: Hetzner Helsinki (hel1) backbone — seed hel1 + relays hel2-5.
+    # These nodes bind RPC to 127.0.0.1 (loopback-only) per fleet-config.json,
+    # so direct :28081 probes only work from a host that has an SSH -L tunnel to
+    # each box (see deploy/explorer/install-nginx-explorer.sh health routes:
+    # hel2->28082 … hel5->28085). For local dev, run the tunnels on these ports
+    # (ssh -L 2808N:127.0.0.1:28081 root@<helN-ip>) or point them at a local node.
     HEALTH = {
-        '/health/seed1': 'http://66.135.23.193:28081',     # New York
-        '/health/seed2': 'http://140.82.57.168:28081',     # Amsterdam
-        '/health/seed3': 'http://207.148.111.76:28081',    # Tokyo
-        '/health/explorer': 'http://207.148.6.50:28081',   # Dallas
-        '/health/api': 'http://95.179.165.225:28081',      # Frankfurt
+        '/health/hel1': 'http://127.0.0.1:28081',   # seed  (local node or tunnel)
+        '/health/hel2': 'http://127.0.0.1:28082',   # relay (ssh -L tunnel to 37.27.185.37)
+        '/health/hel3': 'http://127.0.0.1:28083',   # relay (ssh -L tunnel to 77.42.64.199)
+        '/health/hel4': 'http://127.0.0.1:28084',   # relay (ssh -L tunnel to 89.167.93.52)
+        '/health/nbg1': 'http://127.0.0.1:28085',   # relay (ssh -L tunnel to 2.31.63.25   Nuremberg DE)
+        '/health/ash1': 'http://127.0.0.1:28086',   # relay (ssh -L tunnel to 5.161.214.98 Ashburn VA US)
     }
 
 class H(http.server.BaseHTTPRequestHandler):

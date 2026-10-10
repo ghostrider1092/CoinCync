@@ -74,8 +74,11 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use once_cell::sync::Lazy;
 
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
@@ -740,6 +743,21 @@ fn next_rebootstrap_backoff(current: Duration, made_progress: bool) -> Duration 
     }
 }
 
+// ── Inbound-reachability detection ──────────────────────────────────────────
+// Ground truth for "is this node reachable from the internet" is simply whether
+// it has ever ACCEPTED an inbound connection. A node behind NAT / without a
+// forwarded port can dial out and sync fine, but never accepts inbound, so its
+// address is never gossiped (the network only advertises peers it can connect
+// back to) — it reaches the network but contributes nothing to the mesh, and no
+// one can discover it. This silent failure is why a one-seed testnet stays a
+// one-seed testnet. We surface it with a one-shot operator warning.
+static NODE_START: Lazy<Instant> = Lazy::new(Instant::now);
+static EVER_INBOUND: AtomicBool = AtomicBool::new(false);
+static REACHABILITY_WARNED: AtomicBool = AtomicBool::new(false);
+/// Grace period before warning — long enough that, on a healthy network, a
+/// reachable node would have received an inbound connection by now.
+const REACHABILITY_GRACE: Duration = Duration::from_secs(600);
+
 async fn observe_outbound_health(
     peers: &DashMap<PeerId, PeerInfo>,
     addresses: &RwLock<AddressManager>,
@@ -747,11 +765,31 @@ async fn observe_outbound_health(
 ) -> usize {
     let outbound_count = peers.iter().filter(|peer| peer.outbound).count();
     let total_peers = peers.len();
+    let inbound_count = total_peers.saturating_sub(outbound_count);
     let address_count = addresses.read().await.len();
     if total_peers < 3 {
         info!(
-            "Peer maintenance: {} total peers ({} outbound), {} known addresses",
-            total_peers, outbound_count, address_count
+            "Peer maintenance: {} total peers ({} outbound, {} inbound), {} known addresses",
+            total_peers, outbound_count, inbound_count, address_count
+        );
+    }
+
+    // Reachability: once we accept any inbound connection we are reachable, for
+    // good. If we never do within the grace period, warn ONCE (edge-triggered).
+    if inbound_count > 0 {
+        EVER_INBOUND.store(true, Ordering::Relaxed);
+    } else if !EVER_INBOUND.load(Ordering::Relaxed)
+        && NODE_START.elapsed() >= REACHABILITY_GRACE
+        && !REACHABILITY_WARNED.swap(true, Ordering::Relaxed)
+    {
+        warn!(
+            "Node appears NOT inbound-reachable: 0 inbound connections after {} min. \
+             You are likely behind NAT or your P2P port is not forwarded — other \
+             nodes cannot discover you (your address is never gossiped), so you can \
+             reach the network but do not contribute to the mesh. Forward your P2P \
+             TCP port (or run on a public IP) to be discoverable. On a very small \
+             network this can also just mean no peer has dialed you yet.",
+            REACHABILITY_GRACE.as_secs() / 60
         );
     }
 

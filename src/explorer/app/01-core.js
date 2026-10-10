@@ -181,11 +181,19 @@ document.addEventListener('DOMContentLoaded', function() {
 // (loopback-only)" badge — intentional, not a problem.
 // `apiNginxOnly` flag: api host runs nginx only (no coincync-node);
 // probing it would always 504. Shown for topology completeness only.
-// Single Hetzner box (cync-node-hel1, Falkenstein DE): seed with public P2P
-// (28080) and loopback-only RPC (28081). Add entries here — plus matching
-// GNODES/MNODES rows and a `/health/<id>` nginx route — as the fleet grows.
+// Global backbone: seed hel1 + relays hel2-hel4 (Helsinki), nbg1 (Nuremberg),
+// ash1 (Ashburn VA) — FI/DE/US. All with
+// public P2P (28080) and loopback-only RPC (28081). Add entries here — plus
+// matching GNODES/MNODES rows and a `/health/<id>` nginx route — as the fleet
+// grows. The dedicated miner rig (62.238.121.186) is intentionally omitted:
+// it has no P2P listener (it mines against hel2's RPC over an SSH tunnel).
 const NODES=[
-  {id:'hel1',label:'hel1',    loc:'Hetzner · Falkenstein DE', role:'Seed · public P2P, loopback RPC', proxy:'/health/hel1', _rpc:'http://127.0.0.1:28081', loopbackRpc:true},
+  {id:'hel1',label:'hel1', loc:'Hetzner · Helsinki FI', role:'Seed · public P2P + miner, loopback RPC', proxy:'/health/hel1', _rpc:'http://127.0.0.1:28081', loopbackRpc:true},
+  {id:'hel2',label:'hel2', loc:'Hetzner · Helsinki FI', role:'Relay · public P2P, loopback RPC', proxy:'/health/hel2', _rpc:'http://127.0.0.1:28082', loopbackRpc:true},
+  {id:'hel3',label:'hel3', loc:'Hetzner · Helsinki FI', role:'Relay · public P2P, loopback RPC', proxy:'/health/hel3', _rpc:'http://127.0.0.1:28083', loopbackRpc:true},
+  {id:'hel4',label:'hel4', loc:'Hetzner · Helsinki FI', role:'Relay · public P2P, loopback RPC', proxy:'/health/hel4', _rpc:'http://127.0.0.1:28084', loopbackRpc:true},
+  {id:'nbg1',label:'nbg1', loc:'Hetzner · Nuremberg DE', role:'Relay · public P2P, loopback RPC', proxy:'/health/nbg1', _rpc:'http://127.0.0.1:28085', loopbackRpc:true},
+  {id:'ash1',label:'ash1', loc:'Hetzner · Ashburn VA US', role:'Relay · public P2P, loopback RPC', proxy:'/health/ash1', _rpc:'http://127.0.0.1:28086', loopbackRpc:true},
 ];
 const $=id=>document.getElementById(id);
 const num=n=>Number(n).toLocaleString();
