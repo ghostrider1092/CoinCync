@@ -67,6 +67,46 @@ pub fn no_peer_near_tip(local_height: u64, best_peer_height: u64, margin: u64) -
     best_peer_height == 0 || fork_diverged(local_height, best_peer_height, margin)
 }
 
+// ── Built-in solo-miner observability (backs the `get_mining_live` RPC) ──────
+//
+// Monotonic counters since process start. The in-process miner (the `--mine`
+// path in the node binary) feeds these: `MINER_HASHES_TOTAL` is bumped by the
+// nonce search, `MINER_BLOCKS_FOUND` by the miner loop on an accepted mined
+// block. Before this, `get_mining_live` was hardcoded to `is_mining:false` /
+// zeros because mining lived only in the external rig; now a plain `--mine`
+// node reports its real state. A poller (the rig/TUI) derives hashrate from
+// successive `hashes_total` samples; `sample_hashrate` also offers a
+// best-effort instantaneous rate for single-poller convenience.
+pub static MINER_HASHES_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static MINER_BLOCKS_FOUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Best-effort hashes/sec: the delta in `MINER_HASHES_TOTAL` since the previous
+/// call divided by elapsed wall-time. Intended for a single periodic poller
+/// (the TUI). Returns 0.0 on the first call or when no time has elapsed. This
+/// is an observability convenience, not a precise meter — concurrent callers
+/// just see noisier numbers, never UB.
+pub fn sample_hashrate() -> f64 {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+    static LAST: std::sync::Mutex<Option<(u64, Instant)>> = std::sync::Mutex::new(None);
+    let now_total = MINER_HASHES_TOTAL.load(Ordering::Relaxed);
+    let now = Instant::now();
+    let mut guard = LAST.lock().unwrap_or_else(|p| p.into_inner());
+    let rate = match *guard {
+        Some((prev_total, prev_at)) => {
+            let dt = now.duration_since(prev_at).as_secs_f64();
+            if dt > 0.0 {
+                now_total.saturating_sub(prev_total) as f64 / dt
+            } else {
+                0.0
+            }
+        }
+        None => 0.0,
+    };
+    *guard = Some((now_total, now));
+    rate
+}
+
 #[cfg(test)]
 mod gate_tests {
     use super::{fork_diverged, no_peer_near_tip, solo_mine_gate_allowed, FORK_DIVERGENCE_MARGIN};
@@ -123,5 +163,28 @@ mod gate_tests {
         assert!(!no_peer_near_tip(2403, 2403, FORK_DIVERGENCE_MARGIN));
         assert!(!no_peer_near_tip(2403, 2403 - FORK_DIVERGENCE_MARGIN, FORK_DIVERGENCE_MARGIN));
         assert!(!no_peer_near_tip(2401, 2402, FORK_DIVERGENCE_MARGIN));
+    }
+}
+
+#[cfg(test)]
+mod miner_obs_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn miner_counters_monotonic_and_sampler_is_finite() {
+        // Process-global counters: assert on deltas (another test may also be
+        // incrementing), never absolutes. The hashrate sampler must always
+        // return a finite, non-negative number.
+        let before = MINER_HASHES_TOTAL.load(Ordering::Relaxed);
+        MINER_HASHES_TOTAL.fetch_add(1000, Ordering::Relaxed);
+        assert!(MINER_HASHES_TOTAL.load(Ordering::Relaxed) >= before + 1000);
+
+        let blocks_before = MINER_BLOCKS_FOUND.load(Ordering::Relaxed);
+        MINER_BLOCKS_FOUND.fetch_add(1, Ordering::Relaxed);
+        assert!(MINER_BLOCKS_FOUND.load(Ordering::Relaxed) >= blocks_before + 1);
+
+        let r = sample_hashrate();
+        assert!(r.is_finite() && r >= 0.0, "hashrate must be finite/non-negative, got {r}");
     }
 }

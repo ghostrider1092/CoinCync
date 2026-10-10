@@ -260,9 +260,93 @@ enum Command {
 // register_blocking_method so they run on the blocking thread pool,
 // not on tokio workers. Larger sweep of all 41 handlers is queued
 // for v1.0.11 — for now we covered the highest-traffic three.
+/// Enable ANSI/VT rendering in the Windows console so the color codes `tracing`
+/// emits display as colors instead of printing literally (e.g. `←[32m INFO`).
+/// Classic conhost and PowerShell 5.1's default console ship with
+/// virtual-terminal processing OFF; this flips `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
+/// on stdout + stderr. No-op elsewhere, and harmless when VT is already on
+/// (Windows Terminal, pwsh), so logs are colored in any Windows console.
+#[cfg(windows)]
+fn enable_ansi_colors() {
+    extern "system" {
+        fn GetStdHandle(n: u32) -> *mut core::ffi::c_void;
+        fn GetConsoleMode(h: *mut core::ffi::c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(h: *mut core::ffi::c_void, mode: u32) -> i32;
+    }
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+    // STD_OUTPUT_HANDLE = -11, STD_ERROR_HANDLE = -12.
+    for id in [-11i32 as u32, -12i32 as u32] {
+        unsafe {
+            let h = GetStdHandle(id);
+            if h.is_null() || h == (-1isize as *mut core::ffi::c_void) {
+                continue;
+            }
+            let mut mode = 0u32;
+            if GetConsoleMode(h, &mut mode) != 0 {
+                let _ = SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_ansi_colors() {}
+
+/// CoinCync log formatter — monerod daemon look (local-time stamp, colored
+/// level tag, logging category) with a CoinCync twist: a bright-cyan `◈` brand
+/// glyph leading the category. `ansi` gates all color so redirected output is
+/// plain.
+struct CyncLogStyle {
+    ansi: bool,
+}
+
+impl<S, N> tracing_subscriber::fmt::FormatEvent<S, N> for CyncLogStyle
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'a> tracing_subscriber::fmt::FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> core::fmt::Result {
+        use tracing_subscriber::fmt::FormatFields as _;
+        let meta = event.metadata();
+        // monerod-style level tags, padded to 5 so the categories line up.
+        let (lvl, color) = match *meta.level() {
+            tracing::Level::ERROR => ("ERROR", "31"), // red
+            tracing::Level::WARN => ("WARN ", "33"),  // yellow
+            tracing::Level::INFO => ("INFO ", "32"),  // green
+            tracing::Level::DEBUG => ("DEBUG", "34"), // blue
+            tracing::Level::TRACE => ("TRACE", "90"), // bright-black
+        };
+        // monerod-style local timestamp with millis.
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        // Category = the target, with our crate prefix trimmed for a short,
+        // monerod-like label (coincync::network::node → network::node).
+        let cat = meta.target().strip_prefix("coincync::").unwrap_or(meta.target());
+
+        if self.ansi {
+            // dim timestamp · bold colored level · CoinCync ◈ + bright-cyan category
+            write!(
+                writer,
+                "\x1b[2m{ts}\x1b[0m \x1b[1;{color}m{lvl}\x1b[0m \x1b[96m◈ {cat}\x1b[0m  "
+            )?;
+        } else {
+            write!(writer, "{ts} {lvl} ◈ {cat}  ")?;
+        }
+        ctx.format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
     let cli = Cli::parse();
+
+    // Make the Windows console render tracing's ANSI colors (vs. raw escapes).
+    enable_ansi_colors();
 
     // Initialize tracing. Prefer RUST_LOG, then --log-level, then "info"
     // as a guaranteed-valid last resort. A malformed RUST_LOG or
@@ -278,9 +362,15 @@ async fn main() {
             );
             "info".parse().expect("'info' is a valid log filter")
         });
+    // CoinCync log style: monerod-flavored layout — local-time stamp (dimmed),
+    // a colored level tag, then the logging category — with a CoinCync twist:
+    // the ◈ brand glyph in bright cyan leading the category. Color is emitted
+    // only when stdout is a real terminal (piped/redirected output stays clean).
+    use std::io::IsTerminal as _;
+    let use_color = std::io::stdout().is_terminal();
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
-        .with_target(false)
+        .event_format(CyncLogStyle { ansi: use_color })
         .init();
 
     let network = match cli.network.as_str() {
@@ -1360,31 +1450,54 @@ async fn start_node(
                             });
                         }
                         Ok(BlockStatus::Orphan) => {
-                            // Don't re-request the orphan itself — peers will keep handing
-                            // back the same block and we never advance. Instead, ask sync
-                            // to fetch the orphan's parent so the gap fills, AND pass the
-                            // orphan body so the sync manager can stash it in
-                            // `orphan_blocks`. When the parent connects, the drain loop in
-                            // `on_block_received_from` replays the pooled orphan directly —
-                            // no second gossip required.
+                            // Orphan-parent walkback is ONLY for near-tip out-of-order
+                            // delivery (a peer's fork tip arriving a few blocks before we
+                            // backfill its parents). A block FAR ABOVE our tip is a sync
+                            // GAP, not a race: chasing its parent walks back one block at a
+                            // time and — against a wrong-genesis or beyond-finality peer —
+                            // never connects. That is the orphan-fetch cascade that wedged a
+                            // node stuck at a fork with EMERGENCY-TIER-3 firing repeatedly
+                            // (and the 2026-06-17 h=167 stall; see sync::mark_block_orphan).
                             //
-                            // See sync::mark_block_orphan for the long version, including
-                            // the 2026-06-17 root-cause notes on why the hashes-only
-                            // version stuck the chain at h=167 with 200 blocks of
-                            // orphan-fetch loops.
-                            warn!(
-                                "Block {} from peer {:?} orphan; fetching parent {}",
-                                hex::encode(&hash.as_bytes()[..8]),
-                                &peer_id[..4],
-                                hex::encode(&prev_hash.as_bytes()[..8]),
-                            );
+                            // Fix: only walk back a near-tip orphan; DROP a far one and let
+                            // headers-first IBD fill the gap linearly — a genuine competing
+                            // chain arrives as validated headers that connect to a known
+                            // block (and resolves deep reorgs properly), never as an endless
+                            // orphan walkback.
+                            const ORPHAN_WALKBACK_WINDOW: u64 = 32;
+                            let orphan_height = block_for_relay.header.height.as_u64();
+                            let tip_height = event_chain.height();
                             let p2p2 = event_p2p.clone();
-                            let block_for_pool = block_for_relay.clone();
-                            tokio::spawn(async move {
-                                p2p2.notify_block_received(&hash).await;
-                                p2p2.notify_block_orphan(&peer_id, block_for_pool, &prev_hash)
-                                    .await;
-                            });
+                            if orphan_height <= tip_height.saturating_add(ORPHAN_WALKBACK_WINDOW) {
+                                // Don't re-request the orphan itself — peers keep handing
+                                // back the same block. Stash it + fetch its parent; the
+                                // drain loop replays it when the parent connects.
+                                warn!(
+                                    "Block {} from peer {:?} orphan; fetching parent {}",
+                                    hex::encode(&hash.as_bytes()[..8]),
+                                    &peer_id[..4],
+                                    hex::encode(&prev_hash.as_bytes()[..8]),
+                                );
+                                let block_for_pool = block_for_relay.clone();
+                                tokio::spawn(async move {
+                                    p2p2.notify_block_received(&hash).await;
+                                    p2p2.notify_block_orphan(&peer_id, block_for_pool, &prev_hash)
+                                        .await;
+                                });
+                            } else {
+                                tracing::debug!(
+                                    "Block {} (h={}) from peer {:?} is {} blocks above tip {} — \
+                                     dropping orphan; headers-first IBD fills the gap (no walkback)",
+                                    hex::encode(&hash.as_bytes()[..8]),
+                                    orphan_height,
+                                    &peer_id[..4],
+                                    orphan_height.saturating_sub(tip_height),
+                                    tip_height,
+                                );
+                                tokio::spawn(async move {
+                                    p2p2.notify_block_received(&hash).await;
+                                });
+                            }
                         }
                         Ok(BlockStatus::Invalid(reason)) => {
                             warn!(
@@ -1874,6 +1987,8 @@ async fn start_node(
                                             | coincync::chain::BlockStatus::AcceptedReorg { .. }
                                     );
                                     if accepted {
+                                        coincync::mining::MINER_BLOCKS_FOUND
+                                            .fetch_add(1, Ordering::Relaxed);
                                         let update = p2p_m.next_chain_update();
                                         p2p_m.set_chain_state(update).await;
                                         if let Err(e) = p2p_m.broadcast_block(&b).await {

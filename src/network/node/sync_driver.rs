@@ -408,6 +408,45 @@ pub(super) fn spawn_sync_driver(
                     // peer_heights, un-wedging is_synced for good.
                     s.set_state(SyncState::Headers);
                 }
+                // Dig-Out: clear GetBlocks bans. A node wedged behind a minority
+                // fork requests block spans its peers lack → empty replies →
+                // every peer GetBlocks-banned (1 h) → `live_block_peers` empty →
+                // `[IBD] No live peers for GetBlocks` loops forever. No other path
+                // clears these bans. Doing it here (gated by this 300s-no-progress
+                // emergency tier, re-fires only every REPEAT_SECS) gives the node
+                // a clean shot at the correctly-queued majority hashes so a
+                // shallow fork can reorg instead of wedging. A healthy node never
+                // reaches this tier, so it is never thrashed.
+                let cleared = sync_scorer.write().await.clear_get_blocks_bans();
+                if cleared > 0 {
+                    tracing::warn!(
+                        "[dig-out] cleared GetBlocks bans on {} peer(s) to break a possible fork-recovery stall",
+                        cleared
+                    );
+                }
+                // Dig-Out #3: deep fork = loud + observable, never silent. We only
+                // reach this tier already stalled; if we are also MORE than a
+                // finality window behind the best-known height, the gap is beyond
+                // the finality floor (tip − CHECKPOINT_INTERVAL) and max_reorg_depth
+                // — unreorgable, so it cannot self-heal (clearing bans above only
+                // rescues a SHALLOW fork). Emit ONE definite remedy line (this tier
+                // re-fires at most every REPEAT_SECS → no flood) so monitors and the
+                // rig MESH strip light up. NO auto-wipe: an attacker who eclipsed us
+                // onto a fork could otherwise weaponise it; recovery stays operator-
+                // initiated (reset-to-network / wipe + snapshot).
+                let best_known = { sync_sync.read().await.true_best_height() };
+                let blocks_behind = best_known.saturating_sub(current_height);
+                if blocks_behind > crate::constants::CHECKPOINT_INTERVAL {
+                    tracing::error!(
+                        "[dig-out] FORK-STUCK: {} blocks behind best-known height {} — \
+                         beyond the finality floor (tip − {}), unreorgable. The node \
+                         cannot self-heal; an operator reset-to-network (or wipe + \
+                         reimport snapshot) is required. Not auto-wiping (eclipse safety).",
+                        blocks_behind,
+                        best_known,
+                        crate::constants::CHECKPOINT_INTERVAL,
+                    );
+                }
                 // Artificially advance last_progress_time_secs so the
                 // next emergency-fire check waits REPEAT_SECS instead
                 // of firing immediately on the next tick. Without
@@ -784,7 +823,12 @@ async fn recover_block_requests(sync: &RwLock<ChainSync>, now: u64) {
     }
     let recovered = sync.recover_stuck_downloads();
     if recovered > 0 {
-        info!(
+        // debug, not info: near the tip this re-queues blocks a peer can't yet
+        // deliver (target just ahead of us) and fires every driver tick, so at
+        // info it floods the console. The churn is cheap and self-heals on the
+        // next block; the useful IBD progress is logged by BLOCK_COMMIT /
+        // GetBlocks. See the live two-node run that surfaced the flood.
+        debug!(
             "[IBD] Recovered {} stuck downloads (no pending_request)",
             recovered
         );
@@ -832,6 +876,17 @@ fn remove_dead_senders(
     }
 }
 
+/// Dig-Out #2: order eligible peers so ascending-height spans map to
+/// ascending-height peers. `send_block_spans` hands span index `i` to
+/// `peers[i]`, with span heights increasing in `i`; sorting peers by advertised
+/// height (stable, so equal-height peers keep their relative order) makes the
+/// tallest peer receive the highest span and the shortest the lowest — the
+/// coverage property that keeps a shorter peer from being handed (and answering
+/// empty on) a span above its tip.
+fn coverage_order(ahead: &mut [(PeerId, u64)]) {
+    ahead.sort_by_key(|(_, h)| *h);
+}
+
 async fn send_block_spans(
     hashes: &[Hash],
     peers: &[(PeerId, u64)],
@@ -861,7 +916,7 @@ async fn send_block_spans(
     // de-scored exactly as a taller one is — so this widens eligibility without
     // weakening the P-3 guarantee (taller peers remain eligible unconditionally).
     let work_heavier = { sync.read().await.work_heavier_peers() };
-    let ahead: Vec<(PeerId, u64)> = peers
+    let mut ahead: Vec<(PeerId, u64)> = peers
         .iter()
         .copied()
         .filter(|(id, h)| *h > local_height || work_heavier.contains(id))
@@ -869,6 +924,16 @@ async fn send_block_spans(
     if ahead.is_empty() {
         return 0;
     }
+    // Dig-Out #2 (coverage-aware span assignment): the spans below are carved
+    // from `hashes` in ascending order and handed out by peer index, so span 0
+    // is the LOWEST height range and the last span the HIGHEST. Order the
+    // eligible peers by advertised height so the lowest span goes to the
+    // shortest eligible peer and the highest span to the tallest — a peer is
+    // never handed a span whose heights exceed what a taller eligible peer could
+    // have covered. This stops empty replies (→ GetBlocks bans) accumulating at
+    // the source: a work-heavier-but-shorter peer (#126) receives the low fork
+    // spans it actually holds rather than a top span it can only answer empty.
+    coverage_order(&mut ahead);
     let peers = &ahead[..];
 
     let span_size = hashes.len().div_ceil(peers.len());
@@ -1079,6 +1144,27 @@ mod tests {
             rx.try_recv().is_ok(),
             "a GetBlocks span must be delivered to the work-heavier peer"
         );
+    }
+
+    // Dig-Out #2: coverage-aware ordering puts the tallest eligible peer on the
+    // highest span (last index) and the shortest on the lowest, so no peer is
+    // assigned a span above what a taller peer could cover. Stable on ties.
+    #[test]
+    fn coverage_order_maps_tallest_peer_to_highest_span() {
+        let a: PeerId = [1u8; 32];
+        let b: PeerId = [2u8; 32];
+        let c: PeerId = [3u8; 32];
+        let d: PeerId = [4u8; 32];
+        // Arbitrary order in; two peers tie at height 150.
+        let mut ahead = vec![(b, 200u64), (a, 101), (c, 150), (d, 150)];
+        coverage_order(&mut ahead);
+        let heights: Vec<u64> = ahead.iter().map(|(_, h)| *h).collect();
+        assert_eq!(heights, vec![101, 150, 150, 200], "ascending by height");
+        assert_eq!(ahead.first().unwrap().0, a, "shortest peer → lowest span");
+        assert_eq!(ahead.last().unwrap().0, b, "tallest peer → highest span");
+        // Stable tie-break: c kept ahead of d (both 150), matching input order.
+        assert_eq!(ahead[1].0, c);
+        assert_eq!(ahead[2].0, d);
     }
 
     // §5 control (P-3 preserved): a peer that is neither taller NOR work-heavier

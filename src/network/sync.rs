@@ -2023,6 +2023,25 @@ mod tests {
     }
 
     #[test]
+    fn remove_peer_height_recomputes_true_best_down() {
+        // Invariant (phantom-target guard): true_best_height is a pure recompute
+        // over the live peer set, never a ratchet. Dropping the sole high-water
+        // peer must let the target SHRINK back to local height — not stay pinned.
+        // This is the primitive the dispatch drop-path relies on; the matching
+        // end-to-end guard lives in dispatch::headers.
+        let mut sync = ChainSync::new(0, Hash::zero());
+        let peer = super::super::peer::generate_peer_id();
+        sync.update_peer_height_for(peer, 1234);
+        assert_eq!(sync.true_best_height(), 1234);
+        sync.remove_peer_height(&peer);
+        assert_eq!(
+            sync.true_best_height(),
+            0,
+            "a departed peer's height must not pin the sync target"
+        );
+    }
+
+    #[test]
     fn test_build_locator() {
         let hashes: Vec<Hash> = (0..100).map(|i| Hash::from_bytes([i as u8; 32])).collect();
         let loc = build_locator(99, |h| hashes.get(h as usize).copied());

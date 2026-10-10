@@ -438,6 +438,13 @@ pub struct PeerScore {
     /// instant in the variant. Auto-expires (cleared by `is_get_blocks_banned`)
     /// so peers that recover from their own resync get another shot.
     pub get_blocks_banned_until: Option<MonoInstant>,
+    /// Dig-Out #4 (reviewer finding): how many times emergency recovery has
+    /// force-cleared this peer's GetBlocks ban, and when it last did. A peer
+    /// that keeps re-earning a ban right after each clear is backed off
+    /// exponentially (see `clear_get_blocks_bans`) so recovery stops churning
+    /// it; reset to 0 on a real block delivery (`record_block_success`).
+    pub get_blocks_ban_clears: u32,
+    pub last_get_blocks_clear: Option<MonoInstant>,
 }
 
 impl Default for PeerScore {
@@ -459,6 +466,8 @@ impl Default for PeerScore {
             reconnects: 0,
             consecutive_empty_blocks: 0,
             get_blocks_banned_until: None,
+            get_blocks_ban_clears: 0,
+            last_get_blocks_clear: None,
         }
     }
 }
@@ -474,6 +483,13 @@ pub const EMPTY_BLOCKS_BAN_THRESHOLD: u32 = 5;
 /// they're in the middle of their own resync) without permanently locking
 /// them out. Auto-expires; no manual unban needed.
 pub const EMPTY_BLOCKS_BAN_DURATION_SECS: u64 = 3600;
+
+/// Dig-Out #4: base cooldown before emergency recovery may force-clear the SAME
+/// peer's GetBlocks ban again, doubled per prior clear and capped, so a
+/// persistently unhelpful peer is not re-introduced on every emergency tick.
+/// The first clear of a peer is always allowed (cooldown 0).
+pub const GET_BLOCKS_CLEAR_BACKOFF_BASE_SECS: u64 = 120;
+pub const GET_BLOCKS_CLEAR_BACKOFF_MAX_SECS: u64 = 3600;
 
 /// Per-peer, per-message-type rate tracker.
 ///
@@ -495,6 +511,10 @@ pub const EMPTY_BLOCKS_BAN_DURATION_SECS: u64 = 3600;
 pub struct PeerMessageRateTracker {
     /// (message_type_id, count) for the current window
     counts: HashMap<u8, u32>,
+    /// Message types already flagged as over-limit THIS window. Ensures the
+    /// over-limit signal (warn + penalty) fires at most once per type per
+    /// window instead of once per message — see `record`.
+    flagged: std::collections::HashSet<u8>,
     /// Start of current measurement window
     window_start: MonoInstant,
     /// Window duration (default 10 seconds)
@@ -546,7 +566,7 @@ const MSG_RATE_LIMITS: &[(u8, u32)] = &[
     (12, 100), // MessageType::GetBlocks  — 10/sec (block-fetch flood)
     (14, 200), // MessageType::GetData    — 20/sec (bulk fetch flood)
     (22, 500), // MessageType::InvTx      — 50/sec (tx-relay flood; higher because relaying txs across a mesh is normal)
-    (23, 100), // MessageType::InvBlock   — 10/sec (block-announce flood)
+    (23, 200), // MessageType::InvBlock   — 20/sec (block-announce flood; raised from 10/sec: on a low-difficulty / fast-block network, legit block-announce + reorg-reconciliation bursts briefly exceed 10/sec)
     (30, 50),  // MessageType::GetAddr    — 5/sec  (peer-list scraping)
     (2, 30),   // MessageType::Ping       — 3/sec  (keepalive spam)
     // Light-client / DHT query types (audit R3-4). Their handlers do bounded but
@@ -563,33 +583,79 @@ const MSG_RATE_LIMITS: &[(u8, u32)] = &[
                // + per-shard framer caps.
 ];
 
+/// Outcome of recording one message against a peer's per-type rate limiter.
+///
+/// The two fields are deliberately independent because they drive two different
+/// actions that must NOT be collapsed into one boolean:
+///   * `over_limit` governs whether the caller DROPS the message. It is true for
+///     EVERY message over the per-type limit — the limit is only actually
+///     enforced if every excess message is dropped.
+///   * `penalize` governs whether the caller WARNS + penalizes the peer. It is
+///     true at most once per type per window, so a brief legit burst isn't
+///     logged/penalized per-message, while a sustained flooder still accrues one
+///     penalty per window → eventually banned.
+///
+/// Collapsing these (dropping only when penalizing) was the ccbf066 regression:
+/// only the first over-limit message per window was dropped and every later one
+/// was processed, so the rate limit was effectively disabled and a flooder took
+/// ~100s to ban instead of ~10 messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RateLimitCheck {
+    /// The message is over its per-type limit this window → the caller MUST drop
+    /// it. True for every over-limit message, not just the first.
+    pub over_limit: bool,
+    /// First over-limit message of this type this window → the caller should
+    /// warn + penalize now (at most once per type per window). Always implies
+    /// `over_limit`.
+    pub penalize: bool,
+}
+
 impl PeerMessageRateTracker {
     pub fn new() -> Self {
         PeerMessageRateTracker {
             counts: HashMap::new(),
+            flagged: std::collections::HashSet::new(),
             window_start: mono_now(),
             window_secs: 10,
         }
     }
 
-    /// Record a message and return true if the rate limit is exceeded.
-    pub fn record(&mut self, msg_type_id: u8) -> bool {
+    /// Record a message and classify it against the per-type limit for the
+    /// current window, returning a [`RateLimitCheck`] with two independent bits:
+    ///
+    ///   * `over_limit` — true for EVERY message over the limit. The caller
+    ///     (`network::node::runtime`) drops every such message; dropping only
+    ///     some would leave the limit unenforced.
+    ///   * `penalize` — true only on the FIRST over-limit message of this type
+    ///     this window. The caller warns + penalizes on this bit, so a flooding
+    ///     peer is penalized once per 10s window per type (→ eventually banned,
+    ///     DoS protection intact) while a brief legit burst — e.g. a miner on a
+    ///     low-difficulty / fast-block network, or reorg reconciliation — gets a
+    ///     single penalty and recovers without flooding the log.
+    pub fn record(&mut self, msg_type_id: u8) -> RateLimitCheck {
         let now = mono_now();
         if now.saturating_duration_since(self.window_start).as_secs() >= self.window_secs {
             self.counts.clear();
+            self.flagged.clear();
             self.window_start = now;
         }
 
         let count = self.counts.entry(msg_type_id).or_insert(0);
         *count += 1;
 
-        // Check against per-type limit
+        // Check against per-type limit. Over the limit → DROP every such message
+        // (`over_limit` every time), but WARN + PENALIZE at most once per type
+        // per window (`penalize` is `flagged.insert()`, true only the first time
+        // this type is flagged this window).
         for &(type_id, limit) in MSG_RATE_LIMITS {
             if msg_type_id == type_id && *count > limit {
-                return true; // Rate exceeded
+                return RateLimitCheck {
+                    over_limit: true,
+                    penalize: self.flagged.insert(msg_type_id),
+                };
             }
         }
-        false
+        RateLimitCheck::default() // under the limit → process normally
     }
 }
 
@@ -722,6 +788,7 @@ impl PeerScore {
         self.last_success = Some(mono_now());
         self.validated = true; // H-15 FIX: delivering valid block = validated
         self.consecutive_empty_blocks = 0; // a real delivery clears the wedge counter
+        self.get_blocks_ban_clears = 0; // Dig-Out #4: peer is useful again → reset backoff
         self.update_latency(latency);
         self.update_validity_rate();
         self.adjust_reputation(2);
@@ -1000,6 +1067,87 @@ impl PeerScorer {
     /// Unban a peer
     pub fn unban(&mut self, addr: &SocketAddr) {
         self.banned.remove(addr);
+    }
+
+    /// Dig-Out (fork recovery): clear EVERY peer's `GetBlocks` ban and reset its
+    /// `consecutive_empty_blocks` counter. Returns how many peers were actually
+    /// unbanned (for logging).
+    ///
+    /// Why this exists: a node on a minority fork requests block spans its peers
+    /// don't have → empty replies → after `EMPTY_BLOCKS_BAN_THRESHOLD` each peer
+    /// is GetBlocks-banned for `EMPTY_BLOCKS_BAN_DURATION_SECS` (1 h). Once ALL
+    /// peers are banned, `live_block_peers` returns empty and the sync driver
+    /// loops `[IBD] No live peers for GetBlocks` forever — no existing path clears
+    /// these bans (`unban` only touches the full-disconnect set). The sync
+    /// driver's emergency-recovery tier calls this when it is stuck-but-not-synced
+    /// with connected peers, giving the node a clean shot at the (correctly
+    /// queued) majority hashes so a shallow fork can reorg instead of wedging.
+    /// Observed live on the testnet seed 2026-10-07 (wedged 35 h at height 107).
+    pub fn clear_get_blocks_bans(&mut self) -> usize {
+        // Dig-Out #4 (reviewer finding): do NOT wipe every peer's ban on every
+        // emergency tick — that re-introduces persistently-unhelpful peers
+        // wholesale, which immediately re-empty and re-ban (churn). Instead
+        // clear selectively with per-peer exponential backoff, and keep a
+        // guaranteed-progress fallback so a fully-banned peer set can never
+        // deadlock on the backoff.
+        let now = mono_now();
+        // Cooldown before the SAME peer may be cleared again, growing with the
+        // number of prior clears (first clear is always due: cooldown 0).
+        let cooldown = |clears: u32| -> Duration {
+            if clears == 0 {
+                Duration::ZERO
+            } else {
+                let shift = clears.min(5); // cap so the shift cannot overflow
+                let secs = GET_BLOCKS_CLEAR_BACKOFF_BASE_SECS
+                    .saturating_mul(1u64 << shift)
+                    .min(GET_BLOCKS_CLEAR_BACKOFF_MAX_SECS);
+                Duration::from_secs(secs)
+            }
+        };
+        let mut clear_one = |score: &mut PeerScore| {
+            score.get_blocks_banned_until = None;
+            score.consecutive_empty_blocks = 0;
+            score.get_blocks_ban_clears = score.get_blocks_ban_clears.saturating_add(1);
+            score.last_get_blocks_clear = Some(now);
+        };
+
+        // Pass 1: clear every banned peer whose backoff has elapsed.
+        let mut cleared = 0usize;
+        let mut any_banned = false;
+        for score in self.scores.values_mut() {
+            if score.get_blocks_banned_until.is_none() {
+                continue;
+            }
+            any_banned = true;
+            let due = match score.last_get_blocks_clear {
+                None => true,
+                Some(at) => now.saturating_duration_since(at) >= cooldown(score.get_blocks_ban_clears),
+            };
+            if due {
+                clear_one(score);
+                cleared += 1;
+            }
+        }
+
+        // Guaranteed-progress fallback: peers are banned but none were due (all
+        // in backoff) → still free the single one cleared longest ago, so a node
+        // whose entire peer set is banned can never wedge on the backoff itself.
+        if cleared == 0 && any_banned {
+            if let Some(score) = self
+                .scores
+                .values_mut()
+                .filter(|s| s.get_blocks_banned_until.is_some())
+                .max_by_key(|s| {
+                    s.last_get_blocks_clear
+                        .map(|t| now.saturating_duration_since(t))
+                        .unwrap_or(Duration::MAX)
+                })
+            {
+                clear_one(score);
+                cleared = 1;
+            }
+        }
+        cleared
     }
 
     /// Get top N peers for block download
@@ -1328,6 +1476,34 @@ mod tests {
     }
 
     #[test]
+    fn dig_out_clear_get_blocks_bans_unbans_all_peers() {
+        // Dig-Out: a node wedged behind a minority fork ends up with EVERY peer
+        // GetBlocks-banned; clear_get_blocks_bans() must un-ban them all (and
+        // reset the empty counters) so sync can retry the majority hashes.
+        let mut scorer = PeerScorer::new();
+        let a: SocketAddr = "1.2.3.4:28080".parse().unwrap();
+        let b: SocketAddr = "5.6.7.8:28080".parse().unwrap();
+        for addr in [a, b] {
+            let s = scorer.get_or_create(addr);
+            for _ in 0..EMPTY_BLOCKS_BAN_THRESHOLD {
+                s.record_empty_blocks_response();
+            }
+            assert!(s.is_get_blocks_banned(), "peer banned after threshold empties");
+        }
+
+        let cleared = scorer.clear_get_blocks_bans();
+        assert_eq!(cleared, 2, "both banned peers reported cleared");
+
+        for addr in [a, b] {
+            let s = scorer.get_or_create(addr);
+            assert!(!s.is_get_blocks_banned(), "peer no longer GetBlocks-banned");
+            assert_eq!(s.consecutive_empty_blocks, 0, "empty-counter reset");
+        }
+        // Idempotent: nothing left to clear.
+        assert_eq!(scorer.clear_get_blocks_bans(), 0);
+    }
+
+    #[test]
     fn sub_threshold_empty_blocks_do_not_erode_reputation() {
         // ECLIPSE regression (pre-mainnet review #4): empty `Blocks` replies
         // below the GetBlocks-ban threshold must NOT reduce reputation, so a
@@ -1370,6 +1546,51 @@ mod tests {
     }
 
     #[test]
+    fn clear_get_blocks_bans_is_selective_with_backoff() {
+        // Dig-Out #4: emergency recovery must not wipe every peer's GetBlocks
+        // ban on every tick (which re-introduces unhelpful peers wholesale).
+        // The FIRST clear frees all banned peers; an immediate re-ban + re-clear
+        // (no time elapsed, so per-peer backoff has not expired) frees only ONE
+        // (the guaranteed-progress fallback), not both.
+        let mut scorer = PeerScorer::new();
+        let a: std::net::SocketAddr = "1.1.1.1:1".parse().unwrap();
+        let b: std::net::SocketAddr = "2.2.2.2:2".parse().unwrap();
+
+        let ban = |scorer: &mut PeerScorer, addr: std::net::SocketAddr| {
+            let s = scorer.get_or_create(addr);
+            for _ in 0..EMPTY_BLOCKS_BAN_THRESHOLD {
+                s.record_empty_blocks_response();
+            }
+        };
+
+        ban(&mut scorer, a);
+        ban(&mut scorer, b);
+        assert!(scorer.get_or_create(a).is_get_blocks_banned());
+        assert!(scorer.get_or_create(b).is_get_blocks_banned());
+
+        // First clear: no prior clears → both are due.
+        assert_eq!(scorer.clear_get_blocks_bans(), 2);
+        assert!(!scorer.get_or_create(a).is_get_blocks_banned());
+        assert!(!scorer.get_or_create(b).is_get_blocks_banned());
+
+        // Re-ban both immediately and clear again with ~0 elapsed time: the
+        // per-peer backoff (120s·2) has not expired, so pass 1 frees none and the
+        // progress-fallback frees exactly one.
+        ban(&mut scorer, a);
+        ban(&mut scorer, b);
+        let cleared = scorer.clear_get_blocks_bans();
+        assert_eq!(
+            cleared, 1,
+            "backoff must free only one (progress guarantee), not churn both"
+        );
+        let still_banned = [a, b]
+            .iter()
+            .filter(|p| scorer.get_or_create(**p).is_get_blocks_banned())
+            .count();
+        assert_eq!(still_banned, 1, "exactly one peer stays backed off");
+    }
+
+    #[test]
     fn test_decay_convergence() {
         let mut score = PeerScore::default();
         score.reputation = 80;
@@ -1395,11 +1616,58 @@ mod tests {
         assert_eq!(msg_type_id, 12, "protocol.rs discriminant must be 12");
         let mut exceeded = false;
         for _ in 0..101 {
-            exceeded = tracker.record(msg_type_id);
+            exceeded = tracker.record(msg_type_id).over_limit;
         }
         assert!(
             exceeded,
             "expected message flood threshold to trigger for GetBlocks"
+        );
+    }
+
+    #[test]
+    fn rate_tracker_flags_at_most_once_per_window() {
+        // Over-limit must fire the warn+penalty signal exactly ONCE per type per
+        // window, not once per message — otherwise a bursty peer (e.g. a miner
+        // on a low-difficulty network announcing blocks) floods the log and is
+        // penalized into a ban per-message instead of per-window.
+        let mut t = PeerMessageRateTracker::new();
+        let id = crate::network::protocol::MessageType::InvBlock as u8; // limit 200
+        let flags = (0..600).filter(|_| t.record(id).penalize).count();
+        assert_eq!(flags, 1, "over-limit must flag once per window, not per message");
+    }
+
+    #[test]
+    fn rate_tracker_drops_every_over_limit_message_but_penalizes_once() {
+        // REGRESSION LOCK for the review of ccbf066. The DROP decision and the
+        // WARN+PENALTY decision are two separate concerns and must not collapse
+        // into one boolean:
+        //   * EVERY over-limit message must be dropped (`over_limit`), or the
+        //     rate limit is unenforced — ccbf066 dropped only the first per
+        //     window and processed the rest, so a flooder took ~100s to ban
+        //     instead of ~10 messages.
+        //   * The warn+penalty must fire at most ONCE per type per window
+        //     (`penalize`), so a brief legit burst isn't penalized per-message
+        //     and the log isn't flooded.
+        let mut t = PeerMessageRateTracker::new();
+        let id = crate::network::protocol::MessageType::InvBlock as u8; // limit 200
+        let checks: Vec<RateLimitCheck> = (0..600).map(|_| t.record(id)).collect();
+
+        // Messages 201..=600 (400 of them) are over the limit of 200.
+        let dropped = checks.iter().filter(|c| c.over_limit).count();
+        assert_eq!(dropped, 400, "EVERY over-limit message must be dropped");
+
+        // …but only the first over-limit message warns + penalizes.
+        let penalized = checks.iter().filter(|c| c.penalize).count();
+        assert_eq!(
+            penalized, 1,
+            "warn+penalty must fire once per window, not per message"
+        );
+
+        // `penalize` must always imply `over_limit` (never penalize an
+        // in-limit message).
+        assert!(
+            checks.iter().all(|c| !c.penalize || c.over_limit),
+            "penalize implies over_limit"
         );
     }
 

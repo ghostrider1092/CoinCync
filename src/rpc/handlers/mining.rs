@@ -236,32 +236,35 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
 
     // ── get_mining_live ───────────────────────────────────────
     //
-    // Live mining state, polled by external miners. The node
-    // process itself does NOT mine — mining lives in coincync-rig
-    // as a separate binary that polls this RPC for block
-    // templates. So on a plain node, this method honestly
-    // reports `is_mining = false`
-    // with zeroed fields. A future in-process miner (or a
-    // sidecar that pushes live samples to a shared buffer) can
-    // overwrite these values — the shape is fixed so the TUI
-    // doesn't need to change.
+    // Live mining state, polled by external miners AND now by the node's own
+    // built-in solo miner (the `--mine` path). When in-process mining is
+    // active, `is_mining`, `hashrate`, `hashes_total` and `blocks_found`
+    // reflect the real solo-miner counters (src/mining/mod.rs). On a plain
+    // non-mining node these are false/0 — the same honest zeroed report as
+    // before. The template-detail fields (target/best-hash/nonce) stay
+    // display-only placeholders: the in-process miner doesn't surface a live
+    // template here, and the fixed shape keeps the TUI unchanged.
     module
         .register_method("get_mining_live", |_params, state, _ext| {
             let tip = state.chain.tip();
             let height = tip.height;
-            // The ChainTip struct doesn't carry the target directly —
-            // we'd have to fetch the full BlockHeader for that. Since
-            // this handler reports "not mining" to non-miner nodes and
-            // the `target_hex` field is display-only in the TUI, we
-            // return an empty string; a future miner-sidecar variant
-            // that provides a real template will set this from the
-            // template's header target.
+            let is_mining = crate::consensus::pow::node_mining_active();
+            let hashes_total = crate::mining::MINER_HASHES_TOTAL
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let blocks_found = crate::mining::MINER_BLOCKS_FOUND
+                .load(std::sync::atomic::Ordering::Relaxed);
+            // Best-effort instantaneous rate (delta since the last poll).
+            let hashrate = if is_mining {
+                crate::mining::sample_hashrate()
+            } else {
+                0.0
+            };
             let target_hex = String::new();
             Ok::<_, ErrorObjectOwned>(json!({
-                "is_mining":            false,
-                "hashrate":             0.0,
-                "hashes_total":         0u64,
-                "blocks_found":         0u64,
+                "is_mining":            is_mining,
+                "hashrate":             hashrate,
+                "hashes_total":         hashes_total,
+                "blocks_found":         blocks_found,
                 // CoinCync 1.0 is RandomX-only (algorithm index 0).
                 "algorithm":            0u64,
                 "algorithm_name":       "RandomX",

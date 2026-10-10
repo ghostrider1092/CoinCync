@@ -276,17 +276,26 @@ pub(super) fn spawn_message_processor(
                     let tracker = rate_trackers
                         .entry(msg.peer_id)
                         .or_insert_with(super::super::scoring::PeerMessageRateTracker::new);
-                    if tracker.record(msg.msg_type) {
-                        warn!(
-                            "Peer {:?} exceeded message rate limit for type 0x{:02x}, penalizing",
-                            &msg.peer_id[..4],
-                            msg.msg_type,
-                        );
-                        if let Some(peer_addr) = processor_peers.get(&msg.peer_id).map(|p| p.addr) {
-                            let mut scorer = processor_scorer.write().await;
-                            scorer.get_or_create(peer_addr).record_misbehavior(
-                                super::super::scoring::MisbehaviorType::MessageFlood,
+                    let rate = tracker.record(msg.msg_type);
+                    if rate.over_limit {
+                        // Warn + penalize at most once per type per window (the
+                        // `penalize` bit), but DROP every over-limit message — a
+                        // flooder is penalized once per window (→ eventually
+                        // banned) yet none of its excess messages are processed.
+                        if rate.penalize {
+                            warn!(
+                                "Peer {:?} exceeded message rate limit for type 0x{:02x}, penalizing",
+                                &msg.peer_id[..4],
+                                msg.msg_type,
                             );
+                            if let Some(peer_addr) =
+                                processor_peers.get(&msg.peer_id).map(|p| p.addr)
+                            {
+                                let mut scorer = processor_scorer.write().await;
+                                scorer.get_or_create(peer_addr).record_misbehavior(
+                                    super::super::scoring::MisbehaviorType::MessageFlood,
+                                );
+                            }
                         }
                         continue; // Drop the message and release its reservation
                     }

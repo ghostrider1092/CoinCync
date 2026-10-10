@@ -182,6 +182,49 @@ impl Blockchain {
                 None => db.state.set_network(self.network)?,
             }
 
+            // Anchor-derivation guard (phantom-reset footgun). A chain mined
+            // under a DIFFERENT RandomX anchor derivation can share our genesis
+            // HASH yet be consensus-incompatible: the 2026-09 testnet reset
+            // changed the anchor derivation but KEPT genesis d2240fea, so the
+            // genesis-hash check above passes for a pre-reset data-dir and the
+            // node would silently load and keep extending a retired chain that
+            // no fresh peer will accept (observed live: our pre-reset .coincync-b
+            // sat at height 3627, unsyncable by current-binary nodes). Re-derive
+            // block 1's anchor under THIS binary and refuse to start on a
+            // mismatch. `verify_pow` enforces this exact equality on every
+            // accepted block, so a valid same-network chain ALWAYS passes; only
+            // a cross-reset / incompatible dir fails. Best-effort: skip if block
+            // 1 isn't retrievable (pruned) rather than invent a new failure.
+            if state.height >= 1 {
+                if let Some(h1_hash) = db.blocks.get_hash_by_height(1)? {
+                    if let Some(h1) = db.blocks.get(&h1_hash)? {
+                        let hdr = &h1.header;
+                        let binding = hdr.pow_binding();
+                        let expected = crate::consensus::compute_full_anchor(
+                            &hdr.prev_hash,
+                            hdr.height.as_u64(),
+                            hdr.timestamp.as_secs(),
+                            &binding,
+                        )
+                        .map_err(|e| {
+                            Error::DatabaseError(format!(
+                                "failed to recompute block-1 anchor during load: {e}"
+                            ))
+                        })?
+                        .mixed_hash;
+                        if expected != hdr.anchor {
+                            return Err(Error::DatabaseError(format!(
+                                "data-dir chain was mined under an incompatible RandomX anchor \
+                                 derivation (block 1 anchor {} != expected {} for the current {} \
+                                 consensus rules); this is a pre-reset/incompatible chain — wipe \
+                                 the data dir to resync the current network",
+                                hdr.anchor, expected, self.network,
+                            )));
+                        }
+                    }
+                }
+            }
+
             return match db.blocks.get(&state.tip_hash)? {
                 Some(tip_block) => {
                     if tip_block.header.height.as_u64() != state.height {
