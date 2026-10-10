@@ -866,10 +866,27 @@ async fn send_block_spans(
         .copied()
         .filter(|(id, h)| *h > local_height || work_heavier.contains(id))
         .collect();
-    if ahead.is_empty() {
+    // #cold-start-wedge (2026-10-10): if NO peer's CACHED height is ahead of us,
+    // fall back to requesting from all live peers rather than wedging. We only
+    // reach here with a NON-EMPTY `hashes` queue, i.e. some peer advertised these
+    // block headers to us, so at least one connected peer HAS them. During a mass
+    // simultaneous cold-start IBD (e.g. a whole fleet re-sync), `PeerInfo.height`
+    // stays pinned at the handshake value — syncing peers don't relay `NewBlock`,
+    // so the strict `h > local_height` gate below starves and the download queue
+    // wedges: hashes sit in `downloading` with no pending_request and loop
+    // forever through `recover_stuck_downloads` ("Recovered N stuck downloads
+    // (no pending_request)"), height frozen while peers are in fact far ahead.
+    // A fallback peer that cannot serve a span is re-queued + de-scored exactly
+    // like a taller peer that fails to deliver (see `requeue_failed` below), so
+    // this does NOT reintroduce the P-3 same-height-follower wedge — that
+    // guarantee holds because non-deliverers are penalised and retried, not
+    // because they were never asked. And it only engages when real work is
+    // queued (headers beyond our tip exist), never when we are genuinely at tip.
+    let selected: Vec<(PeerId, u64)> = if ahead.is_empty() { peers.to_vec() } else { ahead };
+    if selected.is_empty() {
         return 0;
     }
-    let peers = &ahead[..];
+    let peers = &selected[..];
 
     let span_size = hashes.len().div_ceil(peers.len());
     let mut total_sent = 0usize;
