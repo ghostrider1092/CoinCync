@@ -79,6 +79,15 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 .as_ref()
                 .map(|p| p.network_stats().peer_count)
                 .unwrap_or(0);
+            // Inbound connections = ground truth for inbound-reachability: a NAT'd
+            // / un-forwarded node dials out and syncs fine but never accepts
+            // inbound, so it is never gossiped and no one can discover it. Expose
+            // the count + a reachable flag so operators (and cytop) can see it.
+            let inbound_peers = state
+                .p2p
+                .as_ref()
+                .map(|p| p.network_stats().inbound)
+                .unwrap_or(0);
             // anonymity_set + effective_ring_size are emitted in get_info.
             // The 2026-05-07 review proposed removing them as a chain-analyst
             // correlator (every public scrape recording "anonymity_set was M
@@ -146,6 +155,8 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 "synced":                  synced,
                 "is_synced":               synced, // back-compat alias
                 "peer_count":              peer_count,
+                "inbound_peers":           inbound_peers,
+                "inbound_reachable":       inbound_peers > 0,
                 // Sustained mesh-floor state (observational). See crate::vitals
                 // + docs/design/runtime-mesh-floor.md.
                 "mesh_degraded":           state.p2p.as_ref().map(|p| p.mesh_degraded()).unwrap_or(false),
