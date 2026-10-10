@@ -30,13 +30,17 @@
 //!   (the historical "sync-stall" class of bug this function's comments
 //!   reference).
 //!   TESTS: `full_peer_queue_does_not_block_other_broadcast_delivery`.
-//! - **§5 `broadcast_raw` chronic-stall ban (`STALL_THRESHOLD`)** —
-//!   INVARIANT: a peer whose send queue is full on `STALL_THRESHOLD`
-//!   consecutive broadcasts is banned rather than retried forever.
+//! - **§5 `broadcast_raw` chronic-stall ban (`STALL_THRESHOLD`, `STALL_MIN_DURATION`)** —
+//!   INVARIANT: a peer is banned only when its send queue has been full on
+//!   `STALL_THRESHOLD` consecutive broadcasts spanning at least
+//!   `STALL_MIN_DURATION`; a shorter run of fulls (a peer that paused
+//!   reading for a few seconds under IBD gossip) only drops messages.
 //!   THREAT: an unresponsive or malicious peer permanently occupying a
-//!   connection slot while contributing nothing to propagation.
-//!   TESTS: (gap — no test drives `consecutive_full` to `STALL_THRESHOLD`
-//!   and asserts the resulting `ban_peer` call).
+//!   connection slot while contributing nothing to propagation; and the
+//!   reverse, a catch-up node banning its own healthy source peers.
+//!   TESTS: `chronic_slow_needs_threshold_and_duration`,
+//!   `full_peer_queue_does_not_block_other_broadcast_delivery` (stamps the
+//!   first full send, clears it on the next successful one).
 //! - **§6 `announce_chain_work`** — INVARIANT: the ChainWork advertisement is
 //!   sent only to peers whose capability bitset actually has `CAP_CHAINWORK`.
 //!   THREAT: broadcasting to non-capable peers wastes bandwidth and can
@@ -73,6 +77,14 @@ use super::peer_manager::{self, BanPeerContext, DisconnectPeerContext};
 use super::types::NodeEvent;
 
 const STALL_THRESHOLD: u32 = 30;
+/// A connection that merely stopped reading is dropped by `WRITE_TIMEOUT`
+/// (30 s, connection.rs) without a ban. Only a channel that stays full for
+/// longer than that, while the connection keeps accepting bytes, is
+/// chronically slow. The count alone is not enough: a node in IBD queues an
+/// InvBlock and a ChainWork per applied block, 40-60 messages per second per
+/// peer, so `STALL_THRESHOLD` is reached within two seconds of a peer pausing
+/// its reads and the 1 h ban lands on a healthy source peer.
+const STALL_MIN_DURATION: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// State used only by the best-effort broadcast path and its peer cleanup.
 pub(super) struct BroadcastContext<'a> {
@@ -206,21 +218,43 @@ async fn broadcast_raw(data: Vec<u8>, context: &BroadcastContext<'_>) -> Result<
                 sent += 1;
                 if let Some(peer) = context.peers.get(&peer_id) {
                     peer.consecutive_full.store(0, Ordering::Relaxed);
+                    peer.queue_full_since.store(0, Ordering::Relaxed);
                 }
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 full += 1;
-                let count = context
+                let (count, full_for) = context
                     .peers
                     .get(&peer_id)
-                    .map(|peer| peer.consecutive_full.fetch_add(1, Ordering::Relaxed) + 1)
-                    .unwrap_or(0);
-                if count >= STALL_THRESHOLD {
-                    to_ban.push((peer_id, count));
+                    .map(|peer| {
+                        let count = peer.consecutive_full.fetch_add(1, Ordering::Relaxed) + 1;
+                        // Milliseconds since the connection opened, plus one so
+                        // that zero can mean "not full".
+                        let now_ms = u64::try_from(peer.connected_at.elapsed().as_millis())
+                            .unwrap_or(u64::MAX)
+                            .saturating_add(1);
+                        let since_ms = match peer.queue_full_since.compare_exchange(
+                            0,
+                            now_ms,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => now_ms,
+                            Err(first) => first,
+                        };
+                        (
+                            count,
+                            std::time::Duration::from_millis(now_ms.saturating_sub(since_ms)),
+                        )
+                    })
+                    .unwrap_or((0, std::time::Duration::ZERO));
+                if chronic_slow(count, full_for) {
+                    to_ban.push((peer_id, count, full_for));
                 }
                 tracing::trace!(
                     peer_id = ?peer_id,
                     consecutive_full = count,
+                    full_for_secs = full_for.as_secs(),
                     "broadcast_raw: peer channel full, dropping (peer will catch up via IBD)"
                 );
             }
@@ -239,11 +273,13 @@ async fn broadcast_raw(data: Vec<u8>, context: &BroadcastContext<'_>) -> Result<
         tracing::warn!(sent, full, closed, "broadcast_raw partial delivery");
     }
 
-    for (peer_id, count) in to_ban {
+    for (peer_id, count, full_for) in to_ban {
+        let secs = full_for.as_secs();
         tracing::warn!(
             peer_id = %hex::encode(&peer_id[..8]),
             consecutive_full = count,
-            "broadcast_raw: disconnecting chronic-slow peer (channel full {count} consecutive sends)"
+            full_for_secs = secs,
+            "broadcast_raw: disconnecting chronic-slow peer (channel full {count} consecutive sends over {secs}s)"
         );
         if let Some(peer) = context.peers.get(&peer_id) {
             let addr = peer.addr;
@@ -271,6 +307,12 @@ async fn broadcast_raw(data: Vec<u8>, context: &BroadcastContext<'_>) -> Result<
     }
 
     Ok(())
+}
+
+/// The chronic-slow rule: full on `STALL_THRESHOLD` consecutive broadcasts
+/// AND that run has lasted at least `STALL_MIN_DURATION`.
+fn chronic_slow(consecutive_full: u32, full_for: std::time::Duration) -> bool {
+    consecutive_full >= STALL_THRESHOLD && full_for >= STALL_MIN_DURATION
 }
 
 fn peer_sender(
@@ -447,6 +489,38 @@ mod tests {
                 .load(Ordering::Relaxed),
             1
         );
+        assert_ne!(
+            peers
+                .get(&slow_peer)
+                .unwrap()
+                .queue_full_since
+                .load(Ordering::Relaxed),
+            0,
+            "the first full send stamps the start of the run"
+        );
+        // The slow peer drained its one slot above, so the next broadcast
+        // reaches it and clears both the count and the stamp.
+        broadcast_raw(vec![10], &context).await.unwrap();
+        assert_eq!(slow_rx.recv().await, Some(vec![10]));
+        assert_eq!(fast_rx.recv().await, Some(vec![10]));
+        let slow = peers.get(&slow_peer).unwrap();
+        assert_eq!(slow.consecutive_full.load(Ordering::Relaxed), 0);
+        assert_eq!(slow.queue_full_since.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn chronic_slow_needs_threshold_and_duration() {
+        let long = STALL_MIN_DURATION;
+        let short = STALL_MIN_DURATION - Duration::from_millis(1);
+        // Count without duration: an IBD gossip burst at a peer that paused
+        // reading for a couple of seconds.
+        assert!(!chronic_slow(STALL_THRESHOLD, short));
+        assert!(!chronic_slow(10 * STALL_THRESHOLD, Duration::from_secs(2)));
+        // Duration without count: a quiet peer whose queue filled slowly.
+        assert!(!chronic_slow(STALL_THRESHOLD - 1, 10 * long));
+        // Both: chronically slow.
+        assert!(chronic_slow(STALL_THRESHOLD, long));
+        assert!(chronic_slow(STALL_THRESHOLD + 1, 2 * long));
     }
 
     // C2 regression: `send_to_peer` is called by the single shared message
