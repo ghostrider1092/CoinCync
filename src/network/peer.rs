@@ -65,7 +65,7 @@
 use crate::error::{Error, Result};
 use crate::primitives::Hash;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -170,6 +170,13 @@ pub struct PeerInfo {
     /// disconnected. Atomic so the lock-free broadcast hot path can
     /// update it without taking a write lock on the peer table.
     pub consecutive_full: Arc<AtomicU32>,
+    /// When the current run of consecutive full sends started, as
+    /// milliseconds since `connected_at` plus one (zero = not full). Set by
+    /// the first `try_send(Full)` of a run, cleared on any successful send.
+    /// The chronic-slow ban also needs the run to have lasted
+    /// `node/broadcast.rs::STALL_MIN_DURATION`, so a peer that stops reading
+    /// for a few seconds under IBD gossip is not banned.
+    pub queue_full_since: Arc<AtomicU64>,
     /// Identifies the connection instance that owns this map entry so an
     /// older task cannot remove a replacement connection with the same peer ID.
     pub(crate) connection_token: Arc<()>,
@@ -208,6 +215,7 @@ impl PeerInfo {
             capabilities: 0,
             consensus_fingerprint: None,
             consecutive_full: Arc::new(AtomicU32::new(0)),
+            queue_full_since: Arc::new(AtomicU64::new(0)),
             connection_token: Arc::new(()),
             eclipse_slot: None,
         }

@@ -1126,6 +1126,7 @@ mod tests {
             remote_static_key: None,
             capabilities: 0,
             consecutive_full: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            queue_full_since: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             connection_token: std::sync::Arc::new(()),
             eclipse_slot: None,
             consensus_fingerprint: None,
