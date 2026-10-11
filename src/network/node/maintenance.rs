@@ -12,8 +12,10 @@
 //!   TESTS: (gap — no test panics the inner loop and asserts the supervisor
 //!   logs CRITICAL rather than exiting quietly).
 //! - **§2 `run_ping_tick`** — INVARIANT: every ping interval, a keepalive is
-//!   sent to all current senders and expired tx-absence entries are pruned,
-//!   using a best-effort send (dead channels don't abort the tick).
+//!   sent to all current senders, each with its own nonce recorded in the
+//!   peer's score so `handle_pong` can time the round trip, and expired
+//!   tx-absence entries are pruned, using a best-effort send (dead channels
+//!   don't abort the tick).
 //!   THREAT: without periodic pings, `PEER_TIMEOUT`-based liveness on the
 //!   remote side evicts us even on a healthy link; without pruning, the
 //!   tx-absence cache grows unbounded between hard-cap evictions.
@@ -69,10 +71,25 @@
 //!   (17h in the referenced production incident) instead of ~30s.
 //!   TESTS: (gap — no test asserts heartbeat emission or its counter
 //!   monotonicity).
+//! - **§9 `run_self_heal_tick` / `self_heal_decision`** — INVARIANT: a node
+//!   whose local height has not advanced for `SELF_HEAL_STALL_SECS` WHILE a
+//!   higher sync target exists and it is not synced performs a SOFT recovery
+//!   (purge phantom peer-height entries, expire stale work claims, re-trigger
+//!   sync), rate-limited to once per `SELF_HEAL_MIN_GAP`; a synced, caught-up,
+//!   or still-progressing node, or one with nobody ahead, does nothing.
+//!   THREAT: the 2026-10-10 IBD wedge the external
+//!   `deploy/fleet/coincync-sync-watchdog.sh` restarts a node for — height
+//!   frozen while peers are far ahead, a departed peer's stale target pinning
+//!   `is_synced` false — internalized as a no-restart recovery. The detection
+//!   is deliberately conservative: a false trigger would purge peer caches
+//!   fleet-wide at once (network-wide outage), so it errs toward doing nothing.
+//!   TESTS: `self_heal_*` in `self_heal_tests` cover healthy/synced,
+//!   behind-but-progressing, nobody-ahead, stalled→recover, and the rate-limit.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
@@ -84,6 +101,9 @@ use crate::mempool::SharedMempool;
 use crate::primitives::Hash;
 use crate::transaction::Transaction;
 
+use std::net::SocketAddr;
+
+use super::super::bootstrap::{AddressManager, PeerAddress};
 use super::super::connection_tracker::ConnectionTracker;
 use super::super::dandelion::{DandelionRouter, DANDELION_MONITOR_INTERVAL_SECS};
 use super::super::peer::{PeerId, PeerInfo, PeerState};
@@ -94,6 +114,7 @@ use super::super::sync::ChainSync;
 use super::chain_state::ChainStateReader;
 use super::constants::{
     MESH_FLOOR_PEERS, MESH_FLOOR_SUSTAIN_TICKS, PEER_TIMEOUT, PING_INTERVAL,
+    SELF_HEAL_HEIGHT_SLACK, SELF_HEAL_INTERVAL, SELF_HEAL_MIN_GAP, SELF_HEAL_STALL_SECS,
     TIP_REBROADCAST_INTERVAL_SECS,
 };
 use super::runtime::wait_for_shutdown;
@@ -118,6 +139,11 @@ pub(super) struct MaintenanceContext {
     pub magic: [u8; 4],
     /// Sustained mesh-floor flag, updated by the heartbeat tick.
     pub mesh_degraded: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Address book, for inbound-peer discovery (#284).
+    pub addresses: Arc<RwLock<AddressManager>>,
+    /// Network default P2P port — the port an inbound peer is *assumed* to
+    /// listen on (the handshake carries none), used by inbound-peer discovery.
+    pub discovery_port: u16,
 }
 
 struct CleanupTick<'a> {
@@ -155,6 +181,8 @@ pub(super) fn spawn_maintenance(
         mut broadcast_rx,
         magic,
         mesh_degraded: maint_mesh_degraded,
+        addresses: maint_addresses,
+        discovery_port,
     } = context;
 
     // Spawn the maintenance task with panic supervision. Previously
@@ -222,6 +250,16 @@ pub(super) fn spawn_maintenance(
         // (from PR #123).
         let mut tip_announce_interval =
             interval(Duration::from_secs(TIP_REBROADCAST_INTERVAL_SECS));
+        // §9 self-heal: internalizes the external IBD-stall watchdog as a SOFT
+        // (no-restart) recovery. State is owned by the loop (wall-clock progress
+        // tracking must NOT live in ChainSync); seeded to the current local
+        // height so the stall clock starts fresh at boot and never false-fires
+        // on a node that is simply still bootstrapping.
+        let mut self_heal_interval = interval(Duration::from_secs(SELF_HEAL_INTERVAL));
+        let mut self_heal_state = SelfHealState::new(maint_chain_state.snapshot().await.0);
+        // #284 inbound-peer discovery: periodically seed the address book with
+        // connected inbound peers (assumed to listen on the network default port).
+        let mut discovery_interval = interval(Duration::from_secs(60));
 
         loop {
             tokio::select! {
@@ -239,7 +277,14 @@ pub(super) fn spawn_maintenance(
                 biased;
                 _ = wait_for_shutdown(&mut shutdown) => break,
                 _ = ping_interval.tick() => {
-                    run_ping_tick(&maint_senders, &maint_tx_absence_cache, magic).await;
+                    run_ping_tick(
+                        &maint_senders,
+                        &maint_peers,
+                        &maint_scorer,
+                        &maint_tx_absence_cache,
+                        magic,
+                    )
+                    .await;
                 }
 
                 _ = relay_score_interval.tick() => {
@@ -277,6 +322,9 @@ pub(super) fn spawn_maintenance(
                 _ = ban_flush_interval.tick() => {
                     flush_ban_list(&maint_scorer, &maint_ban_list_path).await;
                 }
+                _ = discovery_interval.tick() => {
+                    discover_inbound_peers(&maint_peers, &maint_addresses, discovery_port).await;
+                }
                 _ = outbound_rotate_interval.tick() => {
                     rotate_outbound_peer(&maint_peers, &maint_senders, &maint_tracker);
                 }
@@ -284,6 +332,14 @@ pub(super) fn spawn_maintenance(
                     heartbeat_ticks = heartbeat_ticks.saturating_add(1);
                     emit_heartbeat(&maint_peers, heartbeat_ticks);
                     update_mesh_floor(&maint_peers, &maint_mesh_degraded, &mut mesh_below_streak);
+                }
+                _ = self_heal_interval.tick() => {
+                    run_self_heal_tick(
+                        &maint_peers,
+                        &maint_sync,
+                        &maint_chain_state,
+                        &mut self_heal_state,
+                    ).await;
                 }
             }
         }
@@ -336,17 +392,36 @@ pub(super) fn spawn_maintenance(
 
 async fn run_ping_tick(
     senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
+    peers: &DashMap<PeerId, PeerInfo>,
+    scorer: &RwLock<PeerScorer>,
     tx_absence_cache: &parking_lot::RwLock<TxAbsenceCache>,
     magic: [u8; 4],
 ) {
-    if let Ok(data) = Message::ping(magic).to_bytes() {
-        let snapshot: Vec<mpsc::Sender<Vec<u8>>> = senders
-            .iter()
-            .map(|sender| sender.value().clone())
-            .collect();
-        for sender in snapshot {
-            let _ = sender.send(data.clone()).await;
+    // One nonce per peer, remembered in its score with the time we hand the
+    // Ping to its queue: the Pong that echoes it gives us the round-trip time
+    // (see dispatch::control::handle_pong).
+    let snapshot: Vec<_> = senders
+        .iter()
+        .map(|entry| {
+            let addr = peers.get(entry.key()).map(|p| p.addr);
+            (entry.value().clone(), addr)
+        })
+        .collect();
+    let mut pings = Vec::with_capacity(snapshot.len());
+    {
+        let mut scorer = scorer.write().await;
+        for (sender, addr) in snapshot {
+            let nonce = rand::random::<u64>();
+            if let Ok(data) = Message::ping_with_nonce(magic, nonce).to_bytes() {
+                if let Some(addr) = addr {
+                    scorer.get_or_create(addr).record_ping_sent(nonce);
+                }
+                pings.push((sender, data));
+            }
         }
+    }
+    for (sender, data) in pings {
+        let _ = sender.send(data).await;
     }
 
     let pruned = tx_absence_cache.write().prune();
@@ -508,6 +583,44 @@ async fn flush_ban_list(scorer: &RwLock<PeerScorer>, path: &std::path::Path) {
     }
 }
 
+/// #284 — compat-safe inbound-peer discovery. The Version handshake carries no
+/// listening port, so a peer that DIALS us leaves no dialable address: the only
+/// thing we see is its source IP on an ephemeral port. Historically the address
+/// book therefore only ever held the DNS/fallback fleet, and a community node
+/// that dialed out was known only to whoever it connected to, who could not pass
+/// it on (hence new nodes could never discover it — #284).
+///
+/// Heuristic: a peer connected to us is most likely reachable at its source IP
+/// on the NETWORK DEFAULT P2P port (the overwhelming majority of nodes use it).
+/// Seed `(ip, default_port)` into the book as a normal address. It is then
+/// validated the same way as any other: the outbound connector dials it, so a
+/// NAT'd or non-default-port peer simply fails to connect and is pruned/backed
+/// off — nothing is trusted without a successful dial. Once a dial succeeds the
+/// address is gossiped via GetAddr/Addr, so a reachable community node on the
+/// default port becomes discoverable network-wide instead of staying invisible.
+///
+/// No wire-format change (compat-safe with the v3 fleet); `AddressManager::add`
+/// already dedups, applies the anti-eclipse netgroup quota, and skips our own
+/// addresses, so this is idempotent and safe to run every interval.
+async fn discover_inbound_peers(
+    peers: &DashMap<PeerId, PeerInfo>,
+    addresses: &RwLock<AddressManager>,
+    default_port: u16,
+) {
+    let candidates: Vec<SocketAddr> = peers
+        .iter()
+        .filter(|p| !p.outbound && p.state == PeerState::Connected)
+        .map(|p| SocketAddr::new(p.addr.ip(), default_port))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let mut book = addresses.write().await;
+    for addr in candidates {
+        book.add(PeerAddress::new(addr));
+    }
+}
+
 /// Track the sustained mesh-floor state with hysteresis. Increments a
 /// below-floor streak each heartbeat that connected peers are under
 /// `MESH_FLOOR_PEERS`; once the streak reaches `MESH_FLOOR_SUSTAIN_TICKS` the
@@ -605,6 +718,184 @@ async fn evaporate_relay_scores(relay_scores: &RwLock<RelayScoreMap>) {
     }
 }
 
+// ─────────────────────────── §9 self-heal ───────────────────────────
+//
+// Internalizes `deploy/fleet/coincync-sync-watchdog.sh`: a node wedged in IBD
+// (height frozen while peers are far ahead) is recovered WITHOUT a process
+// restart. The external watchdog's SOFT equivalent is: purge phantom/stale
+// peer-height entries (the `retain_connected_peers` connection-lifecycle fix),
+// expire stale work claims, and nudge the sync driver to re-request. No
+// connected peers are dropped, no process exits, no new channels/seeds — the
+// SAFEST actions only. Detection is deliberately conservative because a false
+// trigger would purge peer caches across the whole fleet simultaneously.
+
+/// Decision for the self-heal tick. Kept a pure function (no I/O, no clocks)
+/// so the detection logic is unit-testable without a live node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelfHealAction {
+    /// Node is healthy, caught up, still progressing, has nobody ahead, or is
+    /// inside the rate-limit window — do nothing.
+    None,
+    /// Node is demonstrably wedged in IBD — perform the soft recovery.
+    Recover,
+}
+
+/// Wall-clock progress state owned by the maintenance loop. Deliberately NOT
+/// stored in `ChainSync` (which holds no wall-clock state).
+struct SelfHealState {
+    /// Highest local height observed so far (monotonic high-water mark).
+    last_height: u64,
+    /// Instant `last_height` last increased — the stall clock's zero.
+    last_progress_at: Instant,
+    /// Instant the last soft recovery fired, for rate-limiting; `None` until
+    /// the first recovery.
+    last_heal_at: Option<Instant>,
+}
+
+impl SelfHealState {
+    fn new(local_height: u64) -> Self {
+        Self {
+            last_height: local_height,
+            last_progress_at: Instant::now(),
+            last_heal_at: None,
+        }
+    }
+}
+
+/// Pure detection. CONSERVATIVE — returns `Recover` only when the node is
+/// demonstrably stalled: behind a known-higher target, not synced, and its
+/// height has not advanced for at least `SELF_HEAL_STALL_SECS`, and it is not
+/// inside the `SELF_HEAL_MIN_GAP` rate-limit window.
+///
+/// Mirrors `coincync-sync-watchdog.sh`: do NOTHING when synced, caught up, or
+/// merely slow-but-progressing, and NEVER "recover" when nobody is ahead
+/// (`target <= local_height + slack`) — there would be no one to sync from.
+fn self_heal_decision(
+    local_height: u64,
+    last_height: u64,
+    since_progress: Duration,
+    target: u64,
+    is_synced: bool,
+    since_last_heal: Option<Duration>,
+) -> SelfHealAction {
+    // Synced => healthy, never recover.
+    if is_synced {
+        return SelfHealAction::None;
+    }
+    // Nobody is meaningfully ahead of us => no sync source, never recover.
+    // (Guards the isolated false-synced / caught-up cases the watchdog skips.)
+    if target <= local_height.saturating_add(SELF_HEAL_HEIGHT_SLACK) {
+        return SelfHealAction::None;
+    }
+    // Height advanced since the last sample => still progressing, keep waiting.
+    if local_height > last_height {
+        return SelfHealAction::None;
+    }
+    // Behind and not progressing — but only a stall once it has persisted.
+    if since_progress < Duration::from_secs(SELF_HEAL_STALL_SECS) {
+        return SelfHealAction::None;
+    }
+    // Rate-limit: a recovery within the last SELF_HEAL_MIN_GAP suppresses
+    // another (edge-triggered), so the soft recovery can never hot-loop.
+    if let Some(gap) = since_last_heal {
+        if gap < Duration::from_secs(SELF_HEAL_MIN_GAP) {
+            return SelfHealAction::None;
+        }
+    }
+    SelfHealAction::Recover
+}
+
+/// Self-heal maintenance tick. Samples local height + sync target, runs the
+/// pure decision, and on `Recover` performs the SOFT recovery. Logs loudly at
+/// WARN on recovery; silent when healthy.
+/// Soft self-heal recovery actions on a wedged `ChainSync`, extracted so the
+/// behavior is unit-testable without a live node or `ChainStateReader`:
+///   1. purge peer-height/work entries for peers no longer connected (the
+///      phantom-IBD wedge fix — always safe),
+///   2. expire stale work claims so `is_synced`/target recompute,
+///   3. re-arm a header pull via `arm_near_tip_catchup`, which re-arms from ANY
+///      sync state ONLY when the node is idle (nothing in flight) AND `!synced`
+///      — exactly the behind-and-stuck wedge. (`trigger_resync` would no-op
+///      here; it only fires from Synced/Idle.) The idle guard means it can
+///      never disrupt an actively-progressing download.
+/// Returns `(pruned, expired, retriggered)`. SAFE: no peer drops, no restart.
+fn self_heal_recover(
+    sync: &mut ChainSync,
+    connected: &HashSet<PeerId>,
+    unix_now: u64,
+) -> (usize, usize, bool) {
+    let pruned = sync.retain_connected_peers(connected);
+    let expired = sync.expire_stale_work_claims(unix_now, 0);
+    let retriggered = sync.arm_near_tip_catchup();
+    (pruned, expired, retriggered)
+}
+
+async fn run_self_heal_tick(
+    peers: &DashMap<PeerId, PeerInfo>,
+    sync: &RwLock<ChainSync>,
+    chain_state: &ChainStateReader,
+    state: &mut SelfHealState,
+) {
+    let now = Instant::now();
+    let (local_height, _tip) = chain_state.snapshot().await;
+
+    let (target, is_synced) = {
+        let guard = sync.read().await;
+        (guard.true_best_height(), guard.is_synced())
+    };
+
+    let since_progress = now.saturating_duration_since(state.last_progress_at);
+    let since_last_heal = state
+        .last_heal_at
+        .map(|t| now.saturating_duration_since(t));
+
+    let action = self_heal_decision(
+        local_height,
+        state.last_height,
+        since_progress,
+        target,
+        is_synced,
+        since_last_heal,
+    );
+
+    // Advance the progress clock AFTER the decision (so a tick that observes an
+    // advance is classified as progressing, then records the new high-water).
+    if local_height > state.last_height {
+        state.last_height = local_height;
+        state.last_progress_at = now;
+    }
+
+    if action == SelfHealAction::Recover {
+        let stalled_secs = since_progress.as_secs();
+        // Unix seconds for the work-claim expiry. Use the CANONICAL clock
+        // (src/clock.rs, the E1 single source of truth) — the same clock the
+        // work-claim timestamps were recorded with — so the expiry cutoff can
+        // never drift from the timestamps it is compared against (a plain
+        // chrono wall-clock could, under a mocked/offset clock).
+        let unix_now = crate::clock::unix_now();
+        // Connected-peer set drives the phantom/stale peer-height purge.
+        let connected: HashSet<PeerId> = peers.iter().map(|p| *p.key()).collect();
+
+        let (pruned, expired, retriggered) = {
+            let mut guard = sync.write().await;
+            self_heal_recover(&mut guard, &connected, unix_now)
+        };
+
+        warn!(
+            target: "node::self_heal",
+            "IBD stall self-heal: local height {} frozen {}s below target {} \
+             (not synced) — soft recovery: pruned {} phantom peer-height entries, \
+             expired {} stale work claims, resync re-triggered={}",
+            local_height, stalled_secs, target, pruned, expired, retriggered,
+        );
+
+        state.last_heal_at = Some(now);
+        // Reset the stall clock so the next recovery must re-accumulate a full
+        // stall window (belt-and-braces alongside the MIN_GAP rate-limit).
+        state.last_progress_at = now;
+    }
+}
+
 #[cfg(test)]
 mod mesh_floor_tests {
     use super::*;
@@ -661,5 +952,239 @@ mod mesh_floor_tests {
             update_mesh_floor(&peers, &degraded, &mut streak);
         }
         assert!(degraded.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod self_heal_tests {
+    use super::*;
+
+    const STALL: Duration = Duration::from_secs(SELF_HEAL_STALL_SECS);
+
+    // (a) A synced node never recovers, even if it looks behind by the numbers.
+    #[test]
+    fn synced_node_does_not_recover() {
+        let action = self_heal_decision(
+            100,          // local_height
+            100,          // last_height (no advance)
+            STALL,        // long since progress
+            200,          // target far ahead
+            true,         // is_synced
+            None,         // never healed
+        );
+        assert_eq!(action, SelfHealAction::None);
+    }
+
+    // (b) Behind but progressing (height advanced since last sample) => wait.
+    #[test]
+    fn behind_but_progressing_does_not_recover() {
+        let action = self_heal_decision(
+            150,          // local_height advanced...
+            100,          // ...past last_height
+            STALL,        // even though wall-clock says long (stale sample)
+            200,
+            false,
+            None,
+        );
+        assert_eq!(action, SelfHealAction::None);
+    }
+
+    // (c) Nobody ahead (target within slack of local) => never recover; there
+    //     would be no one to sync from.
+    #[test]
+    fn nobody_ahead_does_not_recover() {
+        // target == local
+        assert_eq!(
+            self_heal_decision(100, 100, STALL, 100, false, None),
+            SelfHealAction::None
+        );
+        // target within slack (local + 2)
+        assert_eq!(
+            self_heal_decision(100, 100, STALL, 100 + SELF_HEAL_HEIGHT_SLACK, false, None),
+            SelfHealAction::None
+        );
+        // target below local (post-reorg transient)
+        assert_eq!(
+            self_heal_decision(100, 100, STALL, 90, false, None),
+            SelfHealAction::None
+        );
+    }
+
+    // Not stalled long enough => wait (conservative detection).
+    #[test]
+    fn behind_but_not_long_enough_does_not_recover() {
+        let action = self_heal_decision(
+            100,
+            100,
+            Duration::from_secs(SELF_HEAL_STALL_SECS - 1),
+            200,
+            false,
+            None,
+        );
+        assert_eq!(action, SelfHealAction::None);
+    }
+
+    // (d) Stalled: behind, not synced, no progress for >= STALL => recover.
+    #[test]
+    fn stalled_and_behind_recovers() {
+        let action = self_heal_decision(
+            100,          // local frozen
+            100,          // no advance
+            STALL,        // for the full window
+            200,          // peers far ahead
+            false,        // not synced
+            None,         // first recovery
+        );
+        assert_eq!(action, SelfHealAction::Recover);
+        // Exactly at the boundary (target == local + slack + 1) still recovers.
+        assert_eq!(
+            self_heal_decision(
+                100,
+                100,
+                STALL,
+                100 + SELF_HEAL_HEIGHT_SLACK + 1,
+                false,
+                None
+            ),
+            SelfHealAction::Recover
+        );
+    }
+
+    // (e) Rate-limit: a second stall within MIN_GAP does not recover again.
+    #[test]
+    fn rate_limited_within_min_gap_does_not_recover() {
+        // Just healed (0s ago) and stalled again: suppressed.
+        assert_eq!(
+            self_heal_decision(
+                100,
+                100,
+                STALL,
+                200,
+                false,
+                Some(Duration::from_secs(0))
+            ),
+            SelfHealAction::None
+        );
+        // Still inside the window (MIN_GAP - 1): suppressed.
+        assert_eq!(
+            self_heal_decision(
+                100,
+                100,
+                STALL,
+                200,
+                false,
+                Some(Duration::from_secs(SELF_HEAL_MIN_GAP - 1))
+            ),
+            SelfHealAction::None
+        );
+        // Past the window: allowed to recover again.
+        assert_eq!(
+            self_heal_decision(
+                100,
+                100,
+                STALL,
+                200,
+                false,
+                Some(Duration::from_secs(SELF_HEAL_MIN_GAP))
+            ),
+            SelfHealAction::Recover
+        );
+    }
+
+    // --- Recovery behavior: self_heal_recover against a constructed wedge -----
+
+    // A departed peer's stale height pins the target up; the real connected peer
+    // is still genuinely ahead. Recovery must purge the phantom (target shrinks)
+    // yet keep us behind the real peer and re-arm the header pull.
+    #[test]
+    fn recover_purges_phantom_height_and_rearms_when_still_behind() {
+        use std::collections::HashSet;
+        let mut sync = ChainSync::new(100, Hash::from_bytes([0u8; 32]));
+        let connected_peer: PeerId = [1u8; 32];
+        let phantom_peer: PeerId = [2u8; 32];
+        sync.update_peer_height_for(connected_peer, 200);
+        sync.update_peer_height_for(phantom_peer, 300); // phantom pins target up
+        assert_eq!(sync.true_best_height(), 300, "phantom pins target pre-heal");
+        let connected: HashSet<PeerId> = [connected_peer].into_iter().collect();
+
+        let (pruned, _expired, retriggered) = self_heal_recover(&mut sync, &connected, 1_000_000);
+
+        assert_eq!(pruned, 1, "the phantom (disconnected) peer-height is purged");
+        assert_eq!(sync.true_best_height(), 200, "target shrinks to the real peer");
+        assert!(!sync.is_synced(), "still behind the connected peer -> not synced");
+        assert!(retriggered, "behind + idle -> header pull re-armed");
+    }
+
+    // If the ONLY ahead-peer was a phantom, purging it leaves nobody ahead ->
+    // the node is correctly synced and the re-arm is a (safe) no-op.
+    #[test]
+    fn recover_does_not_rearm_when_purge_leaves_nobody_ahead() {
+        use std::collections::HashSet;
+        let mut sync = ChainSync::new(100, Hash::from_bytes([0u8; 32]));
+        sync.update_peer_height_for([9u8; 32], 150); // phantom, departed
+        assert!(!sync.is_synced(), "phantom pins us behind pre-heal");
+        let connected: HashSet<PeerId> = HashSet::new();
+
+        let (pruned, _expired, retriggered) = self_heal_recover(&mut sync, &connected, 1_000_000);
+
+        assert_eq!(pruned, 1, "phantom height purged");
+        assert!(sync.is_synced(), "nobody ahead after purge -> synced");
+        assert!(!retriggered, "synced -> no re-arm needed");
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    use crate::network::bootstrap::AddressManager;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn peer(n: u8, ip: [u8; 4], outbound: bool, connected: bool) -> (PeerId, PeerInfo) {
+        let id = [n; 32];
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), 54321 + n as u16);
+        let mut p = PeerInfo::new(id, addr, outbound);
+        if connected {
+            p.state = PeerState::Connected;
+        }
+        (id, p)
+    }
+
+    #[tokio::test]
+    async fn discovery_adds_only_connected_inbound_peers_at_the_default_port() {
+        let default_port = 28080u16;
+        let peers = DashMap::new();
+        // inbound + Connected → added at (ip, default_port)
+        let (i1, p1) = peer(1, [9, 9, 9, 9], false, true);
+        peers.insert(i1, p1);
+        // outbound + Connected → skipped (we already know outbound addresses)
+        let (i2, p2) = peer(2, [8, 8, 8, 8], true, true);
+        peers.insert(i2, p2);
+        // inbound but NOT Connected → skipped (handshake not complete)
+        let (i3, p3) = peer(3, [7, 7, 7, 7], false, false);
+        peers.insert(i3, p3);
+
+        let addresses = RwLock::new(AddressManager::new(1000));
+        discover_inbound_peers(&peers, &addresses, default_port).await;
+
+        let book: Vec<SocketAddr> = addresses
+            .read()
+            .await
+            .get_for_exchange(100)
+            .into_iter()
+            .map(|a| a.addr)
+            .collect();
+
+        assert!(
+            book.contains(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), default_port)),
+            "a connected inbound peer is seeded at (its ip, default port); got {book:?}"
+        );
+        assert!(
+            !book.iter().any(|a| a.ip() == IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            "an outbound peer is not added by inbound discovery"
+        );
+        assert!(
+            !book.iter().any(|a| a.ip() == IpAddr::V4(Ipv4Addr::new(7, 7, 7, 7))),
+            "an inbound peer whose handshake is not complete is skipped"
+        );
     }
 }

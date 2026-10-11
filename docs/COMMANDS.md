@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD036 MD013 -->
 # CoinCync Command Reference
 
-Every CLI binary CoinCync ships, with the subcommands and the practical recipes for each. Copy-paste friendly. For developer-side commands (build, test, deploy), see [`DEVELOPER.md`](DEVELOPER.md).
+Every CLI binary CoinCync ships, with the subcommands and the practical recipes for each. Copy-paste friendly. For developer-side commands (build, test, deploy), see [`DEVELOPER.md`](DEVELOPER.md). **New to mining? Start with the 1-page [`MINING.md`](../MINING.md) quickstart.**
 
 ---
 
@@ -273,6 +273,22 @@ coincync-rig run-solo \
   --metrics-port 9100
 ```
 
+> **⚠️ RandomX mode — don't throttle your hashrate.** `run-solo` builds the full
+> ~2 GB RandomX dataset by default (fast mining; needs ~2.5 GB free RAM + ~1–2 min
+> at startup). The env var `COINCYNC_RANDOMX_LIGHT_MODE=1` forces the 256 MB
+> *light* cache — that is the **validating-node** mode and is ~10× slower to hash.
+> Leave it **unset** for mining; only use it if you're RAM-constrained.
+
+**Validate a payout address before mining to it** (a truncated/typo'd address loses
+every reward — the decoder is stateless, no wallet needed):
+
+```bash
+coincync-wallet --network testnet address-info tCYNC...
+```
+
+A good address prints `Type: Standard` + spend/view pubkeys; a bad one errors
+(e.g. `invalid address: too short`).
+
 **Verify a specific hash (debugging a rejected share):**
 
 ```bash
@@ -358,7 +374,7 @@ Inspects + manages the Stratum-side ban list. Only relevant once a CoinCync mini
 | Goal | Command |
 | --- | --- |
 | Send 1 CYNC to someone | `coincync-wallet ... send --amount 1000000000000 --to-spend ... --to-view ...` |
-| Mine to my own wallet | `coincync-wallet ... address` then `coincync-rig run-solo --address tCYNC... --tui` |
+| Mine to my own wallet | `coincync-wallet ... address` → `address-info` to verify → `coincync-rig run-solo --address tCYNC... --threads N` (add `--tui` for the dashboard) |
 | Check chain tip | `coincync-rig info --node <URL>` (fastest); or `coincync-wallet info` |
 | Run a node + explorer locally | `coincync-node start --explorer` |
 | Verify a specific share | `coincync-rig verify --anchor ... --tx-root ... --height ... --nonce ...` |

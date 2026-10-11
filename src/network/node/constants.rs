@@ -57,6 +57,24 @@ pub const ANCHOR_MAX: usize = 2;
 pub const TIP_REBROADCAST_INTERVAL_SECS: u64 = 60;
 /// Peer timeout (no activity).
 pub const PEER_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Self-heal maintenance tick (internalizes `deploy/fleet/coincync-sync-watchdog.sh`
+/// as a SOFT, no-restart recovery). A node is treated as IBD-stalled only after
+/// its local height has failed to advance for this long WHILE a higher sync
+/// target exists and it is not synced. Mirrors the watchdog's `STALL_SECS=300`.
+/// Conservative by design: a false trigger would purge peer-height caches across
+/// the whole fleet at once, so the window is deliberately long.
+pub const SELF_HEAL_STALL_SECS: u64 = 300;
+/// Minimum interval between two self-heal recoveries (edge-triggered via the
+/// last-recovery instant). Mirrors the watchdog's `MIN_RESTART_GAP=600`; bounds
+/// the soft recovery so it can never hot-loop.
+pub const SELF_HEAL_MIN_GAP: u64 = 600;
+/// How often the self-heal tick samples height/target. 60s matches the cleanup
+/// cadence; detection needs ticks only fine enough to observe the 300s stall.
+pub const SELF_HEAL_INTERVAL: u64 = 60;
+/// Height slack: the sync target must exceed local height by more than this for
+/// the node to count as "behind" (avoids treating a 1-2 block lag as a stall).
+pub const SELF_HEAL_HEIGHT_SLACK: u64 = 2;
 /// Max time a single outbound write may take before the peer is dropped (C2).
 /// A write stalling this long means the peer stopped reading (its TCP receive
 /// window is full); without the bound the per-peer write task blocks forever, its

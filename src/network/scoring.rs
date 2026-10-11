@@ -103,6 +103,15 @@
 //!   TESTS: `top_peers_for_download_filters_unvalidated_and_low_score`,
 //!   `peers_by_latency_filters_unvalidated_and_orders_ascending`,
 //!   `test_peer_scorer`.
+//! - **§11 `record_ping_sent` / `record_pong` latency measurement** —
+//!   INVARIANT: `latency_ms` only moves on a Pong whose nonce matches the
+//!   Ping we recorded for that peer; the first sample replaces the 1000 ms
+//!   placeholder, later ones are averaged (alpha 0.3); a nonce is single use.
+//!   THREAT: a peer forging or replaying Pongs to lower its latency term
+//!   (25% of `composite_score`) and win header-request selection.
+//!   TESTS: `pong_with_matching_nonce_measures_latency`,
+//!   `pong_with_wrong_nonce_is_ignored`,
+//!   `latency_averages_after_the_first_sample`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -396,7 +405,7 @@ pub fn classify_invalid_tx_reason(reason: &str) -> MisbehaviorType {
 pub struct PeerScore {
     /// Base reputation (-100 to 100)
     pub reputation: i32,
-    /// Average response latency in milliseconds
+    /// Ping/Pong round-trip time in milliseconds (moving average)
     pub latency_ms: u32,
     /// Block delivery speed (blocks per second)
     pub block_speed: f64,
@@ -438,6 +447,12 @@ pub struct PeerScore {
     /// instant in the variant. Auto-expires (cleared by `is_get_blocks_banned`)
     /// so peers that recover from their own resync get another shot.
     pub get_blocks_banned_until: Option<MonoInstant>,
+    /// Nonce and send time of the last Ping we sent this peer, cleared by the
+    /// matching Pong (see `record_pong`).
+    ping_sent: Option<(u64, MonoInstant)>,
+    /// Round trips measured so far. The first one replaces the 1000 ms
+    /// placeholder instead of averaging with it.
+    latency_samples: u32,
 }
 
 impl Default for PeerScore {
@@ -459,6 +474,8 @@ impl Default for PeerScore {
             reconnects: 0,
             consecutive_empty_blocks: 0,
             get_blocks_banned_until: None,
+            ping_sent: None,
+            latency_samples: 0,
         }
     }
 }
@@ -499,6 +516,23 @@ pub struct PeerMessageRateTracker {
     window_start: MonoInstant,
     /// Window duration (default 10 seconds)
     window_secs: u64,
+    /// Message-type ids already penalized in the current window. The limit is
+    /// enforced by dropping EVERY over-limit message, but a peer is scored at
+    /// most ONCE per type per window (cleared on window reset). This lets a
+    /// brief legit burst take a single penalty and recover while a sustained
+    /// flooder still accrues one penalty per window → eventually banned.
+    flagged: std::collections::HashSet<u8>,
+}
+
+/// Outcome of [`PeerMessageRateTracker::record`]. `over_limit` → the message
+/// exceeded its per-window cap and must be DROPPED (the cap is only real if
+/// every excess message is dropped). `penalize` → this is the first over-limit
+/// message of its type in the current window, so score it once; later excess
+/// messages in the same window drop silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RateLimitCheck {
+    pub over_limit: bool,
+    pub penalize: bool,
 }
 
 /// Per-message-type limits (messages per 10-second window).
@@ -546,7 +580,7 @@ const MSG_RATE_LIMITS: &[(u8, u32)] = &[
     (12, 100), // MessageType::GetBlocks  — 10/sec (block-fetch flood)
     (14, 200), // MessageType::GetData    — 20/sec (bulk fetch flood)
     (22, 500), // MessageType::InvTx      — 50/sec (tx-relay flood; higher because relaying txs across a mesh is normal)
-    (23, 100), // MessageType::InvBlock   — 10/sec (block-announce flood)
+    (23, 200), // MessageType::InvBlock   — 20/sec (block-announce flood; raised from 10/sec: on a low-difficulty / fast-block network, legit block-announce + reorg-reconciliation bursts briefly exceed 10/sec)
     (30, 50),  // MessageType::GetAddr    — 5/sec  (peer-list scraping)
     (2, 30),   // MessageType::Ping       — 3/sec  (keepalive spam)
     // Light-client / DHT query types (audit R3-4). Their handlers do bounded but
@@ -569,14 +603,21 @@ impl PeerMessageRateTracker {
             counts: HashMap::new(),
             window_start: mono_now(),
             window_secs: 10,
+            flagged: std::collections::HashSet::new(),
         }
     }
 
-    /// Record a message and return true if the rate limit is exceeded.
-    pub fn record(&mut self, msg_type_id: u8) -> bool {
+    /// Record a message and report whether it is over its per-window cap
+    /// (`over_limit` → drop it) and whether to penalize for it (`penalize` →
+    /// the first over-limit message of this type this window; score once). See
+    /// [`RateLimitCheck`]. Dropping every over-limit message is what makes the
+    /// cap real; penalizing once per window avoids log/score spam on a brief
+    /// legit burst while still banning a sustained flooder across windows.
+    pub fn record(&mut self, msg_type_id: u8) -> RateLimitCheck {
         let now = mono_now();
         if now.saturating_duration_since(self.window_start).as_secs() >= self.window_secs {
             self.counts.clear();
+            self.flagged.clear();
             self.window_start = now;
         }
 
@@ -586,10 +627,16 @@ impl PeerMessageRateTracker {
         // Check against per-type limit
         for &(type_id, limit) in MSG_RATE_LIMITS {
             if msg_type_id == type_id && *count > limit {
-                return true; // Rate exceeded
+                // Over the cap: always drop; penalize only the first such
+                // message of this type in the window. `HashSet::insert` returns
+                // true exactly when the id was not already flagged.
+                return RateLimitCheck {
+                    over_limit: true,
+                    penalize: self.flagged.insert(msg_type_id),
+                };
             }
         }
-        false
+        RateLimitCheck::default() // under the cap → process normally
     }
 }
 
@@ -717,14 +764,33 @@ impl PeerScore {
     /// completed handshake. Without this, is_good() never returns true for
     /// peers that skip the handshake-validation path (e.g., inbound connections
     /// that start sending blocks before the scorer sees the handshake event).
-    pub fn record_block_success(&mut self, latency: Duration) {
+    pub fn record_block_success(&mut self) {
         self.blocks_delivered += 1;
         self.last_success = Some(mono_now());
         self.validated = true; // H-15 FIX: delivering valid block = validated
         self.consecutive_empty_blocks = 0; // a real delivery clears the wedge counter
-        self.update_latency(latency);
         self.update_validity_rate();
         self.adjust_reputation(2);
+    }
+
+    /// Remember the nonce of the Ping we just sent so the Pong can be matched.
+    pub fn record_ping_sent(&mut self, nonce: u64) {
+        self.ping_sent = Some((nonce, mono_now()));
+    }
+
+    /// A Pong arrived at `received_at` (stamped when the frame came off the
+    /// socket, before it queued behind other work). If its nonce is the one we
+    /// are waiting for, fold the round-trip time into `latency_ms` and return
+    /// it. Anything else (stale, unsolicited, forged) is ignored, so a peer
+    /// cannot talk its own latency down with pongs we never asked for.
+    pub fn record_pong(&mut self, nonce: u64, received_at: MonoInstant) -> Option<Duration> {
+        if !matches!(self.ping_sent, Some((expected, _)) if expected == nonce) {
+            return None;
+        }
+        let (_, sent_at) = self.ping_sent.take()?;
+        let rtt = received_at.saturating_duration_since(sent_at);
+        self.update_latency(rtt);
+        Some(rtt)
     }
 
     /// Record a failed/invalid block
@@ -836,11 +902,18 @@ impl PeerScore {
         );
     }
 
-    /// Update average latency with exponential moving average
+    /// Update average latency with exponential moving average. The first
+    /// measurement replaces the 1000 ms placeholder outright; averaging with
+    /// it would take about ten pings (20 minutes) to get near the real value.
     fn update_latency(&mut self, latency: Duration) {
         let new_latency = latency.as_millis().min(u32::MAX as u128) as u32;
-        // EMA with alpha = 0.3 (more weight on recent)
-        self.latency_ms = ((self.latency_ms as f64 * 0.7) + (new_latency as f64 * 0.3)) as u32;
+        if self.latency_samples == 0 {
+            self.latency_ms = new_latency;
+        } else {
+            // EMA with alpha = 0.3 (more weight on recent)
+            self.latency_ms = ((self.latency_ms as f64 * 0.7) + (new_latency as f64 * 0.3)) as u32;
+        }
+        self.latency_samples = self.latency_samples.saturating_add(1);
     }
 
     /// Update validity rate
@@ -1192,6 +1265,57 @@ mod tests {
     }
 
     #[test]
+    fn pong_with_matching_nonce_measures_latency() {
+        let mut score = PeerScore::default();
+        assert_eq!(score.latency_ms, 1000, "placeholder until measured");
+        score.record_ping_sent(42);
+        let received_at = mono_now() + Duration::from_millis(40);
+        let rtt = score
+            .record_pong(42, received_at)
+            .expect("matching nonce is accepted");
+        assert_eq!(
+            score.latency_ms,
+            rtt.as_millis() as u32,
+            "first sample replaces the placeholder"
+        );
+        assert!(
+            (40..1000).contains(&score.latency_ms),
+            "{}",
+            score.latency_ms
+        );
+        assert!(
+            score.record_pong(42, received_at).is_none(),
+            "a nonce is single use"
+        );
+    }
+
+    #[test]
+    fn pong_with_wrong_nonce_is_ignored() {
+        let mut score = PeerScore::default();
+        score.record_ping_sent(7);
+        let now = mono_now();
+        assert!(score.record_pong(8, now).is_none(), "wrong nonce");
+        assert_eq!(score.latency_ms, 1000, "latency untouched");
+        assert!(
+            score.record_pong(7, now).is_some(),
+            "the real pong still counts"
+        );
+        assert!(
+            score.record_pong(7, now).is_none(),
+            "nothing outstanding any more"
+        );
+    }
+
+    #[test]
+    fn latency_averages_after_the_first_sample() {
+        let mut score = PeerScore::default();
+        score.update_latency(Duration::from_millis(100));
+        assert_eq!(score.latency_ms, 100);
+        score.update_latency(Duration::from_millis(200));
+        assert_eq!(score.latency_ms, 130, "0.7 * 100 + 0.3 * 200");
+    }
+
+    #[test]
     fn test_peer_scorer() {
         let mut scorer = PeerScorer::new();
         let addr = test_addr(8080);
@@ -1201,7 +1325,7 @@ mod tests {
             let score = scorer.get_or_create(addr);
             score.validated = true;
             score.reputation = 80;
-            score.record_block_success(Duration::from_millis(50));
+            score.record_block_success();
         }
 
         // Check it's in top peers
@@ -1298,7 +1422,7 @@ mod tests {
         );
 
         // Successful delivery resets the counter.
-        score.record_block_success(Duration::from_millis(100));
+        score.record_block_success();
         assert_eq!(
             score.consecutive_empty_blocks, 0,
             "real delivery clears the wedge counter"
@@ -1395,12 +1519,55 @@ mod tests {
         assert_eq!(msg_type_id, 12, "protocol.rs discriminant must be 12");
         let mut exceeded = false;
         for _ in 0..101 {
-            exceeded = tracker.record(msg_type_id);
+            exceeded = tracker.record(msg_type_id).over_limit;
         }
         assert!(
             exceeded,
             "expected message flood threshold to trigger for GetBlocks"
         );
+    }
+
+    #[test]
+    fn rate_tracker_drops_every_over_limit_message_but_penalizes_once() {
+        // GetBlocks cap is 100 per window. Past the cap EVERY message must be
+        // over_limit (so it is dropped — the cap is only real if all excess is
+        // dropped), but only the FIRST over-limit message of the type is
+        // penalized in the window (no score/log spam on a brief burst).
+        let mut t = PeerMessageRateTracker::new();
+        let id = crate::network::protocol::MessageType::GetBlocks as u8;
+        let (mut over, mut penalties) = (0u32, 0u32);
+        for _ in 0..150 {
+            let c = t.record(id);
+            if c.over_limit {
+                over += 1;
+            }
+            if c.penalize {
+                penalties += 1;
+            }
+        }
+        assert_eq!(over, 50, "every message past the 100 cap is over_limit (dropped)");
+        assert_eq!(penalties, 1, "penalize exactly once per type per window");
+    }
+
+    #[test]
+    fn rate_tracker_penalizes_each_flooded_type_independently() {
+        // The penalize-once guard is per message-type, so two different flooded
+        // types in the same window each get their own single penalty.
+        let mut t = PeerMessageRateTracker::new();
+        let get_blocks = crate::network::protocol::MessageType::GetBlocks as u8; // cap 100
+        let get_addr = crate::network::protocol::MessageType::GetAddr as u8; // cap 50
+        let mut penalties = 0u32;
+        for _ in 0..101 {
+            if t.record(get_blocks).penalize {
+                penalties += 1;
+            }
+        }
+        for _ in 0..51 {
+            if t.record(get_addr).penalize {
+                penalties += 1;
+            }
+        }
+        assert_eq!(penalties, 2, "one penalty per flooded type per window");
     }
 
     #[test]
@@ -2043,7 +2210,7 @@ mod tests {
         }
         assert_eq!(score.consecutive_empty_blocks, EMPTY_BLOCKS_BAN_THRESHOLD - 1);
 
-        score.record_block_success(Duration::from_millis(20));
+        score.record_block_success();
         assert_eq!(
             score.consecutive_empty_blocks, 0,
             "a real delivery clears the empty-blocks wedge counter"

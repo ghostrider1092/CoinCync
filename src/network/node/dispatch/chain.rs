@@ -52,8 +52,6 @@
 //!   TESTS: (gap — no dedicated `handle_block_data` test in this file's
 //!   `#[cfg(test)] mod tests` or the listed integration suites).
 
-use std::time::Duration;
-
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, warn};
@@ -225,10 +223,14 @@ pub(super) async fn handle_inv_block(
                 // back with the very range we are already pulling. Deep in IBD
                 // the peer announces every block it mines, so this path kept
                 // re-verifying the same headers and stalled block processing for
-                // the whole batch each time. Refresh only once the queue has
-                // drained; the driver's drained-queue path and the peer's
-                // ChainWork announcements keep the sync target current meanwhile.
-                let queue_busy = sync.read().await.pending_count() > 0;
+                // the whole batch each time. Refresh only once the queue and
+                // the pool have drained; the driver's drained-queue path and the
+                // peer's ChainWork announcements keep the sync target current
+                // meanwhile.
+                let queue_busy = {
+                    let sg = sync.read().await;
+                    sg.pending_count() > 0 || sg.has_pooled_blocks()
+                };
                 let locator = build_locator(our_height, |h| chain.get_block_hash(h));
                 if !locator.is_empty() && !queue_busy {
                     let now = chrono::Utc::now().timestamp() as u64;
@@ -556,7 +558,7 @@ pub(super) async fn handle_blocks(
                         .write()
                         .await
                         .get_or_create(addr)
-                        .record_block_success(Duration::from_millis(100));
+                        .record_block_success();
                 }
                 let _ = event_tx.send(NodeEvent::BlockReceived(block, peer_id));
             }
@@ -738,7 +740,7 @@ pub(super) async fn handle_block_data(
                 .write()
                 .await
                 .get_or_create(addr)
-                .record_block_success(Duration::from_millis(100));
+                .record_block_success();
         }
         // Credit this peer's inbound block-relay score (Phase 1: measure
         // only — not yet consulted by eviction). Public block delivery is

@@ -74,6 +74,7 @@
 //!   TESTS: `test_clsag_serialization`, `clsag_sign_verify_kat_deterministic_and_golden`.
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use curve25519_dalek::traits::VartimeMultiscalarMul;
 use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar};
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -541,6 +542,19 @@ pub fn clsag_verify(
         message,
     );
 
+    // #246 follow-up (linear-constant speedup, bit-identical output):
+    //   * cache `Hp(P_i)` once — it was recomputed (an expensive hash-to-curve)
+    //     every round, and it is loop-invariant per ring member;
+    //   * fold each round's two scalar products into one `vartime_multiscalar_mul`
+    //     (`s·G + c·W` and `s·Hp + c·J`). The verifier's inputs are all PUBLIC,
+    //     so variable-time is safe here, and the resulting points are identical,
+    //     so the challenge chain — and thus the CLSAG KAT — is unchanged.
+    let g = generator();
+    let hps: Vec<RistrettoPoint> = ring
+        .iter()
+        .map(|m| hash_to_point(&m.public_key.to_bytes()))
+        .collect();
+
     // Verify the challenge chain by computing all challenges and checking closure
     // The ring signature forms a closed loop: c[1] -> c[2] -> ... -> c[n-1] -> c[0] -> c[1]
     let mut current_challenge = c1;
@@ -550,13 +564,17 @@ pub fn clsag_verify(
         // Compute the index we're verifying (starts at 1 since c1 is given)
         let idx = (i + 1) % n;
 
-        let hp_idx = hash_to_point(&ring[idx].public_key.to_bytes());
-
         // L_idx = s_idx * G + c_idx * W_idx
-        let l_idx = responses[idx] * generator() + current_challenge * aggregate_keys[idx];
+        let l_idx = RistrettoPoint::vartime_multiscalar_mul(
+            [responses[idx], current_challenge],
+            [g, aggregate_keys[idx]],
+        );
 
         // R_idx = s_idx * Hp(P_idx) + c_idx * J where J = mu_p * I + mu_c * D
-        let r_idx = responses[idx] * hp_idx + current_challenge * aggregate_key_image;
+        let r_idx = RistrettoPoint::vartime_multiscalar_mul(
+            [responses[idx], current_challenge],
+            [hps[idx], aggregate_key_image],
+        );
 
         current_challenge = clsag_hash_round(&hash_base, &l_idx, &r_idx);
     }

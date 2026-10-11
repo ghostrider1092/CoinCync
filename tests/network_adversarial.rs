@@ -295,7 +295,7 @@ fn peer_score_survives_many_updates() {
     // Record many events
     for _ in 0..1000 {
         let s = scorer.get_or_create(peer);
-        s.record_block_success(std::time::Duration::from_millis(100));
+        s.record_block_success();
     }
 
     let score = scorer.get(&peer).unwrap();

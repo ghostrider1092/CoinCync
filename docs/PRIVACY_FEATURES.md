@@ -48,7 +48,6 @@ height), so nothing gated can activate silently.
 | **Encrypted memos** | `memo.rs` | ChaCha20-Poly1305 memos on outputs; ECDH key derivation; ≤256 bytes, enforced at consensus. | ✅ Live |
 | **Decoy selection** | `wallet/decoy_selection/sampling.rs` + `crypto/ring_selection.rs` | CoinCync V1 log-gamma target-height selection at the source (gamma shape 19.28 / rate 1.61 in `decoy_selection.rs`; `src/decoy.rs` holds only the locator/snapshot types), then uniform ring assembly. Samples are conditioned on the eligible canonical-chain age window; this bootstrap mapping is not described as equivalent to Monero's cumulative-output-index picker. | ✅ Live |
 | **Selective disclosure** | `disclosure.rs` | Non-interactive Fiat-Shamir proofs for voluntary compliance (prove balance ≥ X, ownership, source) without revealing the rest. | ✅ Live |
-| **Batch verification** | `batch_verify.rs`, `parallel_proofs.rs` | Parallel batch-verify of CLSAG / Bulletproofs — block-validation performance, not a privacy feature itself but part of the crypto path. | ✅ Live |
 | **CLSAG multisig** | `clsag_multisig.rs` | Multi-party CLSAG signing (pairs with the FROST coordinator work). | ✅ Live |
 
 ### 1.2 Network-layer privacy — `src/network/`

@@ -169,6 +169,10 @@ struct PeerMessage {
     peer_id: PeerId,
     msg_type: u8,
     payload: Vec<u8>,
+    /// When the frame came off the socket. The processor can be seconds
+    /// behind during IBD, so anything timing a reply (Pong) must use this,
+    /// not the moment the handler runs.
+    received_at: crate::clock::MonoInstant,
     _reservation: MemoryReservation,
 }
 
@@ -943,6 +947,11 @@ impl P2PNode {
             .take()
             .ok_or_else(|| Error::InvalidState(START_ONE_SHOT_ERROR.into()))?;
         let (msg_tx, msg_rx) = mpsc::channel::<PeerMessage>(GLOBAL_QUEUE_SIZE);
+        // Dedicated handshake lane: the connection read loop routes Version/Verack
+        // here instead of `msg_tx`, so handshakes are serviced by their own task
+        // (see runtime::spawn_handshake_processor) even while the main processor is
+        // parked in a multi-second header-batch verify during cold-start IBD.
+        let (handshake_tx, handshake_rx) = mpsc::channel::<PeerMessage>(GLOBAL_QUEUE_SIZE);
 
         *self.running.write().await = true;
         info!("P2P node listening on {}", self.config.listen_addr);
@@ -975,6 +984,7 @@ impl P2PNode {
                     peers: self.peers.clone(),
                     event_tx: self.event_tx.clone(),
                     msg_tx: msg_tx.clone(),
+                    handshake_tx: handshake_tx.clone(),
                     senders: self.peer_senders.clone(),
                     chain_state: self.chain_state.reader(),
                     tracker: self.conn_tracker.clone(),
@@ -998,6 +1008,7 @@ impl P2PNode {
                     addresses: self.addresses.clone(),
                     event_tx: self.event_tx.clone(),
                     msg_tx: msg_tx.clone(),
+                    handshake_tx: handshake_tx.clone(),
                     senders: self.peer_senders.clone(),
                     chain_state: self.chain_state.reader(),
                     proxy: self.config.proxy.clone(),
@@ -1045,6 +1056,24 @@ impl P2PNode {
             ),
         );
         node_runtime.track(
+            "handshake-processor",
+            runtime::spawn_handshake_processor(
+                handshake_rx,
+                runtime::HandshakeProcessorContext {
+                    peers: self.peers.clone(),
+                    senders: self.peer_senders.clone(),
+                    dandelion: self.dandelion.clone(),
+                    sync: self.sync.clone(),
+                    event_tx: self.event_tx.clone(),
+                    chain: self.chain.clone(),
+                    scorer: self.peer_scorer.clone(),
+                    nonce: self.version_nonce,
+                    magic: self.config.magic,
+                },
+                node_runtime.shutdown_receiver(),
+            ),
+        );
+        node_runtime.track(
             "sync-driver",
             sync_driver::spawn_sync_driver(
                 sync_driver::SyncDriverContext {
@@ -1079,6 +1108,8 @@ impl P2PNode {
                     broadcast_rx,
                     magic: self.config.magic,
                     mesh_degraded: self.mesh_degraded.clone(),
+                    addresses: self.addresses.clone(),
+                    discovery_port: self.chain.network().default_p2p_port(),
                 },
                 node_runtime.shutdown_receiver(),
             ),
@@ -1152,6 +1183,17 @@ impl P2PNode {
 
     /// Broadcast block announcement
     pub async fn broadcast_block(&self, block: &Block) -> Result<()> {
+        // No block gossip while we are still catching up. Every peer ahead of
+        // us has the block already, and a peer behind us answers each
+        // InvBlock with a GetHeaders whose response it then verifies header
+        // by header (seen live: a seed sent us 8 GetHeaders in 0.4 s, got
+        // 8 x 61 KB of headers back and stopped reading for over 30 s). At
+        // 20-30 applied blocks per second this gossip is also what fills the
+        // peer queues, see broadcast.rs STALL_MIN_DURATION. The 60 s tip
+        // re-announce in maintenance.rs still advertises our tip meanwhile.
+        if !self.chain.is_synced() {
+            return Ok(());
+        }
         broadcast::broadcast_block(self.config.magic, block, &self.broadcast_context()).await
     }
 
@@ -1163,6 +1205,14 @@ impl P2PNode {
     /// Get connected peer count
     pub fn peer_count(&self) -> usize {
         self.peers.len()
+    }
+
+    /// Highest chain height any connected peer has advertised (Version at
+    /// handshake, ChainWork on every tip change); 0 when none has. Unlike the
+    /// sync layer's best-known height this is NOT clamped to our own height,
+    /// so a miner can tell that every peer is behind it (private fork).
+    pub fn max_peer_height(&self) -> u64 {
+        self.peers.iter().map(|p| p.height).max().unwrap_or(0)
     }
 
     /// Get current chain height (for sync guard).
@@ -1266,6 +1316,7 @@ impl P2PNode {
                 scorer: &self.peer_scorer,
                 dandelion: &self.dandelion,
                 orphan_flood: &self.orphan_flood,
+                sync: &self.sync,
                 event_tx: &self.event_tx,
             },
         )

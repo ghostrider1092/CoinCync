@@ -38,7 +38,9 @@
 //!   before a header is accepted into `hashes`.
 //!   THREAT: a structurally-valid header with forged or missing PoW being
 //!   queued for sync.
-//!   TESTS: `accepts_connected_header_with_valid_pow`.
+//!   TESTS: `accepts_connected_header_with_valid_pow`,
+//!   `chunked_validation_matches_whole_batch`,
+//!   `known_hash_skips_pow_but_must_connect`.
 //! - **§6 `handle_get_headers`** — INVARIANT: oversized `GetHeaders` payloads
 //!   are dropped and scored before parsing; the response is bounded to
 //!   `MAX_HEADERS_RESPONSE` headers starting from the first locator match.
@@ -49,20 +51,36 @@
 //! - **§7 `handle_headers` (nonce validation)** — INVARIANT: an inbound
 //!   `Headers` response is honored only for the peer it was issued to, and a
 //!   nonce is consumed on first (even empty) use, never on a cross-peer or
-//!   replayed attempt.
+//!   replayed attempt. An arrived response stops the request timeout while
+//!   it verifies (`mark_headers_received`), and a rejected or superseded one
+//!   releases the nonce so the driver can ask again at once.
 //!   THREAT: eclipse-style cross-peer nonce spoofing or nonce replay
 //!   poisoning `ChainSync` state.
 //!   TESTS: `handle_headers_cross_peer_nonce_is_rejected_without_consuming`,
 //!   `handle_headers_valid_nonce_is_single_use`,
-//!   `handle_headers_unsolicited_nonce_zero_is_ignored`.
+//!   `handle_headers_unsolicited_nonce_zero_is_ignored`,
+//!   `handle_headers_rejected_batch_releases_nonce`.
 //! - **§8 `handle_headers` (deserialization + batch-reject scoring)** —
 //!   INVARIANT: malformed borsh and rejected header batches both score the
 //!   peer via `record_misbehavior` with the classified offense, and a
 //!   rejected batch never reaches `queue_headers_from_peer`.
 //!   THREAT: unscored garbage or invalid-header spam from a misbehaving peer.
 //!   TESTS: `handle_headers_borsh_garbage_scores_protocol_violation`.
+//! - **§9 `handle_headers` (streaming verification)** — INVARIANT: a batch is
+//!   verified in `HEADER_VERIFY_CHUNK` slices and every verified slice is
+//!   queued at once, so block requests start while the rest of the batch is
+//!   still being checked; a slice is never verified in a later RandomX key
+//!   epoch than the block after our tip (the single-slot light cache would
+//!   otherwise be rebuilt on every header and every commit); hashes the
+//!   engine already verified are not RandomX-checked again.
+//!   THREAT: none adversarial. ~45 s of IBD dead time per 2000 headers, and
+//!   the one-block-per-second crawl before every key-epoch boundary.
+//!   TESTS: `chunked_validation_matches_whole_batch`,
+//!   `chunked_validation_reports_absolute_index`,
+//!   `handle_headers_streams_verified_prefix_and_consumes_nonce`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use dashmap::DashMap;
 use tokio::sync::{mpsc, RwLock};
@@ -120,162 +138,261 @@ struct HeaderBatchError {
     offense: MisbehaviorType,
 }
 
+/// §9 — how many headers `handle_headers` verifies between hand-offs to the
+/// sync queue: about 1.5 s of RandomX light-mode work on a laptop, so block
+/// requests for the verified prefix go out long before the batch is done.
+const HEADER_VERIFY_CHUNK: usize = 64;
+
+/// §9 — how long a verifier waits at a key-epoch boundary between polls of
+/// the tip.
+const EPOCH_WAIT_POLL: Duration = Duration::from_millis(250);
+
+/// Incremental form of `validate_header_batch` (§9): `extend` checks the next
+/// slice of one batch against everything accepted before it, so the caller
+/// can queue verified prefixes while the rest is still being checked.
+/// `known` holds hashes the sync engine accepted from an earlier verified
+/// batch; those still have to connect but skip the RandomX work.
+struct HeaderBatchValidator {
+    accepted: HashMap<Hash, BlockHeader>,
+    hashes: Vec<Hash>,
+    previous: Option<BlockHeader>,
+    known: HashSet<Hash>,
+}
+
+impl HeaderBatchValidator {
+    fn new(known: HashSet<Hash>) -> Self {
+        HeaderBatchValidator {
+            accepted: HashMap::new(),
+            hashes: Vec::new(),
+            previous: None,
+            known,
+        }
+    }
+
+    /// Verifies `headers` as the continuation of what this validator has
+    /// accepted so far. On error, `index` counts from the start of the batch.
+    fn extend(
+        &mut self,
+        chain: &SharedBlockchain,
+        headers: &[BlockHeader],
+    ) -> std::result::Result<(), HeaderBatchError> {
+        let expected_magic = chain.network().magic_bytes();
+
+        for header in headers {
+            let index = self.hashes.len();
+            let reject = |reason: String, offense| HeaderBatchError {
+                index,
+                reason,
+                offense,
+            };
+
+            if header.network_magic != expected_magic {
+                return Err(reject(
+                    "wrong network magic".into(),
+                    MisbehaviorType::WrongNetwork,
+                ));
+            }
+
+            let parent = match (&self.previous, self.hashes.last()) {
+                (Some(previous), Some(previous_hash)) => {
+                    if header.prev_hash != *previous_hash {
+                        return Err(reject(
+                            "header batch is not contiguous".into(),
+                            MisbehaviorType::ProtocolViolation,
+                        ));
+                    }
+                    previous.clone()
+                }
+                _ => chain
+                    .get_block(&header.prev_hash)
+                    .map(|block| block.header)
+                    .ok_or_else(|| {
+                        reject(
+                            "first header does not connect to a known block".into(),
+                            MisbehaviorType::ProtocolViolation,
+                        )
+                    })?,
+            };
+
+            let expected_height = parent.height.checked_add(1).ok_or_else(|| {
+                reject(
+                    "parent height overflows u64".into(),
+                    MisbehaviorType::ProtocolViolation,
+                )
+            })?;
+            if header.height != expected_height {
+                return Err(reject(
+                    format!(
+                        "non-sequential height: expected {}, got {}",
+                        expected_height, header.height
+                    ),
+                    MisbehaviorType::ProtocolViolation,
+                ));
+            }
+            if header.version < crate::constants::block_version_at_height(header.height.as_u64())
+                || header.version < parent.version
+            {
+                return Err(reject(
+                    "invalid header version".into(),
+                    MisbehaviorType::ProtocolViolation,
+                ));
+            }
+            if header.timestamp <= parent.timestamp {
+                return Err(reject(
+                    "timestamp does not advance".into(),
+                    MisbehaviorType::ProtocolViolation,
+                ));
+            }
+            if header
+                .checkpoint_vote
+                .as_ref()
+                .is_some_and(|(height, _)| *height >= header.height.as_u64())
+            {
+                return Err(reject(
+                    "checkpoint vote references a future height".into(),
+                    MisbehaviorType::ProtocolViolation,
+                ));
+            }
+
+            let hash = header.hash();
+            let checkpoint_match = match chain.network() {
+                crate::config::NetworkType::Mainnet => {
+                    crate::mainnet::verify_checkpoint(header.height.as_u64(), &hash)
+                }
+                crate::config::NetworkType::Testnet | crate::config::NetworkType::Regtest => {
+                    crate::testnet::verify_checkpoint(header.height.as_u64(), &hash)
+                }
+            };
+            if checkpoint_match == Some(false) {
+                return Err(reject(
+                    "hardcoded checkpoint mismatch".into(),
+                    MisbehaviorType::InvalidBlockPoW,
+                ));
+            }
+
+            // §9: a hash the engine already verified only has to connect.
+            if !self.known.contains(&hash) {
+                let history = header_history(chain, &self.accepted, header.prev_hash)
+                    .map_err(|reason| reject(reason, MisbehaviorType::ProtocolViolation))?;
+
+                if history.len() >= crate::constants::MTP_WINDOW {
+                    let mut timestamps: Vec<u64> = history
+                        .iter()
+                        .rev()
+                        .take(crate::constants::MTP_WINDOW)
+                        .map(|block| block.timestamp)
+                        .collect();
+                    timestamps.sort_unstable();
+                    let median = timestamps[timestamps.len() / 2];
+                    if header.timestamp.as_secs() <= median {
+                        return Err(reject(
+                            "timestamp does not exceed median-time-past".into(),
+                            MisbehaviorType::ProtocolViolation,
+                        ));
+                    }
+                }
+
+                if history.len() >= 2 {
+                    // Single-source the difficulty rule via the chain's network-aware
+                    // computation (identical to `calculate_difficulty` on mainnet/testnet,
+                    // but honors the regtest pin/ease). Calling `calculate_difficulty`
+                    // directly here diverged from the miner + block validator on regtest
+                    // and rejected every peer header, wedging regtest multi-node sync.
+                    let expected_target =
+                        chain.expected_next_target(&history, header.height.as_u64());
+                    if header.target != expected_target {
+                        return Err(reject(
+                            format!(
+                                "difficulty target mismatch: expected {}, got {}",
+                                expected_target.to_hex(),
+                                header.target.to_hex()
+                            ),
+                            MisbehaviorType::InvalidBlockPoW,
+                        ));
+                    }
+                }
+
+                verify_pow(
+                    &header.prev_hash,
+                    header.height.as_u64(),
+                    header.timestamp.as_secs(),
+                    header.nonce,
+                    &header.tx_root,
+                    &header.target,
+                    &header.anchor,
+                    header.algorithm,
+                    &header.pow_binding(),
+                )
+                .map_err(|error| reject(error.to_string(), MisbehaviorType::InvalidBlockPoW))?;
+            }
+
+            self.accepted.insert(hash, header.clone());
+            self.hashes.push(hash);
+            self.previous = Some(header.clone());
+        }
+
+        Ok(())
+    }
+}
+
+/// Whole-batch form, kept for the unit tests of the individual checks.
+#[cfg(test)]
 fn validate_header_batch(
     chain: &SharedBlockchain,
     headers: &[BlockHeader],
 ) -> std::result::Result<Vec<Hash>, HeaderBatchError> {
-    let expected_magic = chain.network().magic_bytes();
-    let mut accepted = HashMap::with_capacity(headers.len());
-    let mut hashes = Vec::with_capacity(headers.len());
+    let mut validator = HeaderBatchValidator::new(HashSet::new());
+    validator.extend(chain, headers)?;
+    Ok(validator.hashes)
+}
 
-    for (index, header) in headers.iter().enumerate() {
-        let reject = |reason: String, offense| HeaderBatchError {
-            index,
-            reason,
-            offense,
-        };
+/// §9 — true when `height` lies in a later RandomX key epoch than `next`.
+#[cfg(feature = "randomx")]
+fn in_later_key_epoch(height: u64, next: u64) -> bool {
+    use crate::consensus::randomx_seed_for_height;
+    height > next && randomx_seed_for_height(height) != randomx_seed_for_height(next)
+}
 
-        if header.network_magic != expected_magic {
-            return Err(reject(
-                "wrong network magic".into(),
-                MisbehaviorType::WrongNetwork,
-            ));
-        }
+#[cfg(not(feature = "randomx"))]
+fn in_later_key_epoch(_height: u64, _next: u64) -> bool {
+    false
+}
 
-        let parent = if index == 0 {
-            chain
-                .get_block(&header.prev_hash)
-                .map(|block| block.header)
-                .ok_or_else(|| {
-                    reject(
-                        "first header does not connect to a known block".into(),
-                        MisbehaviorType::ProtocolViolation,
-                    )
-                })?
-        } else {
-            let previous = &headers[index - 1];
-            if header.prev_hash != hashes[index - 1] {
-                return Err(reject(
-                    "header batch is not contiguous".into(),
-                    MisbehaviorType::ProtocolViolation,
-                ));
-            }
-            previous.clone()
-        };
-
-        let expected_height = parent.height.checked_add(1).ok_or_else(|| {
-            reject(
-                "parent height overflows u64".into(),
-                MisbehaviorType::ProtocolViolation,
-            )
-        })?;
-        if header.height != expected_height {
-            return Err(reject(
-                format!(
-                    "non-sequential height: expected {}, got {}",
-                    expected_height, header.height
-                ),
-                MisbehaviorType::ProtocolViolation,
-            ));
-        }
-        if header.version < crate::constants::block_version_at_height(header.height.as_u64())
-            || header.version < parent.version
-        {
-            return Err(reject(
-                "invalid header version".into(),
-                MisbehaviorType::ProtocolViolation,
-            ));
-        }
-        if header.timestamp <= parent.timestamp {
-            return Err(reject(
-                "timestamp does not advance".into(),
-                MisbehaviorType::ProtocolViolation,
-            ));
-        }
-        if header
-            .checkpoint_vote
-            .as_ref()
-            .is_some_and(|(height, _)| *height >= header.height.as_u64())
-        {
-            return Err(reject(
-                "checkpoint vote references a future height".into(),
-                MisbehaviorType::ProtocolViolation,
-            ));
-        }
-
-        let checkpoint_match = match chain.network() {
-            crate::config::NetworkType::Mainnet => {
-                crate::mainnet::verify_checkpoint(header.height.as_u64(), &header.hash())
-            }
-            crate::config::NetworkType::Testnet | crate::config::NetworkType::Regtest => {
-                crate::testnet::verify_checkpoint(header.height.as_u64(), &header.hash())
-            }
-        };
-        if checkpoint_match == Some(false) {
-            return Err(reject(
-                "hardcoded checkpoint mismatch".into(),
-                MisbehaviorType::InvalidBlockPoW,
-            ));
-        }
-
-        let history = header_history(chain, &accepted, header.prev_hash)
-            .map_err(|reason| reject(reason, MisbehaviorType::ProtocolViolation))?;
-
-        if history.len() >= crate::constants::MTP_WINDOW {
-            let mut timestamps: Vec<u64> = history
-                .iter()
-                .rev()
-                .take(crate::constants::MTP_WINDOW)
-                .map(|block| block.timestamp)
-                .collect();
-            timestamps.sort_unstable();
-            let median = timestamps[timestamps.len() / 2];
-            if header.timestamp.as_secs() <= median {
-                return Err(reject(
-                    "timestamp does not exceed median-time-past".into(),
-                    MisbehaviorType::ProtocolViolation,
-                ));
-            }
-        }
-
-        if history.len() >= 2 {
-            // Single-source the difficulty rule via the chain's network-aware
-            // computation (identical to `calculate_difficulty` on mainnet/testnet,
-            // but honors the regtest pin/ease). Calling `calculate_difficulty`
-            // directly here diverged from the miner + block validator on regtest
-            // and rejected every peer header, wedging regtest multi-node sync.
-            let expected_target = chain.expected_next_target(&history, header.height.as_u64());
-            if header.target != expected_target {
-                return Err(reject(
-                    format!(
-                        "difficulty target mismatch: expected {}, got {}",
-                        expected_target.to_hex(),
-                        header.target.to_hex()
-                    ),
-                    MisbehaviorType::InvalidBlockPoW,
-                ));
-            }
-        }
-
-        verify_pow(
-            &header.prev_hash,
-            header.height.as_u64(),
-            header.timestamp.as_secs(),
-            header.nonce,
-            &header.tx_root,
-            &header.target,
-            &header.anchor,
-            header.algorithm,
-            &header.pow_binding(),
-        )
-        .map_err(|error| reject(error.to_string(), MisbehaviorType::InvalidBlockPoW))?;
-
-        let hash = header.hash();
-        accepted.insert(hash, header.clone());
-        hashes.push(hash);
+/// §9 — end of the slice starting at `offset`: at most `HEADER_VERIFY_CHUNK`
+/// headers, never crossing into a later key epoch than the slice's first.
+fn chunk_end(headers: &[BlockHeader], offset: usize) -> usize {
+    let first = headers[offset].height.as_u64();
+    let mut end = (offset + HEADER_VERIFY_CHUNK).min(headers.len());
+    if let Some(cut) = headers[offset..end]
+        .iter()
+        .position(|header| in_later_key_epoch(header.height.as_u64(), first))
+    {
+        end = offset + cut;
     }
+    end
+}
 
-    Ok(hashes)
+/// §9 — holds verification of a slice that starts in a later key epoch than
+/// the block after our tip until the tip gets there. Returns false when the
+/// request stopped being outstanding meanwhile.
+async fn wait_for_key_epoch(
+    chain: &SharedBlockchain,
+    sync: &RwLock<ChainSync>,
+    nonce: u64,
+    peer_id: &PeerId,
+    height: u64,
+) -> bool {
+    while in_later_key_epoch(height, chain.height() + 1) {
+        if !sync
+            .read()
+            .await
+            .is_header_nonce_outstanding(nonce, peer_id)
+        {
+            return false;
+        }
+        tokio::time::sleep(EPOCH_WAIT_POLL).await;
+    }
+    true
 }
 
 /// #158: resolve the GetHeaders response start height from a block locator.
@@ -475,6 +592,115 @@ mod tests {
         mine_easy_header(header)
     }
 
+    /// Regtest keeps the expected target at the parent's once it is at the
+    /// difficulty floor, so a chain of easy headers validates past height 1.
+    pub(super) fn regtest_setup() -> (SharedBlockchain, crate::consensus::Block) {
+        let chain = Arc::new(Blockchain::new_with_network(
+            crate::config::NetworkType::Regtest,
+        ));
+        chain.init_genesis().expect("genesis");
+        let genesis = chain.get_block_by_height(0).expect("genesis block");
+        (chain, genesis)
+    }
+
+    /// `n` connected easy-target headers on top of `genesis`.
+    pub(super) fn easy_chain(genesis: &crate::consensus::Block, n: usize) -> Vec<BlockHeader> {
+        let mut out = Vec::with_capacity(n);
+        let mut parent = genesis.header.clone();
+        let mut parent_hash = genesis.hash();
+        for _ in 0..n {
+            let height = parent.height.as_u64() + 1;
+            let mut header = parent.clone();
+            header.network_magic = crate::config::NetworkType::Regtest.magic_bytes();
+            header.height = crate::primitives::Height::new(height);
+            header.version = crate::constants::block_version_at_height(height).max(parent.version);
+            header.prev_hash = parent_hash;
+            header.timestamp = crate::primitives::Timestamp::from_secs(
+                parent.timestamp.as_secs() + crate::constants::TARGET_BLOCK_TIME,
+            );
+            header.target = Hash::from_bytes([0xFE; 32]);
+            let header = mine_easy_header(header);
+            parent_hash = header.hash();
+            parent = header.clone();
+            out.push(header);
+        }
+        out
+    }
+
+    /// §9: verifying a batch slice by slice accepts exactly what verifying it
+    /// whole does, in the same order.
+    #[test]
+    fn chunked_validation_matches_whole_batch() {
+        let (chain, genesis) = regtest_setup();
+        let headers = easy_chain(&genesis, 20);
+        let whole = validate_header_batch(&chain, &headers).expect("whole batch");
+        assert_eq!(whole.len(), 20);
+        let mut validator = HeaderBatchValidator::new(HashSet::new());
+        for slice in headers.chunks(7) {
+            validator.extend(&chain, slice).expect("slice");
+        }
+        assert_eq!(validator.hashes, whole);
+    }
+
+    /// §9: an error inside a later slice reports its index within the batch,
+    /// and a slice that does not continue the previous one is rejected.
+    #[test]
+    fn chunked_validation_reports_absolute_index() {
+        let (chain, genesis) = regtest_setup();
+        let mut headers = easy_chain(&genesis, 12);
+        headers[9].prev_hash = Hash::from_bytes([0x5A; 32]);
+        let mut validator = HeaderBatchValidator::new(HashSet::new());
+        validator
+            .extend(&chain, &headers[..4])
+            .expect("first slice");
+        validator
+            .extend(&chain, &headers[4..8])
+            .expect("second slice");
+        let error = validator
+            .extend(&chain, &headers[8..])
+            .expect_err("broken link in the third slice");
+        assert_eq!(error.index, 9);
+        assert!(error.reason.contains("not contiguous"), "{}", error.reason);
+        assert_eq!(
+            validator.hashes.len(),
+            9,
+            "everything before the break is accepted, nothing after"
+        );
+    }
+
+    /// §9: a hash the engine already verified skips the RandomX check but
+    /// still has to connect; the same header unknown is rejected on PoW.
+    #[test]
+    fn known_hash_skips_pow_but_must_connect() {
+        let (chain, genesis) = regtest_setup();
+        let mut header = easy_chain(&genesis, 1).remove(0);
+        // A target nothing meets: the mined nonce no longer proves work.
+        let mut impossible = [0u8; 32];
+        impossible[31] = 1;
+        header.target = Hash::from_bytes(impossible);
+        let error = validate_header_batch(&chain, &[header.clone()]).expect_err("bad pow");
+        assert_eq!(error.offense, MisbehaviorType::InvalidBlockPoW);
+
+        let known: HashSet<Hash> = [header.hash()].into_iter().collect();
+        let mut validator = HeaderBatchValidator::new(known.clone());
+        validator
+            .extend(&chain, &[header.clone()])
+            .expect("known hash is trusted");
+        assert_eq!(validator.hashes, vec![header.hash()]);
+
+        let mut detached = header.clone();
+        detached.prev_hash = Hash::from_bytes([0xA5; 32]);
+        let known: HashSet<Hash> = [detached.hash()].into_iter().collect();
+        let error = HeaderBatchValidator::new(known)
+            .extend(&chain, &[detached])
+            .expect_err("known but disconnected");
+        assert!(
+            error.reason.contains("does not connect"),
+            "{}",
+            error.reason
+        );
+    }
+
     #[test]
     fn accepts_connected_header_with_valid_pow() {
         let (chain, genesis) = setup();
@@ -551,6 +777,15 @@ mod tests {
     }
 }
 
+/// Serializes header-batch verification to ONE at a time. `handle_headers` runs
+/// off the single message processor (spawned per Headers message in
+/// `dispatch::process_message`, so block-apply keeps going while a batch is
+/// checked), so two batches could otherwise verify concurrently; this guard
+/// serializes them. The nonce re-check after the wait still discards a batch
+/// that went stale while queued here.
+static HEADER_VERIFY_SEM: once_cell::sync::Lazy<tokio::sync::Semaphore> =
+    once_cell::sync::Lazy::new(|| tokio::sync::Semaphore::new(1));
+
 pub(super) async fn handle_headers(
     peer_id: PeerId,
     payload: &[u8],
@@ -593,33 +828,107 @@ pub(super) async fn handle_headers(
             // — but do NOT consume it yet, so `headers_request_time` stays set and
             // the driver will not re-request during the slow validation below (the
             // 60s headers timeout comfortably covers the ~24-46s batch verify).
+            let nonce = headers_msg.nonce;
+            // #184: gate on the nonce under a READ lock — cheap and DoS-safe
+            // before any verification work is spent on the payload.
             if !sync
                 .read()
                 .await
-                .is_header_nonce_outstanding(headers_msg.nonce, &peer_id)
+                .is_header_nonce_outstanding(nonce, &peer_id)
             {
                 debug!(
                     "Ignoring Headers nonce={} from peer {:?}: not outstanding for this peer \
                      (cross-peer, stale generation, or already consumed)",
-                    headers_msg.nonce,
+                    nonce,
                     &peer_id[..4]
                 );
                 return Ok(());
             }
+            // §9: the response is here; the request timeout must not fire
+            // while it verifies.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0);
+            if !sync
+                .write()
+                .await
+                .mark_headers_received(nonce, &peer_id, now)
+            {
+                return Ok(());
+            }
 
-            // #184: verify the header batch WITHOUT holding the ChainSync lock.
-            // This is ~2000 sequential RandomX verifications (~24-46s in light
-            // mode); holding the write lock across it froze the entire sync driver,
-            // so a fresh node advanced only ~100 blocks per batch. Off the lock,
-            // block downloads keep flowing while the headers validate.
-            let hashes = match validate_header_batch(chain, &headers_msg.headers) {
-                Ok(hashes) => hashes,
-                Err(error) => {
+            let _verify_permit = HEADER_VERIFY_SEM
+                .acquire()
+                .await
+                .expect("header-verify semaphore is never closed");
+            let known = {
+                let sync_guard = sync.read().await;
+                if !sync_guard.is_header_nonce_outstanding(nonce, &peer_id) {
+                    debug!(
+                        "Dropping Headers nonce={} from peer {:?}: superseded while waiting \
+                         for the verifier",
+                        nonce,
+                        &peer_id[..4]
+                    );
+                    return Ok(());
+                }
+                sync_guard.known_header_hashes()
+            };
+
+            // §9: verify in slices on the blocking pool and queue each verified
+            // slice at once, so block requests start while the rest is checked.
+            let headers = &headers_msg.headers;
+            let max_header_height = headers
+                .last()
+                .map(|header| header.height.as_u64())
+                .unwrap_or(0);
+            let mut validator = HeaderBatchValidator::new(known);
+            let mut offset = 0usize;
+            while offset < headers.len() {
+                if !wait_for_key_epoch(
+                    chain,
+                    sync,
+                    nonce,
+                    &peer_id,
+                    headers[offset].height.as_u64(),
+                )
+                .await
+                {
+                    debug!(
+                        "Dropping Headers nonce={} from peer {:?}: superseded while waiting at \
+                         a key-epoch boundary",
+                        nonce,
+                        &peer_id[..4]
+                    );
+                    return Ok(());
+                }
+                let end = chunk_end(headers, offset);
+                let slice = headers[offset..end].to_vec();
+                let chain_for_verify = chain.clone();
+                let (returned, outcome) = match tokio::task::spawn_blocking(move || {
+                    let outcome = validator.extend(&chain_for_verify, &slice);
+                    (validator, outcome)
+                })
+                .await
+                {
+                    Ok(pair) => pair,
+                    Err(join_err) => {
+                        warn!(
+                            "Header-verify task failed for peer {:?}: {join_err}",
+                            &peer_id[..4]
+                        );
+                        sync.write().await.cancel_headers_request(nonce, &peer_id);
+                        return Ok(());
+                    }
+                };
+                validator = returned;
+                if let Err(error) = outcome {
                     warn!(
                         "Headers validation reject: header[{}] from peer {:?} (h={}): {}",
                         error.index,
                         &peer_id[..4],
-                        headers_msg.headers[error.index].height,
+                        headers[error.index].height,
                         error.reason.as_str(),
                     );
                     if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
@@ -629,39 +938,60 @@ pub(super) async fn handle_headers(
                             .get_or_create(addr)
                             .record_misbehavior(error.offense);
                     }
+                    // §9: release the nonce so the driver can ask another peer
+                    // now instead of after the timeout.
+                    sync.write().await.cancel_headers_request(nonce, &peer_id);
                     return Ok(());
                 }
-            };
 
-            // #184: re-acquire the write lock only now — to consume the nonce and
-            // queue the validated hashes. If the nonce is gone (a rare >60s timeout
-            // reset, or a duplicate consumed it during validation), discard: the
-            // driver has already moved on.
+                let verified = validator.hashes[offset..end].to_vec();
+                let mut sync_guard = sync.write().await;
+                if !sync_guard.is_header_nonce_outstanding(nonce, &peer_id) {
+                    debug!(
+                        "Dropping Headers nonce={} from peer {:?}: superseded during validation \
+                         after {} of {} headers",
+                        nonce,
+                        &peer_id[..4],
+                        offset,
+                        headers.len()
+                    );
+                    return Ok(());
+                }
+                let heights: Vec<(Hash, u64)> = verified
+                    .iter()
+                    .zip(&headers[offset..end])
+                    .map(|(hash, header)| (*hash, header.height.as_u64()))
+                    .collect();
+                sync_guard.note_header_heights(&heights);
+                sync_guard.queue_headers_from_peer(peer_id, verified);
+                drop(sync_guard);
+                offset = end;
+            }
+
             let mut sync_guard = sync.write().await;
-            if !sync_guard.validate_header_nonce(headers_msg.nonce, &peer_id) {
+            if !sync_guard.validate_header_nonce(nonce, &peer_id) {
                 debug!(
                     "Dropping validated Headers nonce={} from peer {:?}: no longer outstanding \
                      (timed out or superseded during validation)",
-                    headers_msg.nonce,
+                    nonce,
                     &peer_id[..4]
                 );
                 return Ok(());
             }
-            let max_header_height = headers_msg
-                .headers
-                .last()
-                .map(|header| header.height.as_u64())
-                .unwrap_or(0);
             sync_guard.update_peer_height(max_header_height);
             sync_guard.update_peer_height_for(peer_id, max_header_height);
+            if headers.is_empty() {
+                // An empty response still drives the state machine
+                // (ConfirmingSynced -> Synced, or back to Headers).
+                sync_guard.queue_headers_from_peer(peer_id, Vec::new());
+            }
             debug!(
                 "Accepted Headers nonce={} count={} max_height={} from peer {:?}",
-                headers_msg.nonce,
-                hashes.len(),
+                nonce,
+                headers.len(),
                 max_header_height,
                 &peer_id[..4]
             );
-            sync_guard.queue_headers_from_peer(peer_id, hashes);
         }
         Err(e) => {
             warn!(
@@ -799,6 +1129,74 @@ mod handle_headers_tests {
             .await
             .unwrap();
 
+        assert!(scorer.read().await.get(&addr).unwrap().reputation < 100);
+    }
+
+    /// §9: a batch longer than one slice is verified in slices, every header
+    /// ends up queued, the engine is in Blocks and the nonce is consumed.
+    #[tokio::test]
+    async fn handle_headers_streams_verified_prefix_and_consumes_nonce() {
+        let (chain, genesis) = super::tests::regtest_setup();
+        let headers = super::tests::easy_chain(&genesis, HEADER_VERIFY_CHUNK * 2 + 5);
+        let peer = [15u8; 32];
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr_for(31005), false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let nonce = sync.write().await.begin_headers_request(peer, 123).unwrap();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = borsh::to_vec(&HeadersMessage {
+            headers: headers.clone(),
+            nonce,
+        })
+        .unwrap();
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        let guard = sync.read().await;
+        assert_eq!(guard.pending_count(), headers.len(), "every header queued");
+        assert_eq!(guard.state(), crate::network::sync::SyncState::Blocks);
+        assert!(
+            !guard.headers_request_pending(),
+            "nonce consumed at the end"
+        );
+        assert_eq!(guard.true_best_height(), headers.len() as u64);
+        assert!(
+            scorer.read().await.get(&addr_for(31005)).is_none(),
+            "nothing scored"
+        );
+    }
+
+    /// §9: a rejected batch releases the nonce right away (the driver used to
+    /// wait out the 60 s timeout) and the verified prefix before the bad
+    /// header stays queued.
+    #[tokio::test]
+    async fn handle_headers_rejected_batch_releases_nonce() {
+        let (chain, genesis) = super::tests::regtest_setup();
+        let mut headers = super::tests::easy_chain(&genesis, HEADER_VERIFY_CHUNK + 3);
+        let bad = HEADER_VERIFY_CHUNK + 1;
+        headers[bad].nonce = headers[bad].nonce.wrapping_add(1);
+        let peer = [16u8; 32];
+        let addr = addr_for(31006);
+        let peers = DashMap::new();
+        peers.insert(peer, PeerInfo::new(peer, addr, false));
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let nonce = sync.write().await.begin_headers_request(peer, 123).unwrap();
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let payload = borsh::to_vec(&HeadersMessage { headers, nonce }).unwrap();
+        handle_headers(peer, &payload, &peers, &sync, &chain, &scorer)
+            .await
+            .unwrap();
+
+        let guard = sync.read().await;
+        assert!(!guard.headers_request_pending(), "nonce released on reject");
+        assert_eq!(
+            guard.pending_count(),
+            HEADER_VERIFY_CHUNK,
+            "first slice stays queued"
+        );
         assert!(scorer.read().await.get(&addr).unwrap().reputation < 100);
     }
 }

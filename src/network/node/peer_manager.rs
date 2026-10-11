@@ -74,13 +74,15 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use once_cell::sync::Lazy;
 
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::interval;
 use tracing::{debug, info, trace, warn};
 
 use crate::config::{P2PEncryptionConfig, ProxyConfig};
@@ -125,6 +127,7 @@ struct OutboundAttempt {
     addresses: Arc<RwLock<AddressManager>>,
     event_tx: broadcast::Sender<NodeEvent>,
     msg_tx: mpsc::Sender<PeerMessage>,
+    handshake_tx: mpsc::Sender<PeerMessage>,
     height: u64,
     tip: crate::primitives::Hash,
     proxy: Option<ProxyConfig>,
@@ -144,6 +147,8 @@ pub(super) struct AcceptorContext {
     pub peers: Arc<DashMap<PeerId, PeerInfo>>,
     pub event_tx: broadcast::Sender<NodeEvent>,
     pub msg_tx: mpsc::Sender<PeerMessage>,
+    /// Dedicated handshake lane — Version/Verack go here, not `msg_tx`.
+    pub handshake_tx: mpsc::Sender<PeerMessage>,
     pub senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
     pub chain_state: ChainStateReader,
     pub tracker: Arc<ConnectionTracker>,
@@ -166,6 +171,7 @@ pub(super) fn spawn_listener_acceptor(
         peers: acceptor_peers,
         event_tx: acceptor_event_tx,
         msg_tx: acceptor_msg_tx,
+        handshake_tx: acceptor_handshake_tx,
         senders: acceptor_senders,
         chain_state: acceptor_chain_state,
         tracker: acceptor_tracker,
@@ -313,6 +319,7 @@ pub(super) fn spawn_listener_acceptor(
                     let senders = acceptor_senders.clone();
                     let event_tx = acceptor_event_tx.clone();
                     let msg_tx = acceptor_msg_tx.clone();
+                    let handshake_tx = acceptor_handshake_tx.clone();
                     let (height, tip) = acceptor_chain_state.snapshot().await;
                     let tracker = acceptor_tracker.clone();
                     let addr_clone = addr;
@@ -337,6 +344,7 @@ pub(super) fn spawn_listener_acceptor(
                             senders,
                             event_tx,
                             msg_tx,
+                            handshake_tx,
                             tracker.clone(),
                             conn_identity,
                             conn_encryption,
@@ -371,6 +379,8 @@ pub(super) struct OutboundContext {
     pub addresses: Arc<RwLock<AddressManager>>,
     pub event_tx: broadcast::Sender<NodeEvent>,
     pub msg_tx: mpsc::Sender<PeerMessage>,
+    /// Dedicated handshake lane — Version/Verack go here, not `msg_tx`.
+    pub handshake_tx: mpsc::Sender<PeerMessage>,
     pub senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
     pub chain_state: ChainStateReader,
     pub proxy: Option<ProxyConfig>,
@@ -404,6 +414,7 @@ pub(super) fn spawn_outbound_connector(
         addresses: connector_addresses,
         event_tx: connector_event_tx,
         msg_tx: connector_msg_tx,
+        handshake_tx: connector_handshake_tx,
         senders: connector_senders,
         chain_state: connector_chain_state,
         proxy: connector_proxy,
@@ -423,7 +434,14 @@ pub(super) fn spawn_outbound_connector(
 
     tokio::spawn(async move {
         let mut connections = JoinSet::new();
-        let mut interval = interval(Duration::from_secs(10));
+        // Dial cadence (see the per-iteration select below): FAST while forming
+        // the initial mesh (cold start / under-meshed), SLOW once meshed so
+        // steady state does not churn peers. The old fixed 10s interval formed
+        // the 3-peer mesh floor only after ~60s on a healthy public host — and a
+        // slow / NAT'd node never reached the floor at all, so cold-start IBD
+        // never began.
+        const COLD_START_DIAL_INTERVAL: Duration = Duration::from_secs(2);
+        const STEADY_DIAL_INTERVAL: Duration = Duration::from_secs(10);
         // ANCHORS: persist known-good outbound peers roughly every 60s
         // (every 6th 10s tick) so a hard kill (SIGKILL, OOM, power loss)
         // still leaves a recent anchor set for fast reconnect. Graceful
@@ -473,6 +491,21 @@ pub(super) fn spawn_outbound_connector(
         }
 
         loop {
+            // COLD-START ACCELERATION: dial fast while below the mesh floor so a
+            // fresh node forms its 3-peer mesh in seconds instead of ~1 peer /
+            // ~20s. Count only *Connected* outbound peers (not in-flight
+            // handshakes), so a run of half-open/stalling connections doesn't
+            // stop us from trying more until the floor is actually met. Once
+            // meshed, revert to the slow cadence — steady-state churn unchanged.
+            let connected_outbound = connector_peers
+                .iter()
+                .filter(|p| p.outbound && p.state == PeerState::Connected)
+                .count();
+            let dial_period = if connected_outbound < MESH_FLOOR_PEERS {
+                COLD_START_DIAL_INTERVAL
+            } else {
+                STEADY_DIAL_INTERVAL
+            };
             tokio::select! {
                 biased;
                 _ = wait_for_shutdown(&mut shutdown) => break,
@@ -480,7 +513,7 @@ pub(super) fn spawn_outbound_connector(
                     log_connection_task_result("outbound", result);
                     continue;
                 }
-                _ = interval.tick() => {}
+                _ = tokio::time::sleep(dial_period) => {}
             }
 
             // ANCHORS: persist known-good outbound peers ~every 60s so a
@@ -680,6 +713,7 @@ pub(super) fn spawn_outbound_connector(
                     addresses: connector_addresses.clone(),
                     event_tx: connector_event_tx.clone(),
                     msg_tx: connector_msg_tx.clone(),
+                    handshake_tx: connector_handshake_tx.clone(),
                     height,
                     tip,
                     proxy: connector_proxy.clone(),
@@ -740,6 +774,21 @@ fn next_rebootstrap_backoff(current: Duration, made_progress: bool) -> Duration 
     }
 }
 
+// ── Inbound-reachability detection ──────────────────────────────────────────
+// Ground truth for "is this node reachable from the internet" is simply whether
+// it has ever ACCEPTED an inbound connection. A node behind NAT / without a
+// forwarded port can dial out and sync fine, but never accepts inbound, so its
+// address is never gossiped (the network only advertises peers it can connect
+// back to) — it reaches the network but contributes nothing to the mesh, and no
+// one can discover it. This silent failure is why a one-seed testnet stays a
+// one-seed testnet. We surface it with a one-shot operator warning.
+static NODE_START: Lazy<Instant> = Lazy::new(Instant::now);
+static EVER_INBOUND: AtomicBool = AtomicBool::new(false);
+static REACHABILITY_WARNED: AtomicBool = AtomicBool::new(false);
+/// Grace period before warning — long enough that, on a healthy network, a
+/// reachable node would have received an inbound connection by now.
+const REACHABILITY_GRACE: Duration = Duration::from_secs(600);
+
 async fn observe_outbound_health(
     peers: &DashMap<PeerId, PeerInfo>,
     addresses: &RwLock<AddressManager>,
@@ -747,11 +796,31 @@ async fn observe_outbound_health(
 ) -> usize {
     let outbound_count = peers.iter().filter(|peer| peer.outbound).count();
     let total_peers = peers.len();
+    let inbound_count = total_peers.saturating_sub(outbound_count);
     let address_count = addresses.read().await.len();
     if total_peers < 3 {
         info!(
-            "Peer maintenance: {} total peers ({} outbound), {} known addresses",
-            total_peers, outbound_count, address_count
+            "Peer maintenance: {} total peers ({} outbound, {} inbound), {} known addresses",
+            total_peers, outbound_count, inbound_count, address_count
+        );
+    }
+
+    // Reachability: once we accept any inbound connection we are reachable, for
+    // good. If we never do within the grace period, warn ONCE (edge-triggered).
+    if inbound_count > 0 {
+        EVER_INBOUND.store(true, Ordering::Relaxed);
+    } else if !EVER_INBOUND.load(Ordering::Relaxed)
+        && NODE_START.elapsed() >= REACHABILITY_GRACE
+        && !REACHABILITY_WARNED.swap(true, Ordering::Relaxed)
+    {
+        warn!(
+            "Node appears NOT inbound-reachable: 0 inbound connections after {} min. \
+             You are likely behind NAT or your P2P port is not forwarded — other \
+             nodes cannot discover you (your address is never gossiped), so you can \
+             reach the network but do not contribute to the mesh. Forward your P2P \
+             TCP port (or run on a public IP) to be discoverable. On a very small \
+             network this can also just mean no peer has dialed you yet.",
+            REACHABILITY_GRACE.as_secs() / 60
         );
     }
 
@@ -818,6 +887,7 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
         addresses,
         event_tx,
         msg_tx,
+        handshake_tx,
         height,
         tip,
         proxy,
@@ -861,6 +931,7 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
                 senders,
                 event_tx,
                 msg_tx,
+                handshake_tx,
                 tracker,
                 identity,
                 encryption,
@@ -1073,6 +1144,7 @@ pub(super) struct BanPeerContext<'a> {
     pub(super) scorer: &'a RwLock<PeerScorer>,
     pub(super) dandelion: &'a RwLock<DandelionRouter>,
     pub(super) orphan_flood: &'a RwLock<OrphanFloodTracker>,
+    pub(super) sync: &'a RwLock<ChainSync>,
     pub(super) event_tx: &'a broadcast::Sender<NodeEvent>,
 }
 
@@ -1095,6 +1167,15 @@ pub(super) async fn ban_peer(peer_id: &PeerId, context: BanPeerContext<'_>) {
     context.peers.remove(peer_id);
     context.senders.remove(peer_id);
     context.orphan_flood.write().await.forget(peer_id);
+    // Purge the banned peer's sync state — crucially its advertised height.
+    // Without this, a banned peer's height lingers in `peer_heights` and keeps
+    // `best_known_height` (RPC `target_height`) pinned at a height no live peer
+    // will serve: a phantom IBD target that wedges the node in permanent
+    // `fork_stuck` (#286 — a chronic-slow seed got a 1h ban and became the
+    // unreachable target). `disconnect_peer` already does this; the ban path did
+    // not. `on_peer_disconnected` also requeues the banned peer's in-flight block
+    // requests to other peers.
+    context.sync.write().await.on_peer_disconnected(peer_id);
     let _ = context.event_tx.send(NodeEvent::PeerDisconnected(*peer_id));
 }
 
@@ -1247,6 +1328,10 @@ mod tests {
         let scorer = RwLock::new(PeerScorer::new());
         let dandelion = RwLock::new(DandelionRouter::new());
         let orphan_flood = RwLock::new(OrphanFloodTracker::new());
+        let sync = RwLock::new(ChainSync::new(
+            0,
+            crate::primitives::Hash::from_bytes([0u8; 32]),
+        ));
         let (event_tx, mut event_rx) = broadcast::channel(1);
 
         ban_peer(
@@ -1258,6 +1343,7 @@ mod tests {
                 scorer: &scorer,
                 dandelion: &dandelion,
                 orphan_flood: &orphan_flood,
+                sync: &sync,
                 event_tx: &event_tx,
             },
         )
@@ -1271,6 +1357,62 @@ mod tests {
             event_rx.try_recv(),
             Ok(NodeEvent::PeerDisconnected(id)) if id == peer_id
         ));
+    }
+
+    #[tokio::test]
+    async fn ban_peer_purges_peer_height_clearing_phantom_ibd_target() {
+        // #286: a banned peer's advertised height must not linger as a phantom
+        // IBD target. Set the (only) peer's height well above local, ban it, and
+        // assert the derived target falls back to local. Before this fix the ban
+        // path never purged the height, so `best_known_height` stayed pinned at an
+        // unreachable value no live peer would serve → permanent `fork_stuck`.
+        let peers = DashMap::new();
+        let senders = DashMap::new();
+        let peer_id = [7u8; 32];
+        let addr = "127.0.0.1:12007".parse().unwrap();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, true));
+        let (sender, _receiver) = mpsc::channel(1);
+        senders.insert(peer_id, sender);
+
+        let tracker = ConnectionTracker::new(1024);
+        assert!(tracker.try_track_connection(&addr));
+        let scorer = RwLock::new(PeerScorer::new());
+        let dandelion = RwLock::new(DandelionRouter::new());
+        let orphan_flood = RwLock::new(OrphanFloodTracker::new());
+        let sync = RwLock::new(ChainSync::new(
+            0,
+            crate::primitives::Hash::from_bytes([0u8; 32]),
+        ));
+        let (event_tx, _event_rx) = broadcast::channel(1);
+
+        // The banned peer is the sole high-water claim.
+        sync.write().await.update_peer_height_for(peer_id, 5_000);
+        assert_eq!(
+            sync.read().await.best_known_height(),
+            5_000,
+            "sanity: the peer's height sets the IBD target"
+        );
+
+        ban_peer(
+            &peer_id,
+            BanPeerContext {
+                peers: &peers,
+                senders: &senders,
+                tracker: &tracker,
+                scorer: &scorer,
+                dandelion: &dandelion,
+                orphan_flood: &orphan_flood,
+                sync: &sync,
+                event_tx: &event_tx,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            sync.read().await.best_known_height(),
+            0,
+            "banning the sole high-water peer must drop the phantom IBD target to local"
+        );
     }
 
     // --- Re-bootstrap-on-isolation gating (#147) --------------------------

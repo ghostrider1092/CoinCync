@@ -281,7 +281,6 @@ src/consensus/privacy_policy.rs
 src/consensus/validation.rs
 src/constants.rs
 src/crypto/audit.rs
-src/crypto/batch_verify.rs
 src/crypto/bulletproofs.rs
 src/crypto/cache.rs
 src/crypto/clsag.rs
@@ -293,7 +292,6 @@ src/crypto/lelantus_spark.rs
 src/crypto/memo.rs
 src/crypto/mod.rs
 src/crypto/mw_cutthrough.rs
-src/crypto/parallel_proofs.rs
 src/crypto/ring_selection.rs
 src/crypto/secure.rs
 src/crypto/stealth.rs

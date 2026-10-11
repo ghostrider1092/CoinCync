@@ -10,6 +10,8 @@ mod inputs;
 mod legacy;
 mod prepare;
 mod selection;
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+mod shield_in;
 mod types;
 mod vesting;
 
@@ -18,6 +20,8 @@ pub use fee::{calculate_fee, estimate_fee_with_multiplier, estimate_tx_size};
 #[allow(deprecated)]
 pub use legacy::create_transaction;
 pub use prepare::{prepare_privacy_transaction, prepare_privacy_transaction_with_options};
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+pub use shield_in::{build_shield_in_transaction, prepare_shield_in, PreparedShieldIn};
 pub use types::{
     CoinSelection, Payment, PreparedPrivacyTransaction, PreparedVestingTransaction, SendRequest,
     SpendContext, VestingRequest,
