@@ -108,6 +108,7 @@ impl BroadcastContext<'_> {
             scorer: self.scorer,
             dandelion: self.dandelion,
             orphan_flood: self.orphan_flood,
+            sync: self.sync,
             event_tx: self.event_tx,
         }
     }

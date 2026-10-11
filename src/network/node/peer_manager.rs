@@ -1144,6 +1144,7 @@ pub(super) struct BanPeerContext<'a> {
     pub(super) scorer: &'a RwLock<PeerScorer>,
     pub(super) dandelion: &'a RwLock<DandelionRouter>,
     pub(super) orphan_flood: &'a RwLock<OrphanFloodTracker>,
+    pub(super) sync: &'a RwLock<ChainSync>,
     pub(super) event_tx: &'a broadcast::Sender<NodeEvent>,
 }
 
@@ -1166,6 +1167,15 @@ pub(super) async fn ban_peer(peer_id: &PeerId, context: BanPeerContext<'_>) {
     context.peers.remove(peer_id);
     context.senders.remove(peer_id);
     context.orphan_flood.write().await.forget(peer_id);
+    // Purge the banned peer's sync state — crucially its advertised height.
+    // Without this, a banned peer's height lingers in `peer_heights` and keeps
+    // `best_known_height` (RPC `target_height`) pinned at a height no live peer
+    // will serve: a phantom IBD target that wedges the node in permanent
+    // `fork_stuck` (#286 — a chronic-slow seed got a 1h ban and became the
+    // unreachable target). `disconnect_peer` already does this; the ban path did
+    // not. `on_peer_disconnected` also requeues the banned peer's in-flight block
+    // requests to other peers.
+    context.sync.write().await.on_peer_disconnected(peer_id);
     let _ = context.event_tx.send(NodeEvent::PeerDisconnected(*peer_id));
 }
 
@@ -1318,6 +1328,10 @@ mod tests {
         let scorer = RwLock::new(PeerScorer::new());
         let dandelion = RwLock::new(DandelionRouter::new());
         let orphan_flood = RwLock::new(OrphanFloodTracker::new());
+        let sync = RwLock::new(ChainSync::new(
+            0,
+            crate::primitives::Hash::from_bytes([0u8; 32]),
+        ));
         let (event_tx, mut event_rx) = broadcast::channel(1);
 
         ban_peer(
@@ -1329,6 +1343,7 @@ mod tests {
                 scorer: &scorer,
                 dandelion: &dandelion,
                 orphan_flood: &orphan_flood,
+                sync: &sync,
                 event_tx: &event_tx,
             },
         )
@@ -1342,6 +1357,62 @@ mod tests {
             event_rx.try_recv(),
             Ok(NodeEvent::PeerDisconnected(id)) if id == peer_id
         ));
+    }
+
+    #[tokio::test]
+    async fn ban_peer_purges_peer_height_clearing_phantom_ibd_target() {
+        // #286: a banned peer's advertised height must not linger as a phantom
+        // IBD target. Set the (only) peer's height well above local, ban it, and
+        // assert the derived target falls back to local. Before this fix the ban
+        // path never purged the height, so `best_known_height` stayed pinned at an
+        // unreachable value no live peer would serve → permanent `fork_stuck`.
+        let peers = DashMap::new();
+        let senders = DashMap::new();
+        let peer_id = [7u8; 32];
+        let addr = "127.0.0.1:12007".parse().unwrap();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, true));
+        let (sender, _receiver) = mpsc::channel(1);
+        senders.insert(peer_id, sender);
+
+        let tracker = ConnectionTracker::new(1024);
+        assert!(tracker.try_track_connection(&addr));
+        let scorer = RwLock::new(PeerScorer::new());
+        let dandelion = RwLock::new(DandelionRouter::new());
+        let orphan_flood = RwLock::new(OrphanFloodTracker::new());
+        let sync = RwLock::new(ChainSync::new(
+            0,
+            crate::primitives::Hash::from_bytes([0u8; 32]),
+        ));
+        let (event_tx, _event_rx) = broadcast::channel(1);
+
+        // The banned peer is the sole high-water claim.
+        sync.write().await.update_peer_height_for(peer_id, 5_000);
+        assert_eq!(
+            sync.read().await.best_known_height(),
+            5_000,
+            "sanity: the peer's height sets the IBD target"
+        );
+
+        ban_peer(
+            &peer_id,
+            BanPeerContext {
+                peers: &peers,
+                senders: &senders,
+                tracker: &tracker,
+                scorer: &scorer,
+                dandelion: &dandelion,
+                orphan_flood: &orphan_flood,
+                sync: &sync,
+                event_tx: &event_tx,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            sync.read().await.best_known_height(),
+            0,
+            "banning the sole high-water peer must drop the phantom IBD target to local"
+        );
     }
 
     // --- Re-bootstrap-on-isolation gating (#147) --------------------------
