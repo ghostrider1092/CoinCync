@@ -69,10 +69,25 @@
 //!   (17h in the referenced production incident) instead of ~30s.
 //!   TESTS: (gap — no test asserts heartbeat emission or its counter
 //!   monotonicity).
+//! - **§9 `run_self_heal_tick` / `self_heal_decision`** — INVARIANT: a node
+//!   whose local height has not advanced for `SELF_HEAL_STALL_SECS` WHILE a
+//!   higher sync target exists and it is not synced performs a SOFT recovery
+//!   (purge phantom peer-height entries, expire stale work claims, re-trigger
+//!   sync), rate-limited to once per `SELF_HEAL_MIN_GAP`; a synced, caught-up,
+//!   or still-progressing node, or one with nobody ahead, does nothing.
+//!   THREAT: the 2026-10-10 IBD wedge the external
+//!   `deploy/fleet/coincync-sync-watchdog.sh` restarts a node for — height
+//!   frozen while peers are far ahead, a departed peer's stale target pinning
+//!   `is_synced` false — internalized as a no-restart recovery. The detection
+//!   is deliberately conservative: a false trigger would purge peer caches
+//!   fleet-wide at once (network-wide outage), so it errs toward doing nothing.
+//!   TESTS: `self_heal_*` in `self_heal_tests` cover healthy/synced,
+//!   behind-but-progressing, nobody-ahead, stalled→recover, and the rate-limit.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
@@ -94,6 +109,7 @@ use super::super::sync::ChainSync;
 use super::chain_state::ChainStateReader;
 use super::constants::{
     MESH_FLOOR_PEERS, MESH_FLOOR_SUSTAIN_TICKS, PEER_TIMEOUT, PING_INTERVAL,
+    SELF_HEAL_HEIGHT_SLACK, SELF_HEAL_INTERVAL, SELF_HEAL_MIN_GAP, SELF_HEAL_STALL_SECS,
     TIP_REBROADCAST_INTERVAL_SECS,
 };
 use super::runtime::wait_for_shutdown;
@@ -222,6 +238,13 @@ pub(super) fn spawn_maintenance(
         // (from PR #123).
         let mut tip_announce_interval =
             interval(Duration::from_secs(TIP_REBROADCAST_INTERVAL_SECS));
+        // §9 self-heal: internalizes the external IBD-stall watchdog as a SOFT
+        // (no-restart) recovery. State is owned by the loop (wall-clock progress
+        // tracking must NOT live in ChainSync); seeded to the current local
+        // height so the stall clock starts fresh at boot and never false-fires
+        // on a node that is simply still bootstrapping.
+        let mut self_heal_interval = interval(Duration::from_secs(SELF_HEAL_INTERVAL));
+        let mut self_heal_state = SelfHealState::new(maint_chain_state.snapshot().await.0);
 
         loop {
             tokio::select! {
@@ -284,6 +307,14 @@ pub(super) fn spawn_maintenance(
                     heartbeat_ticks = heartbeat_ticks.saturating_add(1);
                     emit_heartbeat(&maint_peers, heartbeat_ticks);
                     update_mesh_floor(&maint_peers, &maint_mesh_degraded, &mut mesh_below_streak);
+                }
+                _ = self_heal_interval.tick() => {
+                    run_self_heal_tick(
+                        &maint_peers,
+                        &maint_sync,
+                        &maint_chain_state,
+                        &mut self_heal_state,
+                    ).await;
                 }
             }
         }
@@ -605,6 +636,184 @@ async fn evaporate_relay_scores(relay_scores: &RwLock<RelayScoreMap>) {
     }
 }
 
+// ─────────────────────────── §9 self-heal ───────────────────────────
+//
+// Internalizes `deploy/fleet/coincync-sync-watchdog.sh`: a node wedged in IBD
+// (height frozen while peers are far ahead) is recovered WITHOUT a process
+// restart. The external watchdog's SOFT equivalent is: purge phantom/stale
+// peer-height entries (the `retain_connected_peers` connection-lifecycle fix),
+// expire stale work claims, and nudge the sync driver to re-request. No
+// connected peers are dropped, no process exits, no new channels/seeds — the
+// SAFEST actions only. Detection is deliberately conservative because a false
+// trigger would purge peer caches across the whole fleet simultaneously.
+
+/// Decision for the self-heal tick. Kept a pure function (no I/O, no clocks)
+/// so the detection logic is unit-testable without a live node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelfHealAction {
+    /// Node is healthy, caught up, still progressing, has nobody ahead, or is
+    /// inside the rate-limit window — do nothing.
+    None,
+    /// Node is demonstrably wedged in IBD — perform the soft recovery.
+    Recover,
+}
+
+/// Wall-clock progress state owned by the maintenance loop. Deliberately NOT
+/// stored in `ChainSync` (which holds no wall-clock state).
+struct SelfHealState {
+    /// Highest local height observed so far (monotonic high-water mark).
+    last_height: u64,
+    /// Instant `last_height` last increased — the stall clock's zero.
+    last_progress_at: Instant,
+    /// Instant the last soft recovery fired, for rate-limiting; `None` until
+    /// the first recovery.
+    last_heal_at: Option<Instant>,
+}
+
+impl SelfHealState {
+    fn new(local_height: u64) -> Self {
+        Self {
+            last_height: local_height,
+            last_progress_at: Instant::now(),
+            last_heal_at: None,
+        }
+    }
+}
+
+/// Pure detection. CONSERVATIVE — returns `Recover` only when the node is
+/// demonstrably stalled: behind a known-higher target, not synced, and its
+/// height has not advanced for at least `SELF_HEAL_STALL_SECS`, and it is not
+/// inside the `SELF_HEAL_MIN_GAP` rate-limit window.
+///
+/// Mirrors `coincync-sync-watchdog.sh`: do NOTHING when synced, caught up, or
+/// merely slow-but-progressing, and NEVER "recover" when nobody is ahead
+/// (`target <= local_height + slack`) — there would be no one to sync from.
+fn self_heal_decision(
+    local_height: u64,
+    last_height: u64,
+    since_progress: Duration,
+    target: u64,
+    is_synced: bool,
+    since_last_heal: Option<Duration>,
+) -> SelfHealAction {
+    // Synced => healthy, never recover.
+    if is_synced {
+        return SelfHealAction::None;
+    }
+    // Nobody is meaningfully ahead of us => no sync source, never recover.
+    // (Guards the isolated false-synced / caught-up cases the watchdog skips.)
+    if target <= local_height.saturating_add(SELF_HEAL_HEIGHT_SLACK) {
+        return SelfHealAction::None;
+    }
+    // Height advanced since the last sample => still progressing, keep waiting.
+    if local_height > last_height {
+        return SelfHealAction::None;
+    }
+    // Behind and not progressing — but only a stall once it has persisted.
+    if since_progress < Duration::from_secs(SELF_HEAL_STALL_SECS) {
+        return SelfHealAction::None;
+    }
+    // Rate-limit: a recovery within the last SELF_HEAL_MIN_GAP suppresses
+    // another (edge-triggered), so the soft recovery can never hot-loop.
+    if let Some(gap) = since_last_heal {
+        if gap < Duration::from_secs(SELF_HEAL_MIN_GAP) {
+            return SelfHealAction::None;
+        }
+    }
+    SelfHealAction::Recover
+}
+
+/// Self-heal maintenance tick. Samples local height + sync target, runs the
+/// pure decision, and on `Recover` performs the SOFT recovery. Logs loudly at
+/// WARN on recovery; silent when healthy.
+/// Soft self-heal recovery actions on a wedged `ChainSync`, extracted so the
+/// behavior is unit-testable without a live node or `ChainStateReader`:
+///   1. purge peer-height/work entries for peers no longer connected (the
+///      phantom-IBD wedge fix — always safe),
+///   2. expire stale work claims so `is_synced`/target recompute,
+///   3. re-arm a header pull via `arm_near_tip_catchup`, which re-arms from ANY
+///      sync state ONLY when the node is idle (nothing in flight) AND `!synced`
+///      — exactly the behind-and-stuck wedge. (`trigger_resync` would no-op
+///      here; it only fires from Synced/Idle.) The idle guard means it can
+///      never disrupt an actively-progressing download.
+/// Returns `(pruned, expired, retriggered)`. SAFE: no peer drops, no restart.
+fn self_heal_recover(
+    sync: &mut ChainSync,
+    connected: &HashSet<PeerId>,
+    unix_now: u64,
+) -> (usize, usize, bool) {
+    let pruned = sync.retain_connected_peers(connected);
+    let expired = sync.expire_stale_work_claims(unix_now, 0);
+    let retriggered = sync.arm_near_tip_catchup();
+    (pruned, expired, retriggered)
+}
+
+async fn run_self_heal_tick(
+    peers: &DashMap<PeerId, PeerInfo>,
+    sync: &RwLock<ChainSync>,
+    chain_state: &ChainStateReader,
+    state: &mut SelfHealState,
+) {
+    let now = Instant::now();
+    let (local_height, _tip) = chain_state.snapshot().await;
+
+    let (target, is_synced) = {
+        let guard = sync.read().await;
+        (guard.true_best_height(), guard.is_synced())
+    };
+
+    let since_progress = now.saturating_duration_since(state.last_progress_at);
+    let since_last_heal = state
+        .last_heal_at
+        .map(|t| now.saturating_duration_since(t));
+
+    let action = self_heal_decision(
+        local_height,
+        state.last_height,
+        since_progress,
+        target,
+        is_synced,
+        since_last_heal,
+    );
+
+    // Advance the progress clock AFTER the decision (so a tick that observes an
+    // advance is classified as progressing, then records the new high-water).
+    if local_height > state.last_height {
+        state.last_height = local_height;
+        state.last_progress_at = now;
+    }
+
+    if action == SelfHealAction::Recover {
+        let stalled_secs = since_progress.as_secs();
+        // Unix seconds for the work-claim expiry. Use the CANONICAL clock
+        // (src/clock.rs, the E1 single source of truth) — the same clock the
+        // work-claim timestamps were recorded with — so the expiry cutoff can
+        // never drift from the timestamps it is compared against (a plain
+        // chrono wall-clock could, under a mocked/offset clock).
+        let unix_now = crate::clock::unix_now();
+        // Connected-peer set drives the phantom/stale peer-height purge.
+        let connected: HashSet<PeerId> = peers.iter().map(|p| *p.key()).collect();
+
+        let (pruned, expired, retriggered) = {
+            let mut guard = sync.write().await;
+            self_heal_recover(&mut guard, &connected, unix_now)
+        };
+
+        warn!(
+            target: "node::self_heal",
+            "IBD stall self-heal: local height {} frozen {}s below target {} \
+             (not synced) — soft recovery: pruned {} phantom peer-height entries, \
+             expired {} stale work claims, resync re-triggered={}",
+            local_height, stalled_secs, target, pruned, expired, retriggered,
+        );
+
+        state.last_heal_at = Some(now);
+        // Reset the stall clock so the next recovery must re-accumulate a full
+        // stall window (belt-and-braces alongside the MIN_GAP rate-limit).
+        state.last_progress_at = now;
+    }
+}
+
 #[cfg(test)]
 mod mesh_floor_tests {
     use super::*;
@@ -661,5 +870,183 @@ mod mesh_floor_tests {
             update_mesh_floor(&peers, &degraded, &mut streak);
         }
         assert!(degraded.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod self_heal_tests {
+    use super::*;
+
+    const STALL: Duration = Duration::from_secs(SELF_HEAL_STALL_SECS);
+
+    // (a) A synced node never recovers, even if it looks behind by the numbers.
+    #[test]
+    fn synced_node_does_not_recover() {
+        let action = self_heal_decision(
+            100,          // local_height
+            100,          // last_height (no advance)
+            STALL,        // long since progress
+            200,          // target far ahead
+            true,         // is_synced
+            None,         // never healed
+        );
+        assert_eq!(action, SelfHealAction::None);
+    }
+
+    // (b) Behind but progressing (height advanced since last sample) => wait.
+    #[test]
+    fn behind_but_progressing_does_not_recover() {
+        let action = self_heal_decision(
+            150,          // local_height advanced...
+            100,          // ...past last_height
+            STALL,        // even though wall-clock says long (stale sample)
+            200,
+            false,
+            None,
+        );
+        assert_eq!(action, SelfHealAction::None);
+    }
+
+    // (c) Nobody ahead (target within slack of local) => never recover; there
+    //     would be no one to sync from.
+    #[test]
+    fn nobody_ahead_does_not_recover() {
+        // target == local
+        assert_eq!(
+            self_heal_decision(100, 100, STALL, 100, false, None),
+            SelfHealAction::None
+        );
+        // target within slack (local + 2)
+        assert_eq!(
+            self_heal_decision(100, 100, STALL, 100 + SELF_HEAL_HEIGHT_SLACK, false, None),
+            SelfHealAction::None
+        );
+        // target below local (post-reorg transient)
+        assert_eq!(
+            self_heal_decision(100, 100, STALL, 90, false, None),
+            SelfHealAction::None
+        );
+    }
+
+    // Not stalled long enough => wait (conservative detection).
+    #[test]
+    fn behind_but_not_long_enough_does_not_recover() {
+        let action = self_heal_decision(
+            100,
+            100,
+            Duration::from_secs(SELF_HEAL_STALL_SECS - 1),
+            200,
+            false,
+            None,
+        );
+        assert_eq!(action, SelfHealAction::None);
+    }
+
+    // (d) Stalled: behind, not synced, no progress for >= STALL => recover.
+    #[test]
+    fn stalled_and_behind_recovers() {
+        let action = self_heal_decision(
+            100,          // local frozen
+            100,          // no advance
+            STALL,        // for the full window
+            200,          // peers far ahead
+            false,        // not synced
+            None,         // first recovery
+        );
+        assert_eq!(action, SelfHealAction::Recover);
+        // Exactly at the boundary (target == local + slack + 1) still recovers.
+        assert_eq!(
+            self_heal_decision(
+                100,
+                100,
+                STALL,
+                100 + SELF_HEAL_HEIGHT_SLACK + 1,
+                false,
+                None
+            ),
+            SelfHealAction::Recover
+        );
+    }
+
+    // (e) Rate-limit: a second stall within MIN_GAP does not recover again.
+    #[test]
+    fn rate_limited_within_min_gap_does_not_recover() {
+        // Just healed (0s ago) and stalled again: suppressed.
+        assert_eq!(
+            self_heal_decision(
+                100,
+                100,
+                STALL,
+                200,
+                false,
+                Some(Duration::from_secs(0))
+            ),
+            SelfHealAction::None
+        );
+        // Still inside the window (MIN_GAP - 1): suppressed.
+        assert_eq!(
+            self_heal_decision(
+                100,
+                100,
+                STALL,
+                200,
+                false,
+                Some(Duration::from_secs(SELF_HEAL_MIN_GAP - 1))
+            ),
+            SelfHealAction::None
+        );
+        // Past the window: allowed to recover again.
+        assert_eq!(
+            self_heal_decision(
+                100,
+                100,
+                STALL,
+                200,
+                false,
+                Some(Duration::from_secs(SELF_HEAL_MIN_GAP))
+            ),
+            SelfHealAction::Recover
+        );
+    }
+
+    // --- Recovery behavior: self_heal_recover against a constructed wedge -----
+
+    // A departed peer's stale height pins the target up; the real connected peer
+    // is still genuinely ahead. Recovery must purge the phantom (target shrinks)
+    // yet keep us behind the real peer and re-arm the header pull.
+    #[test]
+    fn recover_purges_phantom_height_and_rearms_when_still_behind() {
+        use std::collections::HashSet;
+        let mut sync = ChainSync::new(100, Hash::from_bytes([0u8; 32]));
+        let connected_peer: PeerId = [1u8; 32];
+        let phantom_peer: PeerId = [2u8; 32];
+        sync.update_peer_height_for(connected_peer, 200);
+        sync.update_peer_height_for(phantom_peer, 300); // phantom pins target up
+        assert_eq!(sync.true_best_height(), 300, "phantom pins target pre-heal");
+        let connected: HashSet<PeerId> = [connected_peer].into_iter().collect();
+
+        let (pruned, _expired, retriggered) = self_heal_recover(&mut sync, &connected, 1_000_000);
+
+        assert_eq!(pruned, 1, "the phantom (disconnected) peer-height is purged");
+        assert_eq!(sync.true_best_height(), 200, "target shrinks to the real peer");
+        assert!(!sync.is_synced(), "still behind the connected peer -> not synced");
+        assert!(retriggered, "behind + idle -> header pull re-armed");
+    }
+
+    // If the ONLY ahead-peer was a phantom, purging it leaves nobody ahead ->
+    // the node is correctly synced and the re-arm is a (safe) no-op.
+    #[test]
+    fn recover_does_not_rearm_when_purge_leaves_nobody_ahead() {
+        use std::collections::HashSet;
+        let mut sync = ChainSync::new(100, Hash::from_bytes([0u8; 32]));
+        sync.update_peer_height_for([9u8; 32], 150); // phantom, departed
+        assert!(!sync.is_synced(), "phantom pins us behind pre-heal");
+        let connected: HashSet<PeerId> = HashSet::new();
+
+        let (pruned, _expired, retriggered) = self_heal_recover(&mut sync, &connected, 1_000_000);
+
+        assert_eq!(pruned, 1, "phantom height purged");
+        assert!(sync.is_synced(), "nobody ahead after purge -> synced");
+        assert!(!retriggered, "synced -> no re-arm needed");
     }
 }
