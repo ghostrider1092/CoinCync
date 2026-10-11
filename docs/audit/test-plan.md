@@ -65,10 +65,10 @@ radius. **P0 = a missing test for a known consensus/funds/liveness risk.**
    bound header field must be rejected via anchor/binding mismatch — no direct test.
    (The live C2 validation surfaced exactly this binding at work against the testnet;
    it needs a unit test pinning it.)
-3. **Balance-equation collapse via identity pseudo-output** (consensus + crypto +
-   batch_verify, "FIX #44"/"R-29"). Identity pseudo-output / commitment must be
-   rejected in `verify_balance_proof`, `verify_ring_signature`, and
-   `batch_verify::verify_single` — the reject branches exist, no test drives them.
+3. **Balance-equation collapse via identity pseudo-output** (consensus + crypto,
+   "FIX #44"/"R-29"). Identity pseudo-output / commitment must be
+   rejected in `verify_balance_proof` and `verify_ring_signature` — the reject
+   branches exist, no test drives them.
 4. **Key-image ↔ signature binding** (consensus "C-2"). `input.key_image !=
    signature.key_image` must be rejected *before* the verify cache (supply-inflation
    binding). Untested.
