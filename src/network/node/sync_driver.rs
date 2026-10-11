@@ -86,9 +86,12 @@
 //!   TESTS: `should_retrigger_sync_covers_height_and_work_126` (the predicate;
 //!   the async tick loop itself remains unit-test-gapped).
 
+use std::collections::VecDeque;
+use std::io::{IsTerminal, Write};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crossterm::style::{Color, Stylize};
 use dashmap::DashMap;
 use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
@@ -112,6 +115,345 @@ const N_T3_BEFORE_BACKOFF: u32 = 3;
 const EMERGENCY_T3_NO_PROGRESS_SECS: u64 = 300;
 const EMERGENCY_T3_REPEAT_SECS: u64 = 120;
 
+// ── §8 IBD progress display ──────────────────────────────────────────────
+// Width (in cells) of the Unicode progress bar in TTY mode.
+const IBD_BAR_WIDTH: usize = 20;
+// Rolling window over which the block-download rate is averaged. Long enough to
+// smooth per-tick jitter, short enough to track real rate changes during IBD.
+const IBD_RATE_WINDOW_SECS: f64 = 8.0;
+// Minimum gap between TTY redraws — caps the bar at ~4 Hz even if the tick rate
+// rises, honoring "update at most ~2-4x/sec; don't spam every block".
+const IBD_TTY_REDRAW_MIN: Duration = Duration::from_millis(250);
+// How often the NON-TTY (journald/systemd) progress line is logged. A `\r` bar
+// is useless in a journal, so there we emit a periodic `tracing::info!` instead.
+const IBD_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Initial-Block-Download progress display (§8). **Additive and display-only**:
+/// it renders the same heights the driver already computes and never influences
+/// sync behavior, the self-heal tiers, or the EMERGENCY-TIER-3 logic.
+///
+/// - TTY: an in-place `\r` progress bar (Unicode `█`/`░`), throttled to ≤4 Hz.
+/// - non-TTY (the fleet/systemd case): a periodic `tracing::info!` line with the
+///   same numbers — no `\r`, which journald cannot render.
+/// Both run ONLY while the node is behind; on catch-up the bar is cleared (TTY)
+/// and a one-time completion line is printed.
+///
+/// PRIVACY: shows peer COUNT only — never peer addresses — and nothing about tx
+/// relay. HONEST: every value is a live reading (local height, the sync engine's
+/// best-known target, a measured block rate); nothing is fabricated or smoothed
+/// into a fake ETA — when the rate is unknown the ETA renders as `--:--`.
+struct IbdProgress {
+    is_tty: bool,
+    /// `(sampled_at, height)` ring for the rolling rate estimate.
+    samples: VecDeque<(Instant, u64)>,
+    /// True once at least one in-progress update has been drawn/logged, so the
+    /// completion line fires only for a node that actually performed IBD (a node
+    /// that boots already synced prints nothing).
+    active: bool,
+    /// Completion line printed once; guards re-entry after catch-up.
+    done: bool,
+    last_render: Option<Instant>,
+    last_log: Option<Instant>,
+    /// Height + wall-time at the first behind observation, for the average in
+    /// the completion summary.
+    start_height: u64,
+    start_at: Instant,
+}
+
+impl IbdProgress {
+    fn new() -> Self {
+        Self {
+            is_tty: std::io::stdout().is_terminal(),
+            samples: VecDeque::new(),
+            active: false,
+            done: false,
+            last_render: None,
+            last_log: None,
+            start_height: 0,
+            start_at: Instant::now(),
+        }
+    }
+
+    /// Call once per driver tick with the freshly-read heights. `target` is the
+    /// sync engine's best-known height (`true_best_height()`), floored by the
+    /// tallest live peer; `peers` is the connected-peer COUNT; `synced` is the
+    /// driver's `effectively_synced` ground truth.
+    #[allow(clippy::too_many_arguments)]
+    fn update(
+        &mut self,
+        local: u64,
+        target: u64,
+        peers: usize,
+        synced: bool,
+        in_header_phase: bool,
+        headers_known: u64,
+    ) {
+        let behind = target > local;
+        if synced || !behind {
+            // Caught up. If we were actively showing progress, finish once.
+            if self.active && !self.done {
+                self.finish(local);
+            }
+            return;
+        }
+
+        let now = Instant::now();
+        if !self.active {
+            self.active = true;
+            self.done = false;
+            self.start_height = local;
+            self.start_at = now;
+            self.samples.clear();
+        }
+
+        // Phase 1 — HEADERS. The chain height legitimately stays at 0 while the
+        // node downloads + RandomX-verifies the header chain, so a block-% bar
+        // would read a misleading, frozen "0.0%". Show an honest header-phase
+        // line (elapsed proves liveness); the determinate block bar takes over
+        // once the engine advances to the Blocks phase.
+        if in_header_phase {
+            self.render_headers(now, local, target, headers_known, peers);
+            return;
+        }
+
+        // Phase 2 — BLOCKS. Blocks are being applied; local height climbs, so
+        // the determinate bar + measured rate/ETA are meaningful.
+        self.push_sample(now, local);
+        let rate = self.rate();
+        let remaining = target.saturating_sub(local);
+        let pct = if target > 0 {
+            (local as f64 / target as f64 * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+
+        // Explicit due-check (not `Option::is_none_or`, which is 1.82+; this
+        // crate keeps its source 1.75-compatible per rust-toolchain.toml).
+        let due = |last: Option<Instant>, gap: Duration| match last {
+            None => true,
+            Some(t) => now.duration_since(t) >= gap,
+        };
+
+        if self.is_tty {
+            if due(self.last_render, IBD_TTY_REDRAW_MIN) {
+                self.render_bar(local, target, pct, rate, remaining, peers);
+                self.last_render = Some(now);
+            }
+        } else if due(self.last_log, IBD_LOG_INTERVAL) {
+            info!(
+                "[IBD] syncing {} / {} ({:.1}%) · {} · ETA {} · {} peer(s)",
+                local,
+                target,
+                pct,
+                fmt_rate(rate),
+                fmt_eta(remaining, rate),
+                peers,
+            );
+            self.last_log = Some(now);
+        }
+    }
+
+    /// Header-sync phase line (phase 1). No block %, no fabricated ETA — just an
+    /// honest "receiving headers", the best-known target, elapsed-in-IBD (which
+    /// advances so the line is visibly alive, not frozen at 0%), and the peer
+    /// count. Throttled identically to the block bar (≤4 Hz TTY / 5s journald).
+    fn render_headers(
+        &mut self,
+        now: Instant,
+        local: u64,
+        target: u64,
+        headers_known: u64,
+        peers: usize,
+    ) {
+        let elapsed = self.start_at.elapsed().as_secs();
+        // Determinate: headers known (applied + queued + in-flight) vs the
+        // best-known target. Advances in ~2000-header batch steps as each batch
+        // is received + verified; the elapsed timer ticks between steps so the
+        // line is always visibly alive. No block rate/ETA here — header arrival
+        // is batchy, so a per-second rate would be misleading.
+        let known = headers_known.max(local).min(target);
+        let pct = if target > 0 {
+            (known as f64 / target as f64 * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+        let due = |last: Option<Instant>, gap: Duration| match last {
+            None => true,
+            Some(t) => now.duration_since(t) >= gap,
+        };
+        if self.is_tty {
+            if due(self.last_render, IBD_TTY_REDRAW_MIN) {
+                print!(
+                    "\r\x1b[2K[IBD] {}  headers {} / {}  ({:.1}%)  ·  {}  ·  {} peer(s)",
+                    make_bar(pct, bar_color(peers)),
+                    known,
+                    target,
+                    pct,
+                    fmt_duration(elapsed),
+                    peers,
+                );
+                let _ = std::io::stdout().flush();
+                self.last_render = Some(now);
+            }
+        } else if due(self.last_log, IBD_LOG_INTERVAL) {
+            info!(
+                "[IBD] headers {} / {} ({:.1}%) · {} · {} peer(s)",
+                known,
+                target,
+                pct,
+                fmt_duration(elapsed),
+                peers,
+            );
+            self.last_log = Some(now);
+        }
+    }
+
+    fn push_sample(&mut self, now: Instant, height: u64) {
+        self.samples.push_back((now, height));
+        // Drop samples older than the window, but always keep at least two so a
+        // rate can still be computed when ticks are sparse.
+        while self.samples.len() > 2 {
+            match self.samples.front() {
+                Some((t, _)) if now.duration_since(*t).as_secs_f64() > IBD_RATE_WINDOW_SECS => {
+                    self.samples.pop_front();
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Blocks/sec over the sample window. 0.0 until two samples spanning real
+    /// time exist (so a cold start reports an honest "unknown" ETA, not ∞).
+    fn rate(&self) -> f64 {
+        let (Some((t0, h0)), Some((t1, h1))) = (self.samples.front(), self.samples.back()) else {
+            return 0.0;
+        };
+        let dt = t1.duration_since(*t0).as_secs_f64();
+        if dt <= 0.0 {
+            return 0.0;
+        }
+        // Height can regress on a reorg; clamp to a non-negative rate.
+        (h1.saturating_sub(*h0)) as f64 / dt
+    }
+
+    // Display math on bounded values: `pct` ∈ [0,100] and the product is in
+    // [0, IBD_BAR_WIDTH], so the `as usize` cannot truncate or go negative.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn render_bar(&self, local: u64, target: u64, pct: f64, rate: f64, remaining: u64, peers: usize) {
+        let bar = make_bar(pct, bar_color(peers));
+        // `\r` returns to column 0; `\x1b[2K` clears the whole line so a shorter
+        // line never leaves stale characters from a longer previous one.
+        print!(
+            "\r\x1b[2K[IBD] {}  {} / {}  ({:.1}%)  ·  {}  ·  ETA {}  ·  {} peer(s)",
+            bar,
+            local,
+            target,
+            pct,
+            fmt_rate(rate),
+            fmt_eta(remaining, rate),
+            peers,
+        );
+        let _ = std::io::stdout().flush();
+    }
+
+    fn finish(&mut self, local: u64) {
+        self.done = true;
+        self.active = false;
+        let elapsed = self.start_at.elapsed().as_secs();
+        let gained = local.saturating_sub(self.start_height);
+        let avg = if elapsed > 0 {
+            gained as f64 / elapsed as f64
+        } else {
+            0.0
+        };
+        if self.is_tty {
+            // Clear the bar line, then print the completion summary on its own.
+            print!("\r\x1b[2K");
+            let _ = std::io::stdout().flush();
+        }
+        info!(
+            "[IBD] sync complete — height {} ({}, {} avg)",
+            local,
+            fmt_duration(elapsed),
+            fmt_rate(avg),
+        );
+    }
+
+    /// On shutdown, if a bar is still on screen move the cursor to a fresh line
+    /// so the shell prompt doesn't land on top of a half-drawn bar.
+    fn on_shutdown(&self) {
+        if self.is_tty && self.active && !self.done {
+            println!();
+        }
+    }
+}
+
+// IBD bar colors (match the rig palette). The FILLED run is colored by mesh
+// health — the same >=3-peer floor the node already warns about — so the bar
+// visibly shifts red -> amber -> green as peers connect; the empty track is a
+// dim gray.
+const BAR_GREEN: Color = Color::Rgb { r: 127, g: 184, b: 121 };
+const BAR_AMBER: Color = Color::Rgb { r: 218, g: 183, b: 94 };
+const BAR_RED: Color = Color::Rgb { r: 209, g: 108, b: 108 };
+const BAR_TRACK: Color = Color::Rgb { r: 80, g: 88, b: 86 };
+
+fn bar_color(peers: usize) -> Color {
+    if peers == 0 {
+        BAR_RED
+    } else if peers < 3 {
+        BAR_AMBER
+    } else {
+        BAR_GREEN
+    }
+}
+
+// Render the colored `█`/`░` bar for a percentage. `pct` ∈ [0,100], so filled ∈
+// [0, IBD_BAR_WIDTH] — the cast cannot truncate or sign-flip. Only called from
+// the TTY render paths, so emitting ANSI color is always correct here.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn make_bar(pct: f64, fill: Color) -> String {
+    let filled = ((pct / 100.0) * IBD_BAR_WIDTH as f64).round() as usize;
+    let filled = filled.min(IBD_BAR_WIDTH);
+    format!(
+        "{}{}",
+        "█".repeat(filled).with(fill),
+        "░".repeat(IBD_BAR_WIDTH - filled).with(BAR_TRACK),
+    )
+}
+
+fn fmt_rate(blk_per_sec: f64) -> String {
+    if blk_per_sec <= 0.0 {
+        "-- blk/s".to_string()
+    } else if blk_per_sec >= 10.0 {
+        format!("{:.0} blk/s", blk_per_sec)
+    } else {
+        format!("{:.1} blk/s", blk_per_sec)
+    }
+}
+
+// `remaining as f64 / rate` is non-negative and finite here (rate > 0), so the
+// ceil'd `as u64` cannot go negative; a pathological overflow saturates to
+// u64::MAX, which fmt_duration renders as a very large (honest) duration.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn fmt_eta(remaining: u64, rate: f64) -> String {
+    if rate <= 0.0 {
+        return "--:--".to_string();
+    }
+    fmt_duration((remaining as f64 / rate).ceil() as u64)
+}
+
+/// `M:SS`, or `H:MM:SS` once an hour or more.
+fn fmt_duration(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 struct SyncDriverState {
     stall_count: u32,
     last_progress_height: u64,
@@ -127,6 +469,9 @@ struct SyncDriverState {
     /// this value between ticks; the stall detector treats that as progress so a
     /// heavier-fork download is not aborted by the 60-tick Headers bounce.
     last_blocks_delivered: u64,
+    /// §8 — IBD progress display (bar / periodic log). Display-only; see
+    /// `IbdProgress`.
+    ibd_progress: IbdProgress,
 }
 
 impl SyncDriverState {
@@ -142,6 +487,7 @@ impl SyncDriverState {
             last_progress_time_secs: 0,
             emergency_t3_fires: 0,
             last_blocks_delivered: 0,
+            ibd_progress: IbdProgress::new(),
         }
     }
 
@@ -346,15 +692,57 @@ pub(super) fn spawn_sync_driver(
             // the engine says synced AND our tip is not below any live peer's
             // height or the work-target. Computed here (before the progress
             // clock) because #192 uses it to decide idle-is-not-a-stall.
-            let max_connected_peer_height = sync_peers
-                .iter()
-                .filter(|p| p.state == PeerState::Connected)
-                .map(|p| p.height)
-                .max()
-                .unwrap_or(0);
+            // Single pass over the live peer set for BOTH the tallest connected
+            // peer (the behind-check ground truth) and the connected COUNT (the
+            // IBD display shows count only — never addresses; see IbdProgress).
+            let (max_connected_peer_height, connected_peer_count) = {
+                let mut maxh = 0u64;
+                let mut count = 0usize;
+                for p in sync_peers.iter() {
+                    if p.state == PeerState::Connected {
+                        count += 1;
+                        if p.height > maxh {
+                            maxh = p.height;
+                        }
+                    }
+                }
+                (maxh, count)
+            };
             let chain_behind =
                 sync_chain.height() < sync_chain.target_height().max(max_connected_peer_height);
-            let effectively_synced = sync_sync.read().await.is_synced() && !chain_behind;
+            // One read serves both the synced check and the IBD display target.
+            let (engine_synced, true_best, in_header_phase, pending_headers) = {
+                let s = sync_sync.read().await;
+                (
+                    s.is_synced(),
+                    s.true_best_height(),
+                    // Headers phase: block height is legitimately 0/flat while
+                    // the header chain downloads — the IBD display shows a
+                    // determinate HEADER bar (headers known vs target) instead
+                    // of a frozen block-% bar.
+                    matches!(s.state(), crate::network::sync::SyncState::Headers),
+                    // Headers received but not yet applied as blocks (queued +
+                    // in-flight); + local height = total headers known so far.
+                    s.pending_count() as u64,
+                )
+            };
+            let effectively_synced = engine_synced && !chain_behind;
+
+            // §8 IBD progress display (additive, display-only — no effect on the
+            // sync state machine, self-heal tiers, or EMERGENCY-TIER-3 below).
+            // Target = sync engine best-known, floored by the tallest live peer.
+            {
+                let ibd_target = true_best.max(max_connected_peer_height);
+                let local_h = sync_chain.height();
+                driver.ibd_progress.update(
+                    local_h,
+                    ibd_target,
+                    connected_peer_count,
+                    effectively_synced,
+                    in_header_phase,
+                    local_h + pending_headers,
+                );
+            }
 
             // ── PROGRESS-TIME STALL TRACKING (runs every tick) ────
             // Track when the chain last made progress. This is the ground truth
@@ -716,6 +1104,9 @@ pub(super) fn spawn_sync_driver(
                 }
             }
         }
+        // §8: if we were still drawing an IBD bar when shutdown arrived, drop to
+        // a fresh line so the shell prompt doesn't land on the half-drawn bar.
+        driver.ibd_progress.on_shutdown();
     })
 }
 
@@ -1189,6 +1580,88 @@ mod tests {
         assert!(
             !bytes.is_empty(),
             "the Blocks tick sent a GetBlocks message to the eligible peer"
+        );
+    }
+
+    // ── §8 IBD progress display ──────────────────────────────────────────
+
+    #[test]
+    fn fmt_duration_crosses_minute_and_hour_boundaries() {
+        assert_eq!(fmt_duration(0), "0:00");
+        assert_eq!(fmt_duration(9), "0:09");
+        assert_eq!(fmt_duration(69), "1:09");
+        assert_eq!(fmt_duration(3600), "1:00:00");
+        assert_eq!(fmt_duration(3661), "1:01:01");
+    }
+
+    #[test]
+    fn fmt_eta_is_honest_when_rate_unknown() {
+        // No measurable rate yet → do NOT fabricate an ETA.
+        assert_eq!(fmt_eta(1000, 0.0), "--:--");
+        // 1344 remaining at 142 blk/s ≈ 10s (ceil).
+        assert_eq!(fmt_eta(1344, 142.0), "0:10");
+    }
+
+    #[test]
+    fn fmt_rate_shows_dashes_until_measured_and_scales_precision() {
+        assert_eq!(fmt_rate(0.0), "-- blk/s");
+        assert_eq!(fmt_rate(2.5), "2.5 blk/s");
+        assert_eq!(fmt_rate(142.0), "142 blk/s");
+    }
+
+    #[test]
+    fn ibd_progress_rate_needs_two_time_separated_samples() {
+        let mut p = IbdProgress::new();
+        assert_eq!(p.rate(), 0.0, "no samples → unknown rate, not infinity");
+        let t0 = Instant::now();
+        p.push_sample(t0, 100);
+        assert_eq!(p.rate(), 0.0, "a single sample cannot yield a rate");
+        p.push_sample(t0 + Duration::from_secs(2), 400);
+        // 300 blocks over 2s = 150 blk/s.
+        assert!((p.rate() - 150.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn ibd_progress_rate_clamps_reorg_regression_to_non_negative() {
+        let mut p = IbdProgress::new();
+        let t0 = Instant::now();
+        p.push_sample(t0, 500);
+        p.push_sample(t0 + Duration::from_secs(1), 450); // tip went backwards
+        assert_eq!(p.rate(), 0.0, "a height regression must not produce a negative rate");
+    }
+
+    #[test]
+    fn ibd_progress_only_completes_after_being_active() {
+        // A node that boots already synced must never print a completion line.
+        let mut p = IbdProgress::new();
+        p.update(100, 100, 3, true, false, 100);
+        assert!(!p.active && !p.done, "synced-at-boot prints nothing");
+
+        // Behind → becomes active; catching up → completes exactly once.
+        let mut q = IbdProgress::new();
+        q.update(10, 100, 3, false, false, 10);
+        assert!(q.active && !q.done, "falling behind activates the display");
+        q.update(100, 100, 3, true, false, 100);
+        assert!(q.done && !q.active, "catching up finishes the display once");
+    }
+
+    #[test]
+    fn ibd_progress_header_phase_activates_without_block_samples() {
+        // Behind and in the HEADERS phase: the display activates, but no block-
+        // rate samples are recorded (block height is legitimately not moving
+        // yet, so a block-% bar / rate would be meaningless).
+        let mut p = IbdProgress::new();
+        p.update(0, 3709, 2, false, true, 1850);
+        assert!(p.active && !p.done, "header phase activates the display");
+        assert!(
+            p.samples.is_empty(),
+            "header phase must not push block-rate samples"
+        );
+        // Engine advances to the BLOCKS phase: now block-rate samples start.
+        p.update(1, 3709, 2, false, false, 1);
+        assert!(
+            !p.samples.is_empty(),
+            "block phase records rate samples once height moves"
         );
     }
 }
