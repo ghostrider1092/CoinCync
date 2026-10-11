@@ -83,7 +83,6 @@ use once_cell::sync::Lazy;
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::interval;
 use tracing::{debug, info, trace, warn};
 
 use crate::config::{P2PEncryptionConfig, ProxyConfig};
@@ -426,7 +425,14 @@ pub(super) fn spawn_outbound_connector(
 
     tokio::spawn(async move {
         let mut connections = JoinSet::new();
-        let mut interval = interval(Duration::from_secs(10));
+        // Dial cadence (see the per-iteration select below): FAST while forming
+        // the initial mesh (cold start / under-meshed), SLOW once meshed so
+        // steady state does not churn peers. The old fixed 10s interval formed
+        // the 3-peer mesh floor only after ~60s on a healthy public host — and a
+        // slow / NAT'd node never reached the floor at all, so cold-start IBD
+        // never began.
+        const COLD_START_DIAL_INTERVAL: Duration = Duration::from_secs(2);
+        const STEADY_DIAL_INTERVAL: Duration = Duration::from_secs(10);
         // ANCHORS: persist known-good outbound peers roughly every 60s
         // (every 6th 10s tick) so a hard kill (SIGKILL, OOM, power loss)
         // still leaves a recent anchor set for fast reconnect. Graceful
@@ -476,6 +482,21 @@ pub(super) fn spawn_outbound_connector(
         }
 
         loop {
+            // COLD-START ACCELERATION: dial fast while below the mesh floor so a
+            // fresh node forms its 3-peer mesh in seconds instead of ~1 peer /
+            // ~20s. Count only *Connected* outbound peers (not in-flight
+            // handshakes), so a run of half-open/stalling connections doesn't
+            // stop us from trying more until the floor is actually met. Once
+            // meshed, revert to the slow cadence — steady-state churn unchanged.
+            let connected_outbound = connector_peers
+                .iter()
+                .filter(|p| p.outbound && p.state == PeerState::Connected)
+                .count();
+            let dial_period = if connected_outbound < MESH_FLOOR_PEERS {
+                COLD_START_DIAL_INTERVAL
+            } else {
+                STEADY_DIAL_INTERVAL
+            };
             tokio::select! {
                 biased;
                 _ = wait_for_shutdown(&mut shutdown) => break,
@@ -483,7 +504,7 @@ pub(super) fn spawn_outbound_connector(
                     log_connection_task_result("outbound", result);
                     continue;
                 }
-                _ = interval.tick() => {}
+                _ = tokio::time::sleep(dial_period) => {}
             }
 
             // ANCHORS: persist known-good outbound peers ~every 60s so a
