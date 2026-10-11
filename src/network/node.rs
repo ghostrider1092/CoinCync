@@ -943,6 +943,11 @@ impl P2PNode {
             .take()
             .ok_or_else(|| Error::InvalidState(START_ONE_SHOT_ERROR.into()))?;
         let (msg_tx, msg_rx) = mpsc::channel::<PeerMessage>(GLOBAL_QUEUE_SIZE);
+        // Dedicated handshake lane: the connection read loop routes Version/Verack
+        // here instead of `msg_tx`, so handshakes are serviced by their own task
+        // (see runtime::spawn_handshake_processor) even while the main processor is
+        // parked in a multi-second header-batch verify during cold-start IBD.
+        let (handshake_tx, handshake_rx) = mpsc::channel::<PeerMessage>(GLOBAL_QUEUE_SIZE);
 
         *self.running.write().await = true;
         info!("P2P node listening on {}", self.config.listen_addr);
@@ -975,6 +980,7 @@ impl P2PNode {
                     peers: self.peers.clone(),
                     event_tx: self.event_tx.clone(),
                     msg_tx: msg_tx.clone(),
+                    handshake_tx: handshake_tx.clone(),
                     senders: self.peer_senders.clone(),
                     chain_state: self.chain_state.reader(),
                     tracker: self.conn_tracker.clone(),
@@ -998,6 +1004,7 @@ impl P2PNode {
                     addresses: self.addresses.clone(),
                     event_tx: self.event_tx.clone(),
                     msg_tx: msg_tx.clone(),
+                    handshake_tx: handshake_tx.clone(),
                     senders: self.peer_senders.clone(),
                     chain_state: self.chain_state.reader(),
                     proxy: self.config.proxy.clone(),
@@ -1039,6 +1046,24 @@ impl P2PNode {
                     scorer: self.peer_scorer.clone(),
                     tx_absence_cache: self.tx_absence_cache.clone(),
                     relay_scores: self.relay_scores.clone(),
+                    magic: self.config.magic,
+                },
+                node_runtime.shutdown_receiver(),
+            ),
+        );
+        node_runtime.track(
+            "handshake-processor",
+            runtime::spawn_handshake_processor(
+                handshake_rx,
+                runtime::HandshakeProcessorContext {
+                    peers: self.peers.clone(),
+                    senders: self.peer_senders.clone(),
+                    dandelion: self.dandelion.clone(),
+                    sync: self.sync.clone(),
+                    event_tx: self.event_tx.clone(),
+                    chain: self.chain.clone(),
+                    scorer: self.peer_scorer.clone(),
+                    nonce: self.version_nonce,
                     magic: self.config.magic,
                 },
                 node_runtime.shutdown_receiver(),

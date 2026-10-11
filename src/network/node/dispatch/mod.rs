@@ -79,9 +79,10 @@ pub(super) async fn process_message(
     payload: &[u8],
     magic: [u8; 4],
     our_nonce: u64,
-    // `peers` / `sync` / `scorer` are taken as `&Arc<…>` (not `&…`) so the Headers
-    // arm can clone owned handles into a spawned verify task; every other handler
-    // call below still receives `&…` via deref coercion, unchanged.
+    // `peers` / `sync` / `scorer` are `&Arc<…>` (not `&…`); every handler call below
+    // receives `&…` via deref coercion, unchanged. (They were widened to `&Arc` when
+    // the Headers arm spawned an owned-handle verify task; harmless now that the arm
+    // runs inline, and kept to avoid churning the signature and its call sites.)
     peers: &Arc<DashMap<PeerId, PeerInfo>>,
     senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
     dandelion: &RwLock<DandelionRouter>,
@@ -255,26 +256,20 @@ pub(super) async fn process_message(
         }
 
         MessageType::Headers => {
-            // SPAWN so the ~24-46s RandomX header-batch verify runs OFF this single
-            // message processor. Inline, it blocked every other peer's Version/Verack
-            // for that whole window — which stalled cold-start mesh formation (fresh
-            // nodes' handshakes queued behind the first peer's header batch). The H-3
-            // pre-handshake gate above has already run for this message; handle_headers
-            // serializes verifies internally (HEADER_VERIFY_SEM) and re-checks the
-            // nonce under the write lock, so moving it off the processor changes no
-            // sync/consensus invariant — only who waits on the CPU.
-            let peers = Arc::clone(peers);
-            let sync = Arc::clone(sync);
-            let chain = chain.clone();
-            let scorer = Arc::clone(scorer);
-            let payload = payload.to_vec();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    headers::handle_headers(peer_id, &payload, &peers, &sync, &chain, &scorer).await
-                {
-                    tracing::warn!("Headers processing error: {e}");
-                }
-            });
+            // Runs INLINE on the message processor. The ~24-46s RandomX header-batch
+            // verify therefore serializes with block-apply on this one task, so the
+            // two never flip the shared light-mode RandomX cache slot concurrently
+            // across a key epoch — the no-thrash invariant #285 relies on. (An earlier
+            // revision spawned this handler off the processor to stop it starving
+            // handshakes during cold-start IBD; that re-introduced the epoch-boundary
+            // cache thrash #285 had driven down. Handshakes are now serviced on their
+            // own dedicated lane — see `process_handshake` and
+            // `runtime::spawn_handshake_processor` — so this verify can stay inline and
+            // serialized here without blocking any peer's Version/Verack.) The H-3
+            // pre-handshake gate above has already run; handle_headers runs the RandomX
+            // batch via spawn_blocking so it never pins an async worker thread, and
+            // re-checks the nonce under the write lock.
+            headers::handle_headers(peer_id, payload, peers, sync, chain, scorer).await?;
         }
 
         MessageType::GetAddr => {
@@ -337,6 +332,71 @@ pub(super) async fn process_message(
         }
 
         MessageType::Padding => unreachable!("padding is discarded before peer accounting"),
+    }
+
+    Ok(())
+}
+
+/// Handshake fast-path: `Version`/`Verack` are serviced on a DEDICATED lane — a
+/// separate mpsc channel drained by its own task (`runtime::spawn_handshake_processor`)
+/// that the connection read loop routes these two types to instead of the main
+/// processor. Because that task is scheduled independently, a peer's handshake
+/// completes even while the single main processor is parked inside a multi-second
+/// RandomX header-batch verify. That is what lets cold-start mesh formation proceed
+/// without waiting on IBD CPU: handshakes no longer queue behind the first peer's
+/// header batch.
+///
+/// Only the two handshake types reach here; every other type still flows through
+/// [`process_message`] and its H-3 pre-handshake gate. Version/Verack are always
+/// allowed pre-handshake, so there is no gate to apply here. Peer activity / byte
+/// accounting is replicated from `process_message` because the main lane no longer
+/// observes these two types.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn process_handshake(
+    peer_id: PeerId,
+    msg_type_id: u8,
+    payload: &[u8],
+    magic: [u8; 4],
+    our_nonce: u64,
+    peers: &DashMap<PeerId, PeerInfo>,
+    senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
+    dandelion: &RwLock<DandelionRouter>,
+    sync: &RwLock<ChainSync>,
+    event_tx: &broadcast::Sender<NodeEvent>,
+    chain: &SharedBlockchain,
+    scorer: &RwLock<PeerScorer>,
+) -> Result<()> {
+    let msg_type = MessageType::try_from(msg_type_id)?;
+
+    // Peer activity + byte accounting, mirroring process_message's §(activity)
+    // block — the main lane no longer sees Version/Verack, so account here.
+    if let Some(mut peer) = peers.get_mut(&peer_id) {
+        peer.touch();
+        peer.bytes_recv = peer
+            .bytes_recv
+            .saturating_add(payload.len().saturating_add(1) as u64);
+    }
+
+    match msg_type {
+        MessageType::Version => {
+            control::handle_version(
+                peer_id, payload, magic, our_nonce, peers, senders, sync, event_tx, chain, scorer,
+            )
+            .await?;
+        }
+        MessageType::Verack => {
+            control::handle_verack(peer_id, magic, peers, senders, dandelion, sync, chain).await?;
+        }
+        // Defensive: the connection read loop only routes Version/Verack here, so
+        // anything else is a routing bug. Drop it rather than mis-handle it (the
+        // main processor remains the single authority for every non-handshake type).
+        other => {
+            trace!(
+                "process_handshake received non-handshake {:?} from peer {:?}; ignoring",
+                other,
+                &peer_id[..4]
+            );
+        }
     }
 
     Ok(())

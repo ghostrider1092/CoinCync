@@ -323,6 +323,11 @@ pub(super) async fn handle_connection(
     senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
     event_tx: broadcast::Sender<NodeEvent>,
     msg_tx: mpsc::Sender<PeerMessage>,
+    // Dedicated handshake lane. Version/Verack are routed here instead of `msg_tx`
+    // so a peer's handshake is serviced by its own processor task even while the
+    // main message processor is parked in a multi-second header-batch verify during
+    // cold-start IBD. See runtime::spawn_handshake_processor.
+    handshake_tx: mpsc::Sender<PeerMessage>,
     conn_tracker: Arc<ConnectionTracker>,
     identity: Arc<NodeIdentity>,
     encryption_config: crate::config::P2PEncryptionConfig,
@@ -565,12 +570,26 @@ pub(super) async fn handle_connection(
                         // 3. Connection limits (MAX_CONNECTIONS_PER_IP)
                         // Never drop solicited data because doing so breaks IBD.
 
-                        if msg_tx.send(PeerMessage {
-                            peer_id,
-                            msg_type: message.msg_type,
-                            payload: message.payload,
-                            _reservation: message.reservation,
-                        }).await.is_err() {
+                        // Route Version/Verack to the dedicated handshake lane so a
+                        // peer's handshake is serviced even while the main processor
+                        // is parked in a multi-second header-batch verify (cold-start
+                        // IBD). Every other type goes to the main message processor,
+                        // which stays the single authority for non-handshake traffic
+                        // (including the H-3 pre-handshake gate). A closed lane means
+                        // the node is shutting down — break either way.
+                        let is_handshake = message.msg_type == MessageType::Version as u8
+                            || message.msg_type == MessageType::Verack as u8;
+                        let lane = if is_handshake { &handshake_tx } else { &msg_tx };
+                        if lane
+                            .send(PeerMessage {
+                                peer_id,
+                                msg_type: message.msg_type,
+                                payload: message.payload,
+                                _reservation: message.reservation,
+                            })
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }

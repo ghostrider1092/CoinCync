@@ -127,6 +127,7 @@ struct OutboundAttempt {
     addresses: Arc<RwLock<AddressManager>>,
     event_tx: broadcast::Sender<NodeEvent>,
     msg_tx: mpsc::Sender<PeerMessage>,
+    handshake_tx: mpsc::Sender<PeerMessage>,
     height: u64,
     tip: crate::primitives::Hash,
     proxy: Option<ProxyConfig>,
@@ -146,6 +147,8 @@ pub(super) struct AcceptorContext {
     pub peers: Arc<DashMap<PeerId, PeerInfo>>,
     pub event_tx: broadcast::Sender<NodeEvent>,
     pub msg_tx: mpsc::Sender<PeerMessage>,
+    /// Dedicated handshake lane — Version/Verack go here, not `msg_tx`.
+    pub handshake_tx: mpsc::Sender<PeerMessage>,
     pub senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
     pub chain_state: ChainStateReader,
     pub tracker: Arc<ConnectionTracker>,
@@ -168,6 +171,7 @@ pub(super) fn spawn_listener_acceptor(
         peers: acceptor_peers,
         event_tx: acceptor_event_tx,
         msg_tx: acceptor_msg_tx,
+        handshake_tx: acceptor_handshake_tx,
         senders: acceptor_senders,
         chain_state: acceptor_chain_state,
         tracker: acceptor_tracker,
@@ -315,6 +319,7 @@ pub(super) fn spawn_listener_acceptor(
                     let senders = acceptor_senders.clone();
                     let event_tx = acceptor_event_tx.clone();
                     let msg_tx = acceptor_msg_tx.clone();
+                    let handshake_tx = acceptor_handshake_tx.clone();
                     let (height, tip) = acceptor_chain_state.snapshot().await;
                     let tracker = acceptor_tracker.clone();
                     let addr_clone = addr;
@@ -339,6 +344,7 @@ pub(super) fn spawn_listener_acceptor(
                             senders,
                             event_tx,
                             msg_tx,
+                            handshake_tx,
                             tracker.clone(),
                             conn_identity,
                             conn_encryption,
@@ -373,6 +379,8 @@ pub(super) struct OutboundContext {
     pub addresses: Arc<RwLock<AddressManager>>,
     pub event_tx: broadcast::Sender<NodeEvent>,
     pub msg_tx: mpsc::Sender<PeerMessage>,
+    /// Dedicated handshake lane — Version/Verack go here, not `msg_tx`.
+    pub handshake_tx: mpsc::Sender<PeerMessage>,
     pub senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
     pub chain_state: ChainStateReader,
     pub proxy: Option<ProxyConfig>,
@@ -406,6 +414,7 @@ pub(super) fn spawn_outbound_connector(
         addresses: connector_addresses,
         event_tx: connector_event_tx,
         msg_tx: connector_msg_tx,
+        handshake_tx: connector_handshake_tx,
         senders: connector_senders,
         chain_state: connector_chain_state,
         proxy: connector_proxy,
@@ -704,6 +713,7 @@ pub(super) fn spawn_outbound_connector(
                     addresses: connector_addresses.clone(),
                     event_tx: connector_event_tx.clone(),
                     msg_tx: connector_msg_tx.clone(),
+                    handshake_tx: connector_handshake_tx.clone(),
                     height,
                     tip,
                     proxy: connector_proxy.clone(),
@@ -877,6 +887,7 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
         addresses,
         event_tx,
         msg_tx,
+        handshake_tx,
         height,
         tip,
         proxy,
@@ -920,6 +931,7 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
                 senders,
                 event_tx,
                 msg_tx,
+                handshake_tx,
                 tracker,
                 identity,
                 encryption,

@@ -367,8 +367,17 @@ impl IbdProgress {
             0.0
         };
         if self.is_tty {
-            // Clear the bar line, then print the completion summary on its own.
-            print!("\r\x1b[2K");
+            // Replace the in-place bar with a FULL GREEN bar: the visible "caught
+            // up" moment. Printed directly (not via tracing) and terminated with a
+            // newline, so it shows regardless of log level (incl. `warn`) and the
+            // shell prompt lands cleanly on the next line.
+            println!(
+                "\r\x1b[2K[IBD] {}  synced — height {}  ·  {}  ·  {} avg",
+                make_bar(100.0, BAR_GREEN),
+                local,
+                fmt_duration(elapsed),
+                fmt_rate(avg),
+            );
             let _ = std::io::stdout().flush();
         }
         info!(
@@ -388,22 +397,27 @@ impl IbdProgress {
     }
 }
 
-// IBD bar colors (match the rig palette). The FILLED run is colored by mesh
-// health — the same >=3-peer floor the node already warns about — so the bar
-// visibly shifts red -> amber -> green as peers connect; the empty track is a
-// dim gray.
+// IBD bar colors (match the rig palette). The FILLED run is colored by SYNC
+// HEALTH, so the bar tells you *where you stand*, not just how full it is:
+//   • RED   — no peers; the node literally cannot make progress.
+//   • AMBER — connected but still behind the tip (the whole catch-up).
+//   • GREEN — caught up. Reserved for the completion line printed by `finish()`;
+//             it never appears mid-sync because `update()` only renders while
+//             still behind (it early-returns and finishes the moment we catch up).
+// The empty track is a dim gray.
 const BAR_GREEN: Color = Color::Rgb { r: 127, g: 184, b: 121 };
 const BAR_AMBER: Color = Color::Rgb { r: 218, g: 183, b: 94 };
 const BAR_RED: Color = Color::Rgb { r: 209, g: 108, b: 108 };
 const BAR_TRACK: Color = Color::Rgb { r: 80, g: 88, b: 86 };
 
+/// Color for the in-progress bar (header + block phases). Only ever called while
+/// behind the tip, so it returns RED (no peers → stuck) or AMBER (catching up);
+/// GREEN is the caught-up color and is emitted solely by [`IbdProgress::finish`].
 fn bar_color(peers: usize) -> Color {
     if peers == 0 {
         BAR_RED
-    } else if peers < 3 {
-        BAR_AMBER
     } else {
-        BAR_GREEN
+        BAR_AMBER
     }
 }
 

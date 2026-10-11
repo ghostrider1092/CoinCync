@@ -551,12 +551,14 @@ mod tests {
     }
 }
 
-/// Serializes header-batch verification to ONE at a time. `handle_headers` now
-/// runs off the single message processor (spawned per Headers message, so the
-/// ~24-46s RandomX verify no longer starves other peers' handshakes during
-/// cold-start IBD) — but two batches must still never verify concurrently, which
-/// this guard preserves. The nonce re-check after the wait still discards a batch
-/// that went stale while queued here.
+/// Serializes header-batch verification to ONE at a time. `handle_headers` runs
+/// INLINE on the single message processor, so that task already serializes it with
+/// everything else on the main lane; this guard is a cheap belt-and-suspenders that
+/// keeps the no-concurrent-verify invariant explicit and would still hold if the
+/// handler were ever driven from more than one task again. (Handshakes are not
+/// starved by the inline verify because they run on their own dedicated lane — see
+/// `dispatch::process_handshake`.) The nonce re-check after the wait still discards
+/// a batch that went stale while queued here.
 static HEADER_VERIFY_SEM: once_cell::sync::Lazy<tokio::sync::Semaphore> =
     once_cell::sync::Lazy::new(|| tokio::sync::Semaphore::new(1));
 
@@ -619,12 +621,13 @@ pub(super) async fn handle_headers(
             // #184: verify the header batch WITHOUT holding the ChainSync lock.
             // This is ~2000 sequential RandomX verifications (~24-46s in light
             // mode). Two changes keep that from stalling cold-start IBD:
-            //   1. Serialize to one verify at a time (HEADER_VERIFY_SEM) — this
-            //      handler now runs off the single message processor, so the guard
-            //      preserves the prior no-concurrent-verify invariant. The permit
+            //   1. Serialize to one verify at a time (HEADER_VERIFY_SEM). The handler
+            //      runs inline on the single message processor, which already
+            //      serializes it; the guard keeps that invariant explicit. The permit
             //      is held through the apply below.
-            //   2. Run the RandomX batch on the BLOCKING pool (spawn_blocking) so
-            //      it never occupies an async worker thread.
+            //   2. Run the RandomX batch on the BLOCKING pool (spawn_blocking) so it
+            //      never occupies an async worker thread for the ~24-46s verify —
+            //      freeing the runtime's other workers (including the handshake lane).
             let _verify_permit = HEADER_VERIFY_SEM
                 .acquire()
                 .await
