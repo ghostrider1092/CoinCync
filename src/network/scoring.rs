@@ -499,6 +499,23 @@ pub struct PeerMessageRateTracker {
     window_start: MonoInstant,
     /// Window duration (default 10 seconds)
     window_secs: u64,
+    /// Message-type ids already penalized in the current window. The limit is
+    /// enforced by dropping EVERY over-limit message, but a peer is scored at
+    /// most ONCE per type per window (cleared on window reset). This lets a
+    /// brief legit burst take a single penalty and recover while a sustained
+    /// flooder still accrues one penalty per window → eventually banned.
+    flagged: std::collections::HashSet<u8>,
+}
+
+/// Outcome of [`PeerMessageRateTracker::record`]. `over_limit` → the message
+/// exceeded its per-window cap and must be DROPPED (the cap is only real if
+/// every excess message is dropped). `penalize` → this is the first over-limit
+/// message of its type in the current window, so score it once; later excess
+/// messages in the same window drop silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RateLimitCheck {
+    pub over_limit: bool,
+    pub penalize: bool,
 }
 
 /// Per-message-type limits (messages per 10-second window).
@@ -546,7 +563,7 @@ const MSG_RATE_LIMITS: &[(u8, u32)] = &[
     (12, 100), // MessageType::GetBlocks  — 10/sec (block-fetch flood)
     (14, 200), // MessageType::GetData    — 20/sec (bulk fetch flood)
     (22, 500), // MessageType::InvTx      — 50/sec (tx-relay flood; higher because relaying txs across a mesh is normal)
-    (23, 100), // MessageType::InvBlock   — 10/sec (block-announce flood)
+    (23, 200), // MessageType::InvBlock   — 20/sec (block-announce flood; raised from 10/sec: on a low-difficulty / fast-block network, legit block-announce + reorg-reconciliation bursts briefly exceed 10/sec)
     (30, 50),  // MessageType::GetAddr    — 5/sec  (peer-list scraping)
     (2, 30),   // MessageType::Ping       — 3/sec  (keepalive spam)
     // Light-client / DHT query types (audit R3-4). Their handlers do bounded but
@@ -569,14 +586,21 @@ impl PeerMessageRateTracker {
             counts: HashMap::new(),
             window_start: mono_now(),
             window_secs: 10,
+            flagged: std::collections::HashSet::new(),
         }
     }
 
-    /// Record a message and return true if the rate limit is exceeded.
-    pub fn record(&mut self, msg_type_id: u8) -> bool {
+    /// Record a message and report whether it is over its per-window cap
+    /// (`over_limit` → drop it) and whether to penalize for it (`penalize` →
+    /// the first over-limit message of this type this window; score once). See
+    /// [`RateLimitCheck`]. Dropping every over-limit message is what makes the
+    /// cap real; penalizing once per window avoids log/score spam on a brief
+    /// legit burst while still banning a sustained flooder across windows.
+    pub fn record(&mut self, msg_type_id: u8) -> RateLimitCheck {
         let now = mono_now();
         if now.saturating_duration_since(self.window_start).as_secs() >= self.window_secs {
             self.counts.clear();
+            self.flagged.clear();
             self.window_start = now;
         }
 
@@ -586,10 +610,16 @@ impl PeerMessageRateTracker {
         // Check against per-type limit
         for &(type_id, limit) in MSG_RATE_LIMITS {
             if msg_type_id == type_id && *count > limit {
-                return true; // Rate exceeded
+                // Over the cap: always drop; penalize only the first such
+                // message of this type in the window. `HashSet::insert` returns
+                // true exactly when the id was not already flagged.
+                return RateLimitCheck {
+                    over_limit: true,
+                    penalize: self.flagged.insert(msg_type_id),
+                };
             }
         }
-        false
+        RateLimitCheck::default() // under the cap → process normally
     }
 }
 
@@ -1395,12 +1425,55 @@ mod tests {
         assert_eq!(msg_type_id, 12, "protocol.rs discriminant must be 12");
         let mut exceeded = false;
         for _ in 0..101 {
-            exceeded = tracker.record(msg_type_id);
+            exceeded = tracker.record(msg_type_id).over_limit;
         }
         assert!(
             exceeded,
             "expected message flood threshold to trigger for GetBlocks"
         );
+    }
+
+    #[test]
+    fn rate_tracker_drops_every_over_limit_message_but_penalizes_once() {
+        // GetBlocks cap is 100 per window. Past the cap EVERY message must be
+        // over_limit (so it is dropped — the cap is only real if all excess is
+        // dropped), but only the FIRST over-limit message of the type is
+        // penalized in the window (no score/log spam on a brief burst).
+        let mut t = PeerMessageRateTracker::new();
+        let id = crate::network::protocol::MessageType::GetBlocks as u8;
+        let (mut over, mut penalties) = (0u32, 0u32);
+        for _ in 0..150 {
+            let c = t.record(id);
+            if c.over_limit {
+                over += 1;
+            }
+            if c.penalize {
+                penalties += 1;
+            }
+        }
+        assert_eq!(over, 50, "every message past the 100 cap is over_limit (dropped)");
+        assert_eq!(penalties, 1, "penalize exactly once per type per window");
+    }
+
+    #[test]
+    fn rate_tracker_penalizes_each_flooded_type_independently() {
+        // The penalize-once guard is per message-type, so two different flooded
+        // types in the same window each get their own single penalty.
+        let mut t = PeerMessageRateTracker::new();
+        let get_blocks = crate::network::protocol::MessageType::GetBlocks as u8; // cap 100
+        let get_addr = crate::network::protocol::MessageType::GetAddr as u8; // cap 50
+        let mut penalties = 0u32;
+        for _ in 0..101 {
+            if t.record(get_blocks).penalize {
+                penalties += 1;
+            }
+        }
+        for _ in 0..51 {
+            if t.record(get_addr).penalize {
+                penalties += 1;
+            }
+        }
+        assert_eq!(penalties, 2, "one penalty per flooded type per window");
     }
 
     #[test]

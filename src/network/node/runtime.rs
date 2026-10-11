@@ -356,17 +356,27 @@ pub(super) fn spawn_message_processor(
                     let tracker = rate_trackers
                         .entry(msg.peer_id)
                         .or_insert_with(super::super::scoring::PeerMessageRateTracker::new);
-                    if tracker.record(msg.msg_type) {
-                        warn!(
-                            "Peer {:?} exceeded message rate limit for type 0x{:02x}, penalizing",
-                            &msg.peer_id[..4],
-                            msg.msg_type,
-                        );
-                        if let Some(peer_addr) = processor_peers.get(&msg.peer_id).map(|p| p.addr) {
-                            let mut scorer = processor_scorer.write().await;
-                            scorer.get_or_create(peer_addr).record_misbehavior(
-                                super::super::scoring::MisbehaviorType::MessageFlood,
+                    let rate = tracker.record(msg.msg_type);
+                    if rate.over_limit {
+                        // Drop EVERY over-limit message (the cap is only real if
+                        // all excess is dropped), but warn + penalize at most
+                        // once per type per window so a brief legit burst takes a
+                        // single penalty and recovers, while a sustained flooder
+                        // still accrues one penalty per window → eventually banned.
+                        if rate.penalize {
+                            warn!(
+                                "Peer {:?} exceeded message rate limit for type 0x{:02x}, penalizing",
+                                &msg.peer_id[..4],
+                                msg.msg_type,
                             );
+                            if let Some(peer_addr) =
+                                processor_peers.get(&msg.peer_id).map(|p| p.addr)
+                            {
+                                let mut scorer = processor_scorer.write().await;
+                                scorer.get_or_create(peer_addr).record_misbehavior(
+                                    super::super::scoring::MisbehaviorType::MessageFlood,
+                                );
+                            }
                         }
                         continue; // Drop the message and release its reservation
                     }
