@@ -1,8 +1,13 @@
 # Cold-start IBD: handshake starvation during header verification
 
-**Status:** design / proposal (2026-10-11). Root cause CONFIRMED on a public fleet host.
-**Scope:** testnet; consensus-adjacent IBD path. Any change lands on its own branch,
-fully tested + soaked, and is NOT fleet-deployed until proven.
+**Status:** IMPLEMENTED (2026-10-11). Root cause confirmed on a public fleet host.
+Shipped as: adaptive dial cadence (PR #280), RandomX key-epoch hold (PR #285), and
+a dedicated handshake lane with inline verify (PR #287) — all merged to `main` and
+deployed to the fleet (network-layer only; consensus fingerprint `d312f6ee…`
+unchanged). An intermediate detached-verify attempt (PR #283) was superseded; see
+"The fix (shipped)".
+**Scope:** testnet; consensus-adjacent IBD path. Each change landed on its own
+branch, fully tested + soaked, and was not fleet-deployed until proven.
 
 ## Symptom
 
@@ -43,69 +48,84 @@ Two independent contributors — the first is fixed, the second is this doc:
 single task; while it is blocked (or awaiting) on this one `Headers` message it
 does not `recv()` the next message, so other peers' handshakes still wait.
 
-## The fix
+## The fix (shipped)
 
-Make header verification **not occupy the single message processor**: verify the
-batch off-task and apply the result without the processor blocking, so it keeps
-servicing other peers' handshake messages.
+The goal is to keep the single processor from starving handshakes during a header
+verify. Two approaches were tried; the second shipped.
 
-**Chosen approach — detached verify + apply:**
-In `handle_headers`, after the cheap read-lock nonce gate (keep in the processor),
-spawn a task that:
-1. runs `validate_header_batch` via `tokio::task::spawn_blocking` (CPU pool, frees
-   the worker thread), then
-2. re-acquires the ChainSync write lock, re-checks `validate_header_nonce` (consume),
-   and runs the existing apply (`update_peer_height*`, `queue_headers_from_peer`).
-The processor returns immediately and processes the next message.
+### First attempt — detached verify (PR #283, superseded)
+`handle_headers` was moved OFF the processor: it spawned a task that ran
+`validate_header_batch` via `spawn_blocking` and applied the result (this needed
+the `Arc`-ification of `process_message`'s `peers`/`sync`/`scorer` so a `'static`
+task could own clones). It unblocked handshakes — **but** it let the header verify
+run **concurrently with block application** across a RandomX key-epoch boundary.
+Light mode keeps a single cache slot keyed per epoch, so the spawned verify (new
+epoch) and the inline block-apply (old epoch) ping-ponged the cache: a fresh-node
+soak measured **78 "Building RandomX cache" rebuilds** (vs ~4-8 with #285's
+key-epoch hold alone). The unblock-handshakes goal was met, but at the cost of
+re-introducing the thrash #285 had just removed. Superseded by #287.
 
-### Refactor required (the real work)
-`process_message` and `handle_headers` currently take the dispatch context **by
-reference** (`&RwLock<ChainSync>`, `&DashMap`, `&SharedBlockchain`, `&RwLock<PeerScorer>`),
-but the processor loop holds them as `Arc`s (`processor_sync.as_ref()`, …). A
-`'static` spawned task needs **owned `Arc` clones**, so:
-- thread the needed `Arc`s (sync, chain, peers, scorer) to `handle_headers` as
-  owned clones (either change the header path's params to `Arc<…>` or pass clones
-  alongside the existing refs), and
-- clone them into the spawned task.
-This is a broad-ish signature change along the header dispatch path + its tests.
+### Shipped approach — dedicated handshake lane (PR #287)
+Keep header verify **inline** on the single processor (so it serializes with
+block-apply and never flips the cache slot concurrently — the no-thrash invariant),
+and take **handshakes off that processor** via a dedicated lane:
+- A second `mpsc` channel + its own consumer task
+  (`runtime::spawn_handshake_processor`). The connection read loop
+  (`connection.rs`) routes `Version`/`Verack` there instead of the shared
+  processor. Because it is a separate task, tokio schedules it independently, so a
+  peer's handshake completes even while the main processor is parked in a verify.
+- `handle_headers` runs inline again (reverting #283's `tokio::spawn`); the RandomX
+  batch still runs via `spawn_blocking` so it never pins an async worker.
+- `dispatch::process_handshake` services the two handshake types (peer-activity /
+  byte accounting mirrored from `process_message`). The H-3 pre-handshake gate is
+  unaffected: it *ignores* (never penalizes) early non-handshake messages, so the
+  cross-lane race (a peer's `GetHeaders` arriving before its `Verack` is serviced)
+  is safe — the early message is dropped and re-requested, no misbehavior score.
 
-### Safety / ordering analysis (must hold)
-- **Nonce single-use:** keep the cheap `is_header_nonce_outstanding` read-lock gate
-  in the processor (rejects cross-peer / stale before spawning). The spawned task
-  re-checks + consumes `validate_header_nonce` under the write lock, so a batch that
-  timed out (>60s) or was superseded during verify is discarded — same invariant as
-  today, just moved into the task. Keep tests
-  `handle_headers_cross_peer_nonce_is_rejected_without_consuming` /
-  `..._valid_nonce_is_single_use` green.
-- **Overlapping batches:** IBD keeps one outstanding header nonce at a time, but a
-  >60s verify + driver re-request could make two verify concurrently. The write-lock
-  apply + nonce consume serialize the apply; `queue_headers_from_peer` must remain
-  idempotent against duplicate hashes (it already dedups via `pending_headers`
-  membership — verify). Consider a per-"one-verify-in-flight" guard if needed.
-- **Back-pressure:** with the processor no longer stalled, the cap-8 channel no
-  longer backs up during IBD; revisit whether the channel cap still wants bumping.
-- **No ChainSync-lock regression:** verification stays off the write lock (#184).
+This is the "alternative" the first revision of this doc listed as *not chosen*. It
+turned out to be the right call: it keeps verify serialized (no thrash) **and**
+handshakes unblocked, where the detached-verify could only get one of the two.
 
-### Alternative considered (not chosen)
-Handle `Version`/`Verack` inline in the per-connection read loop
-(`connection.rs`) so handshakes never route through the busy central processor,
-leaving only heavy messages (Headers/Blocks) central. Smaller blast radius on the
-consensus path, but splits the dispatch in two and duplicates handshake plumbing.
-Keep as a fallback if the detached-verify refactor proves too invasive.
+### Companion fix (PR #285)
+The thrash-freeness of inline verify depends on #285's **key-epoch hold** (the IBD
+download window does not cross a RandomX epoch boundary before the tip reaches it),
+which keeps verify and block-apply on the same epoch key. Measured: #287 inline
+verify *without* #285 ≈ 114 rebuilds; *with* #285, **6**.
 
-## Test + rollout plan (do NOT shortcut)
-1. Full lib suite green (currently 2188/2188) + the handle_headers nonce tests.
-2. Public-host cold-start re-verify (the `coldstart-verify` harness): expect the
-   mesh to reach `outbound>=3` within a few seconds of dialing (not ~60s) AND the
-   chain tip to start advancing — i.e. handshakes no longer wait on header verify.
-3. Single-node soak against the live fleet (fresh data-dir) to full sync, watching
-   for any sync-wedge / fork / EMERGENCY-TIER-3 regressions.
-4. Only then build pristine, fingerprint-verify (`d312f6ee…`, network-layer only),
-   and `safe-deploy.sh` roll to the fleet.
+### Safety / ordering analysis (held)
+- **Nonce single-use / off the ChainSync lock:** `handle_headers` is unchanged here
+  — the `is_header_nonce_outstanding` read-lock gate, the `spawn_blocking` verify
+  off the write lock (#184), and the `validate_header_nonce` consume under the write
+  lock all remain. Tests `handle_headers_cross_peer_nonce_is_rejected_without_consuming`
+  / `..._valid_nonce_is_single_use` stay green.
+- **Cross-lane ordering:** handshake messages (`Version`/`Verack`) only ever precede
+  `Connected`; after `Connected` no handshake messages arrive. A data message that
+  races ahead of its peer's `Verack` hits the H-3 gate and is ignored (not scored),
+  so splitting the lanes introduces no new penalty or corruption.
+- **No concurrent verify/apply:** both run on the one main processor task, one
+  message at a time → never concurrent → no epoch-boundary cache thrash.
+
+## Test + rollout (completed)
+1. Full lib suite green (2190/2190 with #285+#287; 2188/2188 for #287 on `main`
+   without #285) + the `handle_headers` nonce tests.
+2. Public-host cold-start soak (fresh data-dir, fleet VPS): mesh reached
+   `outbound>=3` within ~10s of dialing (not ~60s), **6** RandomX cache rebuilds
+   (vs 78 for the detached-verify attempt), 0 orphans, 0 EMERGENCY-TIER /
+   fork / panic / deadlock, full sync to the fleet tip.
+3. Pristine build, fingerprint-verified (`d312f6ee…`, network-layer only), rolled to
+   all 6 fleet nodes via `safe-deploy.sh` — each re-meshed to 6-7 peers and
+   re-synced cleanly after its restart.
+
+> NOTE: a fresh IBD node cannot complete header-batch delivery on a NAT'd dev box
+> (the bulk Headers response stalls), so cold-start soaks/demos must run on a
+> public fleet VPS, not behind WSL NAT.
 
 ## References
-- `src/network/node/runtime.rs` (`spawn_message_processor`, single `msg_rx` loop)
-- `src/network/node/dispatch/headers.rs:615` (`validate_header_batch` inline)
+- `src/network/node/runtime.rs` (`spawn_message_processor`, `spawn_handshake_processor`)
+- `src/network/node/connection.rs` (read-loop lane split: `Version`/`Verack` → handshake lane)
+- `src/network/node/dispatch/mod.rs` (`process_handshake`; inline `Headers` arm)
+- `src/network/node/dispatch/headers.rs` (`validate_header_batch` via `spawn_blocking`)
 - `src/network/node/dispatch/control.rs` (`handle_version` / `handle_verack`,
   `Connecting → VersionReceived → Connected`)
-- `#184` (verify off the ChainSync lock); PR #280 (adaptive dial cadence).
+- `#184` (verify off the ChainSync lock); PR #280 (adaptive dial); PR #283
+  (detached verify, superseded); PR #285 (key-epoch hold); PR #287 (handshake lane).
