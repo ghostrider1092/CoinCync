@@ -99,6 +99,9 @@ use crate::mempool::SharedMempool;
 use crate::primitives::Hash;
 use crate::transaction::Transaction;
 
+use std::net::SocketAddr;
+
+use super::super::bootstrap::{AddressManager, PeerAddress};
 use super::super::connection_tracker::ConnectionTracker;
 use super::super::dandelion::{DandelionRouter, DANDELION_MONITOR_INTERVAL_SECS};
 use super::super::peer::{PeerId, PeerInfo, PeerState};
@@ -134,6 +137,11 @@ pub(super) struct MaintenanceContext {
     pub magic: [u8; 4],
     /// Sustained mesh-floor flag, updated by the heartbeat tick.
     pub mesh_degraded: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Address book, for inbound-peer discovery (#284).
+    pub addresses: Arc<RwLock<AddressManager>>,
+    /// Network default P2P port — the port an inbound peer is *assumed* to
+    /// listen on (the handshake carries none), used by inbound-peer discovery.
+    pub discovery_port: u16,
 }
 
 struct CleanupTick<'a> {
@@ -171,6 +179,8 @@ pub(super) fn spawn_maintenance(
         mut broadcast_rx,
         magic,
         mesh_degraded: maint_mesh_degraded,
+        addresses: maint_addresses,
+        discovery_port,
     } = context;
 
     // Spawn the maintenance task with panic supervision. Previously
@@ -245,6 +255,9 @@ pub(super) fn spawn_maintenance(
         // on a node that is simply still bootstrapping.
         let mut self_heal_interval = interval(Duration::from_secs(SELF_HEAL_INTERVAL));
         let mut self_heal_state = SelfHealState::new(maint_chain_state.snapshot().await.0);
+        // #284 inbound-peer discovery: periodically seed the address book with
+        // connected inbound peers (assumed to listen on the network default port).
+        let mut discovery_interval = interval(Duration::from_secs(60));
 
         loop {
             tokio::select! {
@@ -299,6 +312,9 @@ pub(super) fn spawn_maintenance(
                 }
                 _ = ban_flush_interval.tick() => {
                     flush_ban_list(&maint_scorer, &maint_ban_list_path).await;
+                }
+                _ = discovery_interval.tick() => {
+                    discover_inbound_peers(&maint_peers, &maint_addresses, discovery_port).await;
                 }
                 _ = outbound_rotate_interval.tick() => {
                     rotate_outbound_peer(&maint_peers, &maint_senders, &maint_tracker);
@@ -536,6 +552,44 @@ async fn run_tip_announce_tick(
 async fn flush_ban_list(scorer: &RwLock<PeerScorer>, path: &std::path::Path) {
     if let Err(error) = scorer.read().await.save_bans_to_file(path) {
         warn!("Periodic ban-list save failed: {}", error);
+    }
+}
+
+/// #284 — compat-safe inbound-peer discovery. The Version handshake carries no
+/// listening port, so a peer that DIALS us leaves no dialable address: the only
+/// thing we see is its source IP on an ephemeral port. Historically the address
+/// book therefore only ever held the DNS/fallback fleet, and a community node
+/// that dialed out was known only to whoever it connected to, who could not pass
+/// it on (hence new nodes could never discover it — #284).
+///
+/// Heuristic: a peer connected to us is most likely reachable at its source IP
+/// on the NETWORK DEFAULT P2P port (the overwhelming majority of nodes use it).
+/// Seed `(ip, default_port)` into the book as a normal address. It is then
+/// validated the same way as any other: the outbound connector dials it, so a
+/// NAT'd or non-default-port peer simply fails to connect and is pruned/backed
+/// off — nothing is trusted without a successful dial. Once a dial succeeds the
+/// address is gossiped via GetAddr/Addr, so a reachable community node on the
+/// default port becomes discoverable network-wide instead of staying invisible.
+///
+/// No wire-format change (compat-safe with the v3 fleet); `AddressManager::add`
+/// already dedups, applies the anti-eclipse netgroup quota, and skips our own
+/// addresses, so this is idempotent and safe to run every interval.
+async fn discover_inbound_peers(
+    peers: &DashMap<PeerId, PeerInfo>,
+    addresses: &RwLock<AddressManager>,
+    default_port: u16,
+) {
+    let candidates: Vec<SocketAddr> = peers
+        .iter()
+        .filter(|p| !p.outbound && p.state == PeerState::Connected)
+        .map(|p| SocketAddr::new(p.addr.ip(), default_port))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let mut book = addresses.write().await;
+    for addr in candidates {
+        book.add(PeerAddress::new(addr));
     }
 }
 
@@ -1048,5 +1102,61 @@ mod self_heal_tests {
         assert_eq!(pruned, 1, "phantom height purged");
         assert!(sync.is_synced(), "nobody ahead after purge -> synced");
         assert!(!retriggered, "synced -> no re-arm needed");
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    use crate::network::bootstrap::AddressManager;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn peer(n: u8, ip: [u8; 4], outbound: bool, connected: bool) -> (PeerId, PeerInfo) {
+        let id = [n; 32];
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), 54321 + n as u16);
+        let mut p = PeerInfo::new(id, addr, outbound);
+        if connected {
+            p.state = PeerState::Connected;
+        }
+        (id, p)
+    }
+
+    #[tokio::test]
+    async fn discovery_adds_only_connected_inbound_peers_at_the_default_port() {
+        let default_port = 28080u16;
+        let peers = DashMap::new();
+        // inbound + Connected → added at (ip, default_port)
+        let (i1, p1) = peer(1, [9, 9, 9, 9], false, true);
+        peers.insert(i1, p1);
+        // outbound + Connected → skipped (we already know outbound addresses)
+        let (i2, p2) = peer(2, [8, 8, 8, 8], true, true);
+        peers.insert(i2, p2);
+        // inbound but NOT Connected → skipped (handshake not complete)
+        let (i3, p3) = peer(3, [7, 7, 7, 7], false, false);
+        peers.insert(i3, p3);
+
+        let addresses = RwLock::new(AddressManager::new(1000));
+        discover_inbound_peers(&peers, &addresses, default_port).await;
+
+        let book: Vec<SocketAddr> = addresses
+            .read()
+            .await
+            .get_for_exchange(100)
+            .into_iter()
+            .map(|a| a.addr)
+            .collect();
+
+        assert!(
+            book.contains(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), default_port)),
+            "a connected inbound peer is seeded at (its ip, default port); got {book:?}"
+        );
+        assert!(
+            !book.iter().any(|a| a.ip() == IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            "an outbound peer is not added by inbound discovery"
+        );
+        assert!(
+            !book.iter().any(|a| a.ip() == IpAddr::V4(Ipv4Addr::new(7, 7, 7, 7))),
+            "an inbound peer whose handshake is not complete is skipped"
+        );
     }
 }

@@ -1104,6 +1104,8 @@ impl P2PNode {
                     broadcast_rx,
                     magic: self.config.magic,
                     mesh_degraded: self.mesh_degraded.clone(),
+                    addresses: self.addresses.clone(),
+                    discovery_port: self.chain.network().default_p2p_port(),
                 },
                 node_runtime.shutdown_receiver(),
             ),
