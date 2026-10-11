@@ -20,7 +20,11 @@ pub const BRAND: Color = Color::Rgb(0x3a, 0xd1, 0xd1);
 
 pub fn superscript(n: u32) -> String {
     const S: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
-    n.to_string().chars().filter_map(|c| c.to_digit(10)).map(|d| S[d as usize]).collect()
+    n.to_string()
+        .chars()
+        .filter_map(|c| c.to_digit(10))
+        .map(|d| S[d as usize])
+        .collect()
 }
 
 /// A btop-style panel: rounded corners in the panel's box colour, a red
@@ -30,9 +34,7 @@ pub fn bpanel(theme: &Theme, idx: u32, title: &str, tabs: &str, box_role: &str) 
     // Wrap a title in btop's notch glyphs: ─┐ … ┌ (box colour), the ┐/┌ notching
     // the label down into the top border line.
     let notch = |inner: Vec<Span<'static>>| {
-        let mut v = vec![
-            Span::styled("─┐", Style::default().fg(box_color)),
-        ];
+        let mut v = vec![Span::styled("─┐", Style::default().fg(box_color))];
         v.extend(inner);
         v.push(Span::styled("┌", Style::default().fg(box_color)));
         v
@@ -42,13 +44,26 @@ pub fn bpanel(theme: &Theme, idx: u32, title: &str, tabs: &str, box_role: &str) 
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(box_color))
         .title(Line::from(notch(vec![
-            Span::styled(superscript(idx), Style::default().fg(theme.c("hi_fg")).add_modifier(Modifier::BOLD)),
-            Span::styled(title.to_string(), Style::default().fg(theme.c("title")).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                superscript(idx),
+                Style::default()
+                    .fg(theme.c("hi_fg"))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                title.to_string(),
+                Style::default()
+                    .fg(theme.c("title"))
+                    .add_modifier(Modifier::BOLD),
+            ),
         ])));
     if !tabs.is_empty() {
         b = b.title(
-            Line::from(notch(vec![Span::styled(tabs.to_string(), Style::default().fg(theme.c("title")))]))
-                .right_aligned(),
+            Line::from(notch(vec![Span::styled(
+                tabs.to_string(),
+                Style::default().fg(theme.c("title")),
+            )]))
+            .right_aligned(),
         );
     }
     b
@@ -64,7 +79,11 @@ pub fn meter_spans(theme: &Theme, grad: &str, pct: f64, width: usize) -> Vec<Spa
     (0..width)
         .map(|i| {
             if i < filled {
-                let frac = if width > 1 { i as f64 / (width - 1) as f64 } else { 0.0 };
+                let frac = if width > 1 {
+                    i as f64 / (width - 1) as f64
+                } else {
+                    0.0
+                };
                 Span::styled("■", Style::default().fg(theme.g(grad, frac * 100.0)))
             } else {
                 Span::styled("■", Style::default().fg(theme.c("meter_bg")))
@@ -74,13 +93,29 @@ pub fn meter_spans(theme: &Theme, grad: &str, pct: f64, width: usize) -> Vec<Spa
 }
 
 /// `label  NN% ■■■■■■  value`.
-pub fn meter_line(theme: &Theme, label: &str, grad: &str, pct: f64, value: &str, bar_w: usize) -> Line<'static> {
+pub fn meter_line(
+    theme: &Theme,
+    label: &str,
+    grad: &str,
+    pct: f64,
+    value: &str,
+    bar_w: usize,
+) -> Line<'static> {
     let mut spans = vec![
-        Span::styled(format!("{label:<8}"), Style::default().fg(theme.c("inactive_fg"))),
-        Span::styled(format!("{pct:>3.0}% "), Style::default().fg(theme.c("main_fg"))),
+        Span::styled(
+            format!("{label:<8}"),
+            Style::default().fg(theme.c("inactive_fg")),
+        ),
+        Span::styled(
+            format!("{pct:>3.0}% "),
+            Style::default().fg(theme.c("main_fg")),
+        ),
     ];
     spans.extend(meter_spans(theme, grad, pct, bar_w));
-    spans.push(Span::styled(format!("  {value}"), Style::default().fg(theme.c("main_fg"))));
+    spans.push(Span::styled(
+        format!("  {value}"),
+        Style::default().fg(theme.c("main_fg")),
+    ));
     Line::from(spans)
 }
 
@@ -112,7 +147,11 @@ pub fn braille_graph(data: &[u64], max: u64, cols: usize, rows: usize) -> Vec<St
     }
     cells
         .iter()
-        .map(|row| row.iter().map(|&b| char::from_u32(0x2800 + b as u32).unwrap_or(' ')).collect())
+        .map(|row| {
+            row.iter()
+                .map(|&b| char::from_u32(0x2800 + b as u32).unwrap_or(' '))
+                .collect()
+        })
         .collect()
 }
 
@@ -172,7 +211,9 @@ pub fn clock_hms() -> String {
 pub fn parse_supply(line: &str) -> Option<u64> {
     let i = line.find("supply_atomic=")? + "supply_atomic=".len();
     let rest = &line[i..];
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 
@@ -191,7 +232,11 @@ pub fn human_cync(atomic: u64) -> String {
 
 pub fn short_hash(h: &str) -> String {
     if h.len() <= 14 {
-        if h.is_empty() { "…".into() } else { h.to_string() }
+        if h.is_empty() {
+            "…".into()
+        } else {
+            h.to_string()
+        }
     } else {
         format!("{}…{}", &h[..8], &h[h.len() - 4..])
     }
@@ -208,7 +253,10 @@ pub fn truncate(s: &str, max: usize) -> String {
 // ─── node-log parsing + icons ────────────────────────────────────────────────
 
 fn looks_like_level(s: &str) -> bool {
-    matches!(s, "ERROR" | "ERRO" | "WARN" | "WARNING" | "INFO" | "DEBUG" | "TRACE")
+    matches!(
+        s,
+        "ERROR" | "ERRO" | "WARN" | "WARNING" | "INFO" | "DEBUG" | "TRACE"
+    )
 }
 
 /// A single-width category icon (+ colour) for a feed line.
@@ -231,7 +279,11 @@ pub fn icon_for(theme: &Theme, level: &str, module: &str, msg: &str) -> (&'stati
         ("⇣", BRAND)
     } else if module.contains("sync_driver") || msg.contains("[IBD]") {
         ("⇅", gold)
-    } else if module.contains("peer_manager") || module.contains("connection") || msg.contains("handshake") || msg.contains("peer") {
+    } else if module.contains("peer_manager")
+        || module.contains("connection")
+        || msg.contains("handshake")
+        || msg.contains("peer")
+    {
         ("●", BRAND)
     } else if module.contains("randomx") || module.contains("pow") {
         ("◆", purple)
@@ -249,13 +301,19 @@ pub fn parse_log_line(theme: &Theme, line: &str) -> FeedLine {
     let t: Vec<&str> = line.split_whitespace().collect();
     if t.len() < 3 || !looks_like_level(t[2]) {
         return FeedLine {
-            spans: vec![("▸ ".to_string(), theme.c("inactive_fg")), (line.trim_end().to_string(), theme.c("main_fg"))],
+            spans: vec![
+                ("▸ ".to_string(), theme.c("inactive_fg")),
+                (line.trim_end().to_string(), theme.c("main_fg")),
+            ],
         };
     }
     let time = t[1];
     let level = t[2];
     let mut i = 3;
-    if t.get(i).map(|s| !s.chars().any(|c| c.is_ascii_alphanumeric())).unwrap_or(false) {
+    if t.get(i)
+        .map(|s| !s.chars().any(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or(false)
+    {
         i += 1;
     }
     let module = t.get(i).copied().unwrap_or("");

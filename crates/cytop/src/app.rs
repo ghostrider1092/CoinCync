@@ -164,7 +164,10 @@ impl App {
             }
             self.prev_blocks = Some(bf);
         }
-        push(&mut self.hash_hist, self.node.hashrate.round().max(0.0) as u64);
+        push(
+            &mut self.hash_hist,
+            self.node.hashrate.round().max(0.0) as u64,
+        );
         push(&mut self.mempool_hist, self.node.mempool);
     }
 
@@ -203,9 +206,17 @@ impl App {
     fn derive_events(&mut self, prev: &NodeInfo) {
         let now = self.node.clone();
         if now.online && !prev.online {
-            self.push_event("node", self.theme.c("proc_misc"), format!("rpc up — {} height={}", now.network, now.height));
+            self.push_event(
+                "node",
+                self.theme.c("proc_misc"),
+                format!("rpc up — {} height={}", now.network, now.height),
+            );
         } else if !now.online && prev.online {
-            self.push_event("node", self.theme.g("used", 100.0), "rpc unreachable — node down?".into());
+            self.push_event(
+                "node",
+                self.theme.g("used", 100.0),
+                "rpc unreachable — node down?".into(),
+            );
         }
         if !now.online {
             return;
@@ -214,22 +225,49 @@ impl App {
             let delta = now.height - prev.height;
             let short = short_hash(&now.top_hash);
             if delta == 1 {
-                self.push_event("chain::commit", BRAND, format!("BLOCK height={} diff={} tip={}", now.height, now.difficulty, short));
+                self.push_event(
+                    "chain::commit",
+                    BRAND,
+                    format!(
+                        "BLOCK height={} diff={} tip={}",
+                        now.height, now.difficulty, short
+                    ),
+                );
             } else {
-                self.push_event("sync_driver", self.theme.g("available", 60.0), format!("IBD +{delta} blocks → height={} tip={short}", now.height));
+                self.push_event(
+                    "sync_driver",
+                    self.theme.g("available", 60.0),
+                    format!("IBD +{delta} blocks → height={} tip={short}", now.height),
+                );
             }
         }
         if prev.online && now.blocks_found > prev.blocks_found {
-            self.push_event("miner", self.theme.g("available", 80.0), format!("⛏ block at height {} — Accepted", now.height));
+            self.push_event(
+                "miner",
+                self.theme.g("available", 80.0),
+                format!("⛏ block at height {} — Accepted", now.height),
+            );
         }
         if prev.online && now.peers != prev.peers {
-            self.push_event("net", self.theme.c("proc_misc"), format!("peers {}→{}", prev.peers, now.peers));
+            self.push_event(
+                "net",
+                self.theme.c("proc_misc"),
+                format!("peers {}→{}", prev.peers, now.peers),
+            );
         }
         if now.fork_stuck && !prev.fork_stuck {
-            self.push_event("sync", self.theme.g("used", 100.0), format!("FORK-STUCK — behind & stalled {}s", now.sync_stall_secs));
+            self.push_event(
+                "sync",
+                self.theme.g("used", 100.0),
+                format!("FORK-STUCK — behind & stalled {}s", now.sync_stall_secs),
+            );
         }
         if now.synced && !prev.synced {
-            self.push_event("sync", self.theme.g("free", 80.0), format!("fully synced at height {}", now.height));
+            self.push_event(
+                "sync",
+                self.theme.g("free", 80.0),
+                format!("fully synced at height {}", now.height),
+            );
         }
     }
 

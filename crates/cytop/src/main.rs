@@ -26,9 +26,12 @@ use crate::config::{Config, DEFAULT_REFRESH_MS, DEFAULT_RPC};
 use crate::theme::Theme;
 
 #[derive(Parser)]
-#[command(name = "cytop", about = "btop-architecture system + CoinCync node monitor")]
+#[command(
+    name = "cytop",
+    about = "btop-architecture system + CoinCync node monitor"
+)]
 struct Cli {
-    /// Node RPC URL to poll (overrides config; default http://127.0.0.1:28121).
+    /// Node RPC URL to poll (overrides config; default http://127.0.0.1:28081).
     #[arg(long)]
     rpc: Option<String>,
     /// Refresh interval, milliseconds (overrides config; default 1000).
@@ -49,11 +52,22 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Config: CLI > file > built-in default.
-    let config_path: PathBuf = cli.config.clone().map(PathBuf::from).unwrap_or_else(config::default_path);
+    let config_path: PathBuf = cli
+        .config
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(config::default_path);
     let cfg = Config::load(&config_path);
-    let rpc = cli.rpc.clone().or(cfg.rpc.clone()).unwrap_or_else(|| DEFAULT_RPC.to_string());
+    let rpc = cli
+        .rpc
+        .clone()
+        .or(cfg.rpc.clone())
+        .unwrap_or_else(|| DEFAULT_RPC.to_string());
     let log = cli.log.clone().or(cfg.log.clone());
-    let refresh_ms = cli.refresh_ms.or(cfg.refresh_ms).unwrap_or(DEFAULT_REFRESH_MS);
+    let refresh_ms = cli
+        .refresh_ms
+        .or(cfg.refresh_ms)
+        .unwrap_or(DEFAULT_REFRESH_MS);
     let theme_arg = cli.theme.clone().or(cfg.theme.clone());
 
     // Themes: built-ins, plus a file theme (path) inserted first, or select a
@@ -93,11 +107,21 @@ fn main() -> anyhow::Result<()> {
     ratatui::restore();
 
     // Persist the resolved settings (incl. the theme the user ended on).
-    Config::save(&config_path, &rpc, log.as_deref(), &app.config_theme(), refresh_ms);
+    Config::save(
+        &config_path,
+        &rpc,
+        log.as_deref(),
+        &app.config_theme(),
+        refresh_ms,
+    );
     res
 }
 
-fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, refresh: Duration) -> anyhow::Result<()> {
+fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    refresh: Duration,
+) -> anyhow::Result<()> {
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
 
@@ -105,7 +129,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, refresh: Duration
             match event::read()? {
                 Event::Key(k) => match k.code {
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(())
+                    }
                     KeyCode::Char(' ') => app.paused = !app.paused,
                     KeyCode::Char('t') | KeyCode::Char('T') => app.next_theme(),
                     KeyCode::Down | KeyCode::Char('j') => app.feed_scroll(1),

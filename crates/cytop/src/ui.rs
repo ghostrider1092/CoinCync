@@ -47,12 +47,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     ])
     .split(body[1]);
     // Left column stacks mem over disks (btop-style).
-    let left = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(mid[0]);
+    let left =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(mid[0]);
     draw_mem(f, left[0], app);
     draw_disks(f, left[1], app);
     draw_node(f, mid[1], app);
     // Right third stacks net over gpu.
-    let right = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(mid[2]);
+    let right =
+        Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(mid[2]);
     draw_net(f, right[0], app);
     draw_gpu(f, right[1], app);
     draw_activity(f, body[2], app);
@@ -66,15 +68,28 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let os = System::long_os_version().unwrap_or_default();
     let up = System::uptime();
     let line = Line::from(vec![
-        Span::styled("◈ cytop", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "◈ cytop",
+            Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!("  {host}  "), Style::default().fg(t.c("title"))),
         Span::styled(format!("{os}  "), Style::default().fg(t.c("inactive_fg"))),
-        Span::styled(format!("up {}h{:02}m", up / 3600, (up % 3600) / 60), Style::default().fg(t.c("inactive_fg"))),
+        Span::styled(
+            format!("up {}h{:02}m", up / 3600, (up % 3600) / 60),
+            Style::default().fg(t.c("inactive_fg")),
+        ),
         Span::styled(
             format!("   rpc {}", if app.node.online { "●" } else { "○" }),
-            Style::default().fg(if app.node.online { t.g("free", 80.0) } else { t.g("used", 100.0) }),
+            Style::default().fg(if app.node.online {
+                t.g("free", 80.0)
+            } else {
+                t.g("used", 100.0)
+            }),
         ),
-        Span::styled(format!("   {}", crate::draw::clock_hms()), Style::default().fg(t.c("inactive_fg"))),
+        Span::styled(
+            format!("   {}", crate::draw::clock_hms()),
+            Style::default().fg(t.c("inactive_fg")),
+        ),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -85,7 +100,10 @@ fn draw_alert(f: &mut Frame, area: Rect, app: &App) {
     let alert = if !n.online {
         Some(("⚠  node RPC offline", t.g("used", 100.0)))
     } else if n.fork_stuck {
-        Some(("⚠  FORK-STUCK — wedged on a minority fork; an operator reset may be needed", t.g("used", 100.0)))
+        Some((
+            "⚠  FORK-STUCK — wedged on a minority fork; an operator reset may be needed",
+            t.g("used", 100.0),
+        ))
     } else if n.mesh_degraded {
         Some(("⚠  mesh degraded — too few peers", t.g("available", 70.0)))
     } else {
@@ -95,7 +113,10 @@ fn draw_alert(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!(" {msg} "),
-                Style::default().fg(t.c("main_bg")).bg(col).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(t.c("main_bg"))
+                    .bg(col)
+                    .add_modifier(Modifier::BOLD),
             ))),
             area,
         );
@@ -110,7 +131,12 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &App) {
         t,
         1,
         "cpu",
-        &format!(" up {}d {:02}h{:02}m ", up / 86400, (up % 86400) / 3600, (up % 3600) / 60),
+        &format!(
+            " up {}d {:02}h{:02}m ",
+            up / 86400,
+            (up % 86400) / 3600,
+            (up % 3600) / 60
+        ),
         "cpu_box",
     );
     let inner = block.inner(area);
@@ -119,20 +145,40 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &App) {
     let core_w = 30u16.min(inner.width.saturating_sub(20));
     let parts = Layout::horizontal([Constraint::Min(0), Constraint::Length(core_w)]).split(inner);
 
-    let glines: Vec<Line> = braille_graph(&slice(&app.cpu_hist), 100, parts[0].width as usize, parts[0].height as usize)
-        .into_iter()
-        .map(|s| Line::from(Span::styled(s, Style::default().fg(t.g("cpu", cpu_now as f64)))))
-        .collect();
+    let glines: Vec<Line> = braille_graph(
+        &slice(&app.cpu_hist),
+        100,
+        parts[0].width as usize,
+        parts[0].height as usize,
+    )
+    .into_iter()
+    .map(|s| {
+        Line::from(Span::styled(
+            s,
+            Style::default().fg(t.g("cpu", cpu_now as f64)),
+        ))
+    })
+    .collect();
     f.render_widget(Paragraph::new(glines), parts[0]);
 
     let cpus = app.sys.cpus();
-    let brand = cpus.first().map(|c| c.brand().trim().to_string()).unwrap_or_default();
-    let brand = if brand.is_empty() { format!("{} cores", cpus.len()) } else { brand };
+    let brand = cpus
+        .first()
+        .map(|c| c.brand().trim().to_string())
+        .unwrap_or_default();
+    let brand = if brand.is_empty() {
+        format!("{} cores", cpus.len())
+    } else {
+        brand
+    };
     let cbox = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(t.c("cpu_box")))
-        .title(Span::styled(truncate(&brand, core_w.saturating_sub(2) as usize), Style::default().fg(t.c("title"))));
+        .title(Span::styled(
+            truncate(&brand, core_w.saturating_sub(2) as usize),
+            Style::default().fg(t.c("title")),
+        ));
     let cinner = cbox.inner(parts[1]);
     f.render_widget(cbox, parts[1]);
 
@@ -148,7 +194,10 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &App) {
 fn core_row(app: &App, label: &str, pct: f64, bar_w: usize) -> Line<'static> {
     let t = &app.theme;
     let mut spans = vec![
-        Span::styled(format!("{label:<4}"), Style::default().fg(t.c("inactive_fg"))),
+        Span::styled(
+            format!("{label:<4}"),
+            Style::default().fg(t.c("inactive_fg")),
+        ),
         Span::styled(format!("{pct:>3.0}% "), Style::default().fg(t.c("main_fg"))),
     ];
     if bar_w > 0 {
@@ -175,14 +224,33 @@ fn draw_mem(f: &mut Frame, area: Rect, app: &App) {
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Total   ", Style::default().fg(t.c("inactive_fg"))),
-            Span::styled(human_bytes(total), Style::default().fg(t.c("title")).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                human_bytes(total),
+                Style::default()
+                    .fg(t.c("title"))
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         meter_line(t, "Used", "used", pct(used), &human_bytes(used), bar_w),
-        meter_line(t, "Avail", "available", pct(avail), &human_bytes(avail), bar_w),
+        meter_line(
+            t,
+            "Avail",
+            "available",
+            pct(avail),
+            &human_bytes(avail),
+            bar_w,
+        ),
         meter_line(t, "Free", "free", pct(free), &human_bytes(free), bar_w),
     ];
     if stotal > 0 {
-        lines.push(meter_line(t, "Swap", "used", sused as f64 / stotal as f64 * 100.0, &human_bytes(sused), bar_w));
+        lines.push(meter_line(
+            t,
+            "Swap",
+            "used",
+            sused as f64 / stotal as f64 * 100.0,
+            &human_bytes(sused),
+            bar_w,
+        ));
     }
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -212,7 +280,10 @@ fn draw_disks(f: &mut Frame, area: Rect, app: &App) {
         lines.push(meter_line(t, &label, "used", pct, &value, bar_w));
     }
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled("no disks", Style::default().fg(t.c("inactive_fg")))));
+        lines.push(Line::from(Span::styled(
+            "no disks",
+            Style::default().fg(t.c("inactive_fg")),
+        )));
     }
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -225,10 +296,15 @@ fn draw_net(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     let nmax = app.down_hist.iter().copied().max().unwrap_or(1).max(1);
-    let glines: Vec<Line> = braille_graph(&slice(&app.down_hist), nmax, inner.width as usize, inner.height as usize)
-        .into_iter()
-        .map(|s| Line::from(Span::styled(s, Style::default().fg(t.g("download", 100.0)))))
-        .collect();
+    let glines: Vec<Line> = braille_graph(
+        &slice(&app.down_hist),
+        nmax,
+        inner.width as usize,
+        inner.height as usize,
+    )
+    .into_iter()
+    .map(|s| Line::from(Span::styled(s, Style::default().fg(t.g("download", 100.0)))))
+    .collect();
     f.render_widget(Paragraph::new(glines), inner);
 }
 
@@ -240,7 +316,11 @@ fn draw_gpu(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "gpu".into()
     };
-    let tab = if g.present { format!(" {} ", g.backend) } else { String::new() };
+    let tab = if g.present {
+        format!(" {} ", g.backend)
+    } else {
+        String::new()
+    };
     let block = bpanel(t, 7, &title, &tab, "net_box");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -250,7 +330,10 @@ fn draw_gpu(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled("gpu  n/a", Style::default().fg(dim))),
-                Line::from(Span::styled("(no nvidia-smi / GPU counters)", Style::default().fg(dim))),
+                Line::from(Span::styled(
+                    "(no nvidia-smi / GPU counters)",
+                    Style::default().fg(dim),
+                )),
             ]),
             inner,
         );
@@ -261,16 +344,29 @@ fn draw_gpu(f: &mut Frame, area: Rect, app: &App) {
     let mut lines = vec![meter_line(t, "util", "cpu", g.util, "", bar_w)];
     if g.mem_total > 0 {
         let pct = g.mem_used as f64 / g.mem_total as f64 * 100.0;
-        lines.push(meter_line(t, "vram", "used", pct, &format!("{}/{}", human_bytes(g.mem_used), human_bytes(g.mem_total)), bar_w));
+        lines.push(meter_line(
+            t,
+            "vram",
+            "used",
+            pct,
+            &format!("{}/{}", human_bytes(g.mem_used), human_bytes(g.mem_total)),
+            bar_w,
+        ));
     }
     let mut tp: Vec<Span> = Vec::new();
     if let Some(temp) = g.temp {
         tp.push(Span::styled("temp ", Style::default().fg(dim)));
-        tp.push(Span::styled(format!("{temp:.0}°C  "), Style::default().fg(t.g("cpu", (temp / 100.0 * 100.0).min(100.0)))));
+        tp.push(Span::styled(
+            format!("{temp:.0}°C  "),
+            Style::default().fg(t.g("cpu", (temp / 100.0 * 100.0).min(100.0))),
+        ));
     }
     if let Some(pw) = g.power {
         tp.push(Span::styled("power ", Style::default().fg(dim)));
-        tp.push(Span::styled(format!("{pw:.0} W"), Style::default().fg(t.c("main_fg"))));
+        tp.push(Span::styled(
+            format!("{pw:.0} W"),
+            Style::default().fg(t.c("main_fg")),
+        ));
     }
     if !tp.is_empty() {
         lines.push(Line::from(tp));
@@ -287,7 +383,10 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
 
     if !n.online {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled("RPC offline — start a node or pass --rpc", Style::default().fg(t.g("used", 100.0))))),
+            Paragraph::new(Line::from(Span::styled(
+                "RPC offline — start a node or pass --rpc",
+                Style::default().fg(t.g("used", 100.0)),
+            ))),
             inner,
         );
         return;
@@ -297,7 +396,12 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     let dim = t.c("inactive_fg");
     let mut lines: Vec<Line> = vec![Line::from(vec![
         Span::styled("height  ", Style::default().fg(dim)),
-        Span::styled(n.height.to_string(), Style::default().fg(t.c("title")).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            n.height.to_string(),
+            Style::default()
+                .fg(t.c("title"))
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("   diff ", Style::default().fg(dim)),
         Span::styled(n.difficulty.clone(), Style::default().fg(t.c("main_fg"))),
     ])];
@@ -309,23 +413,55 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     } else if n.fork_stuck {
         lines.push(Line::from(vec![
             Span::styled("state   ", Style::default().fg(dim)),
-            Span::styled("● FORK-STUCK", Style::default().fg(t.g("used", 100.0)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "● FORK-STUCK",
+                Style::default()
+                    .fg(t.g("used", 100.0))
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
     } else {
         let pct = n.height as f64 / n.target_height.max(n.height).max(1) as f64 * 100.0;
-        lines.push(meter_line(t, "sync", "cpu", pct, &format!("{}/{}", n.height, n.target_height), bar_w));
+        lines.push(meter_line(
+            t,
+            "sync",
+            "cpu",
+            pct,
+            &format!("{}/{}", n.height, n.target_height),
+            bar_w,
+        ));
     }
-    lines.push(meter_line(t, "peers", "process", (n.peers as f64 / 16.0 * 100.0).min(100.0), &format!("{}/16", n.peers), bar_w));
+    lines.push(meter_line(
+        t,
+        "peers",
+        "process",
+        (n.peers as f64 / 16.0 * 100.0).min(100.0),
+        &format!("{}/16", n.peers),
+        bar_w,
+    ));
     let privacy = if n.peers >= 3 {
         Span::styled("● Baffle adequate", Style::default().fg(t.g("free", 80.0)))
     } else {
-        Span::styled("● Baffle size-limited", Style::default().fg(t.g("available", 70.0)))
+        Span::styled(
+            "● Baffle size-limited",
+            Style::default().fg(t.g("available", 70.0)),
+        )
     };
-    lines.push(Line::from(vec![Span::styled("privacy ", Style::default().fg(dim)), privacy]));
+    lines.push(Line::from(vec![
+        Span::styled("privacy ", Style::default().fg(dim)),
+        privacy,
+    ]));
 
     let hmax = app.hash_hist.iter().copied().max().unwrap_or(1).max(1) as f64;
     if n.is_mining {
-        lines.push(meter_line(t, "hashR", "cpu", n.hashrate / hmax * 100.0, &human_hashrate(n.hashrate), bar_w));
+        lines.push(meter_line(
+            t,
+            "hashR",
+            "cpu",
+            n.hashrate / hmax * 100.0,
+            &human_hashrate(n.hashrate),
+            bar_w,
+        ));
     } else {
         lines.push(Line::from(vec![
             Span::styled("hashR   ", Style::default().fg(dim)),
@@ -334,9 +470,15 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     }
     lines.push(Line::from(vec![
         Span::styled("blocks  ", Style::default().fg(dim)),
-        Span::styled(n.blocks_found.to_string(), Style::default().fg(t.c("main_fg"))),
+        Span::styled(
+            n.blocks_found.to_string(),
+            Style::default().fg(t.c("main_fg")),
+        ),
         Span::styled("   mempool ", Style::default().fg(dim)),
-        Span::styled(format!("{} tx", n.mempool), Style::default().fg(t.c("main_fg"))),
+        Span::styled(
+            format!("{} tx", n.mempool),
+            Style::default().fg(t.c("main_fg")),
+        ),
     ]));
 
     // Shielded (Spark) pool: coin count + short anchor root. Empty while
@@ -349,7 +491,10 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(t.g("available", 80.0)),
             ),
             Span::styled("   anchor ", Style::default().fg(dim)),
-            Span::styled(n.shielded_anchor.clone(), Style::default().fg(t.c("main_fg"))),
+            Span::styled(
+                n.shielded_anchor.clone(),
+                Style::default().fg(t.c("main_fg")),
+            ),
         ]));
     } else {
         lines.push(Line::from(vec![
@@ -362,7 +507,9 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     // derived from supply_atomic deltas in the log feed). ESTIMATE ONLY — ignores
     // reward drift across blocks, coinbase maturity, and anything spent.
     let earned = match app.block_reward {
-        Some(r) if n.blocks_found > 0 => format!("≈ {}", human_cync(r.saturating_mul(n.blocks_found))),
+        Some(r) if n.blocks_found > 0 => {
+            format!("≈ {}", human_cync(r.saturating_mul(n.blocks_found)))
+        }
         _ => "—".to_string(),
     };
     lines.push(Line::from(vec![
@@ -372,10 +519,16 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
     ]));
 
     let gold = t.g("available", 80.0);
-    let flashing = app.block_flash.map(|x| x.elapsed() < std::time::Duration::from_secs(3)).unwrap_or(false);
+    let flashing = app
+        .block_flash
+        .map(|x| x.elapsed() < std::time::Duration::from_secs(3))
+        .unwrap_or(false);
     let diff_val: f64 = n.difficulty.parse().unwrap_or(0.0);
     if flashing {
-        lines.push(Line::from(Span::styled("✦ ⛏ BLOCK FOUND! ⛏ ✦", Style::default().fg(gold).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(
+            "✦ ⛏ BLOCK FOUND! ⛏ ✦",
+            Style::default().fg(gold).add_modifier(Modifier::BOLD),
+        )));
     } else if n.is_mining {
         let (art, strike) = mining_art(app.frame);
         let eta = if n.hashrate > 0.0 && diff_val > 0.0 {
@@ -388,7 +541,10 @@ fn draw_node(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(eta, Style::default().fg(dim)),
         ]));
     } else {
-        lines.push(Line::from(Span::styled("(-_-) zzz  idle", Style::default().fg(dim))));
+        lines.push(Line::from(Span::styled(
+            "(-_-) zzz  idle",
+            Style::default().fg(dim),
+        )));
     }
 
     f.render_widget(Paragraph::new(lines), inner);
@@ -411,8 +567,21 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &mut App) {
         } else {
             "waiting for chain activity…"
         };
-        let block = bpanel(&app.theme, 5, "chain-activity", &format!(" {src} "), "proc_box");
-        f.render_widget(Paragraph::new(Line::from(Span::styled(wait, Style::default().fg(app.theme.c("inactive_fg"))))).block(block), area);
+        let block = bpanel(
+            &app.theme,
+            5,
+            "chain-activity",
+            &format!(" {src} "),
+            "proc_box",
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                wait,
+                Style::default().fg(app.theme.c("inactive_fg")),
+            )))
+            .block(block),
+            area,
+        );
         return;
     }
 
@@ -425,7 +594,10 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|e| {
             ListItem::new(Line::from(
-                e.spans.iter().map(|(txt, c)| Span::styled(txt.clone(), Style::default().fg(*c))).collect::<Vec<_>>(),
+                e.spans
+                    .iter()
+                    .map(|(txt, c)| Span::styled(txt.clone(), Style::default().fg(*c)))
+                    .collect::<Vec<_>>(),
             ))
         })
         .collect();
@@ -439,7 +611,9 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &mut App) {
     let hl = if app.feed_follow {
         Style::default()
     } else {
-        Style::default().bg(app.theme.c("selected_bg")).add_modifier(Modifier::BOLD)
+        Style::default()
+            .bg(app.theme.c("selected_bg"))
+            .add_modifier(Modifier::BOLD)
     };
     let list = List::new(items).block(block).highlight_style(hl);
     f.render_stateful_widget(list, area, &mut app.feed_state);
@@ -458,18 +632,38 @@ fn draw_activity(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
-    let key = |s: &'static str| Span::styled(s, Style::default().fg(t.c("hi_fg")).add_modifier(Modifier::BOLD));
+    let key = |s: &'static str| {
+        Span::styled(
+            s,
+            Style::default()
+                .fg(t.c("hi_fg"))
+                .add_modifier(Modifier::BOLD),
+        )
+    };
     let lbl = |s: &'static str| Span::styled(s, Style::default().fg(t.c("inactive_fg")));
     let mut hint = vec![
-        key("q"), lbl(" quit  "),
-        key("j/k"), lbl(" scroll  "),
-        key("G"), lbl(" live  "),
-        key("space"), lbl(" pause  "),
-        key("t"), lbl(" theme:"),
-        Span::styled(format!("{}  ", app.theme_name), Style::default().fg(t.c("title"))),
+        key("q"),
+        lbl(" quit  "),
+        key("j/k"),
+        lbl(" scroll  "),
+        key("G"),
+        lbl(" live  "),
+        key("space"),
+        lbl(" pause  "),
+        key("t"),
+        lbl(" theme:"),
+        Span::styled(
+            format!("{}  ", app.theme_name),
+            Style::default().fg(t.c("title")),
+        ),
     ];
     if app.paused {
-        hint.push(Span::styled("PAUSED  ", Style::default().fg(t.g("available", 70.0)).add_modifier(Modifier::BOLD)));
+        hint.push(Span::styled(
+            "PAUSED  ",
+            Style::default()
+                .fg(t.g("available", 70.0))
+                .add_modifier(Modifier::BOLD),
+        ));
     }
     hint.push(Span::styled("◈ cytop", Style::default().fg(BRAND)));
     f.render_widget(Paragraph::new(Line::from(hint)), area);

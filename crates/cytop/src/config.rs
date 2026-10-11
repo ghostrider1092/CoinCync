@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_RPC: &str = "http://127.0.0.1:28121";
+pub const DEFAULT_RPC: &str = "http://127.0.0.1:28081";
 pub const DEFAULT_REFRESH_MS: u64 = 1000;
 
 #[derive(Clone, Default)]
@@ -66,5 +66,30 @@ pub fn default_path() -> PathBuf {
         return PathBuf::from(appdata).join("cytop").join("cytop.conf");
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".config").join("cytop").join("cytop.conf")
+    PathBuf::from(home)
+        .join(".config")
+        .join("cytop")
+        .join("cytop.conf")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_rpc_points_at_the_testnet_node_port() {
+        // cytop polls a node's JSON-RPC; the testnet node RPC port is 28081. A
+        // wrong default (it was 28121) means cytop silently can't reach a stock
+        // testnet node. Lock the port so it can't regress.
+        assert!(
+            DEFAULT_RPC.ends_with(":28081"),
+            "default RPC must target the testnet node RPC port 28081, got {DEFAULT_RPC}"
+        );
+        assert!(DEFAULT_RPC.starts_with("http://"));
+    }
+
+    #[test]
+    fn default_refresh_is_one_second() {
+        assert_eq!(DEFAULT_REFRESH_MS, 1000);
+    }
 }

@@ -60,7 +60,15 @@ theme[process_end]="#d45454"
 
 /// Gradient bases we precompute into 101-step ramps.
 const GRADIENTS: &[&str] = &[
-    "cpu", "used", "free", "available", "cached", "download", "upload", "process", "temp",
+    "cpu",
+    "used",
+    "free",
+    "available",
+    "cached",
+    "download",
+    "upload",
+    "process",
+    "temp",
 ];
 
 // ─── built-in themes ──────────────────────────────────────────────────────────
@@ -224,8 +232,12 @@ impl Theme {
                 continue;
             }
             // theme[key]="value"
-            let Some(rest) = line.strip_prefix("theme[") else { continue };
-            let Some((key, after)) = rest.split_once(']') else { continue };
+            let Some(rest) = line.strip_prefix("theme[") else {
+                continue;
+            };
+            let Some((key, after)) = rest.split_once(']') else {
+                continue;
+            };
             let val = after.trim_start_matches('=').trim().trim_matches('"');
             if let Some(c) = parse_color(val) {
                 colors.insert(key.trim().to_string(), c);
@@ -325,7 +337,9 @@ fn rgb(c: Color) -> (u8, u8, u8) {
 }
 
 fn lerp(a: u8, b: u8, t: f64) -> u8 {
-    (a as f64 + (b as f64 - a as f64) * t).round().clamp(0.0, 255.0) as u8
+    (a as f64 + (b as f64 - a as f64) * t)
+        .round()
+        .clamp(0.0, 255.0) as u8
 }
 
 fn lerp_c(a: Color, b: Color, t: f64) -> Color {
@@ -341,8 +355,12 @@ fn build_gradient(start: Option<Color>, mid: Option<Color>, end: Option<Color>) 
     };
     match (mid, end) {
         (None, None) => vec![start; 101],
-        (None, Some(end)) => (0..=100).map(|i| lerp_c(start, end, i as f64 / 100.0)).collect(),
-        (Some(mid), None) => (0..=100).map(|i| lerp_c(start, mid, i as f64 / 100.0)).collect(),
+        (None, Some(end)) => (0..=100)
+            .map(|i| lerp_c(start, end, i as f64 / 100.0))
+            .collect(),
+        (Some(mid), None) => (0..=100)
+            .map(|i| lerp_c(start, mid, i as f64 / 100.0))
+            .collect(),
         (Some(mid), Some(end)) => (0..=100)
             .map(|i| {
                 if i <= 50 {

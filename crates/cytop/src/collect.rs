@@ -74,7 +74,11 @@ impl NodeClient {
             online: true,
             network: {
                 let n = s("network");
-                if n.is_empty() { "?".into() } else { n }
+                if n.is_empty() {
+                    "?".into()
+                } else {
+                    n
+                }
             },
             height: u("height"),
             target_height: u("target_height"),
@@ -86,10 +90,17 @@ impl NodeClient {
             peers: u("peer_count"),
             difficulty: {
                 let d = s("difficulty");
-                if d.is_empty() { "?".into() } else { d }
+                if d.is_empty() {
+                    "?".into()
+                } else {
+                    d
+                }
             },
             mempool: u("mempool_size"),
-            is_mining: m.get("is_mining").and_then(|v| v.as_bool()).unwrap_or(false),
+            is_mining: m
+                .get("is_mining")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             hashrate: m.get("hashrate").and_then(|v| v.as_f64()).unwrap_or(0.0),
             hashes_total: m.get("hashes_total").and_then(|v| v.as_u64()).unwrap_or(0),
             blocks_found: m.get("blocks_found").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -104,7 +115,13 @@ impl NodeClient {
 
     fn call(&self, method: &str) -> Option<serde_json::Value> {
         let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":[]});
-        self.client.post(&self.rpc).json(&body).send().ok()?.json().ok()
+        self.client
+            .post(&self.rpc)
+            .json(&body)
+            .send()
+            .ok()?
+            .json()
+            .ok()
     }
 }
 
@@ -187,7 +204,9 @@ fn typeperf_gpu() -> Option<GpuInfo> {
     let text = String::from_utf8_lossy(&out.stdout);
     // typeperf CSV: a header row of quoted counter names, then a data row:
     // "timestamp","v1","v2",... We take the max numeric value in the data row.
-    let data = text.lines().find(|l| l.starts_with('"') && l.contains(','))?;
+    let data = text
+        .lines()
+        .find(|l| l.starts_with('"') && l.contains(','))?;
     let mut max = 0.0f64;
     let mut any = false;
     for tok in data.split(',').skip(1) {
