@@ -47,10 +47,14 @@
 //!   `handle_verack_behind_peer_issues_getheaders_and_replay_does_not_reissue`.
 //! - **§6 `handle_ping` / `handle_pong`** — INVARIANT: a malformed (<8-byte)
 //!   Ping scores ProtocolViolation and never elicits a Pong; a well-formed
-//!   Ping echoes its nonce exactly; Pong itself is a no-op.
-//!   THREAT: P5-N5 malformed-ping spam evading misbehavior scoring.
+//!   Ping echoes its nonce exactly; a Pong is matched against the nonce we
+//!   sent that peer and, only if it matches, becomes its latency sample; a
+//!   malformed Pong scores ProtocolViolation like a malformed Ping.
+//!   THREAT: P5-N5 malformed-ping spam evading misbehavior scoring; forged
+//!   or replayed Pongs steering the latency score.
 //!   TESTS: `handle_ping_malformed_scores_and_sends_no_pong`,
-//!   `handle_ping_echoes_nonce_as_pong`, `handle_pong_is_a_noop`.
+//!   `handle_ping_echoes_nonce_as_pong`, `handle_pong_records_rtt_for_our_nonce`,
+//!   `handle_pong_ignores_unknown_nonce_and_scores_malformed`.
 //! - **§7 `handle_reject`** — INVARIANT: Reject only adjusts peer reputation by
 //!   a fixed benign-disagreement penalty and never feeds the ban scorer.
 //!   THREAT: legitimate protocol disagreement being over-penalized into an
@@ -62,6 +66,7 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, trace, warn};
 
 use crate::chain::SharedBlockchain;
+use crate::clock::MonoInstant;
 use crate::error::Result;
 use crate::network::dandelion::DandelionRouter;
 use crate::network::peer::{PeerId, PeerInfo, PeerState};
@@ -589,7 +594,45 @@ pub(super) async fn handle_ping(
     Ok(())
 }
 
-pub(super) fn handle_pong() {}
+/// Pong: if the nonce is the one `run_ping_tick` sent this peer, the round
+/// trip becomes its latency sample. Any other nonce is ignored. The trip is
+/// measured to `received_at`, the moment the frame came off the socket: this
+/// handler can run seconds later during IBD, behind block verification in
+/// the same processor queue, and that wait is ours, not the peer's.
+pub(super) async fn handle_pong(
+    peer_id: PeerId,
+    payload: &[u8],
+    received_at: MonoInstant,
+    peers: &DashMap<PeerId, PeerInfo>,
+    scorer: &RwLock<PeerScorer>,
+) {
+    let addr = match peers.get(&peer_id).map(|p| p.addr) {
+        Some(addr) => addr,
+        None => return,
+    };
+    if payload.len() < 8 {
+        warn!("Malformed Pong (<8 bytes) from peer {:?}", &peer_id[..4]);
+        scorer
+            .write()
+            .await
+            .get_or_create(addr)
+            .record_misbehavior(crate::network::scoring::MisbehaviorType::ProtocolViolation);
+        return;
+    }
+    let nonce = u64::from_le_bytes(payload[..8].try_into().expect("pong length was validated"));
+    if let Some(rtt) = scorer
+        .write()
+        .await
+        .get_or_create(addr)
+        .record_pong(nonce, received_at)
+    {
+        trace!(
+            "Pong from peer {:?}: rtt {} ms",
+            &peer_id[..4],
+            rtt.as_millis()
+        );
+    }
+}
 
 pub(super) fn handle_reject(peer_id: PeerId, peers: &DashMap<PeerId, PeerInfo>) {
     // Reject can reflect benign disagreement, so it must not feed the ban scorer.
@@ -815,9 +858,48 @@ mod handler_tests {
         assert_eq!(sent, Message::pong(MAGIC, nonce).to_bytes().unwrap());
     }
 
-    #[test]
-    fn handle_pong_is_a_noop() {
-        handle_pong();
+    #[tokio::test]
+    async fn handle_pong_records_rtt_for_our_nonce() {
+        let peer_id = [9u8; 32];
+        let addr = addr_for(30009);
+        let peers = peers_with(peer_id, addr, false);
+        let scorer = RwLock::new(PeerScorer::new());
+        let nonce = 0x0123_4567_89ab_cdefu64;
+        scorer
+            .write()
+            .await
+            .get_or_create(addr)
+            .record_ping_sent(nonce);
+
+        let received_at = crate::clock::mono_now() + std::time::Duration::from_millis(40);
+        handle_pong(peer_id, &nonce.to_le_bytes(), received_at, &peers, &scorer).await;
+
+        let latency = scorer.read().await.get(&addr).unwrap().latency_ms;
+        assert!(
+            (40..1000).contains(&latency),
+            "placeholder replaced by the measured rtt: {latency}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_pong_ignores_unknown_nonce_and_scores_malformed() {
+        let peer_id = [10u8; 32];
+        let addr = addr_for(30010);
+        let peers = peers_with(peer_id, addr, false);
+        let scorer = RwLock::new(PeerScorer::new());
+        scorer.write().await.get_or_create(addr).record_ping_sent(1);
+
+        let now = crate::clock::mono_now();
+        handle_pong(peer_id, &2u64.to_le_bytes(), now, &peers, &scorer).await;
+        let score = scorer.read().await.get(&addr).unwrap().clone();
+        assert_eq!(score.latency_ms, 1000, "unknown nonce leaves latency alone");
+        assert_eq!(score.reputation, 50, "and is not misbehaviour");
+
+        handle_pong(peer_id, &[0u8; 4], now, &peers, &scorer).await;
+        assert!(
+            scorer.read().await.get(&addr).unwrap().reputation < 50,
+            "malformed pong is scored like a malformed ping"
+        );
     }
 
     #[test]

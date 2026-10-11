@@ -51,23 +51,154 @@ use coincync::transaction::Transaction;
 use crate::daemon::DaemonClient;
 use crate::hasher::{HashInput, Hasher};
 
-/// How many blocks the local tip may lead the best peer's advertised
-/// height before we treat it as a private fork and refuse to mine.
-/// A healthy solo miner leads by 0–2 blocks (peers adopt each block
-/// within a beat); a sustained lead this large means peers are NOT
-/// adopting our blocks — the 2026-07-08 runaway-fork signature.
-const FORK_DIVERGENCE_MARGIN: u64 = 25;
+// Fork-divergence gate: shared with the built-in miner, see
+// `coincync::mining::{fork_diverged, FORK_DIVERGENCE_MARGIN}`.
+use coincync::mining::{fork_diverged, FORK_DIVERGENCE_MARGIN};
 
-/// Pure predicate for the miner's fork-divergence gate.
-///
-/// Returns `true` when the local tip has run so far ahead of every peer
-/// that our blocks are provably not being adopted — i.e. we are mining a
-/// private fork and must stop. `peer_target == 0` means "no peer height
-/// reported yet", which is NOT divergence (the separate peer-count gate
-/// covers the empty-mesh case); we return `false` so we don't wedge a
-/// genuinely-fresh node that simply hasn't heard a peer height.
-fn fork_diverged(local_height: u64, peer_target: u64, margin: u64) -> bool {
-    peer_target > 0 && local_height > peer_target.saturating_add(margin)
+/// One-line condition-colored LIVE heartbeat for plain-CLI solo mining,
+/// printed on a cadence from the mining loop. Suppressed under `--tui` (which
+/// renders its own live dashboard). Colors follow the XMRig convention —
+/// green = healthy, amber = attention, red = fault — applied per-field by that
+/// field's OWN condition, with the leading dot showing the WORST of them so the
+/// line reads at a glance. Degrades to a plain, uncolored line (with `[ok]` /
+/// `[!]` / `[X]` glyphs) when stdout is not a TTY, so it is still useful in a
+/// systemd journal. All values are live: hashrate vs this rig's peak, the
+/// node's sync/height/difficulty (cached from the last good get_info), peer
+/// count, tip age, RandomX mode, and blocks found.
+#[allow(clippy::too_many_arguments)]
+fn print_live_status(
+    m: &crate::metrics::MetricsState,
+    node_ok: bool,
+    synced: Option<bool>,
+    height: Option<u64>,
+    difficulty: Option<&str>,
+    cur_hps: u64,
+    peak_hps: u64,
+    blocks_found: u64,
+) {
+    use crossterm::style::{Color, Stylize};
+    use std::io::IsTerminal;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let term = std::io::stdout().is_terminal();
+    let teal_dim = Color::Rgb { r: 58, g: 130, b: 122 };
+    let green = Color::Rgb { r: 127, g: 184, b: 121 };
+    let amber = Color::Rgb { r: 218, g: 183, b: 94 };
+    let red = Color::Rgb { r: 209, g: 108, b: 108 };
+    let cyan = Color::Rgb { r: 122, g: 200, b: 214 };
+    let muted = Color::Rgb { r: 138, g: 148, b: 146 };
+    let p = |s: String, col: Color| if term { s.with(col).to_string() } else { s };
+    let pb = |s: String, col: Color| if term { s.with(col).bold().to_string() } else { s };
+    // Human-readable hashrate via the same auto-scaling formatter the TUI + bench
+    // use, so "2300" reads as "2.3 KH/s" instead of a bare count a tired operator
+    // misreads by 1000x.
+    let fmt_hr = |hps: u64| {
+        let (d, u) = crate::tui_blockfont::format_hashrate(hps);
+        format!("{d} {u}")
+    };
+
+    let peers = m.peers.load(Relaxed);
+    let tip_age = m.tip_age_secs.load(Relaxed);
+    let light = m.randomx_light_mode.load(Relaxed) == 1;
+
+    // Per-field severity rolls up into the leading dot (0 ok / 1 attention / 2 fault).
+    let mut worst: u8 = 0;
+    if !node_ok {
+        worst = 2;
+    }
+    if light {
+        worst = worst.max(1);
+    }
+
+    // Hashrate vs this rig's observed peak.
+    let (hr, hr_col) = if cur_hps == 0 {
+        if node_ok {
+            worst = worst.max(2);
+        }
+        (fmt_hr(0), if node_ok { red } else { muted })
+    } else if peak_hps > 0 && cur_hps.saturating_mul(2) < peak_hps {
+        worst = worst.max(1);
+        (fmt_hr(cur_hps), amber)
+    } else {
+        (fmt_hr(cur_hps), green)
+    };
+
+    // Sync + peers drive severity too.
+    let sync_seg = match synced {
+        Some(true) => p("synced".into(), green),
+        Some(false) => {
+            worst = worst.max(1);
+            p("syncing".into(), amber)
+        }
+        None => p("sync ?".into(), muted),
+    };
+    let peer_col = if peers == 0 {
+        if node_ok {
+            worst = worst.max(2);
+        }
+        red
+    } else if peers < 3 {
+        worst = worst.max(1);
+        amber
+    } else {
+        green
+    };
+
+    let dot_col = match worst {
+        0 => green,
+        1 => amber,
+        _ => red,
+    };
+    let dot = if term {
+        "●".with(dot_col).to_string()
+    } else {
+        match worst {
+            0 => "[ok]",
+            1 => "[!]",
+            _ => "[X]",
+        }
+        .to_string()
+    };
+    let tag = if term {
+        "MINER".with(teal_dim).bold().to_string()
+    } else {
+        "MINER".to_string()
+    };
+    let sep = p(" · ".into(), muted);
+
+    // Node unreachable: don't show stale chain fields — report the fault plus
+    // the one thing still true (our own hashrate), and bail.
+    if !node_ok {
+        println!(
+            "   {dot} {tag}  {}{sep}{}",
+            p("node unreachable — retrying".into(), red),
+            pb(hr, hr_col)
+        );
+        return;
+    }
+
+    let mut segs: Vec<String> = Vec::new();
+    segs.push(pb(hr, hr_col));
+    if peak_hps > 0 {
+        segs.push(p(format!("peak {}", fmt_hr(peak_hps)), muted));
+    }
+    if let Some(h) = height {
+        segs.push(format!("{} {}", p("height".into(), muted), pb(format!("{h}"), cyan)));
+    }
+    segs.push(sync_seg);
+    segs.push(format!("{} {}", pb(format!("{peers}"), peer_col), p("peers".into(), muted)));
+    if light {
+        segs.push(p("LIGHT".into(), amber));
+    }
+    if let Some(d) = difficulty {
+        segs.push(format!("{} {}", p("diff".into(), muted), pb(d.to_string(), cyan)));
+    }
+    segs.push(p(format!("tip {tip_age}s"), if tip_age > 120 { amber } else { muted }));
+    if blocks_found > 0 {
+        segs.push(format!("{} {}", pb(format!("{blocks_found}"), green), p("blocks".into(), muted)));
+    }
+
+    println!("   {dot} {tag}  {}", segs.join(&sep));
 }
 
 /// One run of the solo mining loop. Returns when the daemon connection
@@ -81,6 +212,7 @@ fn fork_diverged(local_height: u64, peer_target: u64, margin: u64) -> bool {
 /// Auto-reconnect: on `get_block_template` or `submit_block` errors we
 /// log and retry with exponential backoff (1s, 2s, 4s, ..., capped at
 /// 60s). The loop never bails — the operator decides when to stop.
+#[allow(clippy::too_many_arguments)] // mining loop config: node + chain + metrics + heartbeat
 pub async fn run_solo(
     daemon: &DaemonClient,
     address_str: &str,
@@ -89,6 +221,9 @@ pub async fn run_solo(
     threads: usize,
     metrics: Option<std::sync::Arc<crate::metrics::MetricsState>>,
     signal_bits: coincync::consensus::fork_signal::SignalBits,
+    // Print the colored live heartbeat to stdout (plain-CLI). False under --tui,
+    // which owns the terminal with its own dashboard.
+    live_status: bool,
 ) -> Result<()> {
     bind_randomx_genesis_for_network(network);
 
@@ -107,6 +242,48 @@ pub async fn run_solo(
         "orchestrator: solo mining loop starting"
     );
 
+    // Hashrate-health guard (startup). Detect if RandomX resolved to LIGHT mode
+    // while we're MINING — a ~5-10x hashrate loss. Two causes this catches that
+    // the pow layer does NOT warn about (it only warns on a full-mem *alloc
+    // failure*): COINCYNC_RANDOMX_LIGHT_MODE set in the env, or node_mining_active
+    // never set (an entry point that forgot activate_full_mem_hashing — the #145
+    // class of bug that silently crippled the Sep-7 rig to light speed). A real
+    // miner should always be full-mem, so this is loud + exported as a metric a
+    // monitor can alert on.
+    let light_forced = std::env::var("COINCYNC_RANDOMX_LIGHT_MODE")
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false);
+    let mining_active = coincync::consensus::pow::node_mining_active();
+    if light_forced || !mining_active {
+        if let Some(m) = metrics.as_ref() {
+            m.randomx_light_mode
+                .store(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let why = if light_forced {
+            "COINCYNC_RANDOMX_LIGHT_MODE is set in the environment"
+        } else {
+            "node_mining_active was never set (activate_full_mem_hashing not called for this entry point)"
+        };
+        warn!(
+            light_forced,
+            mining_active,
+            why,
+            "orchestrator: MINING IN LIGHT-MODE RandomX — expect ~5-10x LOWER hashrate than full-mem. \
+             Fix: unset COINCYNC_RANDOMX_LIGHT_MODE and ensure ~2.5 GB free RAM for the full dataset."
+        );
+    } else if let Some(m) = metrics.as_ref() {
+        m.randomx_light_mode
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // Hashrate-health guard (runtime). Track this rig's own peak sustained
+    // hashrate and flag a sustained drop below half of it — catches a full-mem
+    // -> light fallback under RAM pressure, thermal throttling, or CPU
+    // contention, none of which the static light-mode flag above can see.
+    let mining_start = Instant::now();
+    let mut peak_hps: u64 = 0;
+    let mut last_health_warn: Option<Instant> = None;
+
     let mut last_get_info: Option<Instant> = None;
 
     // Sync gate state (added 2026-06-03 in response to barns1253 report).
@@ -120,6 +297,71 @@ pub async fn run_solo(
     let mut cached_synced: bool = false;
     const SYNC_CACHE_SECS: u64 = 30;
     const SYNC_WAIT_SECS: u64 = 30; // sleep this long when unsynced before re-checking
+
+    // Live heartbeat state. Printed every LIVE_STATUS_SECS off the periodic
+    // get_info below; chain fields are cached from the last good get_info so the
+    // line still renders (amber/red) across a transient node miss.
+    let mut last_status: Option<Instant> = None;
+    let mut last_synced: Option<bool> = None;
+    let mut last_height: Option<u64> = None;
+    let mut last_diff: Option<String> = None;
+    const LIVE_STATUS_SECS: u64 = 30;
+
+    // One-shot "dataset ready" milestone (XMRig's `dataset ready (Xms)` line,
+    // honest): fires the first time we observe a non-zero hashrate, i.e. the
+    // RandomX cache/dataset finished building and workers are actually hashing.
+    let mut dataset_ready_logged = false;
+
+    // Dataset mode (full-mem vs light) is fixed for this process — compute once
+    // and share it between the build spinner and the one-shot ready line.
+    let full_mem = mining_active && !light_forced;
+    let dataset_mode = if full_mem { "full-mem 2048 MB" } else { "light 256 MB" };
+
+    // Indeterminate ELAPSED spinner for the FIRST RandomX dataset build. That
+    // build is one blocking FFI call (~30-60s full-mem, minutes single-threaded)
+    // during which the library falls silent after two early tracing lines — so a
+    // plain CLI would otherwise show dead-air. This is NOT a % progress bar
+    // (true progress lives behind the lock-covered pow.rs); just a braille frame
+    // + MM:SS since start. Shown ONLY on a plain-CLI TTY: under --tui the
+    // dashboard owns the screen, and when piped to a journal the one-shot
+    // "dataset ready (Xs)" line already covers the wait. Stopped (and its line
+    // cleared) at the dataset-ready milestone below — only the first build
+    // blocks, so there is no per-epoch re-arm.
+    let spinner_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut spinner_handle: Option<std::thread::JoinHandle<()>> = None;
+    {
+        use std::io::IsTerminal as _;
+        if live_status && std::io::stdout().is_terminal() {
+            let stop = spinner_stop.clone();
+            let start = mining_start;
+            let mode = dataset_mode;
+            spinner_handle = Some(std::thread::spawn(move || {
+                use crossterm::style::{Color, Stylize};
+                use std::io::Write as _;
+                use std::sync::atomic::Ordering::Relaxed;
+                let teal = Color::Rgb { r: 86, g: 194, b: 180 };
+                let body = Color::Rgb { r: 224, g: 230, b: 228 };
+                let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                let mut i = 0usize;
+                while !stop.load(Relaxed) {
+                    let secs = start.elapsed().as_secs();
+                    print!(
+                        "\r   {} {} ({mode}) — {:02}:{:02}",
+                        frames[i % frames.len()].to_string().with(teal),
+                        "building RandomX dataset".with(body),
+                        secs / 60,
+                        secs % 60,
+                    );
+                    let _ = std::io::stdout().flush();
+                    i += 1;
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                // Clear the spinner line so the following log line starts clean.
+                print!("\r{}\r", " ".repeat(72));
+                let _ = std::io::stdout().flush();
+            }));
+        }
+    }
 
     loop {
         // 0. Honor TUI-driven pause flag — don't poll the daemon, don't
@@ -143,7 +385,8 @@ pub async fn run_solo(
             };
             if due {
                 let started = Instant::now();
-                if let Ok(info) = daemon.get_info().await {
+                let info_res = daemon.get_info().await;
+                if let Ok(info) = &info_res {
                     let latency_ms = started.elapsed().as_millis() as u64;
                     m.rpc_latency_ms
                         .store(latency_ms, std::sync::atomic::Ordering::Relaxed);
@@ -167,8 +410,104 @@ pub async fn run_solo(
                     if let Some(peers) = info.get("peer_count").and_then(|v| v.as_u64()) {
                         m.peers.store(peers, std::sync::atomic::Ordering::Relaxed);
                     }
+                    // Cache chain fields for the live heartbeat below.
+                    last_synced = info
+                        .get("synced")
+                        .and_then(|v| v.as_bool())
+                        .or_else(|| info.get("is_synced").and_then(|v| v.as_bool()));
+                    last_height = info.get("height").and_then(|v| v.as_u64());
+                    last_diff = info.get("difficulty").and_then(|v| {
+                        v.as_str()
+                            .map(|s| s.to_string())
+                            .or_else(|| v.as_u64().map(|n| n.to_string()))
+                    });
                 }
                 last_get_info = Some(Instant::now());
+
+                // Hashrate-health (runtime): track peak + flag a sustained drop
+                // below half of it (thermal throttle / RAM-pressure light
+                // fallback / CPU contention). Skip the warm-up window so the
+                // dataset-build first round never false-alarms.
+                let cur = m
+                    .current_hashrate_hps
+                    .load(std::sync::atomic::Ordering::Relaxed);
+
+                // Dataset-ready milestone (once). As soon as hashing produces a
+                // non-zero rate, the RandomX dataset is live — report how long it
+                // took and which dataset was built. Same full_mem signal the
+                // startup guard used, so the figure can't contradict the banner.
+                if !dataset_ready_logged && cur > 0 {
+                    dataset_ready_logged = true;
+                    // Stop + join the build spinner FIRST so its cleared line
+                    // lands before we print — otherwise its trailing \r collides
+                    // with the ready line.
+                    spinner_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(h) = spinner_handle.take() {
+                        let _ = h.join();
+                    }
+                    let elapsed = mining_start.elapsed().as_secs_f64();
+                    let mode = dataset_mode;
+                    if live_status {
+                        use crossterm::style::{Color, Stylize};
+                        use std::io::IsTerminal;
+                        let green = Color::Rgb { r: 127, g: 184, b: 121 };
+                        let dot = if std::io::stdout().is_terminal() {
+                            "●".with(green).to_string()
+                        } else {
+                            "[ok]".to_string()
+                        };
+                        println!("   {dot} RandomX dataset ready ({elapsed:.1}s · {mode})");
+                    } else {
+                        info!("RandomX dataset ready ({elapsed:.1}s · {mode})");
+                    }
+                }
+
+                if mining_start.elapsed() > Duration::from_secs(120) && cur > 0 {
+                    if cur > peak_hps {
+                        peak_hps = cur;
+                    }
+                    let degraded = peak_hps > 0 && cur.saturating_mul(2) < peak_hps;
+                    m.hashrate_degraded.store(
+                        u64::from(degraded),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if degraded {
+                        let warn_due = last_health_warn
+                            .map(|t| t.elapsed() > Duration::from_secs(300))
+                            .unwrap_or(true);
+                        if warn_due {
+                            warn!(
+                                current_hps = cur,
+                                peak_hps,
+                                "orchestrator: hashrate DEGRADED — now <50% of this rig's peak \
+                                 (possible thermal throttle, RAM-pressure light fallback, or CPU contention)"
+                            );
+                            last_health_warn = Some(Instant::now());
+                        }
+                    }
+                }
+
+                // Live status heartbeat (plain-CLI only; every LIVE_STATUS_SECS).
+                // Uses the hashrate just read above + chain fields cached from
+                // this (or the last good) get_info.
+                if live_status {
+                    let status_due = last_status
+                        .map(|t| t.elapsed() >= Duration::from_secs(LIVE_STATUS_SECS))
+                        .unwrap_or(true);
+                    if status_due {
+                        print_live_status(
+                            m,
+                            info_res.is_ok(),
+                            last_synced,
+                            last_height,
+                            last_diff.as_deref(),
+                            cur,
+                            peak_hps,
+                            blocks_found,
+                        );
+                        last_status = Some(Instant::now());
+                    }
+                }
             }
         }
 
@@ -401,7 +740,11 @@ pub async fn run_solo(
         // 4. Multi-thread nonce search until found OR poll interval elapsed
         let started = Instant::now();
         let deadline = started + Duration::from_secs(poll_interval_secs);
-        let result = mine_parallel(hasher, input, target, threads, deadline, 0).await;
+        // Pass the daemon as the tip source so the search aborts early if the
+        // chain reaches `height` (someone else mined this block) — rebuild on
+        // the new tip instead of hashing a stale template to the deadline.
+        let result =
+            mine_parallel(hasher, input, target, threads, deadline, 0, Some(daemon), height).await;
 
         // 5. Submit if found
         match result {
@@ -440,8 +783,13 @@ pub async fn run_solo(
                     "orchestrator: BLOCK FOUND, submitting"
                 );
 
-                match daemon.submit_block(&block_hex).await {
-                    Ok(_) => {
+                // Ghost-Bridge Stream 4: buffered submit with retry +
+                // stale-share drop (security check #4). A transient RPC/tunnel
+                // failure no longer discards a genuinely-winning block, and a
+                // block the chain has already passed is dropped as stale
+                // instead of retried into a guaranteed orphan.
+                match submit_with_retry(daemon, &block_hex, height).await {
+                    SubmitOutcome::Accepted => {
                         blocks_found = blocks_found.saturating_add(1);
                         if let Some(m) = metrics.as_ref() {
                             m.blocks_accepted_total
@@ -459,12 +807,34 @@ pub async fn run_solo(
                         }
                         info!(blocks_found, "orchestrator: block accepted");
                     }
-                    Err(e) => {
+                    SubmitOutcome::Stale { tip } => {
                         if let Some(m) = metrics.as_ref() {
                             m.blocks_rejected_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        warn!(error = %e, "orchestrator: block submit rejected (likely lost race)");
+                        info!(
+                            height,
+                            tip,
+                            "orchestrator: found block is stale (tip advanced) — dropping, not retrying"
+                        );
+                    }
+                    SubmitOutcome::Failed(e) => {
+                        if let Some(m) = metrics.as_ref() {
+                            m.blocks_rejected_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        warn!(error = %e, "orchestrator: block submit failed after retries (transient RPC/tunnel, or a PoW rejection)");
+                        // #235: if the failure is a PoW hash rejection of OUR block, this
+                        // process hashes differently from the node — re-check the full-mem
+                        // dataset against a freshly built light cache and drop it if it is
+                        // bad, so the next hash rebuilds it instead of mining on a broken
+                        // dataset until a restart. No-ops for a transient RPC/tunnel
+                        // failure (recheck_dataset_after_rejection filters on the reason).
+                        let reason = e.to_string();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            coincync::consensus::pow::recheck_dataset_after_rejection(&reason)
+                        })
+                        .await;
                     }
                 }
             }
@@ -496,6 +866,32 @@ pub async fn run_solo(
                     "orchestrator: poll interval elapsed without finding a nonce, refreshing template"
                 );
             }
+            MineResult::Aborted {
+                total_attempts,
+                per_thread_hps,
+            } => {
+                // Record the partial-window hashrate like Timeout, then loop to
+                // rebuild on the new tip (Ghost-Bridge Stream 1 early-abort).
+                let elapsed = started.elapsed().as_secs_f64();
+                let hps = if elapsed > 0.0 {
+                    total_attempts as f64 / elapsed
+                } else {
+                    0.0
+                };
+                if let Some(m) = metrics.as_ref() {
+                    m.hashes_total
+                        .fetch_add(total_attempts, std::sync::atomic::Ordering::Relaxed);
+                    m.current_hashrate_hps
+                        .store(hps as u64, std::sync::atomic::Ordering::Relaxed);
+                    m.record_hashrate_sample(hps as u64);
+                    m.record_per_thread_hashrate(per_thread_hps);
+                }
+                info!(
+                    height,
+                    attempts = total_attempts,
+                    "orchestrator: new tip detected mid-search — abandoning stale template, rebuilding early"
+                );
+            }
         }
     }
 }
@@ -510,6 +906,13 @@ enum MineResult {
         per_thread_hps: Vec<u64>,
     },
     Timeout {
+        total_attempts: u64,
+        per_thread_hps: Vec<u64>,
+    },
+    /// The search was aborted early because the chain tip advanced to/past the
+    /// height we were mining (Ghost-Bridge Stream 1): the template is now stale,
+    /// so we stop and rebuild on the new tip instead of finishing the window.
+    Aborted {
         total_attempts: u64,
         per_thread_hps: Vec<u64>,
     },
@@ -528,6 +931,7 @@ enum MineResult {
 /// for milliseconds per hash, which is exactly what async runtimes
 /// hate. Keeping them as `std::thread::spawn` lets the tokio runtime
 /// stay responsive (the timeout race below depends on it).
+#[allow(clippy::too_many_arguments)] // nonce-search job: block inputs + target + control signals
 async fn mine_parallel(
     hasher: Hasher,
     input: HashInput,
@@ -540,6 +944,13 @@ async fn mine_parallel(
     // don't re-test identical nonces. It grows far slower than the slice size
     // (u64::MAX / threads), so threads never cross into each other's slices.
     nonce_base: u64,
+    // Tip-abort (Ghost-Bridge Stream 1). When `Some`, the async race polls this
+    // daemon's tip every 2s and aborts the search the instant the chain reaches
+    // `abort_height` (the height we're mining) — so a new block elsewhere makes
+    // us rebuild immediately instead of hashing a stale template to the
+    // deadline. `None` (stratum/pool) disables it; the pool drives job changes.
+    tip_source: Option<&DaemonClient>,
+    abort_height: u64,
 ) -> MineResult {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -652,7 +1063,22 @@ async fn mine_parallel(
     } else {
         deadline.saturating_duration_since(now)
     };
-    let outcome = tokio::time::timeout(timeout, found_rx.recv()).await;
+    // Race three ways: a worker finds a nonce, the deadline fires, or the chain
+    // tip advances to/past `abort_height` (Ghost-Bridge Stream 1 early-abort).
+    // The tip poll runs on THIS async task so it can borrow the daemon client;
+    // the std::thread workers are halted by the `stop` store below regardless of
+    // which arm wins.
+    let mut found: Option<u64> = None;
+    let aborted;
+    tokio::select! {
+        r = tokio::time::timeout(timeout, found_rx.recv()) => {
+            found = match r { Ok(Some(n)) => Some(n), _ => None };
+            aborted = false;
+        }
+        _ = wait_for_new_tip(tip_source, abort_height) => {
+            aborted = true;
+        }
+    }
 
     // Always tell workers to stop, then join. Joining is fast since
     // the loop checks `stop` every iteration.
@@ -673,16 +1099,47 @@ async fn mine_parallel(
         .map(|&a| (a as f64 / elapsed_secs) as u64)
         .collect();
 
-    match outcome {
-        Ok(Some(n)) => MineResult::Found {
+    if aborted {
+        MineResult::Aborted {
+            total_attempts: total,
+            per_thread_hps,
+        }
+    } else if let Some(n) = found {
+        MineResult::Found {
             nonce: n,
             total_attempts: total,
             per_thread_hps,
-        },
-        _ => MineResult::Timeout {
+        }
+    } else {
+        MineResult::Timeout {
             total_attempts: total,
             per_thread_hps,
-        },
+        }
+    }
+}
+
+/// Resolve when the chain tip reaches/passes `abort_height` — i.e. the chain
+/// advanced to or beyond the height we're currently mining, so our template is
+/// stale (Ghost-Bridge Stream 1 early-abort). Polls `get_info` every 2s. With
+/// no tip source (stratum/pool mode, which drives job changes itself) it never
+/// resolves, leaving the found/deadline arms to decide the race.
+async fn wait_for_new_tip(tip_source: Option<&DaemonClient>, abort_height: u64) {
+    let d = match tip_source {
+        Some(d) => d,
+        None => {
+            std::future::pending::<()>().await;
+            return;
+        }
+    };
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if let Ok(info) = d.get_info().await {
+            if let Some(tip) = info.get("height").and_then(|v| v.as_u64()) {
+                if tip >= abort_height {
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -703,6 +1160,75 @@ impl BackoffState {
     fn reset(&mut self) {
         self.next_secs = 1;
     }
+}
+
+/// Outcome of a buffered block submission (Ghost-Bridge Stream 4).
+enum SubmitOutcome {
+    /// Daemon accepted the block.
+    Accepted,
+    /// The chain tip reached/passed this block's height while we were
+    /// (re)submitting — another block won the race. Dropped as stale rather
+    /// than retried into a guaranteed orphan (replay / stale-share defense).
+    Stale { tip: u64 },
+    /// Every retry failed and the block was NOT observed as stale (e.g. the
+    /// daemon RPC was unreachable the whole window — a dropped tunnel).
+    Failed(String),
+}
+
+/// Submit a found block with a bounded retry buffer (Ghost-Bridge Stream 4 +
+/// security check #4, replay/stale defense).
+///
+/// Why this exists: the old path submitted once and, on ANY error, logged
+/// "likely lost race" and discarded the block. But a *transient* RPC failure
+/// (the node momentarily busy mid-validation, or the miner->node tunnel
+/// blipping) is not a lost race — it drops a genuinely-winning block. Here we:
+///   - retry with capped exponential backoff so transient hiccups don't lose a
+///     real block, and
+///   - before each retry, check the daemon's tip: if it has reached/passed this
+///     block's height, another block already won — stop and drop as stale
+///     instead of hammering the node with a guaranteed-orphan resubmission.
+///
+/// A true lost-race (the node rejects because the tip already advanced) is
+/// caught by the staleness check on the first failure, so it costs at most one
+/// extra `get_info` — not five retries.
+async fn submit_with_retry(
+    daemon: &DaemonClient,
+    block_hex: &str,
+    block_height: u64,
+) -> SubmitOutcome {
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut delay = Duration::from_millis(250);
+    let mut last_err = String::new();
+    for attempt in 1..=MAX_ATTEMPTS {
+        match daemon.submit_block(block_hex).await {
+            Ok(_) => return SubmitOutcome::Accepted,
+            Err(e) => {
+                last_err = e.to_string();
+                // Stale-share drop: if the chain tip has reached/passed this
+                // block's height, the race is already lost — don't retry an
+                // orphan. (If get_info also fails, we can't tell, so we fall
+                // through to a transient-failure retry.)
+                if let Ok(info) = daemon.get_info().await {
+                    if let Some(tip) = info.get("height").and_then(|v| v.as_u64()) {
+                        if tip >= block_height {
+                            return SubmitOutcome::Stale { tip };
+                        }
+                    }
+                }
+                if attempt < MAX_ATTEMPTS {
+                    warn!(
+                        attempt,
+                        height = block_height,
+                        error = %last_err,
+                        "orchestrator: block submit failed, buffering + retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay.saturating_mul(2)).min(Duration::from_secs(4));
+                }
+            }
+        }
+    }
+    SubmitOutcome::Failed(last_err)
 }
 
 /// A job as pushed by a CoinCync stratum pool (`login` result / `job` message).
@@ -863,10 +1389,16 @@ pub async fn run_pool(
         };
         // Short deadline so we pick up newly-pushed jobs promptly.
         let deadline = Instant::now() + Duration::from_secs(4);
-        let result = mine_parallel(hasher, input, job.target, n_threads, deadline, nonce_base).await;
+        // Stratum/pool mode: no daemon tip source — the pool pushes new jobs,
+        // so tip-abort is disabled (None, 0); job supersession is handled below.
+        let result = mine_parallel(
+            hasher, input, job.target, n_threads, deadline, nonce_base, None, 0,
+        )
+        .await;
         let attempts = match &result {
             MineResult::Found { total_attempts, .. } => *total_attempts,
             MineResult::Timeout { total_attempts, .. } => *total_attempts,
+            MineResult::Aborted { total_attempts, .. } => *total_attempts,
         };
         nonce_base = nonce_base.wrapping_add(attempts).wrapping_add(1);
 
@@ -942,7 +1474,7 @@ use PowAlgorithm as _PowAlgorithmStillUsedTransitively;
 
 #[cfg(test)]
 mod tests {
-    use super::{fork_diverged, FORK_DIVERGENCE_MARGIN};
+    use coincync::mining::{fork_diverged, FORK_DIVERGENCE_MARGIN};
 
     #[test]
     fn no_peer_height_is_not_divergence() {

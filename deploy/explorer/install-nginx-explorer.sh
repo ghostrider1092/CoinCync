@@ -92,13 +92,21 @@ server {
         proxy_set_header Authorization "Bearer \$coincync_rpc_key";
     }
 
-    # Node health fan-out. 2026-09-06: consolidated to the single Hetzner box
-    # (cync-node-hel1, Falkenstein) — the former Vultr fleet routes pointed at
-    # decommissioned boxes. All health routes resolve to the local node over
-    # loopback. Add a `location = /health/<id>` per node here — and a matching
-    # row in the explorer frontend node arrays (01-core/07-map/08-globe) — as
-    # the fleet is re-provisioned.
-    location = /health/hel1     { proxy_pass http://127.0.0.1:28081;       proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; }
+    # Node health fan-out. 2026-10-10: Hetzner Helsinki (hel1) backbone —
+    # seed hel1 + relays hel2-hel5. Every node binds RPC to 127.0.0.1
+    # (loopback-only), so the explorer host reaches the REMOTE nodes over
+    # per-node SSH tunnels (same pattern as rpc-tunnel-37): run, on THIS host,
+    #   ssh -i <key> -N -L 127.0.0.1:2808N:127.0.0.1:28081 root@<helN-ip>
+    # as a systemd unit, then each /health/helN proxies to that local port.
+    # hel1 is the explorer's own co-located node (28081) if co-located; else
+    # give it a tunnel too. Keep these in sync with the frontend node arrays
+    # (01-core/07-map/08-globe/15-operator-tools) and scripts/fleet-config.json.
+    location = /health/hel1 { proxy_pass http://127.0.0.1:28081; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # seed 2.29.34.197
+    location = /health/hel2 { proxy_pass http://127.0.0.1:28082; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # relay 37.27.185.37 (tunnel)
+    location = /health/hel3 { proxy_pass http://127.0.0.1:28083; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # relay 77.42.64.199 (tunnel)
+    location = /health/hel4 { proxy_pass http://127.0.0.1:28084; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # relay 89.167.93.52 (tunnel)
+    location = /health/nbg1 { proxy_pass http://127.0.0.1:28085; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # relay 2.31.63.25 Nuremberg DE (tunnel)
+    location = /health/ash1 { proxy_pass http://127.0.0.1:28086; proxy_set_header Content-Type application/json; proxy_set_header Authorization "Bearer \$coincync_rpc_key"; } # relay 5.161.214.98 Ashburn VA US (tunnel)
 
     # Keep legacy endpoints alive if external tools still call these.
     location = /api {

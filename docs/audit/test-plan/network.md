@@ -77,7 +77,8 @@ Legend: category ∈ HAPPY / EDGE / ERROR / ADVERSARIAL / LIVENESS / PROPERTY / 
 - [ ] ADVERSARIAL `handle_ping` malformed (&lt;8 bytes) → ProtocolViolation score, no pong — MISSING
 - [ ] HAPPY `handle_ping` echoes nonce as Pong — MISSING
 - [ ] EDGE `handle_reject` adjusts reputation -5 only (never feeds ban scorer) — MISSING
-- [ ] PROPERTY `handle_pong` is a no-op — MISSING
+- [ ] HAPPY `handle_pong` with our nonce records the round trip as latency — EXISTS (handle_pong_records_rtt_for_our_nonce)
+- [ ] ADVERSARIAL `handle_pong` unknown nonce ignored, malformed (&lt;8 bytes) → ProtocolViolation score — EXISTS (handle_pong_ignores_unknown_nonce_and_scores_malformed)
 
 ### src/network/node/dispatch/chain.rs
 - [ ] PROPERTY `invblock_near_tip` regime boundaries — EXISTS (cip019_invblock_near_tip_regime)
@@ -272,6 +273,8 @@ Legend: category ∈ HAPPY / EDGE / ERROR / ADVERSARIAL / LIVENESS / PROPERTY / 
 - [ ] ADVERSARIAL `OrphanFloodTracker` record/forget/count_for bound — PARTIAL (p2p OrphanFlood misbehavior only)
 - [ ] PROPERTY `auto_ban_bad_peers` bans only sub-threshold peers — EXISTS
 - [ ] PROPERTY `top_peers_for_download`/`peers_by_latency` filter validated + score — MISSING
+- [ ] HAPPY `record_pong` with the recorded nonce sets latency_ms (first sample replaces the placeholder, later ones average) — EXISTS (pong_with_matching_nonce_measures_latency, latency_averages_after_the_first_sample)
+- [ ] ADVERSARIAL `record_pong` wrong, replayed or unsolicited nonce leaves latency_ms alone — EXISTS (pong_with_wrong_nonce_is_ignored)
 - [ ] ROUND-TRIP save/load_bans_to_file — PARTIAL (verify)
 - [ ] PROPERTY `classify_invalid_tx_reason`/`classify_invalid_block_reason` mapping — PARTIAL
 - [ ] EDGE `ban` prunes expired entries (bounded map under ban flood) — MISSING

@@ -185,19 +185,6 @@ Note: the wallet-side pool policy (never picks spent/immature/locked outputs, ga
 - [ ] encrypt_memo — invalid recipient view public point ⇒ Err (ERROR) (MISSING)
 - [ ] decrypt_memo — non-curve tx_public_key ⇒ Err (ERROR) (MISSING)
 
-### src/crypto/batch_verify.rs
-
-- [x] verify_all — empty batch ⇒ zero totals, all_valid (EDGE) (EXISTS: test_batch_verify_empty in src/crypto/batch_verify.rs)
-- [x] verify_all — batch with exactly one invalid reports it in invalid_indices (ADVERSARIAL) (EXISTS: cache_does_not_reuse_result_for_different_pseudo_output in src/crypto/batch_verify.rs)
-- [x] verify_single — valid CLSAG accepted (HAPPY) (EXISTS: cache_does_not_reuse_result_for_different_pseudo_output in src/crypto/batch_verify.rs)
-- [x] verify_single — malformed sig/ring/pseudo bytes ⇒ false (ERROR) (EXISTS: test_concurrent_batch in src/crypto/batch_verify.rs)
-- [ ] verify_single — identity pseudo_output rejected (R-29) (ADVERSARIAL) (MISSING)
-- [x] verify_all — parallel path above threshold processes full batch (HAPPY) (EXISTS: test_concurrent_batch in src/crypto/batch_verify.rs)
-- [x] cache — result not reused for different pseudo_output/statement (ADVERSARIAL) (EXISTS: cache_does_not_reuse_result_for_different_pseudo_output in src/crypto/batch_verify.rs)
-- [x] BatchVerifyResult — all_valid / success_rate (HAPPY) (EXISTS: test_batch_result in src/crypto/batch_verify.rs)
-- [x] ParallelTxValidator — empty input ⇒ empty (EDGE) (EXISTS: test_parallel_validator in src/crypto/batch_verify.rs)
-- [ ] ParallelTxValidator — validate_transactions/filter_valid return correct indices/subset (HAPPY) (MISSING)
-
 ### src/crypto/peer_scalars.rs
 
 - [x] PeerScalar::decode — canonical accepted (HAPPY) (EXISTS: scalar_decode_accepts_canonical in src/crypto/peer_scalars.rs)
@@ -265,10 +252,9 @@ Note: the wallet-side pool policy (never picks spent/immature/locked outputs, ga
 | view_keys.rs | 11 | 8 | 3 |
 | disclosure.rs | 30 | 24 | 6 |
 | memo.rs | 12 | 10 | 2 |
-| batch_verify.rs | 10 | 8 | 2 |
 | peer_scalars.rs | 11 | 11 | 0 |
 | curve.rs | 21 | 15 | 6 |
 | secure.rs | 13 | 9 | 4 |
-| **AREA TOTAL** | **215** | **151** | **64** |
+| **AREA TOTAL** | **205** | **143** | **62** |
 
-Notes on the highest-value MISSING gaps (implementation-correctness, ranked): (1) clsag_verify rejects for identity commitment_image, identity ring commitment, non-canonical response/c1 scalars, and zero c1 challenge — every one of these is an explicit reject branch in `clsag_verify` with no dedicated test (the PeerScalar/identity machinery is unit-tested in isolation but never exercised through the CLSAG verifier); (2) `batch_verify::verify_single` identity-pseudo_output reject (R-29) is untested; (3) disclosure identity-nonce rejects (schnorr_r / R / R1,R2) added 2026-09-07 have no tests; (4) bulletproofs aggregation error branches (len mismatch, empty, &gt;MAX_AGGREGATION) and `verify_coinbase_output` are untested; (5) ring_selection ring_size&lt;2 underflow guard and BUG-5 young-real age relaxation are untested at this module level. All EXISTS entries cite a concrete test function that was found in the source; no test names were invented.
+Notes on the highest-value MISSING gaps (implementation-correctness, ranked): (1) clsag_verify rejects for identity commitment_image, identity ring commitment, non-canonical response/c1 scalars, and zero c1 challenge — every one of these is an explicit reject branch in `clsag_verify` with no dedicated test (the PeerScalar/identity machinery is unit-tested in isolation but never exercised through the CLSAG verifier); (2) disclosure identity-nonce rejects (schnorr_r / R / R1,R2) added 2026-09-07 have no tests; (3) bulletproofs aggregation error branches (len mismatch, empty, &gt;MAX_AGGREGATION) and `verify_coinbase_output` are untested; (4) ring_selection ring_size&lt;2 underflow guard and BUG-5 young-real age relaxation are untested at this module level. All EXISTS entries cite a concrete test function that was found in the source; no test names were invented.

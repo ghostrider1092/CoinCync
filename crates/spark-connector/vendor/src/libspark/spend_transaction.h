@@ -83,6 +83,11 @@ public:
 	);
 
 	uint64_t getFee();
+    // CoinCync addition: expose the spend's public output value `vout` so the
+    // node can bind it to the transaction's declared value_balance at verify
+    // (the balance proof already commits to it; this getter lets the shim
+    // reject a spend whose vout does not match the tx). See issue #258.
+    uint64_t getVout() const { return vout; }
     SpendTransactionVersion getVersion() const { return version; }
     const std::vector<GroupElement>& getUsedLTags() const;
     const std::vector<Coin>& getOutCoins();

@@ -250,11 +250,12 @@ async function loadBurnStats(){
 // page shows logical names only.
 //
 const FLEET_BOXES = [
-  { name:'seed1',    region:'New Jersey, USA',        role:'Seed (US-East)',     proxy:'/health/seed1' },
-  { name:'seed2',    region:'Amsterdam, Netherlands', role:'Seed (Europe)',      proxy:'/health/seed2' },
-  { name:'seed3',    region:'Tokyo, Japan',           role:'Seed (Asia-Pacific)',proxy:'/health/seed3' },
-  { name:'explorer', region:'Dallas, USA',            role:'Explorer + Relay',   proxy:'/health/explorer' },
-  { name:'api',      region:'Frankfurt, Germany',     role:'Public API + Relay', proxy:'/health/api' },
+  { name:'hel1', region:'Helsinki, Finland', role:'Seed + miner', proxy:'/health/hel1' },
+  { name:'hel2', region:'Helsinki, Finland', role:'Relay',        proxy:'/health/hel2' },
+  { name:'hel3', region:'Helsinki, Finland', role:'Relay',        proxy:'/health/hel3' },
+  { name:'hel4', region:'Helsinki, Finland', role:'Relay',        proxy:'/health/hel4' },
+  { name:'nbg1', region:'Nuremberg, Germany',     role:'Relay', proxy:'/health/nbg1' },
+  { name:'ash1', region:'Ashburn, VA (US-East)',  role:'Relay', proxy:'/health/ash1' },
 ];
 
 async function _pollFleetBox(box){

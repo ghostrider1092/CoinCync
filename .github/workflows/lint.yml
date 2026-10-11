@@ -1,0 +1,91 @@
+name: Lint
+
+# rustfmt + clippy gate. Complements the existing CI suite (integration-tests,
+# coverage, audit, fuzz, critical-lock, hardening-baseline, verify-reproducible),
+# none of which ran rustfmt or clippy — this was the one real gap in the lint
+# surface.
+#
+# Introduced 2026-10-10 as an INFORMATIONAL ratchet: both jobs are
+# `continue-on-error: true`, so they REPORT drift on every PR without blocking a
+# merge. Two reasons it starts soft rather than hard:
+#   (1) the tree is not yet rustfmt-clean — a one-time `cargo fmt --all` touches
+#       ~186 files (+6188/-2082, purely mechanical); until that lands, a hard
+#       `fmt --check` would red-fail every PR;
+#   (2) clippy has never been enforced here, so a backlog of warnings exists.
+#
+# TO PROMOTE TO A HARD GATE (do this per-job as each surface is cleaned):
+#   - rustfmt: after the one-time `cargo fmt --all` reformat merges, delete the
+#     `continue-on-error: true` line under the fmt job.
+#   - clippy:  after the warning backlog is cleared, delete the
+#     `continue-on-error: true` line under the clippy job. `-D warnings` is
+#     already wired, so promotion is a one-line removal.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pin to the repo's toolchain (rust-toolchain.toml → 1.88.0) and pull the
+      # rustfmt component explicitly so the check runs the same formatter the
+      # local gate does.
+      - name: Install Rust toolchain (1.88.0 + rustfmt)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+          components: rustfmt
+
+      - name: cargo fmt --all --check
+        # INFORMATIONAL until the one-time `cargo fmt --all` reformat lands.
+        # Promote by deleting this line.
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (1.88.0 + clippy)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+          components: clippy
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint-clippy-v1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libssl-dev pkg-config
+
+      - name: cargo clippy
+        # Honors the project's [lints.clippy] baseline in Cargo.toml
+        # (all = allow @ priority -2, correctness/suspicious = warn). `-D warnings`
+        # turns the configured warn-level lints into failures once promoted.
+        # INFORMATIONAL until the warning backlog is cleared — promote by
+        # deleting this line.
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets --features "randomx testnet" -- -D warnings

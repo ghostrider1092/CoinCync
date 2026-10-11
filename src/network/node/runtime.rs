@@ -74,7 +74,7 @@ use super::super::relay_score::RelayScoreMap;
 use super::super::scoring::PeerScorer;
 use super::super::sync::ChainSync;
 use super::super::traffic_shaping::TrafficShaper;
-use super::dispatch::process_message;
+use super::dispatch::{process_handshake, process_message};
 use super::types::NodeEvent;
 use super::{PeerMessage, TxAbsenceCache};
 
@@ -200,6 +200,86 @@ pub(super) struct MessageProcessorContext {
     pub magic: [u8; 4],
 }
 
+/// Handles required by the handshake lane (`spawn_handshake_processor`). A subset
+/// of [`MessageProcessorContext`] — only what `dispatch::process_handshake` needs
+/// to service `Version` (peers/senders/sync/event_tx/chain/scorer + nonce) and
+/// `Verack` (peers/senders/dandelion/sync/chain).
+pub(super) struct HandshakeProcessorContext {
+    pub peers: Arc<DashMap<PeerId, PeerInfo>>,
+    pub senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
+    pub dandelion: Arc<RwLock<DandelionRouter>>,
+    pub sync: Arc<RwLock<ChainSync>>,
+    pub event_tx: broadcast::Sender<NodeEvent>,
+    pub chain: SharedBlockchain,
+    pub scorer: Arc<RwLock<PeerScorer>>,
+    pub nonce: u64,
+    pub magic: [u8; 4],
+}
+
+/// The DEDICATED handshake lane. The connection read loop routes `Version`/`Verack`
+/// to a separate mpsc channel drained by THIS task, instead of the single main
+/// message processor. Because tokio schedules this task independently, a peer's
+/// handshake is serviced even while the main processor is parked inside a
+/// multi-second RandomX header-batch verify during cold-start IBD — which is what
+/// kept fresh nodes from forming the 3-peer mesh floor (their Version/Verack queued
+/// behind the first peer's header batch on the shared processor). Keeping handshakes
+/// off the main lane also lets the header verify stay INLINE and serialized on that
+/// lane, so it never flips the light-mode RandomX cache slot concurrently with
+/// block-apply across a key epoch (the no-thrash invariant from #285).
+///
+/// Shutdown/close semantics mirror `spawn_message_processor`: exit on the runtime
+/// cancel signal or when every producer (connection task) has dropped its sender.
+pub(super) fn spawn_handshake_processor(
+    mut handshake_rx: mpsc::Receiver<PeerMessage>,
+    context: HandshakeProcessorContext,
+    mut shutdown: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    let HandshakeProcessorContext {
+        peers,
+        senders,
+        dandelion,
+        sync,
+        event_tx,
+        chain,
+        scorer,
+        nonce,
+        magic,
+    } = context;
+
+    tokio::spawn(async move {
+        loop {
+            let received = tokio::select! {
+                biased;
+                _ = wait_for_shutdown(&mut shutdown) => break,
+                received = handshake_rx.recv() => received,
+            };
+            match received {
+                Some(msg) => {
+                    if let Err(e) = process_handshake(
+                        msg.peer_id,
+                        msg.msg_type,
+                        &msg.payload,
+                        magic,
+                        nonce,
+                        &peers,
+                        &senders,
+                        &dandelion,
+                        &sync,
+                        &event_tx,
+                        &chain,
+                        &scorer,
+                    )
+                    .await
+                    {
+                        warn!("Handshake processing error: {}", e);
+                    }
+                }
+                None => break,
+            }
+        }
+    })
+}
+
 /// Prune rate-tracker entries whose peer is no longer connected (P5-N3, §4):
 /// retain only trackers for which `is_live` returns true. Extracted as a pure
 /// helper so the memory bound can be unit-tested without driving the async
@@ -276,17 +356,27 @@ pub(super) fn spawn_message_processor(
                     let tracker = rate_trackers
                         .entry(msg.peer_id)
                         .or_insert_with(super::super::scoring::PeerMessageRateTracker::new);
-                    if tracker.record(msg.msg_type) {
-                        warn!(
-                            "Peer {:?} exceeded message rate limit for type 0x{:02x}, penalizing",
-                            &msg.peer_id[..4],
-                            msg.msg_type,
-                        );
-                        if let Some(peer_addr) = processor_peers.get(&msg.peer_id).map(|p| p.addr) {
-                            let mut scorer = processor_scorer.write().await;
-                            scorer.get_or_create(peer_addr).record_misbehavior(
-                                super::super::scoring::MisbehaviorType::MessageFlood,
+                    let rate = tracker.record(msg.msg_type);
+                    if rate.over_limit {
+                        // Drop EVERY over-limit message (the cap is only real if
+                        // all excess is dropped), but warn + penalize at most
+                        // once per type per window so a brief legit burst takes a
+                        // single penalty and recovers, while a sustained flooder
+                        // still accrues one penalty per window → eventually banned.
+                        if rate.penalize {
+                            warn!(
+                                "Peer {:?} exceeded message rate limit for type 0x{:02x}, penalizing",
+                                &msg.peer_id[..4],
+                                msg.msg_type,
                             );
+                            if let Some(peer_addr) =
+                                processor_peers.get(&msg.peer_id).map(|p| p.addr)
+                            {
+                                let mut scorer = processor_scorer.write().await;
+                                scorer.get_or_create(peer_addr).record_misbehavior(
+                                    super::super::scoring::MisbehaviorType::MessageFlood,
+                                );
+                            }
                         }
                         continue; // Drop the message and release its reservation
                     }
@@ -295,17 +385,18 @@ pub(super) fn spawn_message_processor(
                         msg.peer_id,
                         msg.msg_type,
                         &msg.payload,
+                        msg.received_at,
                         magic,
                         processor_nonce,
-                        processor_peers.as_ref(),
+                        &processor_peers,
                         processor_senders.as_ref(),
                         processor_dandelion.as_ref(),
-                        processor_sync.as_ref(),
+                        &processor_sync,
                         &processor_event_tx,
                         &processor_chain,
                         &processor_mempool,
                         processor_addresses.as_ref(),
-                        processor_scorer.as_ref(),
+                        &processor_scorer,
                         processor_tx_absence_cache.as_ref(),
                         processor_relay_scores.as_ref(),
                     )
@@ -435,6 +526,7 @@ mod runtime_tests {
                 peer_id,
                 msg_type: 200,
                 payload: vec![],
+                received_at: crate::clock::mono_now(),
                 _reservation: Arc::new(
                     crate::network::connection_tracker::ConnectionTracker::new(1024),
                 )
@@ -449,6 +541,7 @@ mod runtime_tests {
                 peer_id,
                 msg_type: MessageType::Version as u8,
                 payload: vec![0u8; 1025],
+                received_at: crate::clock::mono_now(),
                 _reservation: Arc::new(
                     crate::network::connection_tracker::ConnectionTracker::new(1024),
                 )

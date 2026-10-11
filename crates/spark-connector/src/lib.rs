@@ -189,6 +189,9 @@ pub mod ffi {
         fn spark_ffi_verify_bundle(
             ptr: *const u8,
             len: c_int,
+            set_ptr: *const u8,
+            set_len: c_int,
+            vout: u64,
             out_tags: *mut u8,
             tags_cap: c_int,
             out_tags_len: *mut c_int,
@@ -414,6 +417,24 @@ pub mod ffi {
         let mut recovered: u64 = 0;
         // Safety: shim writes only to `recovered`.
         unsafe { spark_ffi_create_recover_roundtrip(value, &mut recovered) == 1 && recovered == value }
+    }
+
+    /// Marshal a cover set to the flat FFI wire form
+    /// `[u32 count][ (u32 len)(coin bytes) ]...` (the form the shim parses). An
+    /// empty cover set marshals to an empty buffer so the shim sees `set_len == 0`
+    /// and keeps its legacy (stateless) behaviour (#258).
+    pub(crate) fn marshal_cover_set(cover_set: &[CoinBytes]) -> Vec<u8> {
+        if cover_set.is_empty() {
+            return Vec::new();
+        }
+        let mut set =
+            Vec::with_capacity(4 + cover_set.iter().map(|c| 4 + c.0.len()).sum::<usize>());
+        set.extend_from_slice(&(cover_set.len() as u32).to_le_bytes());
+        for c in cover_set {
+            set.extend_from_slice(&(c.0.len() as u32).to_le_bytes());
+            set.extend_from_slice(&c.0);
+        }
+        set
     }
 
     /// Build a valid self-contained verify bundle (a real spend + its verify
@@ -807,15 +828,31 @@ pub mod ffi {
         /// verifier-side context libspark needs (cover set, its representation,
         /// output coins, block hash). Returns the linking-tag nullifiers on a
         /// valid spend; fail-closed otherwise.
-        fn verify_spend(&self, _cover_set: &[CoinBytes], spend: &SpendBytes, _f: u64, _vb: i64) -> Result<Vec<Nullifier>> {
+        fn verify_spend(&self, cover_set: &[CoinBytes], spend: &SpendBytes, _fee: u64, value_balance: i64) -> Result<Vec<Nullifier>> {
+            // #258: when a NODE-RESOLVED cover set is supplied it is authoritative
+            // (the shim verifies the Grootle proof against it, not the spender's
+            // bundle) and the spend's public output is bound to `value_balance`.
+            // An empty set keeps the legacy stateless (permissive) behaviour.
+            let set = marshal_cover_set(cover_set);
+            // Public value this spend releases to the transparent side: for an
+            // unshield value_balance > 0 and the spend's `vout` must equal it; a
+            // shielded→shielded transfer has value_balance == 0 → vout 0. A net
+            // shield-in (value_balance < 0) is carried on the MINT side, so the
+            // spend's own public output must be 0 — fail-closed otherwise. (The
+            // spend's internal libspark fee is pool-internal, not `_fee`, and is
+            // conserved by the spend's own balance proof — see the shim.)
+            let vout: u64 = if value_balance > 0 { value_balance as u64 } else { 0 };
             let mut tags = vec![0u8; 8192];
             let mut tags_len: c_int = 0;
             // Safety: pointers/lengths are valid for the duration of the call; the
-            // shim only reads `spend` and writes up to `tags.len()` into `tags`.
+            // shim only reads `spend`/`set` and writes up to `tags.len()` into `tags`.
             let rc = unsafe {
                 spark_ffi_verify_bundle(
                     spend.0.as_ptr(),
                     spend.0.len() as c_int,
+                    set.as_ptr(),
+                    set.len() as c_int,
+                    vout,
                     tags.as_mut_ptr(),
                     tags.len() as c_int,
                     &mut tags_len,
@@ -896,6 +933,10 @@ pub mod ffi {
 
         #[test]
         fn verify_spend_accepts_valid_bundle_and_returns_nullifiers() {
+            // Stateless path (empty set → the bundle's own cover set is used and
+            // the #258 strict membership + vout binding are deferred to the
+            // authoritative store-aware verify). The fee/value_balance args are
+            // not enforced on this permissive path.
             let bundle = make_verify_bundle().expect("failed to build verify bundle");
             let b = LibsparkBackend;
             let nullifiers = b
@@ -903,6 +944,74 @@ pub mod ffi {
                 .expect("valid bundle must verify");
             assert_eq!(nullifiers.len(), 1, "one input => one linking-tag nullifier");
             assert_eq!(nullifiers[0].0.len(), 34, "tag is a 34-byte group element");
+        }
+
+        // Helper: mint an N-coin cover set owned by `seed` (coin i has value
+        // `base + i`, all under `ctx`), spend the coin at `index` paying
+        // `out_value`. Returns (bundle, cover_set, fee).
+        #[cfg(test)]
+        fn build_strict_spend(seed: &[u8], base: u64, index: usize, out_value: u64)
+            -> (SpendBytes, Vec<CoinBytes>, u64)
+        {
+            let n = cover_set_size().expect("cover set size");
+            let ctx = serial_context(b"strict:tx:0").expect("ctx");
+            let mut cover_set = Vec::with_capacity(n);
+            for i in 0..n {
+                if i == index {
+                    cover_set.push(mint_to_seed(seed, base + i as u64, &ctx).expect("owned"));
+                } else {
+                    let s = format!("strict-decoy-{i}");
+                    cover_set.push(mint_to_seed(s.as_bytes(), base + i as u64, &ctx).expect("decoy"));
+                }
+            }
+            let bundle = build_spend_over_set(seed, &cover_set, index, &ctx, out_value)
+                .expect("build_spend_over_set");
+            let fee = (base + index as u64) - out_value;
+            (bundle, cover_set, fee)
+        }
+
+        #[test]
+        fn verify_rejects_a_substituted_cover_set() {
+            // #258 core break (1): a spender cannot prove membership in a set the
+            // node did not resolve. The SAME valid bundle, verified against a
+            // DIFFERENT node cover set, must fail — the Grootle proof is checked
+            // against the node's coins and the recomputed `rep` won't match.
+            let b = LibsparkBackend;
+            let (bundle, good_set, fee) = build_strict_spend(b"strict-A", 1_000, 2, 400);
+            // Correct node set → verifies.
+            assert!(
+                b.verify_spend(&good_set, &bundle, fee, 0).is_ok(),
+                "the node's real cover set must verify"
+            );
+            // A different node set (fresh coins) → rejected.
+            let (_b2, other_set, _f2) = build_strict_spend(b"strict-B", 9_000, 2, 400);
+            assert!(
+                b.verify_spend(&other_set, &bundle, fee, 0).is_err(),
+                "a substituted cover set must be rejected"
+            );
+        }
+
+        #[test]
+        fn verify_rejects_value_balance_the_spend_does_not_release() {
+            // #258 core break (2): the spend's public output (vout) must match the
+            // transaction's declared value_balance, or the tx could unshield value
+            // its spend never releases (the inflation hole). This fixture is a
+            // self-spend: vout 0, so value_balance must be 0. (The spend's internal
+            // libspark fee is pool-internal and conserved by its own balance proof,
+            // so it is intentionally NOT bound to the transparent tx fee here.)
+            let b = LibsparkBackend;
+            let (bundle, set, _fee) = build_strict_spend(b"strict-vb", 1_000, 2, 400);
+            // value_balance 0 matches the spend's vout 0 → verifies.
+            assert!(
+                b.verify_spend(&set, &bundle, 0, 0).is_ok(),
+                "a self-spend with value_balance 0 verifies"
+            );
+            // Claiming a positive value_balance (unshield) the spend does not
+            // release (its vout is 0) → rejected.
+            assert!(
+                b.verify_spend(&set, &bundle, 0, 5).is_err(),
+                "claiming an unshield the spend does not release must be rejected"
+            );
         }
 
         #[test]
@@ -920,7 +1029,7 @@ pub mod ffi {
             // block-level double-spend guard), and fail closed on bad input.
             let bundle = make_verify_bundle().expect("failed to build verify bundle");
             let verified = LibsparkBackend
-                .verify_spend(&[], &SpendBytes(bundle.clone()), 0, 0)
+                .verify_spend(&[], &SpendBytes(bundle.clone()), 24, 0)
                 .expect("valid bundle verifies");
             let stateless = spend_ltags(&bundle).expect("stateless tag extraction");
             assert_eq!(stateless, verified, "stateless tags must equal verified tags");
@@ -948,7 +1057,8 @@ pub mod ffi {
             // create -> build -> verify, all through the connector API.
             let material = 50u64.to_le_bytes().to_vec();
             let spend = b.build_spend(&[], &material, 0, 0).expect("build_spend");
-            let nullifiers = b.verify_spend(&[], &spend, 0, 0).expect("built spend must verify");
+            // Fixture spend: input 124 - output 50 => fee 74, vout 0 (stateless).
+            let nullifiers = b.verify_spend(&[], &spend, 74, 0).expect("built spend must verify");
             assert_eq!(nullifiers.len(), 1, "one input => one nullifier");
         }
 
@@ -1022,7 +1132,7 @@ pub mod ffi {
             bundle[n - 10] ^= 0x01;
             let b = LibsparkBackend;
             assert!(
-                b.verify_spend(&[], &SpendBytes(bundle), 0, 0).is_err(),
+                b.verify_spend(&[], &SpendBytes(bundle), 24, 0).is_err(),
                 "tampered spend must be rejected"
             );
         }
@@ -1081,9 +1191,11 @@ pub mod ffi {
                 .expect("build spend over caller-supplied set");
 
             // The bundle must verify and yield exactly one linking-tag nullifier.
+            // #258 strict path: the node supplies the SAME cover set the spend
+            // was built over. coins[1] = 1001, output 400 => fee 601, vout 0.
             let b = LibsparkBackend;
             let tags = b
-                .verify_spend(&[], &bundle, 0, 0)
+                .verify_spend(&coins, &bundle, 601, 0)
                 .expect("caller-set spend must verify");
             assert_eq!(tags.len(), 1, "one input => one nullifier tag");
             assert_eq!(tags[0].0.len(), 34, "tag is a 34-byte group element");
@@ -1117,7 +1229,8 @@ pub mod ffi {
                     .expect("build transfer to B");
 
             let backend = LibsparkBackend;
-            let tags = backend.verify_spend(&[], &bundle, 0, 0).expect("transfer verifies");
+            // coins[2] = 5002, paid 3000 to B => fee 2002, vout 0 (strict).
+            let tags = backend.verify_spend(&coins, &bundle, 2002, 0).expect("transfer verifies");
             assert_eq!(tags.len(), 1, "one input → one nullifier");
 
             // The output coin re-enters the pool with its recoverable context.
@@ -1167,7 +1280,9 @@ pub mod ffi {
             let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 300)
                 .expect("partial-set spend builds");
             let b = LibsparkBackend;
-            let tags = b.verify_spend(&[], &bundle, 0, 0).expect("partial-set spend verifies");
+            // coins[spend_index] = 2000 + spend_index, paid 300 => fee = value - 300.
+            let fee = (2_000 + spend_index as u64) - 300;
+            let tags = b.verify_spend(&coins, &bundle, fee, 0).expect("partial-set spend verifies");
             assert_eq!(tags.len(), 1);
         }
 
@@ -1201,7 +1316,8 @@ pub mod ffi {
             let bundle = build_spend_over_set(seed, &coins, spend_index, &owned_ctx, 900)
                 .expect("outpoint-derived ctx spends");
             let b = LibsparkBackend;
-            assert!(b.verify_spend(&[], &bundle, 0, 0).is_ok());
+            // coins[2] = 5002, paid 900 => fee 4102, vout 0 (strict).
+            assert!(b.verify_spend(&coins, &bundle, 4102, 0).is_ok());
 
             // Wrong outpoint context → cannot recover the coin → fail-closed.
             let wrong_ctx = serial_context(b"tx:cover:vout:999").expect("wrong ctx");
@@ -1232,15 +1348,16 @@ pub mod ffi {
             let b = LibsparkBackend;
 
             // Unspent: empty spent set → solvency holds, returns the tag.
+            // coins[1] = 3001, paid 700 => fee 2301, vout 0 (strict path).
             let tags = b
-                .verify_solvency(&[], &bundle, 0, 0, &[])
+                .verify_solvency(&coins, &bundle, 2301, 0, &[])
                 .expect("unspent coin proves solvency");
             assert_eq!(tags.len(), 1);
 
             // Now that tag is recorded as spent → the SAME proof must be rejected.
             let spent = tags.clone();
             assert!(
-                b.verify_solvency(&[], &bundle, 0, 0, &spent).is_err(),
+                b.verify_solvency(&coins, &bundle, 2301, 0, &spent).is_err(),
                 "a spent linking tag must fail the unspent-solvency check"
             );
         }
