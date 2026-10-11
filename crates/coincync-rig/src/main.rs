@@ -171,6 +171,10 @@ enum Command {
         /// counts toward lock-in.
         #[arg(long, default_value_t = false)]
         signal_v1012: bool,
+        /// Show full hashes/addresses instead of truncated (full
+        /// consensus_fingerprint + full payout address in the startup banner).
+        #[arg(long, default_value_t = false)]
+        verbose: bool,
     },
 
     /// Mine against a CoinCync stratum POOL (the node's built-in `--stratum`
@@ -279,6 +283,7 @@ fn main() -> Result<()> {
             metrics_bind,
             tui,
             signal_v1012,
+            verbose,
         } => run_solo_cli(
             &node,
             api_key,
@@ -290,6 +295,7 @@ fn main() -> Result<()> {
             &metrics_bind,
             tui,
             signal_v1012,
+            verbose,
             tui_log_rx,
         ),
         Command::RunPool {
@@ -409,13 +415,13 @@ fn print_banner() {
     // Framed title. Width derives from the longest content line so the box always
     // closes flush. ANSI codes are zero-width, so padding is computed on the plain
     // text and the colors applied after.
-    let title = format!("CoinCync Rig  -  RandomX CPU miner");
+    let title = "CoinCync Rig  -  RandomX CPU miner".to_string();
     let sub = format!("v{ver} - the mole goes underground");
     let inner = title.chars().count().max(sub.chars().count()) + 2; // 1-space gutter each side
     let bar = "─".repeat(inner);
 
     let framed = |text: &str| {
-        let pad = inner - 1 - text.chars().count(); // leading gutter space + text + pad
+        let pad = inner - 2 - text.chars().count(); // "│ " + text + pad + " │" = inner, so box closes flush
         format!(
             "  {} {}{} {}",
             "│".with(teal),
@@ -516,42 +522,67 @@ fn print_runsolo_metadata(
     metrics_port: u16,
     metrics_bind: &str,
     info: Option<&serde_json::Value>,
+    verbose: bool,
 ) {
     use crossterm::style::{Color, Stylize};
     use std::io::IsTerminal;
 
     let term = std::io::stdout().is_terminal();
+    // Palette matches print_banner, extended with amber (warning), red (error)
+    // and cyan (numeric / accent) so values are colored by MEANING — the
+    // XMRig convention: green = healthy, amber = attention, red = fault.
     let teal = Color::Rgb { r: 86, g: 194, b: 180 };
     let teal_dim = Color::Rgb { r: 58, g: 130, b: 122 };
+    let green = Color::Rgb { r: 127, g: 184, b: 121 };
+    let amber = Color::Rgb { r: 218, g: 183, b: 94 };
+    let red = Color::Rgb { r: 209, g: 108, b: 108 };
+    let cyan = Color::Rgb { r: 122, g: 200, b: 214 };
     let body = Color::Rgb { r: 224, g: 230, b: 228 };
     let muted = Color::Rgb { r: 138, g: 148, b: 146 };
 
-    // `* LABEL value` primary row, and an indented muted continuation line,
-    // aligned under the value column exactly like `print_banner`.
-    let row = |label: &str, value: &str| {
+    // Conditional color: real ANSI in a TTY, clean plain text when piped to a
+    // file / log (crossterm would otherwise emit escape codes either way).
+    let p = |s: &str, col: Color| -> String {
+        if term {
+            s.with(col).to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    let pb = |s: &str, col: Color| -> String {
+        if term {
+            s.with(col).bold().to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    let sep = format!(" {} ", p("·", muted));
+    // Trailing state badge: a geometric glyph in a TTY, an ASCII tag when piped.
+    let badge = |glyph: &str, plain: &str, col: Color| -> String {
+        if term {
+            glyph.with(col).bold().to_string()
+        } else {
+            plain.to_string()
+        }
+    };
+
+    // `* LABEL value` primary row + indented continuation, aligned under the
+    // value column exactly like print_banner (3 + "* " + 9 + 2 = 16).
+    let row = |label: &str, value: String| {
         if term {
             println!(
                 "   {} {}  {}",
                 "*".with(teal),
                 format!("{label:<9}").with(teal_dim).bold(),
-                value.with(body)
+                value
             );
         } else {
             println!("   * {label:<9}  {value}");
         }
     };
-    let cont = |value: &str| {
-        if term {
-            println!("{}{}", " ".repeat(16), value.with(muted));
-        } else {
-            println!("{}{}", " ".repeat(16), value);
-        }
-    };
+    let cont = |value: String| println!("{}{}", " ".repeat(16), value);
 
-    // ── 1. NODE / SOFTWARE ──────────────────────────────────────────
-    // Rig semantic version (this crate), git commit of the linked coincync
-    // lib (or "unknown", same convention as get_info's build_commit), and
-    // this rig's own build profile via cfg!(debug_assertions).
+    // ── NODE / SOFTWARE ─────────────────────────────────────────────
     let ver = env!("CARGO_PKG_VERSION");
     let commit = coincync::build_info::git_commit();
     let commit_short = if commit != "unknown" && commit.len() > 10 {
@@ -566,33 +597,54 @@ fn print_runsolo_metadata(
     };
     row(
         "NODE",
-        &format!("CoinCync Rig v{ver} · commit {commit_short} · {profile}"),
+        [
+            pb(&format!("CoinCync Rig v{ver}"), cyan),
+            p(&format!("commit {commit_short}"), muted),
+            p(profile, if profile == "release" { green } else { amber }),
+        ]
+        .join(&sep),
     );
 
-    // ── 2. NETWORK ──────────────────────────────────────────────────
-    // Chosen network id (CLI) + node RPC URL are always known. The
-    // consensus_fingerprint and the node's self-reported `network` string
-    // come from get_info and are only shown when reachable.
+    // ── NETWORK ─────────────────────────────────────────────────────
     let net_id = format!("{network:?}").to_lowercase();
-    row("NETWORK", &format!("{net_id} · node {node}"));
+    row(
+        "NETWORK",
+        [p(&net_id, body), p(&format!("node {node}"), muted)].join(&sep),
+    );
     if let Some(info) = info {
+        // --verbose shows the full fingerprint; default truncates to 12 hex +
+        // ellipsis (enough to spot a divergent peer at a glance).
         let fp = info
             .get("consensus_fingerprint")
             .and_then(|v| v.as_str())
-            .map(|s| if s.len() > 12 { &s[..12] } else { s });
+            .map(|s| {
+                if verbose || s.len() <= 12 {
+                    s.to_string()
+                } else {
+                    format!("{}…", &s[..12])
+                }
+            });
         let net_field = info.get("network").and_then(|v| v.as_str());
-        match (fp, net_field) {
-            (Some(fp), Some(nf)) => cont(&format!("consensus fp {fp}… · node reports \"{nf}\"")),
-            (Some(fp), None) => cont(&format!("consensus fp {fp}…")),
-            (None, Some(nf)) => cont(&format!("node reports \"{nf}\"")),
+        match (fp.as_deref(), net_field) {
+            (Some(fp), Some(nf)) => cont(
+                [
+                    format!("{} {}", p("fingerprint", muted), pb(fp, cyan)),
+                    p(&format!("node reports \"{nf}\""), body),
+                ]
+                .join(&sep),
+            ),
+            (Some(fp), None) => {
+                cont(format!("{} {}", p("fingerprint", muted), pb(fp, cyan)))
+            }
+            (None, Some(nf)) => cont(p(&format!("node reports \"{nf}\""), body)),
             (None, None) => {}
         }
     }
 
-    // ── 3. CHAIN STATE ──────────────────────────────────────────────
+    // ── CHAIN STATE ─────────────────────────────────────────────────
     // Purely from get_info. (get_info exposes no genesis hash and no
-    // network_hashrate today — genesis is omitted; network hashrate is
-    // shown only if some daemon version reports it as > 0.)
+    // network_hashrate today — genesis omitted; hashrate shown only if a
+    // future daemon reports it > 0.)
     if let Some(info) = info {
         let height = info.get("height").and_then(|v| v.as_u64());
         let target = info.get("target_height").and_then(|v| v.as_u64());
@@ -603,84 +655,126 @@ fn print_runsolo_metadata(
             .and_then(|v| v.as_bool());
         let tip_age = info.get("tip_age_secs").and_then(|v| v.as_u64());
         // difficulty is emitted as a decimal string by get_info.
-        let difficulty = info
-            .get("difficulty")
-            .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| v.as_u64().map(|n| n.to_string())));
+        let difficulty = info.get("difficulty").and_then(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+        });
 
         let mut parts: Vec<String> = Vec::new();
         match (height, target) {
-            (Some(h), Some(t)) => parts.push(format!("height {h} / target {t}")),
-            (Some(h), None) => parts.push(format!("height {h}")),
+            (Some(h), Some(t)) => parts.push(format!(
+                "{} {} {} {}",
+                p("height", muted),
+                pb(&h.to_string(), cyan),
+                p("/ target", muted),
+                pb(&t.to_string(), cyan)
+            )),
+            (Some(h), None) => parts.push(format!("{} {}", p("height", muted), pb(&h.to_string(), cyan))),
             _ => {}
         }
         if let Some(pt) = peer_target {
             if pt > 0 {
-                parts.push(format!("peer_target {pt}"));
+                parts.push(format!("{} {}", p("peer", muted), pb(&pt.to_string(), cyan)));
             }
         }
         if let Some(s) = synced {
-            parts.push(if s { "synced".into() } else { "NOT synced".into() });
+            parts.push(if s {
+                p("synced", green)
+            } else {
+                p("NOT synced", amber)
+            });
         }
         if let Some(a) = tip_age {
-            parts.push(format!("tip {a}s"));
+            parts.push(p(&format!("tip {a}s"), muted));
         }
         if let Some(d) = difficulty {
-            parts.push(format!("diff {d}"));
+            parts.push(format!("{} {}", p("diff", muted), pb(&d, cyan)));
         }
-        if parts.is_empty() {
-            row("CHAIN", "get_info returned no recognizable chain fields");
+        // Trailing badge reflecting sync state: synced → ✔, syncing / NOT-synced
+        // / unknown → ▲.
+        let chain_badge = match synced {
+            Some(true) => badge("✔", "[ok]", green),
+            _ => badge("▲", "[!]", amber),
+        };
+        let chain_value = if parts.is_empty() {
+            p("get_info returned no recognizable chain fields", muted)
         } else {
-            row("CHAIN", &parts.join(" · "));
-        }
-        // Network hashrate: only if the daemon actually reports it (> 0).
+            parts.join(&sep)
+        };
+        row("CHAIN", format!("{chain_value}{sep}{chain_badge}"));
         let net_hr = info
             .get("network_hashrate")
             .and_then(|v| v.as_u64())
             .or_else(|| info.get("hashrate_hps").and_then(|v| v.as_u64()));
         if let Some(hr) = net_hr {
             if hr > 0 {
-                cont(&format!("network hashrate {hr} H/s"));
+                cont(format!("{} {}", p("network", muted), pb(&format!("{hr} H/s"), cyan)));
             }
         }
     } else {
         row(
             "CHAIN",
-            "node: unreachable at startup — will retry per-template",
+            format!(
+                "{}{sep}{}",
+                p("node unreachable at startup — will retry per-template", red),
+                badge("✖", "[x]", red)
+            ),
         );
     }
 
-    // ── 4. MINING ───────────────────────────────────────────────────
-    // Short payout address, thread count, and the RandomX dataset mode the
-    // shared cache will resolve to (full-mem vs light — same signals the
-    // orchestrator's hashrate-health guard uses). Metrics endpoint only
-    // when --metrics-port is set.
-    let addr_short = if address.len() > 18 {
-        format!("{}…{}", &address[..10], &address[address.len() - 6..])
-    } else {
+    // ── MINING ──────────────────────────────────────────────────────
+    // Short payout address, thread count, and RandomX dataset mode (full-mem
+    // vs light — the SAME node_mining_active() signal the orchestrator's
+    // hashrate-health guard uses, so the banner can't disagree with runtime).
+    // --verbose shows the full payout address; default truncates it.
+    let addr_disp = if verbose || address.len() <= 18 {
         address.to_string()
+    } else {
+        format!("{}…{}", &address[..10], &address[address.len() - 6..])
     };
     let light_forced = std::env::var("COINCYNC_RANDOMX_LIGHT_MODE")
         .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
         .unwrap_or(false);
     let full_mem = coincync::consensus::pow::node_mining_active() && !light_forced;
-    let rx_mode = if full_mem { "full-mem" } else { "light" };
+    let (rx_mode, rx_col) = if full_mem { ("full-mem", green) } else { ("light", amber) };
+    // Trailing badge: full-mem → ✔, light → ▲.
+    let mining_badge = if full_mem {
+        badge("✔", "[ok]", green)
+    } else {
+        badge("▲", "[!]", amber)
+    };
     row(
         "MINING",
-        &format!("addr {addr_short} · {n_threads} threads · RandomX {rx_mode}"),
+        [
+            p(&format!("addr {addr_disp}"), body),
+            format!("{} {}", pb(&n_threads.to_string(), cyan), p("threads", muted)),
+            format!("{} {}", p("RandomX", muted), p(rx_mode, rx_col)),
+            mining_badge,
+        ]
+        .join(&sep),
     );
     if metrics_port != 0 {
-        cont(&format!("metrics {metrics_bind}:{metrics_port}"));
+        cont(format!(
+            "{} {}",
+            p("metrics", muted),
+            p(&format!("{metrics_bind}:{metrics_port}"), body)
+        ));
     }
 
-    // ── 5. PRIVACY / ZK POSTURE (honest) ────────────────────────────
-    // No SRS/circuit/nullifier details invented. State plainly that this is
-    // a transparent PoW miner and the shielded machinery lives on the node
-    // and is currently inactive.
+    // ── PRIVACY / ZK POSTURE (honest) ───────────────────────────────
+    // No SRS/circuit/nullifier/commitment values invented — this is a
+    // transparent PoW miner; shielded machinery is node-side and inactive.
     row(
         "PRIVACY",
-        "transparent RandomX PoW miner — shielded/Spark proving is",
+        [
+            p("transparent RandomX PoW", body),
+            p("shielded/Spark node-side", muted),
+            p("INACTIVE", amber),
+        ]
+        .join(&sep),
     );
-    cont("node-side (see node logs) and currently INACTIVE (activation height not yet reached)");
+    cont(p("activation height not yet reached — see node logs", muted));
     println!();
 }
 
@@ -883,6 +977,7 @@ fn run_solo_cli(
     metrics_bind: &str,
     tui_enabled: bool,
     signal_v1012: bool,
+    verbose: bool,
     tui_log_rx: Option<std::sync::mpsc::Receiver<String>>,
 ) -> Result<()> {
     activate_full_mem_hashing(); // #145 (also covers run-config, which calls this)
@@ -927,10 +1022,12 @@ fn run_solo_cli(
         .build()
         .context("creating tokio runtime")?;
 
-    // If --tui is set, the TUI dashboard always wants a MetricsState so
-    // its stats bar has something to read — promote it from "optional
-    // observability surface" to "required when TUI is up".
-    let need_metrics_state = metrics_port != 0 || tui_enabled;
+    // The solo miner always keeps a MetricsState now: it is the live hashrate /
+    // health source the loop's colored heartbeat reads from (as do the --tui
+    // dashboard and the optional /metrics endpoint). It is a cheap Arc of
+    // atomics updated inline by the mining loop — no extra threads, no cost when
+    // nothing reads it — so it is unconditional rather than gated on
+    // --tui / --metrics-port, which means a plain miner also gets the heartbeat.
 
     rt.block_on(async {
         let client = DaemonClient::new(node, api_key)?;
@@ -956,13 +1053,10 @@ fn run_solo_cli(
             metrics_port,
             metrics_bind,
             startup_info.as_ref(),
+            verbose,
         );
 
-        let metrics_state = if need_metrics_state {
-            Some(metrics::MetricsState::new(n_threads))
-        } else {
-            None
-        };
+        let metrics_state = Some(metrics::MetricsState::new(n_threads));
         if metrics_port != 0 {
             if let Some(state) = metrics_state.as_ref() {
                 if let Err(e) = metrics::serve(metrics_bind, metrics_port, state.clone()).await {
@@ -990,17 +1084,130 @@ fn run_solo_cli(
             });
         }
 
-        orchestrator::run_solo(
-            &client,
-            address,
-            network.into_network_type(),
-            poll_interval_secs,
-            n_threads,
-            metrics_state,
-            signal_bits,
-        )
-        .await
+        // Graceful shutdown: race the mining loop against SIGINT (ctrl-c). On a
+        // plain CLI we print a framed session summary and exit cleanly; under
+        // --tui the dashboard owns the terminal and already exits on q/Esc, so
+        // we just exit without scribbling over it. Clone the metrics handle
+        // first — run_solo takes ownership of the original.
+        let started = std::time::Instant::now();
+        let metrics_shutdown = metrics_state.clone();
+        tokio::select! {
+            res = orchestrator::run_solo(
+                &client,
+                address,
+                network.into_network_type(),
+                poll_interval_secs,
+                n_threads,
+                metrics_state,
+                signal_bits,
+                // Colored live heartbeat on the plain CLI; suppressed under --tui,
+                // which owns the terminal with its own dashboard.
+                !tui_enabled,
+            ) => {
+                res
+            }
+            _ = tokio::signal::ctrl_c() => {
+                if !tui_enabled {
+                    if let Some(m) = metrics_shutdown.as_ref() {
+                        print_shutdown_summary(m, started.elapsed());
+                    }
+                }
+                std::process::exit(0);
+            }
+        }
     })
+}
+
+/// Framed session summary printed on ctrl-c (plain-CLI only). Reuses the
+/// startup banner's teal framed-box style. All figures come straight from the
+/// live MetricsState atomics — nothing fabricated.
+fn print_shutdown_summary(m: &metrics::MetricsState, uptime: std::time::Duration) {
+    use crossterm::style::{Color, Stylize};
+    use std::io::IsTerminal;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let term = std::io::stdout().is_terminal();
+    let teal = Color::Rgb { r: 86, g: 194, b: 180 };
+    let body = Color::Rgb { r: 224, g: 230, b: 228 };
+
+    let secs = uptime.as_secs();
+    let uptime_str = format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60);
+
+    let hashes = m.hashes_total.load(Relaxed);
+    let found = m.blocks_found_total.load(Relaxed);
+    let accepted = m.blocks_accepted_total.load(Relaxed);
+    let threads = m.threads.load(Relaxed);
+    // Average over the whole session (not the instantaneous rate), via the same
+    // auto-scaling formatter the heartbeat uses.
+    let avg_hps = if secs > 0 { hashes / secs } else { 0 };
+    let (ad, au) = tui_blockfont::format_hashrate(avg_hps);
+
+    let title = "CoinCync Rig  -  session summary".to_string();
+    let lines = [
+        format!("uptime    {uptime_str}"),
+        format!("hashes    {}", group_thousands(hashes)),
+        format!("blocks    {found} found · {accepted} accepted"),
+        format!("avg rate  {ad} {au}"),
+        format!("threads   {threads}"),
+    ];
+
+    // Box width derives from the longest plain line (ANSI codes are zero-width,
+    // so padding is computed on plain text then colored — same as print_banner).
+    let inner = lines
+        .iter()
+        .map(|l| l.chars().count())
+        .chain(std::iter::once(title.chars().count()))
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let bar = "─".repeat(inner);
+    let framed = |text: &str, col: Color| {
+        // 1-space gutter each side: "│ " + text + pad + " │" fills exactly `inner`.
+        let pad = inner - 2 - text.chars().count();
+        if term {
+            format!(
+                "  {} {}{} {}",
+                "│".with(teal),
+                text.with(col),
+                " ".repeat(pad),
+                "│".with(teal)
+            )
+        } else {
+            format!("  | {}{} |", text, " ".repeat(pad))
+        }
+    };
+
+    println!();
+    if term {
+        println!("  {}{}{}", "┌".with(teal), bar.clone().with(teal), "┐".with(teal));
+    } else {
+        println!("  +{}+", "-".repeat(inner));
+    }
+    println!("{}", framed(&title, teal));
+    for l in &lines {
+        println!("{}", framed(l, body));
+    }
+    if term {
+        println!("  {}{}{}", "└".with(teal), bar.with(teal), "┘".with(teal));
+    } else {
+        println!("  +{}+", "-".repeat(inner));
+    }
+    println!();
+}
+
+/// Group a count into thousands with `,` separators (e.g. 1234567 → 1,234,567).
+fn group_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
 }
 
 // ─── run-config ──────────────────────────────────────────────────────
@@ -1086,6 +1293,7 @@ fn run_config_cli(config_path: &str) -> Result<()> {
         &cfg.mining.metrics_bind,
         false,
         cfg.mining.signal_v1012,
+        false, // verbose: run-config is the systemd entry point; keep logs terse
         None,
     )
 }

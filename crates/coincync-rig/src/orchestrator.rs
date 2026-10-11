@@ -55,6 +55,152 @@ use crate::hasher::{HashInput, Hasher};
 // `coincync::mining::{fork_diverged, FORK_DIVERGENCE_MARGIN}`.
 use coincync::mining::{fork_diverged, FORK_DIVERGENCE_MARGIN};
 
+/// One-line condition-colored LIVE heartbeat for plain-CLI solo mining,
+/// printed on a cadence from the mining loop. Suppressed under `--tui` (which
+/// renders its own live dashboard). Colors follow the XMRig convention —
+/// green = healthy, amber = attention, red = fault — applied per-field by that
+/// field's OWN condition, with the leading dot showing the WORST of them so the
+/// line reads at a glance. Degrades to a plain, uncolored line (with `[ok]` /
+/// `[!]` / `[X]` glyphs) when stdout is not a TTY, so it is still useful in a
+/// systemd journal. All values are live: hashrate vs this rig's peak, the
+/// node's sync/height/difficulty (cached from the last good get_info), peer
+/// count, tip age, RandomX mode, and blocks found.
+#[allow(clippy::too_many_arguments)]
+fn print_live_status(
+    m: &crate::metrics::MetricsState,
+    node_ok: bool,
+    synced: Option<bool>,
+    height: Option<u64>,
+    difficulty: Option<&str>,
+    cur_hps: u64,
+    peak_hps: u64,
+    blocks_found: u64,
+) {
+    use crossterm::style::{Color, Stylize};
+    use std::io::IsTerminal;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let term = std::io::stdout().is_terminal();
+    let teal_dim = Color::Rgb { r: 58, g: 130, b: 122 };
+    let green = Color::Rgb { r: 127, g: 184, b: 121 };
+    let amber = Color::Rgb { r: 218, g: 183, b: 94 };
+    let red = Color::Rgb { r: 209, g: 108, b: 108 };
+    let cyan = Color::Rgb { r: 122, g: 200, b: 214 };
+    let muted = Color::Rgb { r: 138, g: 148, b: 146 };
+    let p = |s: String, col: Color| if term { s.with(col).to_string() } else { s };
+    let pb = |s: String, col: Color| if term { s.with(col).bold().to_string() } else { s };
+    // Human-readable hashrate via the same auto-scaling formatter the TUI + bench
+    // use, so "2300" reads as "2.3 KH/s" instead of a bare count a tired operator
+    // misreads by 1000x.
+    let fmt_hr = |hps: u64| {
+        let (d, u) = crate::tui_blockfont::format_hashrate(hps);
+        format!("{d} {u}")
+    };
+
+    let peers = m.peers.load(Relaxed);
+    let tip_age = m.tip_age_secs.load(Relaxed);
+    let light = m.randomx_light_mode.load(Relaxed) == 1;
+
+    // Per-field severity rolls up into the leading dot (0 ok / 1 attention / 2 fault).
+    let mut worst: u8 = 0;
+    if !node_ok {
+        worst = 2;
+    }
+    if light {
+        worst = worst.max(1);
+    }
+
+    // Hashrate vs this rig's observed peak.
+    let (hr, hr_col) = if cur_hps == 0 {
+        if node_ok {
+            worst = worst.max(2);
+        }
+        (fmt_hr(0), if node_ok { red } else { muted })
+    } else if peak_hps > 0 && cur_hps.saturating_mul(2) < peak_hps {
+        worst = worst.max(1);
+        (fmt_hr(cur_hps), amber)
+    } else {
+        (fmt_hr(cur_hps), green)
+    };
+
+    // Sync + peers drive severity too.
+    let sync_seg = match synced {
+        Some(true) => p("synced".into(), green),
+        Some(false) => {
+            worst = worst.max(1);
+            p("syncing".into(), amber)
+        }
+        None => p("sync ?".into(), muted),
+    };
+    let peer_col = if peers == 0 {
+        if node_ok {
+            worst = worst.max(2);
+        }
+        red
+    } else if peers < 3 {
+        worst = worst.max(1);
+        amber
+    } else {
+        green
+    };
+
+    let dot_col = match worst {
+        0 => green,
+        1 => amber,
+        _ => red,
+    };
+    let dot = if term {
+        "●".with(dot_col).to_string()
+    } else {
+        match worst {
+            0 => "[ok]",
+            1 => "[!]",
+            _ => "[X]",
+        }
+        .to_string()
+    };
+    let tag = if term {
+        "MINER".with(teal_dim).bold().to_string()
+    } else {
+        "MINER".to_string()
+    };
+    let sep = p(" · ".into(), muted);
+
+    // Node unreachable: don't show stale chain fields — report the fault plus
+    // the one thing still true (our own hashrate), and bail.
+    if !node_ok {
+        println!(
+            "   {dot} {tag}  {}{sep}{}",
+            p("node unreachable — retrying".into(), red),
+            pb(hr, hr_col)
+        );
+        return;
+    }
+
+    let mut segs: Vec<String> = Vec::new();
+    segs.push(pb(hr, hr_col));
+    if peak_hps > 0 {
+        segs.push(p(format!("peak {}", fmt_hr(peak_hps)), muted));
+    }
+    if let Some(h) = height {
+        segs.push(format!("{} {}", p("height".into(), muted), pb(format!("{h}"), cyan)));
+    }
+    segs.push(sync_seg);
+    segs.push(format!("{} {}", pb(format!("{peers}"), peer_col), p("peers".into(), muted)));
+    if light {
+        segs.push(p("LIGHT".into(), amber));
+    }
+    if let Some(d) = difficulty {
+        segs.push(format!("{} {}", p("diff".into(), muted), pb(d.to_string(), cyan)));
+    }
+    segs.push(p(format!("tip {tip_age}s"), if tip_age > 120 { amber } else { muted }));
+    if blocks_found > 0 {
+        segs.push(format!("{} {}", pb(format!("{blocks_found}"), green), p("blocks".into(), muted)));
+    }
+
+    println!("   {dot} {tag}  {}", segs.join(&sep));
+}
+
 /// One run of the solo mining loop. Returns when the daemon connection
 /// permanently fails or the operator sends ctrl-c (via tokio signal —
 /// tracked outside this function).
@@ -66,6 +212,7 @@ use coincync::mining::{fork_diverged, FORK_DIVERGENCE_MARGIN};
 /// Auto-reconnect: on `get_block_template` or `submit_block` errors we
 /// log and retry with exponential backoff (1s, 2s, 4s, ..., capped at
 /// 60s). The loop never bails — the operator decides when to stop.
+#[allow(clippy::too_many_arguments)] // mining loop config: node + chain + metrics + heartbeat
 pub async fn run_solo(
     daemon: &DaemonClient,
     address_str: &str,
@@ -74,6 +221,9 @@ pub async fn run_solo(
     threads: usize,
     metrics: Option<std::sync::Arc<crate::metrics::MetricsState>>,
     signal_bits: coincync::consensus::fork_signal::SignalBits,
+    // Print the colored live heartbeat to stdout (plain-CLI). False under --tui,
+    // which owns the terminal with its own dashboard.
+    live_status: bool,
 ) -> Result<()> {
     bind_randomx_genesis_for_network(network);
 
@@ -148,6 +298,71 @@ pub async fn run_solo(
     const SYNC_CACHE_SECS: u64 = 30;
     const SYNC_WAIT_SECS: u64 = 30; // sleep this long when unsynced before re-checking
 
+    // Live heartbeat state. Printed every LIVE_STATUS_SECS off the periodic
+    // get_info below; chain fields are cached from the last good get_info so the
+    // line still renders (amber/red) across a transient node miss.
+    let mut last_status: Option<Instant> = None;
+    let mut last_synced: Option<bool> = None;
+    let mut last_height: Option<u64> = None;
+    let mut last_diff: Option<String> = None;
+    const LIVE_STATUS_SECS: u64 = 30;
+
+    // One-shot "dataset ready" milestone (XMRig's `dataset ready (Xms)` line,
+    // honest): fires the first time we observe a non-zero hashrate, i.e. the
+    // RandomX cache/dataset finished building and workers are actually hashing.
+    let mut dataset_ready_logged = false;
+
+    // Dataset mode (full-mem vs light) is fixed for this process — compute once
+    // and share it between the build spinner and the one-shot ready line.
+    let full_mem = mining_active && !light_forced;
+    let dataset_mode = if full_mem { "full-mem 2048 MB" } else { "light 256 MB" };
+
+    // Indeterminate ELAPSED spinner for the FIRST RandomX dataset build. That
+    // build is one blocking FFI call (~30-60s full-mem, minutes single-threaded)
+    // during which the library falls silent after two early tracing lines — so a
+    // plain CLI would otherwise show dead-air. This is NOT a % progress bar
+    // (true progress lives behind the lock-covered pow.rs); just a braille frame
+    // + MM:SS since start. Shown ONLY on a plain-CLI TTY: under --tui the
+    // dashboard owns the screen, and when piped to a journal the one-shot
+    // "dataset ready (Xs)" line already covers the wait. Stopped (and its line
+    // cleared) at the dataset-ready milestone below — only the first build
+    // blocks, so there is no per-epoch re-arm.
+    let spinner_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut spinner_handle: Option<std::thread::JoinHandle<()>> = None;
+    {
+        use std::io::IsTerminal as _;
+        if live_status && std::io::stdout().is_terminal() {
+            let stop = spinner_stop.clone();
+            let start = mining_start;
+            let mode = dataset_mode;
+            spinner_handle = Some(std::thread::spawn(move || {
+                use crossterm::style::{Color, Stylize};
+                use std::io::Write as _;
+                use std::sync::atomic::Ordering::Relaxed;
+                let teal = Color::Rgb { r: 86, g: 194, b: 180 };
+                let body = Color::Rgb { r: 224, g: 230, b: 228 };
+                let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                let mut i = 0usize;
+                while !stop.load(Relaxed) {
+                    let secs = start.elapsed().as_secs();
+                    print!(
+                        "\r   {} {} ({mode}) — {:02}:{:02}",
+                        frames[i % frames.len()].to_string().with(teal),
+                        "building RandomX dataset".with(body),
+                        secs / 60,
+                        secs % 60,
+                    );
+                    let _ = std::io::stdout().flush();
+                    i += 1;
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                // Clear the spinner line so the following log line starts clean.
+                print!("\r{}\r", " ".repeat(72));
+                let _ = std::io::stdout().flush();
+            }));
+        }
+    }
+
     loop {
         // 0. Honor TUI-driven pause flag — don't poll the daemon, don't
         // mine. Wake every 250 ms to re-check (cheap, never hits the
@@ -170,7 +385,8 @@ pub async fn run_solo(
             };
             if due {
                 let started = Instant::now();
-                if let Ok(info) = daemon.get_info().await {
+                let info_res = daemon.get_info().await;
+                if let Ok(info) = &info_res {
                     let latency_ms = started.elapsed().as_millis() as u64;
                     m.rpc_latency_ms
                         .store(latency_ms, std::sync::atomic::Ordering::Relaxed);
@@ -194,6 +410,17 @@ pub async fn run_solo(
                     if let Some(peers) = info.get("peer_count").and_then(|v| v.as_u64()) {
                         m.peers.store(peers, std::sync::atomic::Ordering::Relaxed);
                     }
+                    // Cache chain fields for the live heartbeat below.
+                    last_synced = info
+                        .get("synced")
+                        .and_then(|v| v.as_bool())
+                        .or_else(|| info.get("is_synced").and_then(|v| v.as_bool()));
+                    last_height = info.get("height").and_then(|v| v.as_u64());
+                    last_diff = info.get("difficulty").and_then(|v| {
+                        v.as_str()
+                            .map(|s| s.to_string())
+                            .or_else(|| v.as_u64().map(|n| n.to_string()))
+                    });
                 }
                 last_get_info = Some(Instant::now());
 
@@ -204,6 +431,37 @@ pub async fn run_solo(
                 let cur = m
                     .current_hashrate_hps
                     .load(std::sync::atomic::Ordering::Relaxed);
+
+                // Dataset-ready milestone (once). As soon as hashing produces a
+                // non-zero rate, the RandomX dataset is live — report how long it
+                // took and which dataset was built. Same full_mem signal the
+                // startup guard used, so the figure can't contradict the banner.
+                if !dataset_ready_logged && cur > 0 {
+                    dataset_ready_logged = true;
+                    // Stop + join the build spinner FIRST so its cleared line
+                    // lands before we print — otherwise its trailing \r collides
+                    // with the ready line.
+                    spinner_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(h) = spinner_handle.take() {
+                        let _ = h.join();
+                    }
+                    let elapsed = mining_start.elapsed().as_secs_f64();
+                    let mode = dataset_mode;
+                    if live_status {
+                        use crossterm::style::{Color, Stylize};
+                        use std::io::IsTerminal;
+                        let green = Color::Rgb { r: 127, g: 184, b: 121 };
+                        let dot = if std::io::stdout().is_terminal() {
+                            "●".with(green).to_string()
+                        } else {
+                            "[ok]".to_string()
+                        };
+                        println!("   {dot} RandomX dataset ready ({elapsed:.1}s · {mode})");
+                    } else {
+                        info!("RandomX dataset ready ({elapsed:.1}s · {mode})");
+                    }
+                }
+
                 if mining_start.elapsed() > Duration::from_secs(120) && cur > 0 {
                     if cur > peak_hps {
                         peak_hps = cur;
@@ -226,6 +484,28 @@ pub async fn run_solo(
                             );
                             last_health_warn = Some(Instant::now());
                         }
+                    }
+                }
+
+                // Live status heartbeat (plain-CLI only; every LIVE_STATUS_SECS).
+                // Uses the hashrate just read above + chain fields cached from
+                // this (or the last good) get_info.
+                if live_status {
+                    let status_due = last_status
+                        .map(|t| t.elapsed() >= Duration::from_secs(LIVE_STATUS_SECS))
+                        .unwrap_or(true);
+                    if status_due {
+                        print_live_status(
+                            m,
+                            info_res.is_ok(),
+                            last_synced,
+                            last_height,
+                            last_diff.as_deref(),
+                            cur,
+                            peak_hps,
+                            blocks_found,
+                        );
+                        last_status = Some(Instant::now());
                     }
                 }
             }
@@ -640,6 +920,7 @@ enum MineResult {
 /// for milliseconds per hash, which is exactly what async runtimes
 /// hate. Keeping them as `std::thread::spawn` lets the tokio runtime
 /// stay responsive (the timeout race below depends on it).
+#[allow(clippy::too_many_arguments)] // nonce-search job: block inputs + target + control signals
 async fn mine_parallel(
     hasher: Hasher,
     input: HashInput,
