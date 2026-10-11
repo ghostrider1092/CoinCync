@@ -487,6 +487,203 @@ fn print_banner() {
     println!();
 }
 
+/// HONEST run-solo startup metadata banner. Logged once, right after the
+/// (reachable or not) startup `get_info`, before the mining loop starts.
+///
+/// Design rule: print ONLY what this rig can actually know.
+///   * Rig-local facts (version, git commit, build profile, chosen network,
+///     node URL, miner address, thread count, RandomX dataset mode, metrics
+///     endpoint) come from the build / CLI / process.
+///   * Chain + consensus facts (consensus_fingerprint, the node's own
+///     `network` string, height/target, sync, tip age, difficulty, and — if
+///     the daemon exposes it — network hashrate) come from the startup
+///     `get_info` result and are omitted when a field is absent.
+///   * Node-internal privacy machinery (Spark/shielded proving, SRS /
+///     trusted-setup, nullifier DB, encrypted mempool, commitment tree) is
+///     NEVER fabricated here. This is a transparent RandomX PoW miner; the
+///     ZK posture line says exactly that and points at the node.
+///
+/// Best-effort: when `info` is `None` the node was unreachable at startup —
+/// the CHAIN section says so and the loop's sync gate retries per-template.
+/// Matches `print_banner`'s palette + `* LABEL value` row style, and degrades
+/// to a plain, un-colored block when stdout is not a terminal.
+#[allow(clippy::too_many_arguments)]
+fn print_runsolo_metadata(
+    node: &str,
+    network: NetworkArg,
+    address: &str,
+    n_threads: usize,
+    metrics_port: u16,
+    metrics_bind: &str,
+    info: Option<&serde_json::Value>,
+) {
+    use crossterm::style::{Color, Stylize};
+    use std::io::IsTerminal;
+
+    let term = std::io::stdout().is_terminal();
+    let teal = Color::Rgb { r: 86, g: 194, b: 180 };
+    let teal_dim = Color::Rgb { r: 58, g: 130, b: 122 };
+    let body = Color::Rgb { r: 224, g: 230, b: 228 };
+    let muted = Color::Rgb { r: 138, g: 148, b: 146 };
+
+    // `* LABEL value` primary row, and an indented muted continuation line,
+    // aligned under the value column exactly like `print_banner`.
+    let row = |label: &str, value: &str| {
+        if term {
+            println!(
+                "   {} {}  {}",
+                "*".with(teal),
+                format!("{label:<9}").with(teal_dim).bold(),
+                value.with(body)
+            );
+        } else {
+            println!("   * {label:<9}  {value}");
+        }
+    };
+    let cont = |value: &str| {
+        if term {
+            println!("{}{}", " ".repeat(16), value.with(muted));
+        } else {
+            println!("{}{}", " ".repeat(16), value);
+        }
+    };
+
+    // ── 1. NODE / SOFTWARE ──────────────────────────────────────────
+    // Rig semantic version (this crate), git commit of the linked coincync
+    // lib (or "unknown", same convention as get_info's build_commit), and
+    // this rig's own build profile via cfg!(debug_assertions).
+    let ver = env!("CARGO_PKG_VERSION");
+    let commit = coincync::build_info::git_commit();
+    let commit_short = if commit != "unknown" && commit.len() > 10 {
+        &commit[..10]
+    } else {
+        commit
+    };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    row(
+        "NODE",
+        &format!("CoinCync Rig v{ver} · commit {commit_short} · {profile}"),
+    );
+
+    // ── 2. NETWORK ──────────────────────────────────────────────────
+    // Chosen network id (CLI) + node RPC URL are always known. The
+    // consensus_fingerprint and the node's self-reported `network` string
+    // come from get_info and are only shown when reachable.
+    let net_id = format!("{network:?}").to_lowercase();
+    row("NETWORK", &format!("{net_id} · node {node}"));
+    if let Some(info) = info {
+        let fp = info
+            .get("consensus_fingerprint")
+            .and_then(|v| v.as_str())
+            .map(|s| if s.len() > 12 { &s[..12] } else { s });
+        let net_field = info.get("network").and_then(|v| v.as_str());
+        match (fp, net_field) {
+            (Some(fp), Some(nf)) => cont(&format!("consensus fp {fp}… · node reports \"{nf}\"")),
+            (Some(fp), None) => cont(&format!("consensus fp {fp}…")),
+            (None, Some(nf)) => cont(&format!("node reports \"{nf}\"")),
+            (None, None) => {}
+        }
+    }
+
+    // ── 3. CHAIN STATE ──────────────────────────────────────────────
+    // Purely from get_info. (get_info exposes no genesis hash and no
+    // network_hashrate today — genesis is omitted; network hashrate is
+    // shown only if some daemon version reports it as > 0.)
+    if let Some(info) = info {
+        let height = info.get("height").and_then(|v| v.as_u64());
+        let target = info.get("target_height").and_then(|v| v.as_u64());
+        let peer_target = info.get("peer_target_height").and_then(|v| v.as_u64());
+        let synced = info
+            .get("synced")
+            .or_else(|| info.get("is_synced"))
+            .and_then(|v| v.as_bool());
+        let tip_age = info.get("tip_age_secs").and_then(|v| v.as_u64());
+        // difficulty is emitted as a decimal string by get_info.
+        let difficulty = info
+            .get("difficulty")
+            .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| v.as_u64().map(|n| n.to_string())));
+
+        let mut parts: Vec<String> = Vec::new();
+        match (height, target) {
+            (Some(h), Some(t)) => parts.push(format!("height {h} / target {t}")),
+            (Some(h), None) => parts.push(format!("height {h}")),
+            _ => {}
+        }
+        if let Some(pt) = peer_target {
+            if pt > 0 {
+                parts.push(format!("peer_target {pt}"));
+            }
+        }
+        if let Some(s) = synced {
+            parts.push(if s { "synced".into() } else { "NOT synced".into() });
+        }
+        if let Some(a) = tip_age {
+            parts.push(format!("tip {a}s"));
+        }
+        if let Some(d) = difficulty {
+            parts.push(format!("diff {d}"));
+        }
+        if parts.is_empty() {
+            row("CHAIN", "get_info returned no recognizable chain fields");
+        } else {
+            row("CHAIN", &parts.join(" · "));
+        }
+        // Network hashrate: only if the daemon actually reports it (> 0).
+        let net_hr = info
+            .get("network_hashrate")
+            .and_then(|v| v.as_u64())
+            .or_else(|| info.get("hashrate_hps").and_then(|v| v.as_u64()));
+        if let Some(hr) = net_hr {
+            if hr > 0 {
+                cont(&format!("network hashrate {hr} H/s"));
+            }
+        }
+    } else {
+        row(
+            "CHAIN",
+            "node: unreachable at startup — will retry per-template",
+        );
+    }
+
+    // ── 4. MINING ───────────────────────────────────────────────────
+    // Short payout address, thread count, and the RandomX dataset mode the
+    // shared cache will resolve to (full-mem vs light — same signals the
+    // orchestrator's hashrate-health guard uses). Metrics endpoint only
+    // when --metrics-port is set.
+    let addr_short = if address.len() > 18 {
+        format!("{}…{}", &address[..10], &address[address.len() - 6..])
+    } else {
+        address.to_string()
+    };
+    let light_forced = std::env::var("COINCYNC_RANDOMX_LIGHT_MODE")
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false);
+    let full_mem = coincync::consensus::pow::node_mining_active() && !light_forced;
+    let rx_mode = if full_mem { "full-mem" } else { "light" };
+    row(
+        "MINING",
+        &format!("addr {addr_short} · {n_threads} threads · RandomX {rx_mode}"),
+    );
+    if metrics_port != 0 {
+        cont(&format!("metrics {metrics_bind}:{metrics_port}"));
+    }
+
+    // ── 5. PRIVACY / ZK POSTURE (honest) ────────────────────────────
+    // No SRS/circuit/nullifier details invented. State plainly that this is
+    // a transparent PoW miner and the shielded machinery lives on the node
+    // and is currently inactive.
+    row(
+        "PRIVACY",
+        "transparent RandomX PoW miner — shielded/Spark proving is",
+    );
+    cont("node-side (see node logs) and currently INACTIVE (activation height not yet reached)");
+    println!();
+}
+
 fn run_selftest() -> Result<()> {
     info!("running hasher selftest with fixed input");
     let input = HashInput {
@@ -737,21 +934,29 @@ fn run_solo_cli(
 
     rt.block_on(async {
         let client = DaemonClient::new(node, api_key)?;
-        match client.get_info().await {
-            Ok(info) => {
-                let height = info.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                let synced = info
-                    .get("synced")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                println!("daemon ok: height={height} synced={synced}");
-            }
+        // Best-effort startup get_info — feeds the HONEST metadata banner.
+        // On failure we don't bail: the banner prints "node: unreachable at
+        // startup" and the orchestrator's sync gate retries per-template.
+        let startup_info = match client.get_info().await {
+            Ok(info) => Some(info),
             Err(e) => {
-                println!("daemon get_info failed: {e}");
-                println!("(continuing — orchestrator retries per-template)");
+                tracing::warn!(
+                    error = %e,
+                    "run-solo: get_info failed at startup — continuing, \
+                     orchestrator retries per-template"
+                );
+                None
             }
-        }
-        println!("mining threads: {n_threads}");
+        };
+        print_runsolo_metadata(
+            node,
+            network,
+            address,
+            n_threads,
+            metrics_port,
+            metrics_bind,
+            startup_info.as_ref(),
+        );
 
         let metrics_state = if need_metrics_state {
             Some(metrics::MetricsState::new(n_threads))
