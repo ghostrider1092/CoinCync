@@ -551,6 +551,15 @@ mod tests {
     }
 }
 
+/// Serializes header-batch verification to ONE at a time. `handle_headers` now
+/// runs off the single message processor (spawned per Headers message, so the
+/// ~24-46s RandomX verify no longer starves other peers' handshakes during
+/// cold-start IBD) — but two batches must still never verify concurrently, which
+/// this guard preserves. The nonce re-check after the wait still discards a batch
+/// that went stale while queued here.
+static HEADER_VERIFY_SEM: once_cell::sync::Lazy<tokio::sync::Semaphore> =
+    once_cell::sync::Lazy::new(|| tokio::sync::Semaphore::new(1));
+
 pub(super) async fn handle_headers(
     peer_id: PeerId,
     payload: &[u8],
@@ -609,12 +618,26 @@ pub(super) async fn handle_headers(
 
             // #184: verify the header batch WITHOUT holding the ChainSync lock.
             // This is ~2000 sequential RandomX verifications (~24-46s in light
-            // mode); holding the write lock across it froze the entire sync driver,
-            // so a fresh node advanced only ~100 blocks per batch. Off the lock,
-            // block downloads keep flowing while the headers validate.
-            let hashes = match validate_header_batch(chain, &headers_msg.headers) {
-                Ok(hashes) => hashes,
-                Err(error) => {
+            // mode). Two changes keep that from stalling cold-start IBD:
+            //   1. Serialize to one verify at a time (HEADER_VERIFY_SEM) — this
+            //      handler now runs off the single message processor, so the guard
+            //      preserves the prior no-concurrent-verify invariant. The permit
+            //      is held through the apply below.
+            //   2. Run the RandomX batch on the BLOCKING pool (spawn_blocking) so
+            //      it never occupies an async worker thread.
+            let _verify_permit = HEADER_VERIFY_SEM
+                .acquire()
+                .await
+                .expect("header-verify semaphore is never closed");
+            let chain_for_verify = chain.clone();
+            let headers_for_verify = headers_msg.headers.clone();
+            let hashes = match tokio::task::spawn_blocking(move || {
+                validate_header_batch(&chain_for_verify, &headers_for_verify)
+            })
+            .await
+            {
+                Ok(Ok(hashes)) => hashes,
+                Ok(Err(error)) => {
                     warn!(
                         "Headers validation reject: header[{}] from peer {:?} (h={}): {}",
                         error.index,
@@ -629,6 +652,13 @@ pub(super) async fn handle_headers(
                             .get_or_create(addr)
                             .record_misbehavior(error.offense);
                     }
+                    return Ok(());
+                }
+                Err(join_err) => {
+                    warn!(
+                        "Header-verify task failed for peer {:?}: {join_err}",
+                        &peer_id[..4]
+                    );
                     return Ok(());
                 }
             };
