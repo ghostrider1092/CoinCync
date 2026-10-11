@@ -91,7 +91,6 @@ conformance, not as a conformance proof in themselves.
 ### MEDIUM crypto coverage (batch/single agreement + large ring + inflation)
 | Item | Property pinned | Test | Build |
 |------|-----------------|------|-------|
-| M2 — parallel proof verifier | A batch AGREES with per-proof `verify_single` and flags exactly the invalid proof (was only tested on empty input). Guards `verify_block_proofs`. | `parallel_batch_agrees_with_single_and_flags_the_invalid_proof` | default |
 | M3 — MW kernel balance | Excess encoding MORE value than the declared fee (or a stray blinding component) is rejected — the inflation direction (was only fee-mismatch). | `verify_kernel_set_rejects_value_inflation_and_stray_blinding` | default |
 | M4 — CLSAG large ring | Verifies at the production ring size (16) with the real signer at several positions; a single-slot tamper (response scalar or decoy member) is rejected (was only ring size 2–3). | `clsag_verifies_at_production_ring_size_and_rejects_single_slot_tamper` | default |
 | M1 — Spark batch verifier | Batch AGREES with per-proof `verify_spark_spend`; one tampered proof in a batch is rejected. (Inflation surface when enabled.) | `batch_verify_sparks_agrees_with_single_and_rejects_one_tampered` | `sketch-lelantus-spark` |
