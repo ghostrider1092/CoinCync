@@ -823,7 +823,18 @@ pub async fn run_solo(
                             m.blocks_rejected_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        warn!(error = %e, "orchestrator: block submit failed after retries (transient RPC/tunnel?)");
+                        warn!(error = %e, "orchestrator: block submit failed after retries (transient RPC/tunnel, or a PoW rejection)");
+                        // #235: if the failure is a PoW hash rejection of OUR block, this
+                        // process hashes differently from the node — re-check the full-mem
+                        // dataset against a freshly built light cache and drop it if it is
+                        // bad, so the next hash rebuilds it instead of mining on a broken
+                        // dataset until a restart. No-ops for a transient RPC/tunnel
+                        // failure (recheck_dataset_after_rejection filters on the reason).
+                        let reason = e.to_string();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            coincync::consensus::pow::recheck_dataset_after_rejection(&reason)
+                        })
+                        .await;
                     }
                 }
             }
