@@ -92,6 +92,48 @@ pub async fn run_solo(
         "orchestrator: solo mining loop starting"
     );
 
+    // Hashrate-health guard (startup). Detect if RandomX resolved to LIGHT mode
+    // while we're MINING — a ~5-10x hashrate loss. Two causes this catches that
+    // the pow layer does NOT warn about (it only warns on a full-mem *alloc
+    // failure*): COINCYNC_RANDOMX_LIGHT_MODE set in the env, or node_mining_active
+    // never set (an entry point that forgot activate_full_mem_hashing — the #145
+    // class of bug that silently crippled the Sep-7 rig to light speed). A real
+    // miner should always be full-mem, so this is loud + exported as a metric a
+    // monitor can alert on.
+    let light_forced = std::env::var("COINCYNC_RANDOMX_LIGHT_MODE")
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false);
+    let mining_active = coincync::consensus::pow::node_mining_active();
+    if light_forced || !mining_active {
+        if let Some(m) = metrics.as_ref() {
+            m.randomx_light_mode
+                .store(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let why = if light_forced {
+            "COINCYNC_RANDOMX_LIGHT_MODE is set in the environment"
+        } else {
+            "node_mining_active was never set (activate_full_mem_hashing not called for this entry point)"
+        };
+        warn!(
+            light_forced,
+            mining_active,
+            why,
+            "orchestrator: MINING IN LIGHT-MODE RandomX — expect ~5-10x LOWER hashrate than full-mem. \
+             Fix: unset COINCYNC_RANDOMX_LIGHT_MODE and ensure ~2.5 GB free RAM for the full dataset."
+        );
+    } else if let Some(m) = metrics.as_ref() {
+        m.randomx_light_mode
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // Hashrate-health guard (runtime). Track this rig's own peak sustained
+    // hashrate and flag a sustained drop below half of it — catches a full-mem
+    // -> light fallback under RAM pressure, thermal throttling, or CPU
+    // contention, none of which the static light-mode flag above can see.
+    let mining_start = Instant::now();
+    let mut peak_hps: u64 = 0;
+    let mut last_health_warn: Option<Instant> = None;
+
     let mut last_get_info: Option<Instant> = None;
 
     // Sync gate state (added 2026-06-03 in response to barns1253 report).
@@ -154,6 +196,38 @@ pub async fn run_solo(
                     }
                 }
                 last_get_info = Some(Instant::now());
+
+                // Hashrate-health (runtime): track peak + flag a sustained drop
+                // below half of it (thermal throttle / RAM-pressure light
+                // fallback / CPU contention). Skip the warm-up window so the
+                // dataset-build first round never false-alarms.
+                let cur = m
+                    .current_hashrate_hps
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if mining_start.elapsed() > Duration::from_secs(120) && cur > 0 {
+                    if cur > peak_hps {
+                        peak_hps = cur;
+                    }
+                    let degraded = peak_hps > 0 && cur.saturating_mul(2) < peak_hps;
+                    m.hashrate_degraded.store(
+                        u64::from(degraded),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if degraded {
+                        let warn_due = last_health_warn
+                            .map(|t| t.elapsed() > Duration::from_secs(300))
+                            .unwrap_or(true);
+                        if warn_due {
+                            warn!(
+                                current_hps = cur,
+                                peak_hps,
+                                "orchestrator: hashrate DEGRADED — now <50% of this rig's peak \
+                                 (possible thermal throttle, RAM-pressure light fallback, or CPU contention)"
+                            );
+                            last_health_warn = Some(Instant::now());
+                        }
+                    }
+                }
             }
         }
 
