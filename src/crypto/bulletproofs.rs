@@ -58,6 +58,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use merlin::Transcript;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -525,6 +526,42 @@ static BP_PLUS_PC_GENS: Lazy<BpPlusPedersenGens<RistrettoPoint>> = Lazy::new(|| 
     }
 });
 
+/// Cached BP+ `RangeParameters`, one per padded aggregation size (1, 2, …,
+/// `MAX_AGGREGATION`). `RangeParameters::init` runs `BulletproofGens::new`,
+/// which derives `RANGE_BITS · max_aggregation` generators through the
+/// hash-to-group chain and builds an interleaved precomputation table — the
+/// dominant cost paid on EVERY range-proof prove/verify before this cache (#256;
+/// it is why the 4-output aggregated verify measured slightly *slower* than four
+/// single verifies). The precomputation table is held behind an `Arc` inside the
+/// generators, so cloning a cached entry shares it (an `Arc` bump) and copies
+/// only the already-derived generator vectors — never re-deriving them. The
+/// parameters are a deterministic function of the size, so proofs are unchanged.
+static BP_PLUS_PARAMS: Lazy<HashMap<usize, BpPlusParams<RistrettoPoint>>> = Lazy::new(|| {
+    let mut m = HashMap::new();
+    let mut size = 1usize;
+    while size <= MAX_AGGREGATION {
+        // A fixed, known-good (RANGE_BITS, size); init is deterministic and only
+        // fails on a bad capacity, so a miss here just means callers fall back.
+        if let Ok(p) = BpPlusParams::init(RANGE_BITS, size, BP_PLUS_PC_GENS.clone()) {
+            m.insert(size, p);
+        }
+        size *= 2;
+    }
+    m
+});
+
+/// BP+ `RangeParameters` for a padded aggregation `size`: a cheap clone of the
+/// cached entry for every power of two up to `MAX_AGGREGATION`, built on demand
+/// (uncached) for any other size. Fail-closed on an init error. See
+/// [`BP_PLUS_PARAMS`] for why the cache clone is cheap.
+fn bp_plus_params(size: usize) -> Result<BpPlusParams<RistrettoPoint>> {
+    if let Some(p) = BP_PLUS_PARAMS.get(&size) {
+        return Ok(p.clone());
+    }
+    BpPlusParams::init(RANGE_BITS, size, BP_PLUS_PC_GENS.clone())
+        .map_err(|e| Error::CryptoError(format!("BP+ params: {e}")))
+}
+
 /// Create a single BP+ range proof.
 pub fn create_range_proof_bp_plus<R: RngCore + CryptoRng>(
     amount: Amount,
@@ -535,8 +572,7 @@ pub fn create_range_proof_bp_plus<R: RngCore + CryptoRng>(
     let witness = BpPlusWitness::init(vec![opening])
         .map_err(|e| Error::CryptoError(format!("BP+ witness: {e}")))?;
 
-    let params = BpPlusParams::init(RANGE_BITS, 1, BP_PLUS_PC_GENS.clone())
-        .map_err(|e| Error::CryptoError(format!("BP+ params: {e}")))?;
+    let params = bp_plus_params(1)?;
 
     let c = PedersenCommitment::commit(amount.as_atomic(), blinding);
     let commitment = c.as_point().decompress().ok_or(Error::RangeProofInvalid)?;
@@ -595,8 +631,7 @@ pub fn create_aggregated_range_proof_bp_plus<R: RngCore + CryptoRng>(
     let witness = BpPlusWitness::init(openings)
         .map_err(|e| Error::CryptoError(format!("BP+ witness: {e}")))?;
 
-    let params = BpPlusParams::init(RANGE_BITS, padded_count, BP_PLUS_PC_GENS.clone())
-        .map_err(|e| Error::CryptoError(format!("BP+ params: {e}")))?;
+    let params = bp_plus_params(padded_count)?;
 
     // Build commitments (real + identity padding)
     let mut commitments: Vec<RistrettoPoint> = Vec::with_capacity(padded_count);
@@ -649,7 +684,7 @@ pub fn verify_range_proof_bp_plus(commitment: &PedersenCommitment, proof: &Range
         None => return false,
     };
 
-    let params = match BpPlusParams::init(RANGE_BITS, 1, BP_PLUS_PC_GENS.clone()) {
+    let params = match bp_plus_params(1) {
         Ok(p) => p,
         Err(_) => return false,
     };
@@ -704,7 +739,7 @@ pub fn verify_range_proofs_bp_plus(commitments: &[PedersenCommitment], proof: &R
         points.push(identity);
     }
 
-    let params = match BpPlusParams::init(RANGE_BITS, padded_count, BP_PLUS_PC_GENS.clone()) {
+    let params = match bp_plus_params(padded_count) {
         Ok(p) => p,
         Err(_) => return false,
     };
@@ -1162,6 +1197,42 @@ mod tests {
 
         assert!(!proof.is_empty());
         assert!(verify_range_proofs(&commitments, &proof));
+    }
+
+    #[test]
+    fn bp_plus_params_cache_covers_sizes_and_round_trips() {
+        // #256: every padded aggregation size (1, 2, 4, 8, 16) is precomputed in
+        // the cache, and a proof built with a cached entry still verifies — i.e.
+        // the cached params are equivalent to a fresh `RangeParameters::init`.
+        let mut size = 1usize;
+        while size <= MAX_AGGREGATION {
+            assert!(
+                BP_PLUS_PARAMS.contains_key(&size),
+                "BP+ params not cached for aggregation size {size}"
+            );
+            size *= 2;
+        }
+        // Round-trip a single proof (size 1) and an aggregated proof padded to a
+        // cached size (3 → 4) using the cache-backed create/verify paths.
+        let mut rng = OsRng;
+        let one_amt = Amount::from_atomic(12_345);
+        let one_bf = BlindingFactor::random(&mut rng);
+        let one_proof = create_range_proof_bp_plus(one_amt, &one_bf, &mut rng).unwrap();
+        let one_c = PedersenCommitment::commit(one_amt.as_atomic(), &one_bf);
+        assert!(verify_range_proof_bp_plus(&one_c, &one_proof), "cached size-1 proof verifies");
+
+        let amounts: Vec<Amount> = (0..3).map(|i| Amount::from_atomic(1_000 + i)).collect();
+        let blindings: Vec<BlindingFactor> = (0..3).map(|_| BlindingFactor::random(&mut rng)).collect();
+        let proof = create_aggregated_range_proof_bp_plus(&amounts, &blindings, &mut rng).unwrap();
+        let commitments: Vec<PedersenCommitment> = amounts
+            .iter()
+            .zip(blindings.iter())
+            .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
+            .collect();
+        assert!(
+            verify_range_proofs_bp_plus(&commitments, &proof),
+            "cached aggregated (padded) proof verifies"
+        );
     }
 
     #[test]
