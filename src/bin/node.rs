@@ -235,6 +235,32 @@ enum Command {
         #[arg(long)]
         input: PathBuf,
     },
+
+    /// Roll a STOPPED node back to a given height, disconnecting every block
+    /// above it and rebuilding supply/UTXO/work state down to that height. The
+    /// rest of the data dir is kept.
+    ///
+    /// Recovery path for a node wedged on a private/minority fork (#286): a node
+    /// that mined its own fork past the MESS floor can never reorg back to the
+    /// real chain. Roll back to the last height it shares with the real chain,
+    /// then restart — the node is now simply *behind*, not forked, and syncs
+    /// forward normally. Refuses to cross a consensus checkpoint (finality is
+    /// enforced). Block bodies above the target stay in the DB but are no longer
+    /// canonical (a later resync overwrites the height index).
+    ///
+    /// The node MUST be stopped (the DB is single-process; a running daemon
+    /// holds the lock and this command refuses to open it). Prints the plan and
+    /// exits WITHOUT changing anything unless `--yes` is given.
+    Rollback {
+        /// Height to roll back to. Must be below the current tip and at or above
+        /// the last checkpoint.
+        #[arg(long)]
+        to_height: u64,
+        /// Actually perform the rollback. Without this flag the command only
+        /// reports what it would do (a dry run).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 // SECURITY (runtime resilience): force at least 4 worker threads regardless of
@@ -570,6 +596,93 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        Command::Rollback { to_height, yes } => {
+            let network_subdir = match network {
+                Network::Mainnet => "mainnet",
+                Network::Testnet => "testnet",
+                Network::Regtest => "regtest",
+            };
+            let chaindata_path = data_dir.join(network_subdir);
+
+            // Open the stopped node's DB. A running daemon holds the single-process
+            // lock, so this fails fast — exactly the guard we want (never mutate a
+            // live, mid-write chain). Dropped at the end of the arm → sled flush +
+            // unlock.
+            let db = match Database::open(&chaindata_path) {
+                Ok(db) => db,
+                Err(e) => {
+                    error!(
+                        "Cannot open chaindata at {} for rollback: {}. Is the node still running? Stop it first.",
+                        chaindata_path.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let chain = Blockchain::with_database(Arc::new(db), network);
+            match chain.load_from_database_with_outcome() {
+                Ok(ChainLoadOutcome::Loaded) => {}
+                Ok(ChainLoadOutcome::Fresh) => {
+                    error!(
+                        "Database at {} is uninitialized — nothing to roll back.",
+                        chaindata_path.display()
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    error!("Cannot load chaindata for rollback: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
+            let tip = chain.tip();
+            if to_height >= tip.height {
+                error!(
+                    "Target height {} is not below the current tip {} — nothing to roll back.",
+                    to_height, tip.height
+                );
+                std::process::exit(1);
+            }
+            let depth = tip.height - to_height;
+            info!(
+                "Rollback plan (network={}): height {} → {}, disconnecting {} block(s). Current tip {}.",
+                network_subdir,
+                tip.height,
+                to_height,
+                depth,
+                hex::encode(tip.hash.as_bytes()),
+            );
+
+            if !yes {
+                info!("Dry run — no changes made. Re-run with --yes to perform the rollback.");
+                info!(
+                    "Tip: `coincync-node snapshot-export --out <dir>` first if you want a restorable backup."
+                );
+            } else {
+                match chain.rollback_to_height(to_height) {
+                    Ok(orphaned) => {
+                        info!(
+                            "✓ Rolled back to height {} ({} block(s) disconnected, {} non-coinbase tx(s) orphaned).",
+                            to_height,
+                            depth,
+                            orphaned.len()
+                        );
+                        info!(
+                            "Block bodies above {} remain in the DB but are no longer canonical. Start the node normally to resync forward.",
+                            to_height
+                        );
+                    }
+                    Err(e) => {
+                        error!("Rollback refused: {}", e);
+                        error!(
+                            "(A rollback cannot cross a consensus checkpoint — finality is enforced. Pick a target at or above the last checkpoint.)"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+            // `chain` (and its Arc<Database>) dropped here → sled flush + unlock.
         }
         Command::Start => {
             if let Err(e) = start_node(

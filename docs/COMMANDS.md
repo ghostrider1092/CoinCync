@@ -25,6 +25,9 @@ Commands:
   start               Start the node (default if no command is given)
   print-genesis-hash  Print the genesis block hash and exit
   status              Show node status
+  snapshot-export     Export a chain snapshot (node must be stopped)
+  snapshot-import     Install a chain snapshot (node must be stopped)
+  rollback            Roll a STOPPED node back to a height (fork recovery, #286)
 
 Common options:
   --data-dir <DIR>      Data directory  [default: ~/.coincync]
@@ -75,6 +78,46 @@ coincync-node print-genesis-hash --network testnet
 ```bash
 coincync-node status
 ```
+
+**Recover a node wedged on a private/minority fork (#286):**
+
+Symptom: your node mined its own fork (e.g. with `--allow-solo-mine` on a home
+box, or after a peer-ban cascade left it alone), the explorer shows none of your
+blocks, and on restart every real-chain block is refused with
+`Rejecting reorg at depth N: MESS rejection ...` / `Reorg too deep`. Once a
+private fork crosses the MESS floor no honest chain can out-weigh it, so the node
+can never rejoin on its own.
+
+Roll back to the last height you share with the real chain, then restart — the
+node is now simply *behind*, not forked, and syncs forward normally.
+
+```bash
+# 1. STOP the node first (the DB is single-process).
+
+# 2. Find the fork point. It's the last height before your node went solo —
+#    check your logs for the last block you received from a peer, or pick a
+#    height safely below where the explorer and your node diverge.
+
+# 3. Dry-run (prints the plan, changes NOTHING):
+coincync-node rollback --to-height 827 --network testnet
+
+# 4. (Optional) take a restorable backup first:
+coincync-node snapshot-export --out ~/coincync-prerollback --network testnet
+
+# 5. Perform it:
+coincync-node rollback --to-height 827 --yes --network testnet
+
+# 6. Start the node normally; it resyncs forward from 827.
+coincync-node start --network testnet
+```
+
+Notes:
+- The command refuses to cross a consensus checkpoint (finality is enforced) —
+  pick a target at or above the last checkpoint.
+- Block bodies above the target stay in the DB but are no longer canonical; a
+  later resync overwrites the height index.
+- A running daemon holds the DB lock, so the command refuses to open a live
+  node — stop it first.
 
 ---
 
