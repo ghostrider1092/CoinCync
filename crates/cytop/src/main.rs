@@ -8,6 +8,7 @@ mod app;
 mod collect;
 mod config;
 mod draw;
+mod fleet;
 mod theme;
 mod ui;
 
@@ -46,6 +47,22 @@ struct Cli {
     /// Config file path (default: %APPDATA%/cytop/cytop.conf or ~/.config/cytop/cytop.conf).
     #[arg(long)]
     config: Option<String>,
+    /// Fleet overview: watch many nodes at once. A comma list of `label=url`
+    /// (or bare urls, auto-labelled n1,n2…). Bare `host` → http://host:28081.
+    /// Remote nodes with loopback-bound RPC: forward them first (see
+    /// scripts/fleet-tunnels.sh), then pass the 127.0.0.1:<port> urls.
+    #[arg(long)]
+    fleet: Option<String>,
+    /// Per-node poll timeout in the fleet view, milliseconds (default 1500).
+    #[arg(long)]
+    fleet_timeout_ms: Option<u64>,
+    /// With --fleet: poll once, print a text report, and exit 0 (healthy) / 1.
+    /// A scriptable health gate; no TUI.
+    #[arg(long)]
+    once: bool,
+    /// With --fleet --once: emit JSON instead of text.
+    #[arg(long)]
+    json: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -96,8 +113,29 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let mut app = App::new(rpc.clone(), log.clone(), themes, start_idx, file_theme);
     let refresh = Duration::from_millis(refresh_ms.max(200));
+
+    // Fleet overview mode: watch many nodes at once, no host/log panels.
+    if let Some(spec) = cli.fleet.clone() {
+        let targets = fleet::FleetTarget::parse_list(&spec);
+        if targets.is_empty() {
+            eprintln!("error: --fleet had no usable targets (expected label=url,…)");
+            std::process::exit(2);
+        }
+        let timeout = Duration::from_millis(cli.fleet_timeout_ms.unwrap_or(1500).max(200));
+        if cli.once {
+            std::process::exit(fleet::run_once(&targets, timeout, cli.json));
+        }
+        let theme = themes[start_idx.min(themes.len().saturating_sub(1))].1.clone();
+        let mut fapp = fleet::FleetApp::new(targets, theme, timeout);
+        let mut terminal = ratatui::init();
+        fapp.tick();
+        let res = run_fleet(&mut terminal, &mut fapp, refresh);
+        ratatui::restore();
+        return res;
+    }
+
+    let mut app = App::new(rpc.clone(), log.clone(), themes, start_idx, file_theme);
 
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
@@ -158,6 +196,42 @@ fn run(
         if !app.paused {
             app.drain_log();
         }
+        if !app.paused && app.last_poll.elapsed() >= refresh {
+            app.tick();
+            app.last_poll = Instant::now();
+        }
+    }
+}
+
+fn run_fleet(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut fleet::FleetApp,
+    refresh: Duration,
+) -> anyhow::Result<()> {
+    // A fleet poll fans out to every node and can take up to the per-node
+    // timeout; never poll more often than once per `refresh`, but also give the
+    // network a breath so a slow fleet doesn't hammer.
+    let refresh = refresh.max(Duration::from_millis(750));
+    loop {
+        terminal.draw(|f| fleet::draw_fleet(f, app))?;
+
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(k) = event::read()? {
+                match k.code {
+                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(())
+                    }
+                    KeyCode::Char(' ') => app.paused = !app.paused,
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        app.tick();
+                        app.last_poll = Instant::now();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        app.frame = app.frame.wrapping_add(1);
         if !app.paused && app.last_poll.elapsed() >= refresh {
             app.tick();
             app.last_poll = Instant::now();
