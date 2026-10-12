@@ -68,7 +68,19 @@ pub const TESTNET_SEED_NODES: &[&str] = &[
     // 2026-09-07: migrated 2.28.1.75 (CPX22, 4 GB) -> 2.29.34.197 (CPX32, 8 GB).
     // The CPX22 OOM-killed the node (RandomX full-dataset + UTXO exceeded 4 GB);
     // the CPX32 runs it comfortably. Old box decommissioned.
-    "2.29.34.197:28080", // Hetzner (EU, Falkenstein) — stable public seed
+    // 2026-10-10: fleet taken global — a 4-country Hetzner backbone (FI/DE/US).
+    // Appended the EU relays (hel2/hel3/hel4), the Nuremberg relay (nbg1) and
+    // the Ashburn US relay (ash1). hel5 (89.167.113.125) was deleted the same
+    // day to free a server-limit slot and stays OUT. The community tester box
+    // (89.34.25.42) is DNS-seed only — NOT baked in here (DNS is revocable; the
+    // compiled bootstrap list stays project-owned). MUST stay in sync with
+    // src/network/dns_seeds.rs::TESTNET_FALLBACK and scripts/fleet-config.json.
+    "2.29.34.197:28080", // hel1 — Hetzner (EU, Falkenstein) — seed
+    "37.27.185.37:28080", // hel2 — Hetzner (EU, Helsinki) — relay
+    "77.42.64.199:28080", // hel3 — Hetzner (EU, Helsinki) — relay
+    "89.167.93.52:28080", // hel4 — Hetzner (EU, Helsinki) — relay
+    "2.31.63.25:28080",  // nbg1 — Hetzner (DE, Nuremberg) — relay
+    "5.161.214.98:28080", // ash1 — Hetzner (US, Ashburn) — relay
 ];
 
 pub const TESTNET_MIN_RING_SIZE: usize = 11;

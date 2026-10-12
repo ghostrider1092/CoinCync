@@ -1587,131 +1587,6 @@
     ]
   },
   {
-    "path": "src/crypto/batch_verify.rs",
-    "subsystem": "crypto",
-    "critical": true,
-    "sections": [
-      {
-        "num": 1,
-        "name": "BatchVerifier::add",
-        "invariant": "`add`/`add_all` only enqueue signatures and `pending_count` reflects the queue; no verification runs until `verify_all`.",
-        "threat": "a signature silently dropped from the batch and never verified.",
-        "tags": [],
-        "tests": [
-          "test_concurrent_batch"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 2,
-        "name": "BatchVerifier::verify_all",
-        "invariant": "the batch result equals per-signature verification \u2014 `total == valid + invalid`, an empty batch is `all_valid`, and the parallel and single-threaded paths agree.",
-        "threat": "the batch path masking one invalid signature (fail-one must fail-all \u2014 that index must appear in `invalid_indices`).",
-        "tags": [],
-        "tests": [
-          "test_batch_verify_empty",
-          "test_concurrent_batch",
-          "cache_does_not_reuse_result_for_different_pseudo_output"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 3,
-        "name": "BatchVerifier::verify_single",
-        "invariant": "a signature verifies here iff CLSAG verify accepts it, and an identity `pseudo_output` is rejected defensively (R-29 fix).",
-        "threat": "R-29 \u2014 an identity `pseudo_output` collapses the `mu_c \u00b7 (C_i \u2212 C')` balance term and enables inflation.",
-        "tags": [
-          "R-29"
-        ],
-        "tests": [
-          "batch_verify_single_rejects_identity_pseudo_output"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 4,
-        "name": "SignatureData::cache_key",
-        "invariant": "`cache_key` binds message, signature, ring_data, and pseudo_output together so a cached result cannot be reused across statements.",
-        "threat": "cache poisoning \u2014 reusing a valid result for a different ring or pseudo-output.",
-        "tags": [],
-        "tests": [
-          "cache_does_not_reuse_result_for_different_pseudo_output"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 5,
-        "name": "BatchVerifyResult",
-        "invariant": "`all_valid()` is true iff `invalid == 0`, and `success_rate() == valid / total` (1.0 on an empty batch).",
-        "threat": "mis-reporting a batch that contains an invalid signature as all-valid.",
-        "tags": [],
-        "tests": [
-          "test_batch_result",
-          "test_batch_verify_empty"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 6,
-        "name": "ParallelTxValidator::validate_transactions",
-        "invariant": "`validate_transactions` returns exactly the indices failing the predicate; empty input short-circuits without touching rayon.",
-        "threat": "a parallel-order race dropping or misindexing an invalid transaction.",
-        "tags": [],
-        "tests": [
-          "test_parallel_validator",
-          "parallel_validator_returns_correct_invalid_indices_and_subset"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 7,
-        "name": "ParallelTxValidator::filter_valid",
-        "invariant": "`filter_valid` keeps exactly the subset of transactions passing the predicate, in order; empty input short-circuits.",
-        "threat": "a parallel filter admitting an invalid transaction or dropping a valid one.",
-        "tags": [],
-        "tests": [
-          "parallel_validator_returns_correct_invalid_indices_and_subset"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 8,
-        "name": "VerificationStats::record",
-        "invariant": "`record` atomically increments total/hits/misses/valid/invalid, and `snapshot`/`hit_rate` read a consistent tally under concurrent updates.",
-        "threat": "lost or torn counter updates corrupting reported verification stats.",
-        "tags": [],
-        "tests": [
-          "VerificationStats"
-        ],
-        "gap": true,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      }
-    ]
-  },
-  {
     "path": "src/crypto/bulletproofs.rs",
     "subsystem": "crypto",
     "critical": true,
@@ -1810,23 +1685,6 @@
         "tags": [],
         "tests": [
           "verify_coinbase_output_matches_zero_blinding"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 7,
-        "name": "batch_verify_range_proofs",
-        "invariant": "`batch_verify_range_proofs` accepts a set iff every `(commitment, proof)` pair verifies, and aggregation refuses length mismatch and any batch exceeding `MAX_AGGREGATION`, with `RANGE_BITS` fixing the 64-bit proving width.",
-        "threat": "an oversized/mismatched batch is a DoS or padding-abuse vector, a lenient batch check lets one bad proof slip through, and a wrong bit width would prove the wrong range.",
-        "tags": [],
-        "tests": [
-          "create_aggregated_range_proof_rejects_length_mismatch",
-          "create_aggregated_range_proof_rejects_over_max_aggregation",
-          "create_aggregated_range_proof_empty_returns_empty_proof",
-          "range_proof_at_u64_max"
         ],
         "gap": false,
         "adversarial": true,
@@ -2970,118 +2828,6 @@
         "name": "CutThroughEngine::process",
         "invariant": "a candidate is pruned only once `current_height >= spent_at + MW_CUTTHROUGH_DEPTH`, keeping the kernel behind; others stay pending.",
         "threat": "pruning before the reorg-protection depth would delete an output/input pair that a reorg could still need, corrupting the UTXO set.",
-        "tags": [],
-        "tests": [],
-        "gap": true,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      }
-    ]
-  },
-  {
-    "path": "src/crypto/parallel_proofs.rs",
-    "subsystem": "crypto",
-    "critical": true,
-    "sections": [
-      {
-        "num": 1,
-        "name": "ProofTask",
-        "invariant": "a task carries the commitment bytes and raw proof bytes intact, and `cache_key` is a pure function of both so identical proofs hit the same cache slot.",
-        "threat": "a mismatched or mutable cache key would let a poisoned/aliased result stand in for a different proof.",
-        "tags": [],
-        "tests": [
-          "test_proof_task"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 2,
-        "name": "verify_all",
-        "invariant": "the parallel batch result agrees byte-for-byte with the per-proof (`verify_single`) ground truth and reports exactly the invalid indices; it also CONSUMES the pending queue (R-30) so a second call sees an empty set rather than silently re-reporting success.",
-        "threat": "a batch that accepted a proof the single verifier rejects (crypto M2) would let an inflating output pass block validation; the R-30 side effect could mask an unverified re-submission.",
-        "tags": [
-          "M2",
-          "R-30"
-        ],
-        "tests": [
-          "parallel_batch_agrees_with_single_and_flags_the_invalid_proof",
-          "test_parallel_verifier_empty",
-          "test_empty_batch"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 3,
-        "name": "verify_single",
-        "invariant": "a proof is valid only if its range proof parses AND its commitment passes checked Ristretto decode (A6-COMMITMENT) AND the range proof verifies against that commitment.",
-        "threat": "unchecked point decode would accept non-Ristretto bytes, breaking the homomorphic balance equation and enabling inflation.",
-        "tags": [
-          "A6-COMMITMENT"
-        ],
-        "tests": [
-          "parallel_batch_agrees_with_single_and_flags_the_invalid_proof"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 4,
-        "name": "ParallelVerifyResult",
-        "invariant": "`all_valid()` is true iff `invalid == 0`, and `invalid_indices` lists precisely the failing positions.",
-        "threat": "an all-valid verdict that hid a failing proof would admit an invalid output into a block.",
-        "tags": [],
-        "tests": [
-          "test_empty_batch",
-          "parallel_batch_agrees_with_single_and_flags_the_invalid_proof"
-        ],
-        "gap": false,
-        "adversarial": true,
-        "proven": false,
-        "color": "yellow"
-      },
-      {
-        "num": 5,
-        "name": "verify_block_proofs",
-        "invariant": "every (tx_hash, idx, commitment, proof) output in a block is verified through the same parallel engine and gated on the aggregate result.",
-        "threat": "an unverified block output would let an inflating tx confirm.",
-        "tags": [],
-        "tests": [
-          "verify_all",
-          "verify_single"
-        ],
-        "gap": true,
-        "adversarial": true,
-        "proven": false,
-        "color": "grey"
-      },
-      {
-        "num": 6,
-        "name": "AggregatedProofVerifier",
-        "invariant": "a single aggregated proof verifies only when a proof is set, the commitment list is non-empty, and every commitment passes checked decode (A6-COMMITMENT) before `verify_range_proofs`.",
-        "threat": "accepting an empty set or a non-canonical commitment would forge a balanced-looking aggregate.",
-        "tags": [
-          "A6-COMMITMENT"
-        ],
-        "tests": [],
-        "gap": true,
-        "adversarial": true,
-        "proven": false,
-        "color": "grey"
-      },
-      {
-        "num": 7,
-        "name": "VerifierStats",
-        "invariant": "total-verified / cache-hit / time counters are monotonic atomic accumulators, correct under the parallel `par_iter` path.",
-        "threat": "torn or racy counters would corrupt operational telemetry, not consensus.",
         "tags": [],
         "tests": [],
         "gap": true,
@@ -6981,15 +6727,16 @@
       {
         "num": 6,
         "name": "handle_ping",
-        "invariant": "a malformed (<8-byte) Ping scores ProtocolViolation and never elicits a Pong; a well-formed Ping echoes its nonce exactly; Pong itself is a no-op.",
-        "threat": "P5-N5 malformed-ping spam evading misbehavior scoring.",
+        "invariant": "a malformed (<8-byte) Ping or Pong scores ProtocolViolation and a malformed Ping never elicits a Pong; a well-formed Ping echoes its nonce exactly; a Pong is matched against the nonce we sent that peer and only then recorded as its latency sample.",
+        "threat": "P5-N5 malformed-ping spam evading misbehavior scoring; forged or replayed Pongs steering the latency score.",
         "tags": [
           "P5-N5"
         ],
         "tests": [
           "handle_ping_malformed_scores_and_sends_no_pong",
           "handle_ping_echoes_nonce_as_pong",
-          "handle_pong_is_a_noop"
+          "handle_pong_records_rtt_for_our_nonce",
+          "handle_pong_ignores_unknown_nonce_and_scores_malformed"
         ],
         "gap": false,
         "adversarial": true,
@@ -7080,7 +6827,9 @@
         "threat": "a structurally-valid header with forged or missing PoW being queued for sync.",
         "tags": [],
         "tests": [
-          "accepts_connected_header_with_valid_pow"
+          "accepts_connected_header_with_valid_pow",
+          "chunked_validation_matches_whole_batch",
+          "known_hash_skips_pow_but_must_connect"
         ],
         "gap": false,
         "adversarial": true,
@@ -7111,7 +6860,8 @@
         "tests": [
           "handle_headers_cross_peer_nonce_is_rejected_without_consuming",
           "handle_headers_valid_nonce_is_single_use",
-          "handle_headers_unsolicited_nonce_zero_is_ignored"
+          "handle_headers_unsolicited_nonce_zero_is_ignored",
+          "handle_headers_rejected_batch_releases_nonce"
         ],
         "gap": false,
         "adversarial": true,
@@ -7129,6 +6879,22 @@
         ],
         "gap": false,
         "adversarial": true,
+        "proven": false,
+        "color": "yellow"
+      },
+      {
+        "num": 9,
+        "name": "handle_headers",
+        "invariant": "a Headers batch is verified in HEADER_VERIFY_CHUNK slices and every verified slice is queued at once, so block requests start while the rest of the batch is still being checked; a slice is never verified in a later RandomX key epoch than the block after our tip; hashes the engine already verified are not RandomX-checked again.",
+        "threat": "none adversarial; ~45 s of IBD dead time per 2000 headers and the one-block-per-second crawl before every key-epoch boundary.",
+        "tags": [],
+        "tests": [
+          "chunked_validation_matches_whole_batch",
+          "chunked_validation_reports_absolute_index",
+          "handle_headers_streams_verified_prefix_and_consumes_nonce"
+        ],
+        "gap": false,
+        "adversarial": false,
         "proven": false,
         "color": "yellow"
       }
@@ -7778,11 +7544,12 @@
       {
         "num": 2,
         "name": "run_headers_tick",
-        "invariant": "the tick loop checks `headers_request_pending()` and returns early rather than issuing a second concurrent GetHeaders.",
+        "invariant": "the tick loop checks `headers_request_pending()` and returns early rather than issuing a second concurrent GetHeaders. The tick also does not ask while the pool is still applying a received batch (headers_tick_deferred).",
         "threat": "Finding #3 headers-request flood \u2014 the pre-fix loop sent GetHeaders unconditionally every tick (~4 Hz hammer) while stuck on a fork, exhausting CPU.",
         "tags": [],
         "tests": [
-          "regression_finding_03_ibd_loop_gates_on_pending"
+          "regression_finding_03_ibd_loop_gates_on_pending",
+          "headers_tick_waits_for_the_pool_to_drain"
         ],
         "gap": false,
         "adversarial": true,
@@ -8292,7 +8059,7 @@
         "threat": "evicting anything other than the true oldest entry would let a flood of new orphans push out arbitrary (possibly still-relevant) entries, or regress to the prior O(n\u00b2) scan under load.",
         "tags": [],
         "tests": [
-          "mark_block_orphan_lru_evicts_at_max_orphan_blocks"
+          "mark_block_orphan_evicts_farthest_at_max_orphan_blocks"
         ],
         "gap": true,
         "adversarial": true,
@@ -8938,6 +8705,22 @@
         "adversarial": true,
         "proven": false,
         "color": "yellow"
+      },
+      {
+        "num": 11,
+        "name": "record_pong",
+        "invariant": "`latency_ms` only moves on a Pong whose nonce matches the Ping recorded for that peer; the first sample replaces the 1000 ms placeholder, later ones are averaged; a nonce is single use.",
+        "threat": "a peer forging or replaying Pongs to lower its latency term (25% of composite_score) and win header-request selection.",
+        "tags": [],
+        "tests": [
+          "pong_with_matching_nonce_measures_latency",
+          "pong_with_wrong_nonce_is_ignored",
+          "latency_averages_after_the_first_sample"
+        ],
+        "gap": false,
+        "adversarial": true,
+        "proven": false,
+        "color": "yellow"
       }
     ]
   },
@@ -9238,14 +9021,15 @@
       {
         "num": 5,
         "name": "MAX_ORPHANS_PER_PEER",
-        "invariant": "a single peer's orphan deliveries are never silently dropped by a per-peer cap; only the total-pool cap (`MAX_ORPHAN_BLOCKS`) plus LRU eviction bounds memory.",
+        "invariant": "a single peer's orphan deliveries are never silently dropped by a per-peer cap; only the total-pool cap (`MAX_ORPHAN_BLOCKS`) plus farthest-from-tip eviction bounds memory; a parent that is already pooled is never re-requested.",
         "threat": "incident F24 (2026-07-04 SEV-A) \u2014 a per-peer cap of 50 silently dropped 578 of 628 intermediate blocks during a legitimate deep reorg, so the reorg could never complete.",
         "tags": [
           "F24"
         ],
         "tests": [
           "regression_2026_07_04_deep_reorg_orphan_cap",
-          "mark_block_orphan_lru_evicts_at_max_orphan_blocks",
+          "mark_block_orphan_evicts_farthest_at_max_orphan_blocks",
+          "orphan_parent_already_pooled_is_not_requeued",
           "catch_up_stall_side_block_delivers_orphan_descendant"
         ],
         "gap": false,
@@ -9299,6 +9083,37 @@
         ],
         "gap": false,
         "adversarial": true,
+        "proven": false,
+        "color": "yellow"
+      },
+      {
+        "num": 9,
+        "name": "get_blocks_to_request",
+        "invariant": "the download window never runs past a RandomX key-epoch boundary until the tip is one block below it, so blocks of two epochs do not alternate through the single-slot light cache.",
+        "threat": "none adversarial; IBD crawled at 1-6 blocks/s for the last ~300 blocks of every epoch (a 0.4 s cache rebuild per flip).",
+        "tags": [],
+        "tests": [
+          "download_window_holds_at_key_epoch_boundary"
+        ],
+        "gap": false,
+        "adversarial": false,
+        "proven": false,
+        "color": "yellow"
+      },
+      {
+        "num": 10,
+        "name": "mark_headers_received",
+        "invariant": "once the outstanding request's response has arrived the 60 s request timeout no longer applies and the node is not idle for arm_near_tip_catchup while the batch is still being queued; a verifier that never finishes is still cut off by HEADERS_VERIFY_CAP_SECS; consume, cancel and reset clear the marker; known_header_hashes names exactly the hashes accepted from a fully verified header batch whose block has not committed yet (never a merely pooled block, whose receipt check only proves work against its own target). has_pooled_blocks reports a received batch still being applied so the driver does not ask for the next one yet.",
+        "threat": "a 2000-header batch that verifies slower than the timeout being discarded and re-requested for ever (seen live 2026-10-11 at height 165).",
+        "tags": [],
+        "tests": [
+          "headers_timeout_pauses_once_response_is_being_verified",
+          "known_header_hashes_track_verified_headers_until_commit",
+          "arm_near_tip_catchup_rearms_stuck_but_not_synced_or_active",
+          "has_pooled_blocks_tracks_the_orphan_pool"
+        ],
+        "gap": false,
+        "adversarial": false,
         "proven": false,
         "color": "yellow"
       }

@@ -1804,6 +1804,77 @@ impl Blockchain {
             )));
         }
 
+        // ORDERING (#260 defense-in-depth): these two cheap, header-only checks —
+        // Median-Time-Past and the EXACT ASERT difficulty target — run BEFORE
+        // `validate_block_ctx` below, which runs the expensive per-transaction
+        // verification (CLSAG ring signatures, range proofs, …). They do not
+        // depend on anything `validate_block_ctx` produces (only `self`, `block`
+        // and `is_main_chain`), so moving them ahead is a pure reorder — the
+        // accept/reject outcome is unchanged. The payoff: a competing fork block
+        // mined at a fraction of the real difficulty (`validate_block_ctx` only
+        // bounds the target relative to the parent; the exact target is matched
+        // here) or a backdated block is rejected before a single transaction is
+        // verified, instead of after the whole block is.
+
+        // SECURITY: Median-Time-Past (MTP) validation.
+        // Block timestamp must be greater than the median of the 11 blocks
+        // that PRECEDE it ON ITS OWN CHAIN. This prevents miners from
+        // backdating blocks to manipulate difficulty.
+        //
+        // REORG-CORRECTNESS: we walk the block's ACTUAL parent lineage via
+        // `prev_hash`, not the active chain by height. Reading by height was
+        // wrong for a competing-fork block — it computed the median from
+        // unrelated main-chain timestamps at those heights, so a valid
+        // heavier fork whose near-fork blocks predated the active chain's MTP
+        // was rejected AND the honest peer serving it was banned
+        // (InvalidBlockPoW), blocking legitimate reorgs and risking permanent
+        // self-isolation of a drifted node. For a main-chain block the parent
+        // lineage IS the by-height ancestry, so this is behaviour-identical
+        // on the common path. Mirrors the fork-aware difficulty window below.
+        if block.header.height.as_u64() >= 11 {
+            if let Some(mtp) = self.median_time_past_of_lineage(block.header.prev_hash) {
+                if block.header.timestamp.as_secs() <= mtp {
+                    return Ok(BlockStatus::Invalid(format!(
+                        "Block timestamp {} is not greater than median-time-past {} (median of last 11 blocks on its own chain)",
+                        block.header.timestamp.as_secs(), mtp
+                    )));
+                }
+            }
+        }
+
+        // SECURITY (C-2 + C20-FIX): Verify difficulty target matches ASERT calculation.
+        // For main-chain blocks, use main-chain history via get_difficulty_blocks().
+        // For fork blocks, build a mixed difficulty window: main-chain blocks below
+        // the fork point, plus fork-chain blocks above it. This prevents an attacker
+        // from constructing a fork with trivially easy targets (the old code used
+        // main-chain history for ALL blocks, which could produce wrong expectations
+        // for fork blocks OR allow fork blocks to bypass proper difficulty validation).
+        if block.header.height.as_u64() >= 1 {
+            let difficulty_blocks = if is_main_chain {
+                self.get_difficulty_blocks(block.header.height.as_u64())
+            } else {
+                // DB-sourced fork window — deterministic across all nodes
+                // (fix for chain.rs:2056; replaces the volatile in-memory-cache
+                // walk that made two nodes compute different windows/targets for
+                // the same fork block → consensus split).
+                self.fork_difficulty_window(block.header.prev_hash, block.header.height.as_u64())
+            };
+
+            // `test-fast-pow` (INSECURE test feature) skips the ASERT target
+            // match so the instant-mining harness can use a trivial target.
+            if difficulty_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
+                let expected_target =
+                    self.expected_next_target(&difficulty_blocks, block.header.height.as_u64());
+                if block.header.target != expected_target {
+                    return Ok(BlockStatus::Invalid(format!(
+                        "Difficulty target mismatch: expected {}, got {}",
+                        expected_target.to_hex()[..16].to_string(),
+                        block.header.target.to_hex()[..16].to_string(),
+                    )));
+                }
+            }
+        }
+
         // SECURITY (C-1): Run full consensus validation before accepting blocks.
         // Previously validate_block() was never called, allowing blocks with no PoW,
         // inflated coinbase, forged signatures, and duplicate key images.
@@ -1889,65 +1960,6 @@ impl Blockchain {
                         serde_json::json!({"reason": &e}),
                     );
                     return Ok(BlockStatus::Invalid(e));
-                }
-            }
-        }
-
-        // SECURITY: Median-Time-Past (MTP) validation.
-        // Block timestamp must be greater than the median of the 11 blocks
-        // that PRECEDE it ON ITS OWN CHAIN. This prevents miners from
-        // backdating blocks to manipulate difficulty.
-        //
-        // REORG-CORRECTNESS: we walk the block's ACTUAL parent lineage via
-        // `prev_hash`, not the active chain by height. Reading by height was
-        // wrong for a competing-fork block — it computed the median from
-        // unrelated main-chain timestamps at those heights, so a valid
-        // heavier fork whose near-fork blocks predated the active chain's MTP
-        // was rejected AND the honest peer serving it was banned
-        // (InvalidBlockPoW), blocking legitimate reorgs and risking permanent
-        // self-isolation of a drifted node. For a main-chain block the parent
-        // lineage IS the by-height ancestry, so this is behaviour-identical
-        // on the common path. Mirrors the fork-aware difficulty window below.
-        if block.header.height.as_u64() >= 11 {
-            if let Some(mtp) = self.median_time_past_of_lineage(block.header.prev_hash) {
-                if block.header.timestamp.as_secs() <= mtp {
-                    return Ok(BlockStatus::Invalid(format!(
-                        "Block timestamp {} is not greater than median-time-past {} (median of last 11 blocks on its own chain)",
-                        block.header.timestamp.as_secs(), mtp
-                    )));
-                }
-            }
-        }
-
-        // SECURITY (C-2 + C20-FIX): Verify difficulty target matches ASERT calculation.
-        // For main-chain blocks, use main-chain history via get_difficulty_blocks().
-        // For fork blocks, build a mixed difficulty window: main-chain blocks below
-        // the fork point, plus fork-chain blocks above it. This prevents an attacker
-        // from constructing a fork with trivially easy targets (the old code used
-        // main-chain history for ALL blocks, which could produce wrong expectations
-        // for fork blocks OR allow fork blocks to bypass proper difficulty validation).
-        if block.header.height.as_u64() >= 1 {
-            let difficulty_blocks = if is_main_chain {
-                self.get_difficulty_blocks(block.header.height.as_u64())
-            } else {
-                // DB-sourced fork window — deterministic across all nodes
-                // (fix for chain.rs:2056; replaces the volatile in-memory-cache
-                // walk that made two nodes compute different windows/targets for
-                // the same fork block → consensus split).
-                self.fork_difficulty_window(block.header.prev_hash, block.header.height.as_u64())
-            };
-
-            // `test-fast-pow` (INSECURE test feature) skips the ASERT target
-            // match so the instant-mining harness can use a trivial target.
-            if difficulty_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
-                let expected_target =
-                    self.expected_next_target(&difficulty_blocks, block.header.height.as_u64());
-                if block.header.target != expected_target {
-                    return Ok(BlockStatus::Invalid(format!(
-                        "Difficulty target mismatch: expected {}, got {}",
-                        expected_target.to_hex()[..16].to_string(),
-                        block.header.target.to_hex()[..16].to_string(),
-                    )));
                 }
             }
         }
@@ -4339,6 +4351,50 @@ mod tests {
     }
 
     #[test]
+    fn load_from_database_rejects_mismatched_block1_anchor() {
+        // Anchor-derivation guard (#286 / phantom-reset footgun): a dir whose
+        // block 1 was mined under a DIFFERENT RandomX anchor derivation (e.g. a
+        // pre-reset chain that shares our genesis HASH) must be refused at load,
+        // not silently loaded and extended. The genesis-hash check alone cannot
+        // catch it because the 2026-09 reset kept genesis d2240fea.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let genesis = crate::testnet::testnet_genesis();
+        let genesis_hash = genesis.hash();
+        db.blocks.insert(&genesis).unwrap();
+        db.blocks.set_height_hash(0, &genesis_hash).unwrap();
+
+        // Block 1 with a deliberately WRONG anchor: it cannot equal the
+        // deterministic recompute from its own header fields.
+        let mut b1 = genesis.clone();
+        b1.header.height = crate::primitives::Height::new(1);
+        b1.header.prev_hash = genesis_hash;
+        b1.header.anchor = Hash::from_bytes([0xFF; 32]);
+        let b1_hash = b1.hash();
+        db.blocks.insert(&b1).unwrap();
+        db.blocks.set_height_hash(1, &b1_hash).unwrap();
+
+        db.state
+            .save_state(&ChainStateData {
+                tip_hash: b1_hash,
+                height: 1,
+                total_difficulty: 2,
+                total_supply: 0,
+                total_burned: 0,
+                last_checkpoint: 0,
+            })
+            .unwrap();
+
+        let chain = Blockchain::with_database(db, NetworkType::Testnet);
+        let error = chain.load_from_database().unwrap_err().to_string();
+        assert!(
+            error.contains("incompatible RandomX anchor"),
+            "unexpected error: {}",
+            error
+        );
+    }
+
+    #[test]
     fn total_difficulty_recompute_and_fork_walk_agree_on_genesis_base() {
         // Regression lock for the fleet-wide total_difficulty divergence bug.
         //
@@ -4869,7 +4925,7 @@ mod tests {
         };
 
         let seed = b"chain-hook-seed";
-        let n = cover_set_size().unwrap();
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
         let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
         // Mint payload built against an EMPTY transparent input set (matches the
         // tx's empty inputs, so the hook re-derives identical outpoints). The
@@ -4949,7 +5005,7 @@ mod tests {
         let mut chain = Blockchain::new();
         chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
         let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
-        let n = cover_set_size().expect("cover set size");
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
         assert!(n >= 2, "soak needs a cover set of at least 2 coins");
         // A fixed second wallet: transfer recipient, distinct from the per-cycle
         // sender seed. Its address is stable across cycles.

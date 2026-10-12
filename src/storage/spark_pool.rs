@@ -52,6 +52,13 @@ use crate::error::{Error, Result};
 /// (`ShieldedStore` / `SparkStore` use 1000, covering testnet max_reorg_depth).
 const MAX_CHECKPOINTS: usize = 1000;
 
+/// Maximum coins in a single Spark cover-set group (= N, the libspark
+/// `get_default` Grootle capacity n^m = 8^5 = 32768). libspark rejects a cover
+/// set larger than N on both prove and verify, so [`SparkPoolStore::cover_set_at`]
+/// buckets the pool into fixed groups of at most this many coins (#259). MUST
+/// stay in lock-step with `cc_params()`/`spark_ffi_cover_set_size` in the shim.
+pub const SPARK_COVER_SET_GROUP: usize = 32_768;
+
 /// Borsh-serializable form of a [`SparkPoolCoin`] for RocksDB. `CoinBytes` /
 /// `Nullifier` are the connector's plain byte wrappers (not Borsh), so the
 /// persisted row uses plain `Vec<u8>` fields and converts at the boundary.
@@ -320,17 +327,28 @@ impl SparkPoolStore {
         self.coins.read().iter().map(|c| c.coin.clone()).collect()
     }
 
-    /// The cover set anchored at a pool snapshot: coins with `height <=
-    /// anchor_height`, in `cover_index` order (canonical, so every node resolves
-    /// the identical `{C_i}` a Grootle proof was built against). `cover_set_id`
-    /// is reserved for multi-group buckets (cip-shielded-anonset); today the
-    /// whole pool is one monotonic group, so it is accepted and ignored.
-    pub fn cover_set_at(&self, _cover_set_id: u64, anchor_height: u64) -> Vec<CoinBytes> {
+    /// The cover set anchored at a pool snapshot: the `cover_set_id` group's
+    /// coins with `height <= anchor_height`, in `cover_index` order (canonical,
+    /// so every node resolves the identical `{C_i}` a Grootle proof was built
+    /// against).
+    ///
+    /// #259: the pool is split into FIXED groups of at most
+    /// [`SPARK_COVER_SET_GROUP`] (= N, the libspark `get_default` Grootle
+    /// capacity) coins, indexed by `cover_set_id`: group `g` is the coins whose
+    /// insertion position lies in `[g*N, (g+1)*N)`. A coin's group is stable (its
+    /// insertion index never changes), so it is always spendable in exactly one
+    /// group, and the returned set never exceeds N — which libspark requires
+    /// (it rejects an oversized cover set on both prove and verify). Group 0 is
+    /// the whole pool until it first exceeds N.
+    pub fn cover_set_at(&self, cover_set_id: u64, anchor_height: u64) -> Vec<CoinBytes> {
+        let start = (cover_set_id as usize).saturating_mul(SPARK_COVER_SET_GROUP);
+        let end = start.saturating_add(SPARK_COVER_SET_GROUP);
         self.coins
             .read()
             .iter()
-            .filter(|c| c.height <= anchor_height)
-            .map(|c| c.coin.clone())
+            .enumerate()
+            .filter(|(idx, c)| *idx >= start && *idx < end && c.height <= anchor_height)
+            .map(|(_, c)| c.coin.clone())
             .collect()
     }
 
@@ -346,19 +364,22 @@ impl SparkPoolStore {
     /// and outpoint so a REMOTE wallet (which lacks the store) can identify its
     /// owned coin and build a spend against the identical set the verifier will
     /// resolve. The position in this `Vec` is the coin's spend index for a proof
-    /// anchored at `(cover_set_id, anchor_height)`. `cover_set_id` is reserved
-    /// for multi-group buckets (accepted and ignored while the pool is one
-    /// monotonic group — mirrors `cover_set_at`).
+    /// anchored at `(cover_set_id, anchor_height)`. Resolves the SAME fixed
+    /// `cover_set_id` group as [`cover_set_at`](Self::cover_set_at) (#259), so a
+    /// remote wallet and the verifier agree on the set and the spend index.
     pub fn cover_entries_at(
         &self,
-        _cover_set_id: u64,
+        cover_set_id: u64,
         anchor_height: u64,
     ) -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>, u64)> {
+        let start = (cover_set_id as usize).saturating_mul(SPARK_COVER_SET_GROUP);
+        let end = start.saturating_add(SPARK_COVER_SET_GROUP);
         self.coins
             .read()
             .iter()
-            .filter(|c| c.height <= anchor_height)
-            .map(|c| {
+            .enumerate()
+            .filter(|(idx, c)| *idx >= start && *idx < end && c.height <= anchor_height)
+            .map(|(_, c)| {
                 (
                     c.outpoint.clone(),
                     c.coin.0.clone(),
@@ -964,7 +985,7 @@ mod tests {
 
         let store = SparkPoolStore::new();
         let seed = b"treasury-e2e-seed";
-        let n = cover_set_size().expect("cover set size");
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
 
         // Mint N coins into the store, each keyed by a synthetic outpoint whose
         // deterministic serial context we store alongside the coin.

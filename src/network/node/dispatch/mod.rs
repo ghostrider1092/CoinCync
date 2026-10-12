@@ -37,6 +37,8 @@
 //!   loop or reaching the wrong handler.
 //!   TESTS: `unknown_msg_type_returns_err_without_crashing`.
 
+use std::sync::Arc;
+
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::trace;
@@ -75,17 +77,21 @@ pub(super) async fn process_message(
     peer_id: PeerId,
     msg_type_id: u8,
     payload: &[u8],
+    received_at: crate::clock::MonoInstant,
     magic: [u8; 4],
     our_nonce: u64,
-    peers: &DashMap<PeerId, PeerInfo>,
+    // `peers` / `sync` / `scorer` are taken as `&Arc<…>` (not `&…`) so the Headers
+    // arm can clone owned handles into a spawned verify task; every other handler
+    // call below still receives `&…` via deref coercion, unchanged.
+    peers: &Arc<DashMap<PeerId, PeerInfo>>,
     senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
     dandelion: &RwLock<DandelionRouter>,
-    sync: &RwLock<ChainSync>,
+    sync: &Arc<RwLock<ChainSync>>,
     event_tx: &broadcast::Sender<NodeEvent>,
     chain: &SharedBlockchain,
     mempool: &SharedMempool,
     addresses: &RwLock<AddressManager>,
-    scorer: &RwLock<PeerScorer>,
+    scorer: &Arc<RwLock<PeerScorer>>,
     // v1.0.13 #2 — tx-absence cache, populated by NotFound-receive,
     // consulted by InvTx-receive.
     tx_absence_cache: &parking_lot::RwLock<TxAbsenceCache>,
@@ -199,7 +205,9 @@ pub(super) async fn process_message(
             control::handle_ping(peer_id, payload, magic, peers, senders, scorer).await?;
         }
 
-        MessageType::Pong => control::handle_pong(),
+        MessageType::Pong => {
+            control::handle_pong(peer_id, payload, received_at, peers, scorer).await;
+        }
 
         MessageType::GetHeaders => {
             headers::handle_get_headers(peer_id, payload, magic, peers, senders, chain, scorer)
@@ -250,7 +258,29 @@ pub(super) async fn process_message(
         }
 
         MessageType::Headers => {
-            headers::handle_headers(peer_id, payload, peers, sync, chain, scorer).await?;
+            // SPAWN so the header-batch verify runs OFF this single message
+            // processor and block-apply keeps going while the batch is checked:
+            // handle_headers §9 queues each verified slice at once and pauses at a
+            // RandomX key-epoch boundary until the tip is there, so the verify never
+            // flips the light-mode cache against block-apply (that pacing is what
+            // makes running the two concurrently thrash-free; an earlier spawn
+            // without it was reverted for exactly that thrash). The H-3 pre-handshake
+            // gate above has already run for this message; handle_headers serializes
+            // verifies internally (HEADER_VERIFY_SEM) and re-checks the nonce under
+            // the write lock, so moving it off the processor changes no
+            // sync/consensus invariant, only who waits on the CPU.
+            let peers = Arc::clone(peers);
+            let sync = Arc::clone(sync);
+            let chain = chain.clone();
+            let scorer = Arc::clone(scorer);
+            let payload = payload.to_vec();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    headers::handle_headers(peer_id, &payload, &peers, &sync, &chain, &scorer).await
+                {
+                    tracing::warn!("Headers processing error: {e}");
+                }
+            });
         }
 
         MessageType::GetAddr => {
@@ -318,6 +348,71 @@ pub(super) async fn process_message(
     Ok(())
 }
 
+/// Handshake fast-path: `Version`/`Verack` are serviced on a DEDICATED lane — a
+/// separate mpsc channel drained by its own task (`runtime::spawn_handshake_processor`)
+/// that the connection read loop routes these two types to instead of the main
+/// processor. Because that task is scheduled independently, a peer's handshake
+/// completes even while the single main processor is parked inside a multi-second
+/// RandomX header-batch verify. That is what lets cold-start mesh formation proceed
+/// without waiting on IBD CPU: handshakes no longer queue behind the first peer's
+/// header batch.
+///
+/// Only the two handshake types reach here; every other type still flows through
+/// [`process_message`] and its H-3 pre-handshake gate. Version/Verack are always
+/// allowed pre-handshake, so there is no gate to apply here. Peer activity / byte
+/// accounting is replicated from `process_message` because the main lane no longer
+/// observes these two types.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn process_handshake(
+    peer_id: PeerId,
+    msg_type_id: u8,
+    payload: &[u8],
+    magic: [u8; 4],
+    our_nonce: u64,
+    peers: &DashMap<PeerId, PeerInfo>,
+    senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
+    dandelion: &RwLock<DandelionRouter>,
+    sync: &RwLock<ChainSync>,
+    event_tx: &broadcast::Sender<NodeEvent>,
+    chain: &SharedBlockchain,
+    scorer: &RwLock<PeerScorer>,
+) -> Result<()> {
+    let msg_type = MessageType::try_from(msg_type_id)?;
+
+    // Peer activity + byte accounting, mirroring process_message's §(activity)
+    // block — the main lane no longer sees Version/Verack, so account here.
+    if let Some(mut peer) = peers.get_mut(&peer_id) {
+        peer.touch();
+        peer.bytes_recv = peer
+            .bytes_recv
+            .saturating_add(payload.len().saturating_add(1) as u64);
+    }
+
+    match msg_type {
+        MessageType::Version => {
+            control::handle_version(
+                peer_id, payload, magic, our_nonce, peers, senders, sync, event_tx, chain, scorer,
+            )
+            .await?;
+        }
+        MessageType::Verack => {
+            control::handle_verack(peer_id, magic, peers, senders, dandelion, sync, chain).await?;
+        }
+        // Defensive: the connection read loop only routes Version/Verack here, so
+        // anything else is a routing bug. Drop it rather than mis-handle it (the
+        // main processor remains the single authority for every non-handshake type).
+        other => {
+            trace!(
+                "process_handshake received non-handshake {:?} from peer {:?}; ignoring",
+                other,
+                &peer_id[..4]
+            );
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod router_tests {
     use super::*;
@@ -334,17 +429,17 @@ mod router_tests {
         msg_type_id: u8,
         payload: Vec<u8>,
     ) -> (Result<()>, Option<i32>) {
-        let peers = DashMap::new();
+        let peers = Arc::new(DashMap::new());
         peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
         let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
         let dandelion = RwLock::new(DandelionRouter::new());
-        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let sync = Arc::new(RwLock::new(ChainSync::new(0, Hash::zero())));
         let (event_tx, _event_rx) = broadcast::channel(8);
         let chain: SharedBlockchain = Arc::new(Blockchain::new());
         chain.init_genesis().unwrap();
         let mempool = SharedMempool::new();
         let addresses = RwLock::new(AddressManager::new(1000));
-        let scorer = RwLock::new(PeerScorer::new());
+        let scorer = Arc::new(RwLock::new(PeerScorer::new()));
         let cache = parking_lot::RwLock::new(TxAbsenceCache::new());
         let relay = RwLock::new(RelayScoreMap::new());
 
@@ -352,6 +447,7 @@ mod router_tests {
             peer_id,
             msg_type_id,
             &payload,
+            crate::clock::mono_now(),
             [1, 2, 3, 4],
             0,
             &peers,

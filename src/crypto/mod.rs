@@ -30,11 +30,9 @@ pub mod testbed {
     pub use super::curve::{Commitment, KeyImage, PublicPoint, SecretScalar};
 }
 mod audit;
-mod batch_verify;
 mod cache;
 mod disclosure;
 pub mod memo;
-mod parallel_proofs;
 mod ring_selection;
 mod secure;
 
@@ -79,7 +77,7 @@ pub mod spark_turnstile; // CIP-Shielded (transparent⇄shielded value turnstile
 pub mod spark_note; // CIP-Shielded (Note Connector: stealth⇄bound-coin detect/recover)
 
 pub use bulletproofs::{
-    batch_verify_range_proofs, commit, create_aggregated_range_proof,
+    commit, create_aggregated_range_proof,
     create_aggregated_range_proof_bp_plus, create_aggregated_range_proof_for_height,
     create_range_proof, create_range_proof_bp_plus, create_range_proof_for_height,
     verify_coinbase_output, verify_commitment, verify_range_proof, verify_range_proof_bp_plus,
@@ -152,16 +150,6 @@ pub use ring_selection::{
 pub use audit::{BlockSupplyDelta, SupplyAuditResult, SupplyCommitment, SupplySnapshot};
 
 pub use cache::{global_cache, proof_cache_key, ring_sig_cache_key, CacheStats, VerificationCache};
-
-pub use batch_verify::{
-    differential_ring_sig_check, BatchVerifier, BatchVerifyResult, ParallelTxValidator,
-    SignatureData, VerificationStats,
-};
-
-pub use parallel_proofs::{
-    verify_block_proofs, AggregatedProofVerifier, ParallelProofVerifier, ParallelVerifyResult,
-    ProofTask, VerifierStats,
-};
 
 // `disclosure` is consumed by the wallet CLI (`src/bin/wallet.rs`)
 // which exposes selective-disclosure proofs (balance / ownership / sum

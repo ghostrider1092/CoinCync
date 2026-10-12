@@ -69,6 +69,17 @@ pub struct MetricsState {
     /// 0 means "not yet observed" — the TUI suppresses the share % stat
     /// until this is non-zero.
     pub network_hashrate_hps: AtomicU64,
+    /// 1 when RandomX resolved to LIGHT mode while this process is MINING
+    /// (env `COINCYNC_RANDOMX_LIGHT_MODE` set, or `node_mining_active` was
+    /// never set — the #145 class of bug). Light mode is ~5-10x slower per
+    /// hash, so a real miner should always read 0 (full-mem). A monitor can
+    /// alert on this == 1.
+    pub randomx_light_mode: AtomicU64,
+    /// 1 when the sustained hashrate has dropped well below this rig's own
+    /// observed peak (after warm-up) — catches a full-mem→light fallback on
+    /// RAM pressure, thermal throttling, or CPU contention that the static
+    /// light-mode flag above can't see. 0 = healthy.
+    pub hashrate_degraded: AtomicU64,
     /// Peer count from the daemon's `get_info` — the mesh-health signal the
     /// mining gate keys on (`peer_count >= 3`). 0 means "none / not yet sampled".
     pub peers: AtomicU64,
@@ -121,6 +132,8 @@ impl MetricsState {
             tip_age_secs: AtomicU64::new(0),
             rpc_latency_ms: AtomicU64::new(0),
             network_hashrate_hps: AtomicU64::new(0),
+            randomx_light_mode: AtomicU64::new(0),
+            hashrate_degraded: AtomicU64::new(0),
             peers: AtomicU64::new(0),
             mining_ready: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -290,6 +303,20 @@ impl MetricsState {
             "gauge",
             "Total network hashrate as reported by the daemon's get_info.",
             self.network_hashrate_hps.load(Ordering::Relaxed),
+        );
+        m(
+            &mut s,
+            "coincync_rig_randomx_light_mode",
+            "gauge",
+            "1 if mining in LIGHT-mode RandomX (~5-10x slower, should never be 1 on a real miner); 0 = full-mem.",
+            self.randomx_light_mode.load(Ordering::Relaxed),
+        );
+        m(
+            &mut s,
+            "coincync_rig_hashrate_degraded",
+            "gauge",
+            "1 if sustained hashrate dropped well below this rig's observed peak (fallback/throttle/contention); 0 = healthy.",
+            self.hashrate_degraded.load(Ordering::Relaxed),
         );
         m(
             &mut s,

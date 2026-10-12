@@ -16,7 +16,6 @@ use coincync::network::scoring::{MisbehaviorType, PeerScorer};
 use coincync::network::{MessageType, MAX_MESSAGE_SIZE};
 use coincync::transaction::Transaction;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::Duration;
 
 // Protocol constants (imported from protocol module via network)
 const MAX_LOCATOR_SIZE: usize = 64;
@@ -225,7 +224,7 @@ fn good_peer_not_banned_after_occasional_failures() {
     // 100 good blocks, 2 bad ones — mostly good peer
     for _ in 0..100 {
         let s = scorer.get_or_create(mixed_peer);
-        s.record_block_success(Duration::from_millis(50));
+        s.record_block_success();
     }
     for _ in 0..2 {
         let s = scorer.get_or_create(mixed_peer);

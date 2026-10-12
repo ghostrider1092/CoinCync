@@ -179,6 +179,11 @@ pub struct DandelionRouter {
     /// Kept to detect stem loops and avoid double-fluffing.
     /// Pruned periodically.
     fluffed: HashMap<Hash, u64>, // hash → fluff timestamp
+    /// Last-reported privacy state, so the "privacy degraded" warning is
+    /// EDGE-triggered (logged on the transition into/out of degraded) instead
+    /// of on every `set_outbound_peers` call — otherwise a node sitting below
+    /// the privacy floor floods the log on every connection-set refresh.
+    privacy_degraded: bool,
 }
 
 impl DandelionRouter {
@@ -197,6 +202,7 @@ impl DandelionRouter {
             },
             epoch_number: 0,
             fluffed: HashMap::new(),
+            privacy_degraded: false,
         }
     }
 
@@ -205,13 +211,25 @@ impl DandelionRouter {
     /// Set the full list of outbound peers.  Called by node.rs whenever the
     /// outbound peer set changes (connect/disconnect).
     pub fn set_outbound_peers(&mut self, peers: Vec<PeerId>) {
-        if peers.len() < MIN_PEERS_FOR_PRIVACY && !peers.is_empty() {
+        // Edge-triggered: only log on a CHANGE in the privacy state, not on
+        // every refresh. An empty peer set is startup/teardown, not "degraded".
+        let degraded = !peers.is_empty() && peers.len() < MIN_PEERS_FOR_PRIVACY;
+        if degraded && !self.privacy_degraded {
             tracing::warn!(
                 "Dandelion++ has only {} outbound peer(s) — privacy degraded. \
                  Need {} for adequate anonymity.",
                 peers.len(),
                 MIN_PEERS_FOR_PRIVACY
             );
+        } else if !degraded && self.privacy_degraded && !peers.is_empty() {
+            tracing::info!(
+                "Dandelion++ privacy restored — {} outbound peer(s) (>= {}).",
+                peers.len(),
+                MIN_PEERS_FOR_PRIVACY
+            );
+        }
+        if !peers.is_empty() {
+            self.privacy_degraded = degraded;
         }
         self.outbound_peers = peers;
     }

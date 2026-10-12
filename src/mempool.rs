@@ -2080,7 +2080,7 @@ mod shielded_mempool_admission_172 {
     fn shielded_spend_admits_and_double_spend_rejects() {
         let store = SparkPoolStore::new();
         let seed = b"mempool-172-seed";
-        let n = cover_set_size().unwrap();
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
         let inputs = vec![vec![0x7Au8; 36]];
         let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
         let (mint_payload, contexts) = build_mint_payload(seed, &values, &inputs).unwrap();

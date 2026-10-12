@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use coincync::chain::{Blockchain, ChainLoadOutcome};
 use coincync::config::Network;
@@ -171,6 +171,15 @@ struct Cli {
     #[arg(long)]
     allow_solo_mine: bool,
 
+    /// Verbose startup display. Prints the FULL consensus fingerprint (not the
+    /// truncated form) and the configured bootstrap seed addresses in the
+    /// startup banner. CAUTION: the seed list is network topology — only pass
+    /// this when you are reading the output yourself, not piping it somewhere
+    /// it could leak which peers this node reaches. The live IBD display always
+    /// shows peer COUNT only, never addresses, regardless of this flag.
+    #[arg(long, short = 'v')]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -225,6 +234,32 @@ enum Command {
         /// Snapshot directory (containing `db/` + `manifest.json`).
         #[arg(long)]
         input: PathBuf,
+    },
+
+    /// Roll a STOPPED node back to a given height, disconnecting every block
+    /// above it and rebuilding supply/UTXO/work state down to that height. The
+    /// rest of the data dir is kept.
+    ///
+    /// Recovery path for a node wedged on a private/minority fork (#286): a node
+    /// that mined its own fork past the MESS floor can never reorg back to the
+    /// real chain. Roll back to the last height it shares with the real chain,
+    /// then restart — the node is now simply *behind*, not forked, and syncs
+    /// forward normally. Refuses to cross a consensus checkpoint (finality is
+    /// enforced). Block bodies above the target stay in the DB but are no longer
+    /// canonical (a later resync overwrites the height index).
+    ///
+    /// The node MUST be stopped (the DB is single-process; a running daemon
+    /// holds the lock and this command refuses to open it). Prints the plan and
+    /// exits WITHOUT changing anything unless `--yes` is given.
+    Rollback {
+        /// Height to roll back to. Must be below the current tip and at or above
+        /// the last checkpoint.
+        #[arg(long)]
+        to_height: u64,
+        /// Actually perform the rollback. Without this flag the command only
+        /// reports what it would do (a dry run).
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -562,6 +597,93 @@ async fn main() {
                 }
             }
         }
+        Command::Rollback { to_height, yes } => {
+            let network_subdir = match network {
+                Network::Mainnet => "mainnet",
+                Network::Testnet => "testnet",
+                Network::Regtest => "regtest",
+            };
+            let chaindata_path = data_dir.join(network_subdir);
+
+            // Open the stopped node's DB. A running daemon holds the single-process
+            // lock, so this fails fast — exactly the guard we want (never mutate a
+            // live, mid-write chain). Dropped at the end of the arm → sled flush +
+            // unlock.
+            let db = match Database::open(&chaindata_path) {
+                Ok(db) => db,
+                Err(e) => {
+                    error!(
+                        "Cannot open chaindata at {} for rollback: {}. Is the node still running? Stop it first.",
+                        chaindata_path.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let chain = Blockchain::with_database(Arc::new(db), network);
+            match chain.load_from_database_with_outcome() {
+                Ok(ChainLoadOutcome::Loaded) => {}
+                Ok(ChainLoadOutcome::Fresh) => {
+                    error!(
+                        "Database at {} is uninitialized — nothing to roll back.",
+                        chaindata_path.display()
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    error!("Cannot load chaindata for rollback: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
+            let tip = chain.tip();
+            if to_height >= tip.height {
+                error!(
+                    "Target height {} is not below the current tip {} — nothing to roll back.",
+                    to_height, tip.height
+                );
+                std::process::exit(1);
+            }
+            let depth = tip.height - to_height;
+            info!(
+                "Rollback plan (network={}): height {} → {}, disconnecting {} block(s). Current tip {}.",
+                network_subdir,
+                tip.height,
+                to_height,
+                depth,
+                hex::encode(tip.hash.as_bytes()),
+            );
+
+            if !yes {
+                info!("Dry run — no changes made. Re-run with --yes to perform the rollback.");
+                info!(
+                    "Tip: `coincync-node snapshot-export --out <dir>` first if you want a restorable backup."
+                );
+            } else {
+                match chain.rollback_to_height(to_height) {
+                    Ok(orphaned) => {
+                        info!(
+                            "✓ Rolled back to height {} ({} block(s) disconnected, {} non-coinbase tx(s) orphaned).",
+                            to_height,
+                            depth,
+                            orphaned.len()
+                        );
+                        info!(
+                            "Block bodies above {} remain in the DB but are no longer canonical. Start the node normally to resync forward.",
+                            to_height
+                        );
+                    }
+                    Err(e) => {
+                        error!("Rollback refused: {}", e);
+                        error!(
+                            "(A rollback cannot cross a consensus checkpoint — finality is enforced. Pick a target at or above the last checkpoint.)"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+            // `chain` (and its Arc<Database>) dropped here → sled flush + unlock.
+        }
         Command::Start => {
             if let Err(e) = start_node(
                 network,
@@ -583,6 +705,7 @@ async fn main() {
                 cli.mine_threads,
                 cli.allow_solo_mine,
                 cli.max_connections_per_ip,
+                cli.verbose,
             )
             .await
             {
@@ -608,6 +731,207 @@ fn print_genesis_hash(network: Network) {
             Network::Regtest => "testnet",
         }
     );
+}
+
+/// Professional teal-framed node startup banner, mirroring the rig's
+/// `print_banner` aesthetic (crossterm palette, framed title box, XMRig-style
+/// `* LABEL value` rows). Shows only honest, already-known values.
+///
+/// PRIVACY: the consensus fingerprint is truncated to 12 hex chars by default
+/// (full value only under `--verbose`). Peers are shown as a CONNECTING status
+/// + outbound target + seed COUNTS — never a live peer list; the configured
+/// seed addresses print only under `--verbose`, with a caution. Dandelion++ is
+/// shown as POSTURE only (enabled + per-epoch stem/fluff parameters), never a
+/// stem path or relay target.
+#[allow(clippy::too_many_arguments)]
+fn print_startup_banner(
+    network: Network,
+    data_dir: &std::path::Path,
+    db_path: &std::path::Path,
+    listen_addr: std::net::SocketAddr,
+    rpc_listen: std::net::SocketAddr,
+    max_outbound: usize,
+    seed_count: usize,
+    dns_seed_count: usize,
+    discovery_disabled: bool,
+    seed_addrs: &[std::net::SocketAddr],
+    verbose: bool,
+) {
+    use coincync::consensus::fingerprint::consensus_fingerprint_bytes;
+    use crossterm::style::Stylize;
+    use std::io::IsTerminal;
+
+    let ver = env!("CARGO_PKG_VERSION");
+    let commit = coincync::build_info::git_commit();
+    let dirty = if coincync::build_info::git_dirty() {
+        "-dirty"
+    } else {
+        ""
+    };
+    let profile = coincync::build_info::build_profile();
+    let net_name = format!("{network:?}").to_lowercase();
+
+    // Consensus fingerprint for THIS network. Truncated unless --verbose.
+    let fp_full = hex::encode(consensus_fingerprint_bytes(network));
+    let fp_shown = if verbose {
+        fp_full.clone()
+    } else {
+        format!("{}…", &fp_full[..12.min(fp_full.len())])
+    };
+
+    // Dandelion++ posture — static configuration only (see privacy note above).
+    let dandelion_posture = format!(
+        "per-epoch stem/fluff · ~{}s epochs · {} stems · {}% fluff",
+        coincync::constants::DANDELION_EPOCH_BASE_SECS,
+        coincync::constants::DANDELION_STEMS,
+        coincync::constants::DANDELION_FLUFF_PROBABILITY,
+    );
+
+    let peers_line = if discovery_disabled {
+        "connecting… · auto-discovery disabled (--no-peers)".to_string()
+    } else {
+        format!(
+            "connecting… · target {max_outbound} outbound · {seed_count} seed(s) · {dns_seed_count} dns-seed(s)"
+        )
+    };
+
+    // Plain fallback for non-terminals (pipes, journald, log files): same
+    // facts, no ANSI. journald strips colors anyway, and a framed box is noise
+    // in a log, so emit flat `label: value` lines instead.
+    if !std::io::stdout().is_terminal() {
+        println!("CoinCync Node v{ver}  (full node daemon)");
+        println!("build:      {commit}{dirty} · {profile}");
+        println!("network:    {net_name} · consensus-fingerprint {fp_shown}");
+        println!("data-dir:   {}", data_dir.display());
+        println!("db:         RocksDB · {}", db_path.display());
+        println!("p2p:        listening {listen_addr}");
+        println!("rpc:        {rpc_listen}");
+        println!("peers:      {peers_line}");
+        println!("dandelion++: enabled · {dandelion_posture}");
+        if verbose && !seed_addrs.is_empty() {
+            println!(
+                "seeds (--verbose; topology — do not share): {}",
+                seed_addrs
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        println!();
+        return;
+    }
+
+    // Palette mirrors the rig: teal accent for the frame + labels, soft
+    // off-white body, muted gray for secondary text, green for "on".
+    use crossterm::style::Color;
+    let teal = Color::Rgb {
+        r: 86,
+        g: 194,
+        b: 180,
+    };
+    let teal_dim = Color::Rgb {
+        r: 58,
+        g: 130,
+        b: 122,
+    };
+    let green = Color::Rgb {
+        r: 127,
+        g: 184,
+        b: 121,
+    };
+    let body = Color::Rgb {
+        r: 224,
+        g: 230,
+        b: 228,
+    };
+    let muted = Color::Rgb {
+        r: 138,
+        g: 148,
+        b: 146,
+    };
+
+    let title = "CoinCync Node  -  full node daemon".to_string();
+    let sub = format!("v{ver} · {commit}{dirty} · {profile}");
+    let inner = title.chars().count().max(sub.chars().count()) + 2;
+    let bar = "─".repeat(inner);
+    let framed = |text: &str| {
+        let pad = inner - 2 - text.chars().count(); // "│ " + text + pad + " │" = inner, so box closes flush
+        format!(
+            "  {} {}{} {}",
+            "│".with(teal),
+            text.with(body),
+            " ".repeat(pad),
+            "│".with(teal)
+        )
+    };
+
+    println!();
+    println!(
+        "  {}{}{}",
+        "┌".with(teal),
+        bar.clone().with(teal),
+        "┐".with(teal)
+    );
+    println!("{}", framed(&title));
+    println!("{}", framed(&sub));
+    println!("  {}{}{}", "└".with(teal), bar.with(teal), "┘".with(teal));
+    println!();
+
+    let row = |label: &str, value: String| {
+        println!(
+            "   {} {}  {}",
+            "*".with(teal),
+            format!("{label:<11}").with(teal_dim).bold(),
+            value
+        );
+    };
+
+    row(
+        "NETWORK",
+        format!(
+            "{}  {}  fingerprint {}",
+            net_name.clone().with(body),
+            "·".with(muted),
+            fp_shown.clone().with(muted),
+        ),
+    );
+    row("DATA DIR", data_dir.display().to_string().with(body).to_string());
+    row(
+        "DB",
+        format!(
+            "{}  {}  {}",
+            "RocksDB".with(body),
+            "·".with(muted),
+            db_path.display().to_string().with(muted),
+        ),
+    );
+    row("P2P", format!("{} {}", "listening".with(muted), listen_addr.to_string().with(body)));
+    row("RPC", rpc_listen.to_string().with(body).to_string());
+    row("PEERS", peers_line.clone().with(body).to_string());
+    row(
+        "DANDELION++",
+        format!("{}  {}  {}", "enabled".with(green).bold(), "·".with(muted), dandelion_posture.with(muted)),
+    );
+    if !verbose {
+        row(
+            "",
+            "(full fingerprint + seed list: --verbose)"
+                .with(muted)
+                .to_string(),
+        );
+    } else if !seed_addrs.is_empty() {
+        row(
+            "SEEDS",
+            "(--verbose) configured bootstrap peers — this is network topology, do not share:"
+                .with(muted)
+                .to_string(),
+        );
+        for a in seed_addrs {
+            println!("{}{}", " ".repeat(18), a.to_string().with(body));
+        }
+    }
+    println!();
 }
 
 /// Print the current binary's version and, if it differs from the
@@ -818,6 +1142,7 @@ async fn start_node(
     mine_threads: usize,
     allow_solo_mine: bool,
     max_connections_per_ip: usize,
+    verbose: bool,
 ) -> coincync::Result<()> {
     info!("CoinCync 1.0 node starting");
     info!("Network:  {:?}", network);
@@ -1179,6 +1504,19 @@ async fn start_node(
 
     // Start P2P node
     let listen_addr = p2p_config.listen_addr;
+    // Capture bootstrap posture for the startup banner BEFORE `p2p_config` is
+    // moved into `P2PNode::new`. These are configuration facts (peer target +
+    // seed counts), not live peer addresses — honest, and no topology leak.
+    let banner_max_outbound = p2p_config.max_outbound;
+    let banner_seed_count = p2p_config.bootstrap.seed_nodes.len();
+    let banner_dns_seed_count = p2p_config.bootstrap.dns_seeds.len();
+    let banner_discovery_disabled = no_peers;
+    // Under --verbose the operator asked to see the configured seed addresses.
+    let banner_seed_addrs: Vec<std::net::SocketAddr> = if verbose {
+        p2p_config.bootstrap.seed_nodes.clone()
+    } else {
+        Vec::new()
+    };
     let p2p = Arc::new(P2PNode::new(p2p_config, chain_arc.clone(), mempool.clone()));
     info!("Starting P2P listener on {}", listen_addr);
     if let Err(e) = p2p.start().await {
@@ -1372,7 +1710,7 @@ async fn start_node(
                             // the 2026-06-17 root-cause notes on why the hashes-only
                             // version stuck the chain at h=167 with 200 blocks of
                             // orphan-fetch loops.
-                            warn!(
+                            debug!(
                                 "Block {} from peer {:?} orphan; fetching parent {}",
                                 hex::encode(&hash.as_bytes()[..8]),
                                 &peer_id[..4],
@@ -1468,6 +1806,27 @@ async fn start_node(
         .as_deref()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| ([127, 0, 0, 1], network.default_rpc_port()).into());
+
+    // ── Startup banner ───────────────────────────────────────────
+    // Professional teal-framed summary of what this binary is and how it is
+    // configured, mirroring the rig's `print_banner` aesthetic. Printed once
+    // now that every value it shows is known (version/commit, consensus
+    // fingerprint, data dir + DB, P2P/RPC endpoints, peer target + Dandelion++
+    // posture). Honest: only real, known values; nothing fabricated.
+    print_startup_banner(
+        network,
+        &data_dir,
+        &db_path,
+        listen_addr,
+        rpc_listen,
+        banner_max_outbound,
+        banner_seed_count,
+        banner_dns_seed_count,
+        banner_discovery_disabled,
+        &banner_seed_addrs,
+        verbose,
+    );
+
     let mut rpc_config = RpcConfig {
         listen_addr: rpc_listen,
         network_name: format!("{:?}", network).to_lowercase(),
@@ -1736,6 +2095,7 @@ async fn start_node(
                     use std::sync::Arc;
                     let nt = chain_m.network();
                     let mut nonce_base: u64 = 0;
+                    let mut gate_paused_reason: Option<String> = None;
                     loop {
                         // Mine-gate: never build a private fork. Mine on regtest
                         // (always), when synced WITH at least one peer, or with 0
@@ -1753,15 +2113,56 @@ async fn start_node(
                         // 0-peer solo-mine opt-in and let an isolated node mine a
                         // private fork. The predicate + its regression test live in
                         // `mining::solo_mine_gate_allowed`.
+                        //
+                        // A peer that is BEHIND us does not make is_synced false,
+                        // so one stale peer (a frozen seed) used to be enough to
+                        // mine a private fork for hours. Close the gate when our
+                        // tip runs > FORK_DIVERGENCE_MARGIN blocks ahead of every
+                        // connected peer. The height comes straight from the peer
+                        // map: the sync layer's target is max(local, peers) and can
+                        // never show a peer below us.
+                        let peer_count = p2p_m.peer_count();
+                        let local_height = chain_m.height();
+                        let peer_target = p2p_m.max_peer_height();
+                        let synced = chain_m.is_synced();
+                        let diverged = peer_count > 0
+                            && coincync::mining::no_peer_near_tip(
+                                local_height,
+                                peer_target,
+                                coincync::mining::FORK_DIVERGENCE_MARGIN,
+                            );
                         let allowed = coincync::mining::solo_mine_gate_allowed(
                             matches!(nt, coincync::config::NetworkType::Regtest),
-                            p2p_m.peer_count() > 0,
-                            chain_m.is_synced(),
+                            peer_count > 0,
+                            synced,
                             allow_solo_mine,
+                            diverged,
                         );
                         if !allowed {
+                            let reason = if peer_count == 0 {
+                                "no peers (pass --allow-solo-mine only on a bootstrap seed)".to_string()
+                            } else if !synced {
+                                format!("not synced (height {} / peers at {})", local_height, peer_target)
+                            } else if peer_target == 0 {
+                                format!("{} peer(s) connected but none has reported a height yet", peer_count)
+                            } else {
+                                format!(
+                                    "height {} is more than {} blocks ahead of every peer (best {}); \
+                                     our blocks are not being adopted, not mining a private fork",
+                                    local_height,
+                                    coincync::mining::FORK_DIVERGENCE_MARGIN,
+                                    peer_target
+                                )
+                            };
+                            if gate_paused_reason.as_deref() != Some(reason.as_str()) {
+                                warn!("miner: paused: {}", reason);
+                                gate_paused_reason = Some(reason);
+                            }
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             continue;
+                        }
+                        if gate_paused_reason.take().is_some() {
+                            info!("miner: resuming at height {} (peers at {})", local_height, peer_target);
                         }
                         // #186: synced and about to mine — NOW switch to the
                         // full-memory RandomX dataset. Idempotent atomic store;
@@ -1837,6 +2238,17 @@ async fn start_node(
                                         if let Err(e) = p2p_m.broadcast_block(&b).await {
                                             warn!("miner: broadcast failed: {}", e);
                                         }
+                                    }
+                                    // #235: our own block failed PoW -> re-check the
+                                    // dataset and drop it if it hashes wrong.
+                                    if let coincync::chain::BlockStatus::Invalid(reason) = &status {
+                                        let reason = reason.clone();
+                                        let _ = tokio::task::spawn_blocking(move || {
+                                            coincync::consensus::pow::recheck_dataset_after_rejection(
+                                                &reason,
+                                            )
+                                        })
+                                        .await;
                                     }
                                 }
                                 Err(e) => warn!("miner: submit failed: {}", e),

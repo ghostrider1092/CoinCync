@@ -799,9 +799,13 @@ impl Message {
         use rand::RngCore;
         let mut nonce = [0u8; 8];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
-        let msg = PingPongMessage {
-            nonce: u64::from_le_bytes(nonce),
-        };
+        Self::ping_with_nonce(magic, u64::from_le_bytes(nonce))
+    }
+
+    /// Ping with a caller-chosen nonce, so the sender can recognise the Pong
+    /// that echoes it and time the round trip.
+    pub fn ping_with_nonce(magic: [u8; 4], nonce: u64) -> Self {
+        let msg = PingPongMessage { nonce };
         // INVARIANT: PingPongMessage is a single u64 wrapper — borsh writes 8
         // bytes with no I/O and no fallible step. Changing the type's layout
         // (e.g., adding a Vec field) would break this invariant and re-introduce
