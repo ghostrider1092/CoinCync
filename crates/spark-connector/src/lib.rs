@@ -924,6 +924,20 @@ pub mod ffi {
         }
 
         #[test]
+        fn cover_set_size_is_production_default_not_test_params() {
+            // #259: the shim routes every libspark call through cc_params() =
+            // get_default() (Grootle n=8, m=5), so the cover-set capacity is
+            // N = 8^5 = 32768 — NOT the get_test() N = 2^4 = 16 that made the
+            // shielded anonymity set the same size as a CLSAG ring and broke
+            // spends once the pool passed 16 coins.
+            assert_eq!(
+                cover_set_size(),
+                Some(32_768),
+                "the shim must use production (get_default) Grootle parameters"
+            );
+        }
+
+        #[test]
         fn spend_serialize_deserialize_verify_round_trips() {
             assert!(
                 spend_verify_roundtrip(),
@@ -953,7 +967,7 @@ pub mod ffi {
         fn build_strict_spend(seed: &[u8], base: u64, index: usize, out_value: u64)
             -> (SpendBytes, Vec<CoinBytes>, u64)
         {
-            let n = cover_set_size().expect("cover set size");
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
             let ctx = serial_context(b"strict:tx:0").expect("ctx");
             let mut cover_set = Vec::with_capacity(n);
             for i in 0..n {
@@ -1169,7 +1183,7 @@ pub mod ffi {
             // owned note into it, and drives a spend over THAT set (not the shim's
             // internal fixture). This is the Route-B seam for shielded solvency.
             let seed = b"treasury-seed-omega";
-            let n = cover_set_size().expect("cover set size");
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
             assert!(n >= 2, "need a non-trivial cover set");
 
             // Mint N cover coins owned by the seed wallet, each with a known,
@@ -1209,7 +1223,7 @@ pub mod ffi {
             let a = b"sender-seed-A";
             let b_seed = b"recipient-seed-B";
             let addr_b = address_from_seed(b_seed).expect("B's address");
-            let n = cover_set_size().expect("cover set size");
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
 
             // A mints its cover set (owns every coin).
             let mut coins = Vec::with_capacity(n);
@@ -1265,7 +1279,7 @@ pub mod ffi {
             // so a real (partial) cover set — fewer than N coins — must still
             // build and verify.
             let seed = b"treasury-seed-partial";
-            let n = cover_set_size().expect("cover set size");
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
             let partial = (n / 2).max(2); // strictly fewer than N
             let mut coins = Vec::with_capacity(partial);
             let mut ctxs = Vec::with_capacity(partial);
@@ -1293,7 +1307,7 @@ pub mod ffi {
             // only the outpoint later — and a WRONG outpoint's context cannot
             // recover the coin (fail-closed).
             let seed = b"treasury-seed-ctx";
-            let n = cover_set_size().expect("cover set size");
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
 
             // Same outpoint → same context (determinism).
             let outpoint = b"tx:abcd1234:vout:1";
@@ -1332,7 +1346,7 @@ pub mod ffi {
             // (b) The unspent-solvency check: verify the spend, then require its
             // linking tag ∉ spent-set. Unspent → Ok; tag already spent → reject.
             let seed = b"treasury-seed-solvency";
-            let n = cover_set_size().expect("cover set size");
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
             let mut coins = Vec::with_capacity(n);
             let mut ctxs = Vec::with_capacity(n);
             for i in 0..n {
@@ -1365,7 +1379,7 @@ pub mod ffi {
         #[test]
         fn spend_over_set_rejects_bad_index_and_overspend() {
             let seed = b"treasury-seed-beta";
-            let n = cover_set_size().expect("cover set size");
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
             let mut coins = Vec::with_capacity(n);
             let mut ctxs = Vec::with_capacity(n);
             for i in 0..n {

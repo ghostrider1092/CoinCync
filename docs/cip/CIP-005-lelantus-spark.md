@@ -45,7 +45,7 @@
 
 ## Abstract
 
-Activate Firo's Lelantus Spark protocol as an alternative private-spend mechanism alongside CLSAG-16 ring signatures. Spark uses a **one-out-of-many proof** over a vector commitment to the entire historical anonymity set — currently capped at 16,384 coins, roughly 1000× the anonymity set of a CLSAG-16 ring. Each spend produces a serial tag that lets verifiers detect double-spends without learning anything about which coin was spent.
+Activate Firo's Lelantus Spark protocol as an alternative private-spend mechanism alongside CLSAG-16 ring signatures. Spark uses a **one-out-of-many proof** over a vector commitment to the entire historical anonymity set — currently capped at 32,768 coins, roughly 1000× the anonymity set of a CLSAG-16 ring. Each spend produces a serial tag that lets verifiers detect double-spends without learning anything about which coin was spent.
 
 CoinCync's `src/crypto/lelantus_spark.rs` contains a **non-production SKETCH** of a Schnorr-style construction over the same Ristretto primitives used by CLSAG — but that sketch is unsound and fail-closed (see the soundness box above, #221). The production Spark engine is the audited Firo **libspark** backend (`consensus::spark_payload`, feature `libspark-ffi`). This CIP defines the activation path for that engine: how Spark spends are encoded in transactions, how the chain maintains the Spark accumulator state, and how wallets mint and spend Spark notes.
 
@@ -53,7 +53,7 @@ CoinCync's `src/crypto/lelantus_spark.rs` contains a **non-production SKETCH** o
 
 ## Motivation
 
-**Anonymity-set ceiling.** CLSAG-16 caps the per-input anonymity set at 16 ring members. For most users this is fine — 16 decoys is enough to defeat casual chain analysis — but for high-value transactions or transactions in low-volume periods, 16 decoys can be statistically thin. Spark's 16,384-element set is structurally three orders of magnitude harder to deanonymize.
+**Anonymity-set ceiling.** CLSAG-16 caps the per-input anonymity set at 16 ring members. For most users this is fine — 16 decoys is enough to defeat casual chain analysis — but for high-value transactions or transactions in low-volume periods, 16 decoys can be statistically thin. Spark's 32,768-element set is structurally three orders of magnitude harder to deanonymize.
 
 **Defense in depth via primitive diversity.** CLSAG and the one-out-of-many proof rest on different cryptographic assumptions. A future cryptanalysis attack against CLSAG (or its specific Schnorr ring construction) does not automatically break Spark, and vice versa. Users gain resilience to single-primitive failures.
 
@@ -118,7 +118,7 @@ Verification:
 
 ### Anonymity-set window
 
-The real Firo Spark one-out-of-many proof (the libspark engine — NOT the native `lelantus_spark.rs` sketch, which is O(n) and unsound) verifies in O(log N) where N is the anonymity-set size. At N = 16,384, the proof is ~3 KB and verification is ~50 ms on a modern CPU. The window is rolling: each spend specifies its own 16,384-coin slice of the accumulator, anchored at a recent block height.
+The real Firo Spark one-out-of-many proof (the libspark engine — NOT the native `lelantus_spark.rs` sketch, which is O(n) and unsound) verifies in O(log N) where N is the anonymity-set size. At N = 32,768, the proof is ~3 KB and verification is ~50 ms on a modern CPU. The window is rolling: each spend specifies its own 32,768-coin slice of the accumulator, anchored at a recent block height.
 
 This gives users explicit control over the anonymity set used for a given spend: a more recent window is faster to verify but smaller; an older window includes more historical coins but is slower for the verifier (one extra accumulator traversal step per ~10,000 mints in between).
 
@@ -126,7 +126,7 @@ This gives users explicit control over the anonymity set used for a given spend:
 
 ## Privacy Properties
 
-**Spend privacy.** With the libspark engine, observers learn that a Spark spend occurred and see the 16,384-coin window referenced, but not which coin within that window was spent. (The native `lelantus_spark.rs` sketch does NOT provide this — its proof reveals the spent index, #221 — which is one reason it is fail-closed and never used on the consensus path.)
+**Spend privacy.** With the libspark engine, observers learn that a Spark spend occurred and see the 32,768-coin window referenced, but not which coin within that window was spent. (The native `lelantus_spark.rs` sketch does NOT provide this — its proof reveals the spent index, #221 — which is one reason it is fail-closed and never used on the consensus path.)
 
 **Cross-spend linkability.** Two Spark spends from the same wallet are unlinkable as long as the spent coins were from independent mints. The serial tag `T` is per-coin, not per-wallet.
 
