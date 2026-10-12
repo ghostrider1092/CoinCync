@@ -1672,14 +1672,27 @@ impl Blockchain {
     /// Gated behind `test`/`test-utilities`; never compiled into a release node.
     #[cfg(any(test, feature = "test-utilities"))]
     pub fn seed_linear_chain_for_testing(&self, n_blocks: u64, block_time: u64) {
-        use crate::consensus::header::BlockHeader;
-        use crate::primitives::PublicKey;
-
         // Target ~2^-16 of max ⇒ difficulty ≈ 65_536 (finite, positive).
         let mut tb = [0xffu8; 32];
         tb[0] = 0;
         tb[1] = 0;
-        let target = Hash::from_bytes(tb);
+        self.seed_linear_chain_for_testing_with_target(n_blocks, block_time, Hash::from_bytes(tb));
+    }
+
+    /// Like [`seed_linear_chain_for_testing`] but with a caller-chosen PoW
+    /// `target`. A test that then mines a REAL block on top (via `add_block`)
+    /// should seed at the `MIN_DIFFICULTY` floor: the exact-ASERT target the
+    /// miner must grind is derived from this seeded window, and light-mode
+    /// RandomX is ~1 s/hash — a 65_536-difficulty window makes each mined block
+    /// take minutes, whereas a floor (~500) window makes it a few seconds.
+    pub fn seed_linear_chain_for_testing_with_target(
+        &self,
+        n_blocks: u64,
+        block_time: u64,
+        target: Hash,
+    ) {
+        use crate::consensus::header::BlockHeader;
+        use crate::primitives::PublicKey;
 
         let mut inner = self.inner.write();
         let magic = self.network.magic_bytes();
@@ -5156,6 +5169,244 @@ mod tests {
             "SHIELDED SOAK OK: {cycles} mint/transfer/spend/reorg cycles in {secs}s, seed={seed0}"
         );
         assert!(cycles > 0, "soak ran zero cycles");
+    }
+
+    /// #172 PR-3: shielded submission is activation-gated, end-to-end through the
+    /// REAL block pipeline. The soak drives `apply_spark_v2_txs` directly, which
+    /// SKIPS `add_block -> validate_transaction -> check_shielded_tx` and its
+    /// activation gate. This test routes a shielded tx through `add_block` on a
+    /// regtest chain and proves it is REJECTED below
+    /// `SHIELDED_REGTEST_ACTIVATION_HEIGHT` (100) and ACCEPTED at/after it —
+    /// closing out issue #172 (PR1 node admission, PR2 wallet send/mint, PR3 e2e).
+    ///
+    /// Run: `SPARK_OPENSSL_DIR=... cargo test --features "testnet sketch-gk-proof
+    /// libspark-ffi" shielded_submission_is_activation_gated_regtest_e2e --
+    /// --ignored --nocapture`.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    #[ignore = "shielded regtest e2e: needs libspark (SPARK_OPENSSL_DIR); run in the ignored pass"]
+    fn shielded_submission_is_activation_gated_regtest_e2e() {
+        use crate::config::NetworkType;
+        use crate::consensus::spark_payload::build::{build_mint_payload, build_transfer_payload};
+        use crate::consensus::spark_payload::derive_outpoint;
+        use crate::consensus::{compute_full_anchor, compute_pow_hash, BlockHeader, PowAlgorithm};
+        use crate::crypto::{
+            coinbase_stealth_address, BlindingFactor, PedersenCommitment,
+        };
+        use crate::emission::calculate_block_reward;
+        use crate::primitives::{hash_domain, merkle_root, Hash, PublicKey};
+        use crate::transaction::{Transaction, TxOutput, TxType};
+        use spark_connector::ffi::address_from_seed;
+
+        let act = crate::constants::shielded_activation_height(NetworkType::Regtest);
+        assert_eq!(act, 100, "regtest activates shielded at 100 under sketch-gk-proof");
+
+        std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+        crate::consensus::bind_randomx_genesis_for_network(NetworkType::Regtest);
+        let magic = NetworkType::Regtest.magic_bytes();
+
+        // Persistent (temp-dir) DB: seed_linear_chain_for_testing + add_block store
+        // block bodies in `db.blocks`, which get_block_by_height reads back. A db-less
+        // chain keeps only genesis in the in-memory cache, so the seeded fillers below
+        // would be unretrievable. with_database also opens the persistent SparkPoolStore.
+        let _db_dir = tempfile::tempdir().expect("temp db dir");
+        let db = Arc::new(Database::open(_db_dir.path()).expect("open db"));
+        let chain = Blockchain::with_database(db, NetworkType::Regtest);
+        chain.init_genesis().expect("genesis init");
+        let genesis = chain.get_block_by_height(0).expect("genesis block");
+        chain
+            .restore_state(0, genesis.hash(), 1)
+            .expect("seed cumulative-work base = 1");
+
+        // ── Pre-populate the shielded pool directly (like the soak): a mint at
+        // height 1 seeds owned coins so the add_block'd TRANSFER below has a cover
+        // set to spend. The value-bridge-backed shield-in through add_block needs
+        // real transparent ring members (forbidden as synthetic ≥100), so we use a
+        // value_balance=0 TRANSFER to exercise the activation gate cleanly.
+        let wseed = b"e2e-shielded-172-pr3";
+        let store = chain
+            .spark_pool_store
+            .as_ref()
+            .expect("regtest+sketch-gk-proof chain has a SparkPoolStore")
+            .clone();
+        let values: Vec<u64> = vec![5_000, 6_000, 7_000, 8_000];
+        let n = values.len();
+        let (mint_payload, _) =
+            build_mint_payload(wseed, &values, &[]).expect("build mint");
+        let mk = |extra: Vec<u8>, fee: u64| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(fee),
+            range_proof: vec![],
+            extra,
+        };
+        chain.checkpoint_phase2_stores(1);
+        chain.apply_spark_v2_txs(std::slice::from_ref(&mk(mint_payload.encode(), 0)), 1);
+        assert_eq!(store.coin_count(), n, "mint seeded the pool");
+
+        // The shielded tx we'll try to submit through add_block: a transfer of one
+        // owned coin to a second wallet (value_balance = 0).
+        let recipient_b = b"e2e-recipient-b";
+        let addr_b = address_from_seed(recipient_b).expect("recipient B address");
+        let xfer_op = derive_outpoint(&[], 0);
+        let xfer_payload =
+            build_transfer_payload(wseed, store.as_ref(), &xfer_op, 100, 0, 1, &addr_b)
+                .expect("build transfer");
+        // fee=0: this e2e proves the ACTIVATION GATE through add_block, not the
+        // fee-market. The gate fires BEFORE any fee check (validation.rs: the
+        // `is_shielded()` branch returns early), so a fee=0 bundle is all we need to
+        // show the gate opening. Bundle validity + the fee path are covered by the
+        // wallet tests and the 24h soak (which drives apply_spark_v2_txs directly).
+        let shielded_tx = mk(xfer_payload.encode(), 0);
+        // Sanity: the bundle itself is valid (independent of the block gate).
+        assert!(
+            chain.verify_block_spark_v2(std::slice::from_ref(&shielded_tx)).is_ok(),
+            "the transfer bundle must be independently valid"
+        );
+
+        // ── Block helpers (real RandomX PoW; regtest difficulty eases to the
+        // floor with wide spacing). Mirrors tests/reorg_double_spend_e2e.rs.
+        // Real curve keypairs for the coinbase (random bytes are not valid
+        // Ristretto points, which coinbase_stealth_address rejects).
+        let kp = || {
+            let s = crate::crypto::SecretScalar::random(&mut rand::rngs::OsRng);
+            PublicKey::from_bytes(s.to_public().to_bytes())
+        };
+        let spend_pub = kp();
+        let view_pub = kp();
+        let coinbase = |height: u64| -> Transaction {
+            let reward = calculate_block_reward(height);
+            let amt = reward.as_atomic();
+            let commitment = PedersenCommitment::commit(amt, &BlindingFactor::zero());
+            let miner_secret: [u8; 32] = *blake3::hash(view_pub.as_bytes()).as_bytes();
+            let (stealth, _) =
+                coinbase_stealth_address(&spend_pub, &view_pub, height, 0, &miner_secret)
+                    .expect("coinbase stealth");
+            let view_tag = {
+                let shared = hash_domain(
+                    b"COINCYNC_VIEW_TAG",
+                    &[stealth.tx_public_key.as_bytes().as_slice(), &[0u8]].concat(),
+                );
+                shared.as_bytes()[0]
+            };
+            Transaction {
+                version: 1,
+                tx_type: TxType::Coinbase,
+                inputs: vec![],
+                outputs: vec![TxOutput {
+                    stealth_address: stealth.public_key,
+                    tx_public_key: stealth.tx_public_key,
+                    encrypted_amount: amt.to_le_bytes().to_vec(),
+                    commitment: commitment.to_bytes(),
+                    view_tag,
+                    lock_height: None,
+                    encrypted_memo: vec![],
+                }],
+                fee: crate::primitives::Amount::ZERO,
+                range_proof: vec![],
+                extra: crate::consensus::fork_signal::encode_coinbase_extra(
+                    height,
+                    crate::consensus::fork_signal::SignalBits(0),
+                ),
+            }
+        };
+        let base_ts = genesis.header.timestamp.as_secs();
+        let mine = |prev: &Block, height: u64, txs: Vec<Transaction>| -> Block {
+            let ts = base_ts + height * 3600;
+            let target = chain.next_target();
+            let prev_hash = prev.hash();
+            let tx_hashes: Vec<Hash> = txs.iter().map(|t| t.hash()).collect();
+            let tx_root = merkle_root(&tx_hashes);
+            let mut header = BlockHeader {
+                network_magic: magic,
+                version: crate::constants::block_version_at_height(height),
+                height: crate::primitives::Height::new(height),
+                timestamp: ts.into(),
+                prev_hash,
+                tx_root,
+                anchor: Hash::from_bytes([0u8; 32]),
+                algorithm: PowAlgorithm::RandomX as u8,
+                nonce: 0,
+                target,
+                miner_pubkey: spend_pub,
+                supply_commitment: [0u8; 32],
+                checkpoint_vote: None,
+                spark_set_root: [0u8; 32],
+                mw_kernel_root: [0u8; 32],
+            };
+            let binding = header.pow_binding();
+            header.anchor = compute_full_anchor(&prev_hash, height, ts, &binding)
+                .expect("anchor")
+                .mixed_hash;
+            let mut nonce = 0u64;
+            loop {
+                let pow = compute_pow_hash(PowAlgorithm::RandomX, &header.anchor, nonce, &tx_root, height)
+                    .expect("randomx");
+                if pow.meets_difficulty(&target) {
+                    break;
+                }
+                nonce += 1;
+            }
+            header.nonce = nonce;
+            Block::new(header, txs)
+        };
+
+        // ── Seed coinbase-less filler blocks to height 49 (fast: bypasses PoW),
+        // then mine ONE real block at 50 carrying the shielded tx → the activation
+        // gate must REJECT it (h=50 < 100). Seeding keeps the e2e runtime sane; the
+        // two shielded-carrying blocks below go through the full add_block pipeline.
+        // Seed the fillers at the MIN_DIFFICULTY floor (~512) so the exact-ASERT
+        // target the two REAL blocks below must grind stays at the floor (~500
+        // hashes each, seconds) instead of the helper's default 65_536-difficulty
+        // window (~65k hashes, minutes in light mode).
+        let floor_target = {
+            let mut tb = [0xffu8; 32];
+            tb[0] = 0x00;
+            tb[1] = 0x7f; // 9 leading zero bits ⇒ difficulty ≈ 512 ≥ MIN_DIFFICULTY
+            Hash::from_bytes(tb)
+        };
+        chain.seed_linear_chain_for_testing_with_target(49, 3600, floor_target);
+        let parent49 = chain.get_block_by_height(49).expect("seeded block 49");
+        let gated = mine(&parent49, 50, vec![coinbase(50), shielded_tx.clone()]);
+        let res_a = chain.add_block(gated);
+        let msg_a = format!("{res_a:?}");
+        // add_block reports a bad block as Ok(BlockStatus::Invalid(reason)); the
+        // reason must cite the activation gate (check_shielded_tx). It may ALSO
+        // carry the block-level fee-market complaint — we only require that the
+        // activation gate is what fired.
+        assert!(
+            msg_a.contains("not activated at this height"),
+            "below activation (h=50 < 100) the shielded tx must be rejected BY THE \
+             ACTIVATION GATE (check_shielded_tx), got {msg_a}"
+        );
+        assert_eq!(chain.height(), 49, "rejected block must not advance the tip");
+
+        // ── Seed to 99, then submit the SAME shielded tx at height 100 (= activation)
+        // through add_block → the activation gate OPENS: the tx is no longer rejected
+        // for inactivity. (With fee=0 it then trips the fee-market — a DIFFERENT check
+        // that lives AFTER the gate; a real wallet tx carries a fee. The point proven
+        // here is that the submission path exists and is height-gated, closing #172.)
+        chain.seed_linear_chain_for_testing_with_target(50, 3600, floor_target); // → height 99
+        let parent99 = chain.get_block_by_height(99).expect("seeded block 99");
+        let activated = mine(&parent99, 100, vec![coinbase(100), shielded_tx]);
+        let res_b = chain.add_block(activated);
+        let msg_b = format!("{res_b:?}");
+        // AT activation the gate OPENS: the activation rejection is gone, and the
+        // tx reaches the post-gate block fee-market check (fee=0 ⇒ "fee too low").
+        // Seeing the fee complaint but NOT the activation one proves the gate let
+        // it through (rather than the block failing earlier for some other reason).
+        assert!(
+            !msg_b.contains("not activated at this height")
+                && msg_b.contains("fee too low for congestion"),
+            "AT activation (h=100) the shielded tx must PASS the activation gate and \
+             reach the fee-market check, got {msg_b}"
+        );
+        eprintln!(
+            "#172 PR-3 e2e OK: shielded tx rejected by the activation gate at h=50<100, \
+             passes the gate at h=100 ({msg_b})"
+        );
     }
 
     /// The verify hook rejects UNAUTHENTICATED coin entry: a shielded payload
