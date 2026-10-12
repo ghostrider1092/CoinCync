@@ -2285,6 +2285,41 @@ async fn cmd_shielded_mint(
     let tx = coincync::wallet::send::build_shield_in_transaction(prepared, rings, &mut rng)
         .map_err(|e| format!("build shield-in tx: {e}"))?;
 
+    // #302: reserve the transparent inputs BEFORE submitting — exactly like a
+    // transparent send (cmd_send) does. Without this, two shield-ins built in a
+    // row select the same UTXOs and only the node catches the double-spend; the
+    // wallet would also happily re-spend reserved-but-unconfirmed inputs.
+    let tx_hash = tx.hash();
+    let mut input_keys: Vec<(coincync::primitives::Hash, u8)> = Vec::with_capacity(tx.inputs.len());
+    for ki in tx.key_images() {
+        for utxo in &wallet.all_utxos() {
+            if utxo.key_image == ki && !utxo.spent {
+                input_keys.push((utxo.tx_hash, utxo.output_index));
+                break;
+            }
+        }
+    }
+    if input_keys.len() != tx.inputs.len() {
+        return Err(format!(
+            "internal: failed to map all shield-in inputs back to UTXO keys (mapped {}/{}). \
+             Refusing to submit without an in-flight reservation; `wallet scan` and retry.",
+            input_keys.len(),
+            tx.inputs.len()
+        ));
+    }
+    if let Err(conflict) = wallet.reserve_utxos(&input_keys, tx_hash, current_height) {
+        return Err(format!(
+            "reservation conflict: {} (another shield-in/send is using these inputs; \
+             `wallet scan` and retry)",
+            conflict
+        ));
+    }
+    // Persist the reservation before broadcasting; roll back if it never saved.
+    if let Err(e) = wallet.save(Some(&password)) {
+        wallet.release_reservations_by_tx(tx_hash);
+        return Err(format!("failed to persist shield-in reservation: {e}"));
+    }
+
     submit_shielded_tx(node, &tx, &format!("shield-in mint of {amount} atomic")).await
 }
 
@@ -2392,6 +2427,25 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
     let fee = chosen_value
         .checked_sub(amount)
         .ok_or("funding note does not cover the amount")?;
+
+    // #302: guard against the no-change-note funds-loss. `build_spend_to_address`
+    // takes a single recipient + value today, so there is no change note — the
+    // ENTIRE funding-note remainder (chosen_value − amount) becomes the fee.
+    // Spending a small `amount` from a much larger note therefore silently burns
+    // the difference. Until a self-change output lands (shim work, tracked
+    // follow-up), refuse when the fee would exceed the amount sent (you would
+    // lose more than you send) unless the operator explicitly opts in.
+    let allow_high_fee = std::env::var("COINCYNC_ALLOW_HIGH_SHIELDED_FEE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if fee > amount && !allow_high_fee {
+        return Err(format!(
+            "refusing shielded send: funding note is {chosen_value} atomic but you are sending \
+             only {amount} — the remaining {fee} atomic would ALL be paid as fee (no change note \
+             is created yet). Spend a note closer to {amount}, or set \
+             COINCYNC_ALLOW_HIGH_SHIELDED_FEE=1 to proceed and forfeit the remainder."
+        ));
+    }
 
     // Build the spend to the recipient over the fetched cover set, then
     // self-verify the bundle (standalone — the node re-verifies on submit).
