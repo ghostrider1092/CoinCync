@@ -570,9 +570,33 @@ impl AddressManager {
         }
     }
 
-    /// Get addresses for peer exchange
+    /// Enumerate the raw book (every known address, tried or not). Used
+    /// internally and by tests; NOT for the wire — gossip must go through
+    /// [`get_for_gossip`] so unverified entries are never announced.
     pub fn get_for_exchange(&self, max: usize) -> Vec<PeerAddress> {
         self.addresses.iter().take(max).cloned().collect()
+    }
+
+    /// Addresses to announce in an `Addr`/GetAddr reply: ONLY ones we have
+    /// VERIFIED are real, reachable nodes — the `good` set (successfully
+    /// connected to at least once, via `mark_success`) plus operator-configured
+    /// `manual` peers. Anchors are a subset of `good`, so they're included.
+    ///
+    /// #303 PRIVACY FIX: `get_for_exchange` gossiped every book entry with no
+    /// tried/good filter, so an inbound-only (often NAT'd) peer's `(ip,
+    /// default_port)` guess — seeded by the #293 inbound-discovery tick — was
+    /// announced network-wide within a minute of connecting, even though it was
+    /// never dial-confirmed. Gossiping only verified addresses stops that leak
+    /// AND mirrors the new/tried anti-eclipse model already used for dialing
+    /// (`get_next` prefers `good`): we never propagate an address we haven't
+    /// personally reached, so poisoned/unverified entries can't spread via us.
+    pub fn get_for_gossip(&self, max: usize) -> Vec<PeerAddress> {
+        self.addresses
+            .iter()
+            .filter(|a| self.good.contains(&a.addr) || self.manual.contains(&a.addr))
+            .take(max)
+            .cloned()
+            .collect()
     }
 
     /// Mark an address as our own (detected via self-connection nonce match).
@@ -1009,6 +1033,44 @@ mod tests {
         assert!(
             am.get_for_exchange(10_000).iter().any(|a| a.addr == manual),
             "operator manual peer must bypass the netgroup quota"
+        );
+    }
+
+    #[test]
+    fn gossip_announces_only_verified_and_manual_addresses() {
+        // #303: GetAddr/Addr replies must carry ONLY addresses we have verified
+        // (good) or the operator trusts (manual) — never a raw untried book entry
+        // (e.g. a #293 inbound-discovery (ip, default_port) guess), which would
+        // leak an inbound-only peer's IP network-wide.
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let mut am = AddressManager::new(1000);
+        let a = |o: [u8; 4], p: u16| {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(o[0], o[1], o[2], o[3])), p)
+        };
+
+        let untried = a([203, 0, 113, 9], 28080); // never dial-confirmed
+        am.add(PeerAddress::new(untried));
+
+        let good = a([198, 51, 100, 20], 28080); // successfully connected
+        am.add(PeerAddress::new(good));
+        am.mark_success(good);
+
+        let manual = a([192, 0, 2, 50], 28080); // operator --addnode
+        am.add_manual(manual);
+
+        let gossiped: Vec<SocketAddr> = am.get_for_gossip(100).iter().map(|e| e.addr).collect();
+        assert!(gossiped.contains(&good), "verified-good address must be gossiped");
+        assert!(gossiped.contains(&manual), "operator manual address must be gossiped");
+        assert!(
+            !gossiped.contains(&untried),
+            "#303: an untried/unverified address must NOT be gossiped (no IP leak)"
+        );
+
+        // It stays in the raw book so the dialer can still try it — only the
+        // WIRE announcement is withheld until it becomes good.
+        assert!(
+            am.get_for_exchange(10_000).iter().any(|e| e.addr == untried),
+            "untried address remains in the book for dialing"
         );
     }
 

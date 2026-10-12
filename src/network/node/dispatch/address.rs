@@ -74,7 +74,9 @@ pub(super) async fn handle_get_addr(
     }
 
     let addrs = addresses.read().await;
-    let peer_addrs = addrs.get_for_exchange(100);
+    // #303: gossip ONLY verified/trusted addresses (never raw untried book
+    // entries) so we don't leak an inbound-only peer's unconfirmed (ip, port).
+    let peer_addrs = addrs.get_for_gossip(100);
     drop(addrs);
 
     if !peer_addrs.is_empty() {
