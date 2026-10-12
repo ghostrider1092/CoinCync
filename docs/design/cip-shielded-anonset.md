@@ -1,7 +1,33 @@
 # CIP-Shielded — Anonymity-Set Determinism Contract
 
-Status: **DRAFT / provisional** (not ratified; not activated). Companion to
-`cip-shielded-txtype.md` and `cip-shielded-proof.md`.
+Status: **SUPERSEDED for the shipped engine** (and still not activated). This CIP
+specifies the anon-set contract for the **v1 native-GK** shielded path
+(`consensus::shielded_pipeline` + `storage::ShieldedStore`). The engine CoinCync
+actually ships and submits for audit is the **v2 libspark** path
+(`storage::SparkPoolStore` + `consensus::spark_payload::verify_spark_payload`);
+its anon-set contract is summarized under "Shipped engine (v2 libspark)" below,
+and the v1 model in the rest of this document is retained for history/reference
+only — it is **not the audited path**. Companion to `cip-shielded-txtype.md`,
+`cip-shielded-proof.md`, and `cip-shielded-libspark-ffi.md`.
+
+> ## Shipped engine (v2 libspark) — the audited anon-set
+>
+> The audited shielded engine verifies each spend against a **node-authoritative
+> cover set** resolved from `SparkPoolStore::cover_set_at(cover_set_id,
+> anchor_height)`: the pool is bucketed into fixed groups of at most
+> **`N = n^m = 8^5 = 32768`** coins (libspark `get_default` Grootle params, #259),
+> where group `g` is the coins at insertion positions `[g·N, (g+1)·N)` with
+> `height ≤ anchor_height`, in canonical order. The Groth-Kohlweiss one-of-many
+> proof is verified against *that* set, and the cover-set representation is
+> **recomputed deterministically on the node** (`cc_cover_set_rep`, a
+> domain-separated hash over the ordered coins) so a spender cannot prove
+> membership in a set they made up (#258). A spend whose resolved group is
+> **empty** is rejected before the backend runs (#308), and the spend's public
+> output `vout` is bound to the transaction's `value_balance` (#258). This path is
+> gated `sketch-gk-proof` + `libspark-ffi` and stays **activation-gated off**
+> (`u64::MAX`) on testnet/mainnet until the external libspark audit passes. The
+> same `N`-group bucketing idea as the v1 model below, but the set capacity,
+> representation, and proof system are libspark's, not the native pipeline's.
 
 ## Problem
 
@@ -64,10 +90,13 @@ one-out-of-many over `N` elements; the pads simply cannot be the witness.
 
 ## Open ratification questions (before activation)
 
-1. **`N` (i.e. `m = GK_ANON_SET_LOG2`).** Larger `N` = stronger anonymity but
-   `O(N)` verify and slower bucket fill on a young chain. Provisional `m = 8`
-   (`N = 256`); to be chosen with the privacy WG + measured against testnet
-   fill-rate before activation.
+1. **`N` (i.e. `m = GK_ANON_SET_LOG2`).** [v1 native only] Larger `N` = stronger
+   anonymity but `O(N)` verify and slower bucket fill on a young chain.
+   Provisional `m = 8` (`N = 256`). **Resolved for the shipped v2 engine:**
+   `N = 32768` (libspark `get_default`, Grootle n=8/m=5), fixed by #259 — under
+   the #258 node-authoritative verify, test params (N=16) break every spend once
+   the pool exceeds N, so production params are mandatory, not a tunable. The
+   provisional v1 figure above applies only to the unshipped native path.
 2. **Cross-bucket spends / bucket selection when a wallet owns coins in several
    buckets** (each input proves against its own bucket — confirm mempool/relay
    cost is acceptable).

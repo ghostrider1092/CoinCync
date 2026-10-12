@@ -145,10 +145,29 @@ completed. (`11418320`, `105cc7a0`, `13a50c75`, `0ac53153`, `e1fcad5d`.)
   `STRICT_RING_MEMBER_HEIGHT`, an unknown ring member is allowed — a mint window.
   Closed **operationally** at launch by the genesis-bootstrap runbook (self-mine
   ≥100 blocks with `--no-peers` before opening), not in code.
-- **Dormant / feature-gated (inert in production):** Lelantus Spark & MimbleWimble
-  stores, rolling-finality, CIP-007 activation registry, `CONSENSUS_CHECKPOINTS`
-  (empty), `insecure-fast-sync` (default off). None are on the live consensus
-  path; each is a future-activation item that must be re-audited when wired.
+- **Shielded (Spark) engine — prepared for audit, gated off.** The shielded pool
+  CoinCync ships is the **v2 libspark** engine (`storage::SparkPoolStore` +
+  `consensus::spark_payload::verify_spark_payload`, vendored Firo libspark behind
+  the `libspark-ffi` feature): node-authoritative cover-set verification so a
+  spender cannot substitute their own anonymity set (#258), a fail-closed
+  empty-cover guard (#308), and production Grootle parameters `N = n^m = 8^5 =
+  32768` (#259). Its anon-set contract is summarized in
+  `docs/design/cip-shielded-anonset.md` ("Shipped engine (v2 libspark)"); the
+  libspark provenance pin and FFI boundary are in
+  `docs/design/cip-shielded-libspark-ffi.md`. A **24h in-block consensus soak**
+  (mint → transfer → self-spend → double-spend-reject → reorg via the real block
+  hooks with live libspark proofs) is the pre-audit validation gate. **An earlier
+  v1 native-GK path (`consensus::shielded_pipeline` + `ShieldedStore`, anon-set
+  N=256) is superseded and retained gated for reference only — it is NOT the
+  audited engine.** Both stay **activation-gated off** (activation height
+  `u64::MAX`) on testnet/mainnet; shielded is never on the live consensus path
+  until the external libspark audit passes. Value conservation across the veil is
+  enforced by the transparent↔shielded balance bridge (`verify_transparent_shielded_balance`)
+  plus the spend's own libspark balance/range proof.
+- **Other dormant / feature-gated (inert in production):** MimbleWimble stores,
+  rolling-finality, CIP-007 activation registry, `CONSENSUS_CHECKPOINTS` (empty),
+  `insecure-fast-sync` (default off). None are on the live consensus path; each is
+  a future-activation item that must be re-audited when wired.
 - **Not yet done:** external professional audit (this document exists to enable
   it); mainnet seed-fleet + DNS provisioning (operator infra). The
   `total_difficulty` determinism guard now has a dedicated E2E test (extend +
