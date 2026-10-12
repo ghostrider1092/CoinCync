@@ -119,6 +119,16 @@ pub fn verify_spark_payload<B: SparkBackend>(
         return Ok(Vec::new());
     };
     let cover = store.cover_set_at(sb.cover_set_id, sb.anchor_height);
+    // A spend MUST anchor to a NON-EMPTY node-resolved cover set. An empty set
+    // (e.g. an `anchor_height` before any coin exists, or an unknown bucket)
+    // marshals to `set_len == 0`, which the backend treats as the permissive
+    // STATELESS admit — verifying the spender's OWN bundle set instead of the
+    // node's. That is the #258 hole reached through a side door. A one-of-many
+    // membership proof over zero coins is never legitimate, so reject it here
+    // and fail closed before the backend ever sees an empty set.
+    if cover.is_empty() {
+        return Err(Error::SparkVerifyFailed);
+    }
     let tags = backend
         .verify_solvency(
             &cover,
@@ -591,6 +601,35 @@ mod tests {
             value_balance: 0,
         };
         assert!(verify_spark_payload(&store, &StubBackend, &p, 0).is_err());
+    }
+
+    #[test]
+    fn spend_with_empty_cover_set_is_rejected_by_the_node_guard() {
+        // #258 side-door: a spend anchored where the node resolves an EMPTY cover
+        // set must be rejected by the NODE before the backend runs — an empty set
+        // marshals to set_len==0, which the backend treats as the permissive
+        // stateless admit (verifying the spender's own bundle set). The guard
+        // returns SparkVerifyFailed; the backend's path maps to CryptoError, so
+        // asserting the exact variant proves the guard short-circuited first.
+        use spark_connector::StubBackend;
+        let store = SparkPoolStore::new(); // empty → cover_set_at(..) is empty
+        let p = SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![],
+            spend: Some(SpendBundle {
+                cover_set_id: 0,
+                anchor_height: 0,
+                bundle: vec![0u8; 32],
+            }),
+            value_balance: 0,
+        };
+        match verify_spark_payload(&store, &StubBackend, &p, 0) {
+            Err(Error::SparkVerifyFailed) => {} // guard fired before the backend ✓
+            other => panic!(
+                "expected SparkVerifyFailed from the empty-cover guard, got {other:?}"
+            ),
+        }
     }
 
     #[test]
