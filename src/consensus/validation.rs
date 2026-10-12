@@ -1619,6 +1619,12 @@ pub(crate) fn validate_transaction_for_network_ctx(
         check_tx_ring_members(expected_network, tx, utxos, current_height, v1_0_12_active)?;
         check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
     }
+    // DoS cap (#260): bound every input's ring to MAX_RING_SIZE BEFORE the
+    // O(n²) CLSAG verify. The exact-size check above is CONTEXTUAL-only and is
+    // skipped when a competing fork block is validated pre-storage
+    // (`contextual = false`), so without this cap CLSAG would run on an
+    // arbitrarily large ring. This runs in BOTH modes.
+    check_tx_ring_size_cap(tx)?;
     check_tx_ring_signatures(tx)?;
     check_tx_range_proofs(tx, current_height)?;
     check_tx_balance_proof(tx)?;
@@ -2368,6 +2374,34 @@ fn check_tx_ring_size_and_unique_members(
 /// see the "abort" signal reliably. Relaxed ordering could let threads
 /// miss the failure flag being set, potentially allowing invalid
 /// signatures to pass validation in edge cases.
+/// Context-free upper bound on every input's ring size, enforced in BOTH the
+/// contextual and non-contextual validation paths BEFORE the O(n²) CLSAG verify
+/// (`check_tx_ring_signatures`) runs.
+///
+/// The contextual `check_tx_ring_size_and_unique_members` enforces the EXACT
+/// ring size (`effective_ring_size`, i.e. RING_SIZE = 16 after bootstrap), but
+/// it is skipped when a competing fork block is validated pre-storage
+/// (`contextual = false`, see the dispatch in `validate_transaction`). That left
+/// CLSAG exposed to an arbitrarily large ring on the fork path: a 2 MiB block
+/// can carry one input with ~21,000 members (96 wire bytes each), and at CLSAG's
+/// O(n²) cost verifying that single signature is ≈ an hour of a core — while the
+/// block itself can be mined at a small fraction of the real difficulty (#260).
+/// This cap bounds the per-input work to `MAX_RING_SIZE²` before any signature
+/// is checked. `MAX_RING_SIZE` (32) is 2× the enforced `RING_SIZE` (16), so no
+/// honest transaction is affected; the contextual path still enforces the exact
+/// size.
+fn check_tx_ring_size_cap(tx: &Transaction) -> Result<()> {
+    for input in &tx.inputs {
+        if input.ring_members.len() > crate::constants::MAX_RING_SIZE {
+            return Err(Error::InvalidRingSize {
+                expected: crate::constants::MAX_RING_SIZE,
+                got: input.ring_members.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn check_tx_ring_signatures(tx: &Transaction) -> Result<()> {
     let all_sigs_valid = AtomicBool::new(true);
     let failed_idx = std::sync::atomic::AtomicUsize::new(usize::MAX);
@@ -3915,6 +3949,50 @@ mod tests {
             .errors
             .iter()
             .any(|e| e.contains("Duplicate key image in block")));
+    }
+
+    // ── #260: context-free ring-size cap before CLSAG ───────────────────────
+    #[test]
+    fn ring_size_cap_rejects_oversized_ring_before_clsag_260() {
+        use crate::constants::MAX_RING_SIZE;
+
+        // A ring far larger than MAX_RING_SIZE — the shape of the fork-block
+        // CLSAG DoS (a huge ring whose O(n²) verify costs ~an hour of a core).
+        // The context-free cap must reject it, in BOTH validation modes, before
+        // any signature is verified.
+        let oversized = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(1, ring_of(MAX_RING_SIZE + 1, 10))],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        assert!(
+            matches!(
+                check_tx_ring_size_cap(&oversized),
+                Err(Error::InvalidRingSize { expected, got })
+                    if expected == MAX_RING_SIZE && got == MAX_RING_SIZE + 1
+            ),
+            "a ring larger than MAX_RING_SIZE must be rejected by the cap"
+        );
+
+        // A ring AT the cap passes it (the EXACT size is a separate contextual
+        // check); the cap only bounds the worst case.
+        let at_cap = Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: vec![input_with_ki(1, ring_of(MAX_RING_SIZE, 10))],
+            outputs: vec![a_valid_output()],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![],
+        };
+        assert!(
+            check_tx_ring_size_cap(&at_cap).is_ok(),
+            "a ring at MAX_RING_SIZE passes the cap"
+        );
     }
 
     // ── header / block structural sub-checks ────────────────────────────

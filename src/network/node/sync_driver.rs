@@ -815,6 +815,23 @@ pub(super) fn spawn_sync_driver(
                     // peer_heights, un-wedging is_synced for good.
                     s.set_state(SyncState::Headers);
                 }
+                // Dig-Out (#286): clear GetBlocks bans. A node wedged behind a
+                // minority fork requests block spans its peers lack → empty
+                // replies → every peer GetBlocks-banned (1 h) → `live_block_peers`
+                // empty → `[IBD] No live peers for GetBlocks` loops forever. No
+                // other path clears these bans. Doing it here (gated by this
+                // emergency tier, which re-fires only every EMERGENCY_T3_REPEAT_SECS)
+                // gives the node a clean shot at the correctly-queued majority
+                // hashes so a SHALLOW fork can reorg instead of wedging. Selective
+                // + backed-off in the scorer, so re-admitting peers can't churn; a
+                // healthy node never reaches this tier, so it is never thrashed.
+                let cleared = sync_scorer.write().await.clear_get_blocks_bans();
+                if cleared > 0 {
+                    tracing::warn!(
+                        "[dig-out] cleared GetBlocks bans on {} peer(s) to break a possible fork-recovery stall",
+                        cleared
+                    );
+                }
                 // Artificially advance last_progress_time_secs so the
                 // next emergency-fire check waits REPEAT_SECS instead
                 // of firing immediately on the next tick. Without
