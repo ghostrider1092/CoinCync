@@ -1677,7 +1677,26 @@ fn check_shielded_tx(
     // a malformed v2 tx is rejected now, a well-formed one is admitted to face
     // the block-level verify.
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-    if crate::consensus::spark_payload::SparkPayload::decode(&tx.extra).is_ok() {
+    if let Ok(payload) = crate::consensus::spark_payload::SparkPayload::decode(&tx.extra) {
+        // SECURITY (F4, issue #314): stateless mirror of the block-gate rule in
+        // chain.rs::verify_block_spark_v2 — a shielded tx must be PURE-SHIELDED
+        // (no transparent inputs/outputs, value_balance == 0) until the
+        // transparent shield-in/unshield bridge is validated + audited. Rejecting
+        // it here keeps a cross-veil-inflation-shaped tx out of the mempool/relay.
+        if !tx.inputs.is_empty() || !tx.outputs.is_empty() {
+            return Err(Error::InvalidTransaction(
+                "shielded tx must be pure-shielded: no transparent inputs/outputs \
+                 until the transparent bridge is validated (#314)"
+                    .to_string(),
+            ));
+        }
+        if payload.value_balance != 0 {
+            return Err(Error::InvalidTransaction(
+                "shielded tx must have value_balance == 0 until the transparent \
+                 shield-in/unshield bridge is validated (#314)"
+                    .to_string(),
+            ));
+        }
         return Ok(());
     }
 

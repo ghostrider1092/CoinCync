@@ -913,6 +913,28 @@ impl Blockchain {
                 Ok(p) => p,
                 Err(_) => continue, // not a v2 payload (native v1 handled elsewhere)
             };
+            // SECURITY (F4, issue #314): a block-admitted shielded tx MUST be
+            // PURE-SHIELDED — no transparent inputs/outputs and value_balance == 0.
+            // The transparent side of a shielded tx skips RingCT validation (the
+            // is_shielded early-return in validate_transaction), so an unproven
+            // transparent output (or input) fed into the value bridge below would
+            // let value be minted across the veil (cross-veil inflation). Until the
+            // transparent shield-in/unshield bridge is validated (ring/UTXO on
+            // inputs + range proofs on outputs) and audited, forbid any transparent
+            // side. Fail-closed; matches every wired/soaked path today.
+            if !tx.inputs.is_empty() || !tx.outputs.is_empty() {
+                return Err(format!(
+                    "spark v2 tx {idx}: transparent inputs/outputs are forbidden — \
+                     shielded txs must be pure-shielded until the transparent bridge \
+                     is validated (#314)"
+                ));
+            }
+            if payload.value_balance != 0 {
+                return Err(format!(
+                    "spark v2 tx {idx}: value_balance must be 0 — transparent \
+                     shield-in/unshield is gated until the bridge is validated (#314)"
+                ));
+            }
             // Transparent↔shielded value bridge: the tx's public value_balance
             // must be backed by its transparent commitments (no cross-veil
             // inflation). The shielded side's own conservation is proven by the
