@@ -2333,6 +2333,16 @@ fn mole_notice(amount: u64) {
     eprintln!("        {amount} atomic is burrowing underground (shielded)");
     eprintln!("        - no transparent trace of sender, recipient, or amount.");
     eprintln!("=====================================================");
+    // On-chain shield-in needs a transparent side (ring-signed inputs +
+    // transparent change, value_balance < 0). That path is GATED at consensus:
+    // a block-admitted shielded tx must be pure-shielded until the transparent
+    // bridge is validated and audited (F4, issue #314). A node will REJECT this
+    // broadcast with "transparent inputs/outputs are forbidden". This command
+    // exercises the builder path; it will not relay until #314 lands.
+    eprintln!(" [GATED] on-chain shield-in is disabled until the transparent");
+    eprintln!("         bridge is validated (issue #314) — the node will reject");
+    eprintln!("         this transaction. Builder/testing use only for now.");
+    eprintln!("=====================================================");
 }
 
 /// Self-contained REGTEST run: bootstrap a local pool, fund this wallet, build +
