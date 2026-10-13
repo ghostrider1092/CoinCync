@@ -141,10 +141,14 @@ If any count/result differs from §5, the baseline shifted — re-derive before 
 - **Crypto is verbatim / unmodified.** Only build-environment shims differ
   (`util.h`/`sync.h`/boost-optional/chainparams stubs); no cryptographic code is
   changed. NOTICE.md gives the verbatim-vs-shim breakdown.
-- ⚠️ **Open provenance gap:** NOTICE.md pins Firo at `master`, **not an exact
-  commit SHA.** The audit requires the precise upstream commit (and ideally a
-  `diff` against it proving the "verbatim" claim). **Pin the exact Firo commit
-  before submission.**
+- ✅ **Provenance pinned (verified):** Firo tag **`v0.14.18.1`** = commit
+  **`c03cd0a1c68e1af8274349d1234d142ae7d02d1e`**. Confirmed by `version.h`
+  (`PROTOCOL_VERSION=90031`, `MIN_FIRO_CLIENT_VERSION=141000`) and a
+  byte-identical (LF-normalized) SHA-256 match of `grootle.cpp` / `chaum.cpp` /
+  `spend_transaction.cpp` against that tag. The only vendored-side departures are
+  the build-environment shims and the additive `getVout()` getter (#258, no
+  crypto change). Reproduction recipe in
+  `crates/spark-connector/vendor/NOTICE.md` → "Provenance verification".
 
 ---
 
@@ -154,7 +158,6 @@ If any count/result differs from §5, the baseline shifted — re-derive before 
   audit clears. Regtest activation (height 100) exists only under `sketch-gk-proof`.
 - **Production-param soak in progress** (§5) — the audit baseline is not final
   until it completes clean and its cycle count is pinned.
-- **Exact Firo provenance commit not pinned** (§7).
 - **Shielded-specific fuzz coverage** is not yet enumerated here — to be added or
   declared explicitly before submission.
 - **Value conservation across the veil** is enforced by the transparent bridge

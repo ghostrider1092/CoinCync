@@ -21,8 +21,9 @@ live consensus path until the external audit clears.
   crypto/serialization it needs. **MIT**; the cryptographic code is
   **verbatim/unmodified** — only build-environment shims differ. See
   `crates/spark-connector/vendor/NOTICE.md` for the verbatim-vs-shim breakdown.
-  ⚠️ **Provenance gap:** NOTICE.md pins Firo at `master`, not an exact commit
-  SHA — the audit needs the precise upstream commit; pin it before submission.
+  ✅ **Provenance pinned:** Firo `v0.14.18.1` = `c03cd0a1c68e1af8274349d1234d142ae7d02d1e`,
+  verified by a byte-identical (LF-normalized) SHA-256 match of the verbatim
+  crypto files + `version.h` (see NOTICE.md → "Provenance verification").
 - **Thin C shim** — `crates/spark-connector/csrc/shim.cpp`: a flat `extern "C"`
   API over byte buffers (create coin, build/verify spend, identify/recover, tag).
   All secp256k1/OpenSSL stays behind it; Rust never touches secp types. Every
