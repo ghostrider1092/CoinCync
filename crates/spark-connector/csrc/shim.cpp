@@ -105,6 +105,7 @@ extern "C" {
 // Chaum tag-proof prove->verify round-trip. Returns 1 iff everything succeeds.
 // Proves the vendored libspark (crypto + proof/verify machinery) is live.
 int spark_ffi_selftest(void) {
+  try {
     const spark::Params* params = cc_params();
 
     // Coin + tag recovery path.
@@ -149,6 +150,12 @@ int spark_ffi_selftest(void) {
     if (!chaum.verify_v1(mu, Ss, Ts, proof)) return 0;
 
     return 1;
+  } catch (...) {
+    // A libspark exception must NOT cross the extern "C" boundary (UB). A
+    // selftest reports failure (0); it never aborts the node. Matches the
+    // try/catch discipline of every other shim entry point.
+    return 0;
+  }
 }
 
 // Build a valid V2 spend, SERIALIZE the transaction to bytes, DESERIALIZE it,
