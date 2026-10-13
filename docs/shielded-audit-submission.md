@@ -154,6 +154,27 @@ If any count/result differs from §5, the baseline shifted — re-derive before 
 
 ## 8. Known gaps (declared, not hidden)
 
+> ⛔ **MUST-FIX BEFORE ACTIVATION — F4: shielded transparent outputs are not
+> range-proven (cross-veil inflation). Tracked as issue #314.**
+> A shielded tx early-returns from `validate_transaction` (`validation.rs:1601`)
+> before the output-curve / range-proof / balance checks; `check_shielded_tx` is
+> stateless; the range-proof requirement is relaxed for shielded
+> (`validation.rs:3012`); and `verify_block_spark_v2` feeds `tx.outputs`
+> commitments into `verify_transparent_shielded_balance` with **no range proof and
+> no requirement that `tx.outputs` be empty**. The code relies on "the transparent
+> output set is empty" (comment at `validation.rs:3008–3011`) but that is
+> **assumed, not enforced** — a shielded tx carrying a transparent output with a
+> wrapped ("negative") value can balance the Pedersen bridge equation while minting
+> value across the veil on an unshield.
+> **Not live:** activation is `u64::MAX` and today's engine only uses
+> `value_balance = 0` / empty transparent I/O (the soak); reachable only once
+> shielded activates.
+> **Fix (design decision, consensus-critical — CIP + two-of-N):** (A) enforce
+> `is_shielded ⇒ tx.inputs.is_empty() && tx.outputs.is_empty()` (pure-shielded +
+> mint-bundle only), or (B) range-prove `tx.outputs` on the shielded path before
+> the value bridge consumes them. Must be resolved **and re-soaked** before
+> activation.
+
 - **Activation is `u64::MAX`** on testnet/mainnet — shielded is off until this
   audit clears. Regtest activation (height 100) exists only under `sketch-gk-proof`.
 - **Production-param soak in progress** (§5) — the audit baseline is not final
@@ -163,18 +184,14 @@ If any count/result differs from §5, the baseline shifted — re-derive before 
 - **Value conservation across the veil** is enforced by the transparent bridge
   (`verify_transparent_shielded_balance`) plus the spend's own libspark
   balance/range proof; confirm this composition is complete for every tx shape.
-- **Value-bridge open questions** (from an internal adversarial review — believed
-  benign, flagged for auditor confirmation):
-  - `verify_transparent_shielded_balance` rejects the identity point on **input**
-    pseudo-commitments (the §44 inflation hole) but **not** on **output**
-    commitments. An identity output commits to zero and does not move the balance
-    equation, so it is believed benign — confirm no zero/identity output is
-    exploitable given output values are range-proven elsewhere.
-  - `value_balance` (the public turnstile amount) is **not explicitly
-    range-bounded** in the bridge; an absurd magnitude simply fails the Pedersen
-    equation. Confirm `value_balance` is bounded to a sane range (≤ total supply)
-    by validation, or that equation-failure suffices (incl. the
-    `i64::MIN`/`unsigned_abs` edge).
+- **Value-bridge (F4 follow-ons).** The identity-rejection asymmetry (input vs
+  output commitments) first noted in review is **not benign — it is the surface
+  of F4 above**: transparent outputs are unproven, so an identity/zero output is
+  just the trivial case of the broader "any unproven transparent output" hole.
+  Also confirm `value_balance` is bounded to a sane range (≤ total supply) by
+  validation, or that Pedersen-equation failure suffices (incl. the
+  `i64::MIN`/`unsigned_abs` edge) — largely subsumed if the F4 fix takes path (B)
+  (range-proofs on transparent outputs).
 
 ---
 
