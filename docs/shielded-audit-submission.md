@@ -160,6 +160,18 @@ If any count/result differs from §5, the baseline shifted — re-derive before 
 - **Value conservation across the veil** is enforced by the transparent bridge
   (`verify_transparent_shielded_balance`) plus the spend's own libspark
   balance/range proof; confirm this composition is complete for every tx shape.
+- **Value-bridge open questions** (from an internal adversarial review — believed
+  benign, flagged for auditor confirmation):
+  - `verify_transparent_shielded_balance` rejects the identity point on **input**
+    pseudo-commitments (the §44 inflation hole) but **not** on **output**
+    commitments. An identity output commits to zero and does not move the balance
+    equation, so it is believed benign — confirm no zero/identity output is
+    exploitable given output values are range-proven elsewhere.
+  - `value_balance` (the public turnstile amount) is **not explicitly
+    range-bounded** in the bridge; an absurd magnitude simply fails the Pedersen
+    equation. Confirm `value_balance` is bounded to a sane range (≤ total supply)
+    by validation, or that equation-failure suffices (incl. the
+    `i64::MIN`/`unsigned_abs` edge).
 
 ---
 
