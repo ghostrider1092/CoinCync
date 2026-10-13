@@ -1,10 +1,56 @@
 # CIP-Shielded — Binding Firo `libspark` (FFI) + the connector
 
-Status: **FEASIBILITY / design** (no code). Decision context: adopt Firo's
-deployed, audited Spark rather than reimplement (see
-`cip-shielded-spend-composition.md` "PINNED REFERENCE CONSTRUCTION" and
-[[coincync-strategy-narrow-shielded]]). This doc records the feasibility findings
-from reading `firoorg/firo/src/libspark` (`master`) and specs the connector.
+Status: **IMPLEMENTED (v2) — gated OFF, pending external audit.** The connector
+and the vendored Firo `libspark` backend specced below are now built and wired
+behind the `sketch-gk-proof` + `libspark-ffi` features; see "Implemented (v2)"
+immediately below for what shipped. **Activation stays `u64::MAX`** on
+testnet/mainnet until the external libspark/integration audit passes. The
+original feasibility findings (reading `firoorg/firo/src/libspark`) are retained
+further down as design history. Decision context: adopt Firo's deployed, audited
+Spark rather than reimplement (see `cip-shielded-spend-composition.md` "PINNED
+REFERENCE CONSTRUCTION" and the one-pool strategy).
+
+## Implemented (v2) — what shipped (reviewer map)
+
+Built and wired behind `sketch-gk-proof` (pool/payload types) + `libspark-ffi`
+(the real backend). **Activation stays `u64::MAX`** — shielded is never on the
+live consensus path until the external audit clears.
+
+- **Vendored backend** — `crates/spark-connector/vendor/` carries Firo's
+  `libspark`, its `secp256k1` C++ primitives, and the Bitcoin-core
+  crypto/serialization it needs. **MIT**; the cryptographic code is
+  **verbatim/unmodified** — only build-environment shims differ. See
+  `crates/spark-connector/vendor/NOTICE.md` for the verbatim-vs-shim breakdown.
+  ⚠️ **Provenance gap:** NOTICE.md pins Firo at `master`, not an exact commit
+  SHA — the audit needs the precise upstream commit; pin it before submission.
+- **Thin C shim** — `crates/spark-connector/csrc/shim.cpp`: a flat `extern "C"`
+  API over byte buffers (create coin, build/verify spend, identify/recover, tag).
+  All secp256k1/OpenSSL stays behind it; Rust never touches secp types. Every
+  libspark call routes through one `cc_params()` accessor = **production Grootle
+  params `get_default()`, N = nᵐ = 8⁵ = 32768** (#259).
+- **Rust connector** — `crates/spark-connector/src/lib.rs`: the `SparkBackend`
+  trait (`LibsparkBackend` real impl; `StubBackend` fail-closed default) +
+  marshalling. Build needs OpenSSL via `SPARK_OPENSSL_DIR` (an MSVC static
+  prefix); **Windows/MSVC only** — the vendored C++ does not compile on the Linux
+  toolchain.
+- **Consensus verify** — `consensus::spark_payload::verify_spark_payload` →
+  `verify_solvency` (called from `chain.rs::verify_block_spark_v2`, gated): a
+  spend is verified against a **node-authoritative cover set** from
+  `SparkPoolStore::cover_set_at` (the pool bucketed into fixed groups of ≤N,
+  indexed by `cover_set_id`), with a deterministic `cc_cover_set_rep` binding so a
+  spender cannot substitute their own set (#258); an empty-resolving group is
+  rejected before the backend runs (#308); and `vout` is bound to `value_balance`
+  (#258). Double-spend is keyed on libspark's linking tag `T`.
+- **Value turnstile** — the shield/unshield amount is the public `value_balance`
+  (Sapling-style); `verify_transparent_shielded_balance` backs it with the tx's
+  transparent commitments. No cross-curve ZK (the de-risker explained below).
+
+**Naming:** the shipped path is **v2** (`SparkPayload` / `verify_spark_payload` /
+`SparkPoolStore`). The feasibility text below refers to an earlier **v1** sketch
+(`ShieldedPayload` / `verify_shielded_payload`); that native path is **superseded**
+— see `cip-shielded-anonset.md` → "Shipped engine (v2 libspark)".
+
+---
 
 ## Feasibility findings (from reading the source)
 
