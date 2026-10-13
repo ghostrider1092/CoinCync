@@ -102,10 +102,16 @@ pub fn emission_phase(height: u64) -> EmissionPhase {
     }
 }
 
-/// Calculate the base block reward from cumulative supply.
-///
-/// This is the canonical reward function used by consensus:
+/// Calculate the base block reward from cumulative supply:
 ///     reward = max(TAIL_EMISSION, (cap - supply) / EMISSION_DIVISOR)
+///
+/// NOTE (F6): this supply-based form is **not** the consensus path today — the
+/// coinbase validator uses the HEIGHT-based [`base_reward`] via
+/// `emission::calculate_block_reward`. Switching consensus to this form would
+/// change the live emission curve (a hard fork), so it stays an alternative /
+/// reference form unless an explicit emission-change CIP adopts it. An earlier
+/// comment here wrongly called this "the canonical reward function used by
+/// consensus"; corrected to match the actual wiring.
 ///
 /// `cumulative_supply_atomic` is in atomic units (u128 because
 /// 100M CYNC × 10^12 atomic/CYNC = 10^20, which overflows u64).
@@ -119,14 +125,20 @@ pub fn base_reward_from_supply(cumulative_supply_atomic: u128) -> Amount {
     Amount::from_atomic(reward as u64)
 }
 
-/// Calculate block reward by height (estimated, for use when cumulative
-/// supply is not available — e.g., block template building, explorer
-/// display, tests).
+/// Calculate the block reward by HEIGHT. **This is the consensus reward**: the
+/// coinbase validator (`consensus::validation`) calls it via
+/// `emission::calculate_block_reward`, and the miner must match it exactly.
 ///
-/// Uses numerical integration of the asymptotic curve to estimate
-/// cumulative supply at the given height, then applies the formula.
-/// This is an approximation — the consensus-critical path should use
-/// [`base_reward_from_supply`] with actual chain state.
+/// It is deterministic — integer numerical integration of the asymptotic curve
+/// via [`estimate_supply_at_height`], so every node computes the identical value
+/// for a given height — and is effectively PINNED: changing it (or the
+/// adaptive-step boundaries in `estimate_supply_at_height`) alters the live
+/// emission and forks the chain. Also serves template building / explorer / tests.
+///
+/// (A supply-based alternative, [`base_reward_from_supply`], exists but is NOT on
+/// the consensus path — see its note. F6: an earlier comment here claimed the
+/// consensus path "should use `base_reward_from_supply`"; that was wrong — it
+/// does, and must, use this height-based function.)
 pub fn base_reward(height: u64) -> Amount {
     let supply_estimate = estimate_supply_at_height(height); // u128
     base_reward_from_supply(supply_estimate)
