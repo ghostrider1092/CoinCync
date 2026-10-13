@@ -548,9 +548,15 @@ impl SparkPoolStore {
     }
 
     /// Persist the current in-memory checkpoint stack to the meta CF (one borsh
-    /// blob under `CHECKPOINTS_KEY`). Best-effort: a serialize/write failure is
-    /// logged, not fatal — the in-memory stack stays authoritative for the
-    /// running session, and the next successful checkpoint rewrites the blob.
+    /// blob under `CHECKPOINTS_KEY`). This is consensus-recovery state, NOT
+    /// best-effort metadata: `open_with_db` reads this stack back on restart and
+    /// `rewind` pops its top, so the on-disk blob decides which pool state is
+    /// restored. If this write were dropped and the node restarted before the
+    /// next checkpoint rewrote the blob, the stack on disk would be one entry
+    /// short — the next disconnect would pop the checkpoint of the block below and
+    /// rewind one block too far, a SILENT wrong rewind (chain.rs reports it as
+    /// RolledBack, not Stranded). So a failure here is R-61 fatal, exactly like
+    /// the coin/tag/pool_value writes — not logged and swallowed.
     fn persist_checkpoints(&self, cps: &[PoolCheckpoint]) {
         let Some(p) = &self.persistence else {
             return;
@@ -563,17 +569,13 @@ impl SparkPoolStore {
                 pool_value: c.pool_value,
             })
             .collect();
-        match borsh::to_vec(&persisted) {
-            Ok(bytes) => {
-                let _ = p.meta.insert(CHECKPOINTS_KEY, bytes);
-            }
-            Err(e) => {
-                tracing::error!(
-                    target: "storage::spark_pool",
-                    error = %e,
-                    "failed to serialize Spark pool checkpoint stack for persistence"
-                );
-            }
+        // R-61 CLASS site: the persisted checkpoint stack determines the restored
+        // rewind state across a restart, so a serialize/write failure must halt.
+        let bytes = borsh::to_vec(&persisted).unwrap_or_else(|e| {
+            panic!("R-61: Spark pool checkpoint-stack borsh serialize failed: {e}")
+        });
+        if let Err(e) = p.meta.insert(CHECKPOINTS_KEY, bytes) {
+            panic!("R-61: spark_pool checkpoint-stack write failed: {e}");
         }
     }
 
@@ -1003,7 +1005,7 @@ mod tests {
     #[test]
     fn end_to_end_store_drives_spend_and_unspent_check() {
         use spark_connector::ffi::{
-            build_spend_over_set, cover_set_size, mint_to_seed, serial_context, LibsparkBackend,
+            build_spend_over_set, mint_to_seed, serial_context, LibsparkBackend,
         };
         use spark_connector::SparkBackend;
 
