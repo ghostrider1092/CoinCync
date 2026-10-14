@@ -2053,7 +2053,6 @@ mod shielded_mempool_admission_172 {
     use crate::consensus::spark_payload::derive_outpoint;
     use crate::storage::spark_pool::SparkPoolStore;
     use crate::transaction::{Transaction, TxType};
-    use spark_connector::ffi::cover_set_size;
 
     fn mk_shielded_tx(extra: Vec<u8>) -> Transaction {
         // Fee is set by the caller to the floor; start at 0.
@@ -2080,7 +2079,9 @@ mod shielded_mempool_admission_172 {
     fn shielded_spend_admits_and_double_spend_rejects() {
         let store = SparkPoolStore::new();
         let seed = b"mempool-172-seed";
-        let n = cover_set_size().unwrap();
+        // #311: small mint, not the full cover set (production N=32768 makes
+        // build_mint_payload reject a cover_set_size() mint).
+        let n = 8usize;
         let inputs = vec![vec![0x7Au8; 36]];
         let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
         let (mint_payload, contexts) = build_mint_payload(seed, &values, &inputs).unwrap();

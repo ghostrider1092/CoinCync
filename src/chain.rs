@@ -4941,7 +4941,6 @@ mod tests {
         use crate::consensus::spark_payload::derive_outpoint;
         use crate::storage::spark_pool::SparkPoolStore;
         use crate::transaction::{Transaction, TxType};
-        use spark_connector::ffi::cover_set_size;
         use std::sync::Arc;
 
         // A chain with the libspark pool store initialized.
@@ -4960,7 +4959,9 @@ mod tests {
         };
 
         let seed = b"chain-hook-seed";
-        let n = cover_set_size().unwrap();
+        // #311: size the mint to a small set, not the full cover set — production
+        // params (N=32768) make build_mint_payload reject a cover_set_size() mint.
+        let n = 8usize;
         let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
         // Mint payload built against an EMPTY transparent input set (matches the
         // tx's empty inputs, so the hook re-derives identical outpoints). The
@@ -5020,9 +5021,7 @@ mod tests {
         use crate::consensus::spark_payload::derive_outpoint;
         use crate::storage::spark_pool::SparkPoolStore;
         use crate::transaction::{Transaction, TxType};
-        use spark_connector::ffi::{
-            address_from_seed, cover_set_size, spend_outputs, LibsparkBackend,
-        };
+        use spark_connector::ffi::{address_from_seed, spend_outputs, LibsparkBackend};
         use spark_connector::SparkBackend;
         use std::sync::Arc;
         use std::time::{Duration, Instant};
@@ -5040,7 +5039,9 @@ mod tests {
         let mut chain = Blockchain::new();
         chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
         let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
-        let n = cover_set_size().expect("cover set size");
+        // #311: small mint, not the full cover set (production N=32768 makes
+        // build_mint_payload reject a cover_set_size() mint).
+        let n = 8usize;
         assert!(n >= 2, "soak needs a cover set of at least 2 coins");
         // A fixed second wallet: transfer recipient, distinct from the per-cycle
         // sender seed. Its address is stable across cycles.

@@ -5124,7 +5124,11 @@ mod tests {
         use crate::config::NetworkType::{Regtest, Testnet};
         use crate::constants::SHIELDED_REGTEST_ACTIVATION_HEIGHT as ACT;
 
-        // A real authenticated v2 SparkPayload (mint / shield-in).
+        // A well-formed v2 SparkPayload shaped as a shield-in (mint, value_balance
+        // < 0) carrying a transparent side. Under the F4 pure-shielded gate (#314,
+        // Option A) a transparent-side shielded tx is REJECTED until the bridge is
+        // validated — so this verifies stateless routing + BOTH gates (activation
+        // then shape), not admission.
         let (payload, _) =
             crate::consensus::spark_payload::build::build_mint_payload(b"regtest-act-seed", &[10_000u64, 20_000], &[])
                 .expect("build v2 mint payload");
@@ -5133,16 +5137,25 @@ mod tests {
         tx.extra = payload.encode();
         let utxos = UtxoSet::new();
 
-        // Regtest at/after activation: the stateless gate ADMITS the well-formed
-        // v2 payload (structural); the full stateful verify runs at block level.
+        // Regtest AT activation: the tx clears the activation gate and is routed
+        // statelessly to check_shielded_tx, where the F4 pure-shielded gate rejects
+        // its transparent side. The "pure-shielded" reason proves it got PAST
+        // activation to the shape check (not merely blocked as inactive).
+        let at_act = validate_transaction_for_network_ctx(&tx, &utxos, ACT, Regtest, false)
+            .expect_err("F4: a transparent-side shielded tx must be rejected until the bridge is validated")
+            .to_string();
         assert!(
-            validate_transaction_for_network_ctx(&tx, &utxos, ACT, Regtest, false).is_ok(),
-            "regtest at activation must admit a well-formed v2 shielded tx"
+            at_act.contains("pure-shielded"),
+            "at activation the F4 pure-shielded gate must reject the transparent side, got: {at_act}"
         );
-        // Regtest BELOW activation: rejected (not activated).
+        // Regtest BELOW activation: blocked at the activation gate, BEFORE the
+        // shape check — a distinct rejection reason.
+        let below = validate_transaction_for_network_ctx(&tx, &utxos, ACT - 1, Regtest, false)
+            .expect_err("below activation must be rejected")
+            .to_string();
         assert!(
-            validate_transaction_for_network_ctx(&tx, &utxos, ACT - 1, Regtest, false).is_err(),
-            "regtest below activation must reject the shielded tx"
+            below.contains("not activated"),
+            "below activation must be rejected as not-activated, got: {below}"
         );
         // Testnet: shielded is inactive at every REALISTIC height (activation is
         // u64::MAX — the unreachable sentinel; a real chain never reaches it).
