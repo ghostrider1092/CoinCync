@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn end_to_end_v2_payload_verify_then_apply() {
         use spark_connector::ffi::{
-            build_spend_over_set, cover_set_size, mint_to_seed, serial_context, LibsparkBackend,
+            build_spend_over_set, mint_to_seed, serial_context, LibsparkBackend,
         };
 
         let store = SparkPoolStore::new();
@@ -723,7 +723,7 @@ mod tests {
     #[test]
     fn spend_linking_tags_match_verified_tags() {
         use super::build::{build_mint_payload, build_spend_payload};
-        use spark_connector::ffi::{cover_set_size, LibsparkBackend};
+        use spark_connector::ffi::LibsparkBackend;
 
         let store = SparkPoolStore::new();
         let seed = b"ltag-match-seed";
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn mint_builder_then_spend_builder_full_loop() {
         use super::build::{build_mint_payload, build_spend_payload};
-        use spark_connector::ffi::{cover_set_size, LibsparkBackend};
+        use spark_connector::ffi::LibsparkBackend;
 
         let store = SparkPoolStore::new();
         let seed = b"mint-builder-seed";
