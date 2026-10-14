@@ -48,6 +48,8 @@ Option B re-enables, under full validation:
 
 Out of scope: the shielded-side crypto (inherited from the audited libspark bundle); Option A's pure-shielded path (unchanged).
 
+**Phased delivery.** Option B lands in increments, each fully validated + soaked before the next: **phase 1 = shield-in** (`value_balance < 0`; fund the pool — nothing else matters until value can enter), **phase 2 = unshield** (`value_balance > 0`). Each phase enables only its own direction at the policy slot (§3.5); the other direction stays rejected (fail-closed) until its phase lands. Activation (off `u64::MAX`) still gates the whole engine regardless of phase.
+
 ## 3. Specification
 
 ### 3.1 The invariant
@@ -74,6 +76,15 @@ The same transparent-side validation MUST be applied at **mempool admission** (`
 ### 3.4 Activation
 
 `SHIELDED_TX_ACTIVATION_HEIGHT` stays `u64::MAX`. Option B does not itself flip activation. Activation is a separate, later governance step (CIP-007 policy) that may only proceed after Option B has landed, been reviewed two-of-N, and been re-soaked (§5). Until then Option A (pure-shielded) is the enforced behaviour.
+
+### 3.5 Connector architecture (the translation seam)
+
+Option B is wired as a **connector + fail-closed policy slot**, the same shape as `shielded_connector` (the single libspark swap point) and the project's other seams — not as validation scattered through the tuned consensus functions. This keeps the intricate bridge logic in its own reviewable module, out of the locked consensus heart, with a fail-safe default.
+
+- A **`ShieldInPolicy` slot defaults to `Disabled`** — reject every shield-in, identical to Option A (#315, pure-shielded). The real bridge runs only when the slot is `Enabled` **and** shielded is activated; both are gated, and neither holds on any current network.
+- The connector performs only the **cross-world translation**. libspark already carries the shielded-side code (mint value proof, spend proof, coin range proofs); the transparent side is CoinCync-native (ristretto CLSAG/UTXO — a different curve and model that libspark cannot validate). The connector ties them together through the **cleartext `value_balance` turnstile** — no cross-curve ZK (see `cip-shielded-libspark-ffi.md`). It adds **no new crypto**: it orchestrates `verify_transparent_shielded_balance` (transparent commitments ↔ `value_balance`) and the libspark `verify_mint_shield_in` + `verify_spark_payload` (`value_balance` ↔ authenticated shielded coins).
+- Because the connector cannot run CoinCync's transparent-input checks itself (they need the chain's UTXO/ring state), the **caller validates the transparent side first** — in consensus, where that state lives — then calls the connector only for the translation. The caller's call *is* its attestation that CLSAG / no-double-spend / range proofs ran.
+- The consensus seam is **one call** in `verify_block_spark_v2`: pure-shielded (`value_balance == 0`) unchanged; shield-in (`value_balance < 0`) → run the transparent validators, then the connector; unshield (`value_balance > 0`) → rejected in phase 1. Mirrored at mempool admission per §3.3.
 
 ## 4. Rationale
 
