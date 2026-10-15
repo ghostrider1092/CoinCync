@@ -2984,6 +2984,20 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
                 "shielded tx carries neither a mint nor a spend".into(),
             ));
         }
+        // SECURITY (F4, issue #314 — Option A): a shielded tx must be
+        // PURE-SHIELDED — no transparent inputs/outputs — until the validated
+        // transparent bridge lands (CIP-011). The block gate (verify_block_spark_v2)
+        // and check_shielded_tx already reject a transparent-side shielded tx;
+        // mirror it HERE, at the mempool's structural gate, so a feature-build node
+        // does NOT admit and relay a shielded tx it can never mine
+        // (mempool-vs-block drift / relay-DoS).
+        if !tx.inputs.is_empty() || !tx.outputs.is_empty() {
+            return Err(Error::InvalidTransaction(
+                "shielded tx must be pure-shielded: no transparent inputs/outputs \
+                 until the transparent bridge is validated (#314)"
+                    .to_string(),
+            ));
+        }
     }
 
     // SECURITY (BUG-17): Reject transactions with empty inputs or outputs.
@@ -5191,6 +5205,29 @@ mod tests {
         assert!(
             validate_transaction_for_network_ctx(&tx, &utxos, ACT, Regtest, false).is_err(),
             "a malformed shielded payload must be rejected"
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    fn basic_validation_rejects_transparent_side_shielded_tx() {
+        // F4/#314: validate_transaction_basic (the mempool's structural gate) must
+        // reject a shielded tx carrying a transparent input/output, matching
+        // check_shielded_tx and the block gate — otherwise a feature-build node
+        // would admit and relay a tx it can never mine (mempool-vs-block drift).
+        let (payload, _) = crate::consensus::spark_payload::build::build_mint_payload(
+            b"basic-f4-seed",
+            &[10_000u64, 20_000],
+            &[],
+        )
+        .expect("build v2 mint payload");
+        let mut tx = coinbase_tx(vec![a_valid_output()]); // stray transparent output
+        tx.tx_type = TxType::Shielded;
+        tx.extra = payload.encode();
+        let err = validate_transaction_basic(&tx).unwrap_err().to_string();
+        assert!(
+            err.contains("pure-shielded"),
+            "basic must reject a transparent-side shielded tx, got: {err}"
         );
     }
 
