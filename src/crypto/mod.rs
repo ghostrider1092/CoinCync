@@ -75,15 +75,16 @@ pub mod spark_range; // CIP-Shielded (value range binding via BP+)
 pub mod spark_turnstile; // CIP-Shielded (transparent⇄shielded value turnstile)
 #[cfg(feature = "sketch-gk-proof")]
 pub mod spark_note; // CIP-Shielded (Note Connector: stealth⇄bound-coin detect/recover)
+pub mod range_verify_strategy; // verification-strategy slot for block range proofs
 
 pub use bulletproofs::{
     commit, create_aggregated_range_proof,
     create_aggregated_range_proof_bp_plus, create_aggregated_range_proof_for_height,
     create_range_proof, create_range_proof_bp_plus, create_range_proof_for_height,
     verify_coinbase_output, verify_commitment, verify_range_proof, verify_range_proof_bp_plus,
-    verify_range_proof_dispatch, verify_range_proofs, verify_range_proofs_bp_plus,
-    verify_range_proofs_dispatch, BlindingFactor, PedersenCommitment, RangeProof, MAX_AGGREGATION,
-    RANGE_BITS,
+    verify_range_proof_dispatch, verify_range_proofs, verify_range_proofs_batch,
+    verify_range_proofs_bp_plus, verify_range_proofs_dispatch, BlindingFactor, PedersenCommitment,
+    RangeProof, MAX_AGGREGATION, RANGE_BITS,
 };
 
 pub use stealth::{
