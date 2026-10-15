@@ -1643,6 +1643,32 @@ fn shielded_root_permitted(
     crate::constants::shielded_tx_active_at_height(network, height) || *spark_set_root == [0u8; 32]
 }
 
+/// SECURITY (F4, issue #314 — Option A): the single source of truth for the
+/// pure-shielded shape rule. A shielded tx must carry NO transparent inputs or
+/// outputs until the validated transparent bridge lands (CIP-011). The transparent
+/// side of a shielded tx skips RingCT validation (the `is_shielded` early-return in
+/// `validate_transaction`), so an unproven transparent input/output could feed the
+/// value bridge and mint value across the veil.
+///
+/// Called at EVERY shielded admission site — the mempool structural gate
+/// (`validate_transaction_basic`), the per-tx gate (`check_shielded_tx`) and the
+/// stateful block gate (`chain::verify_block_spark_v2`) — so the rule cannot drift
+/// between them. That drift is exactly what opened F4 (the check guarded only the
+/// v2 branch) and F7 (it was missing from the mempool gate). Fail-closed; the
+/// `value_balance == 0` half is enforced per payload version at each site. When
+/// Option B (shield-in) is enabled this predicate is what a `ShieldInPolicy` slot
+/// replaces.
+pub(crate) fn require_pure_shielded_shape(tx: &Transaction) -> Result<()> {
+    if !tx.inputs.is_empty() || !tx.outputs.is_empty() {
+        return Err(Error::InvalidTransaction(
+            "shielded tx must be pure-shielded: no transparent inputs/outputs \
+             until the transparent bridge is validated (#314)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a shielded (Lelantus-Spark) transaction — CIP-Shielded.
 ///
 /// FAIL-CLOSED SKELETON. The wire type (`TxType::Shielded`, borsh discriminant
@@ -1668,23 +1694,10 @@ fn check_shielded_tx(
         ));
     }
 
-    // SECURITY (F4, issue #314 — Option A): EVERY shielded tx must be
-    // PURE-SHIELDED — no transparent inputs/outputs — until the validated
-    // transparent bridge lands (CIP-011). This runs BEFORE the v1/v2 split and is
-    // NOT feature-gated, so it covers both payload formats and the default
-    // (non-libspark) build. The transparent side of a shielded tx skips RingCT
-    // validation (the `is_shielded` early-return in `validate_transaction`), so an
-    // unproven transparent input/output could feed the value bridge and mint value
-    // across the veil. Forbid it outright; fail-closed. `value_balance == 0` is
-    // additionally enforced per payload version below. (Reported by @junbyjun1238
-    // on #315: the earlier check only guarded the v2 branch.)
-    if !tx.inputs.is_empty() || !tx.outputs.is_empty() {
-        return Err(Error::InvalidTransaction(
-            "shielded tx must be pure-shielded: no transparent inputs/outputs \
-             until the transparent bridge is validated (#314)"
-                .to_string(),
-        ));
-    }
+    // Option A (#314): pure-shielded shape, before the v1/v2 split and un-gated,
+    // so it covers both payload formats and the default (non-libspark) build.
+    // Single source of truth — see require_pure_shielded_shape.
+    require_pure_shielded_shape(tx)?;
 
     // v2 (SparkPayload — the canonical libspark-aligned format): STATELESS
     // structural routing only. The full verify is STATEFUL — cover set + pool
@@ -2984,20 +2997,11 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
                 "shielded tx carries neither a mint nor a spend".into(),
             ));
         }
-        // SECURITY (F4, issue #314 — Option A): a shielded tx must be
-        // PURE-SHIELDED — no transparent inputs/outputs — until the validated
-        // transparent bridge lands (CIP-011). The block gate (verify_block_spark_v2)
-        // and check_shielded_tx already reject a transparent-side shielded tx;
-        // mirror it HERE, at the mempool's structural gate, so a feature-build node
-        // does NOT admit and relay a shielded tx it can never mine
-        // (mempool-vs-block drift / relay-DoS).
-        if !tx.inputs.is_empty() || !tx.outputs.is_empty() {
-            return Err(Error::InvalidTransaction(
-                "shielded tx must be pure-shielded: no transparent inputs/outputs \
-                 until the transparent bridge is validated (#314)"
-                    .to_string(),
-            ));
-        }
+        // Option A (#314): enforce pure-shielded at the mempool's structural gate
+        // too, so a feature-build node does NOT admit/relay a shielded tx the block
+        // gate can never mine (mempool-vs-block drift / relay-DoS). Single source
+        // of truth — see require_pure_shielded_shape.
+        require_pure_shielded_shape(tx)?;
     }
 
     // SECURITY (BUG-17): Reject transactions with empty inputs or outputs.
