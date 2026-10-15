@@ -462,6 +462,58 @@ pub mod build {
 mod tests {
     use super::*;
 
+    /// Shielded-engine FUZZ coverage (closes the "shielded-specific fuzz coverage
+    /// not yet enumerated" gap in docs/shielded-audit-submission.md §8). Pure-Rust
+    /// targets — no libspark — so they run under `--features "testnet
+    /// sketch-gk-proof"` on any platform. Focus: robustness (no panic on
+    /// adversarial input) + round-trip stability, since balanced-case correctness
+    /// is covered by value_bridge_balances_shield_unshield_and_zero below.
+    mod fuzz {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+            /// The network-facing v2 payload parser must NEVER panic on arbitrary
+            /// bytes — a decoder that panics on attacker-controlled `tx.extra` is a
+            /// remote DoS. It must always return Ok/Err.
+            #[test]
+            fn decode_never_panics_on_arbitrary_bytes(
+                bytes in prop::collection::vec(any::<u8>(), 0..4096),
+            ) {
+                let _ = SparkPayload::decode(&bytes);
+            }
+
+            /// encode/decode is a faithful round-trip for any payload that decodes:
+            /// decode(encode(p)) == p, and re-decoding never fails.
+            #[test]
+            fn decode_encode_roundtrip_is_stable(
+                bytes in prop::collection::vec(any::<u8>(), 0..4096),
+            ) {
+                if let Ok(p) = SparkPayload::decode(&bytes) {
+                    let re = SparkPayload::decode(&p.encode());
+                    prop_assert!(re.is_ok(), "re-decode of a valid payload's encoding must succeed");
+                    prop_assert_eq!(p, re.unwrap(), "encode/decode must preserve the payload");
+                }
+            }
+
+            /// The transparent↔shielded value bridge must NEVER panic on arbitrary
+            /// commitments / fee / value_balance — the adversary controls the
+            /// commitment bytes and `value_balance` on the wire. Must return Ok/Err,
+            /// including the i64::MIN / unsigned_abs edge flagged in audit §8.
+            #[test]
+            fn value_bridge_never_panics(
+                pin in prop::collection::vec(any::<[u8; 32]>(), 0..8),
+                pout in prop::collection::vec(any::<[u8; 32]>(), 0..8),
+                fee in any::<u64>(),
+                vb in any::<i64>(),
+            ) {
+                let _ = verify_transparent_shielded_balance(&pin, &pout, fee, vb);
+            }
+        }
+    }
+
     fn commit_bytes(value: u64, blinding: [u8; 32]) -> [u8; 32] {
         use crate::crypto::{BlindingFactor, PedersenCommitment};
         PedersenCommitment::commit(value, &BlindingFactor::from_bytes(blinding)).to_bytes()
