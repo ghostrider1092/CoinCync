@@ -1668,6 +1668,24 @@ fn check_shielded_tx(
         ));
     }
 
+    // SECURITY (F4, issue #314 — Option A): EVERY shielded tx must be
+    // PURE-SHIELDED — no transparent inputs/outputs — until the validated
+    // transparent bridge lands (CIP-011). This runs BEFORE the v1/v2 split and is
+    // NOT feature-gated, so it covers both payload formats and the default
+    // (non-libspark) build. The transparent side of a shielded tx skips RingCT
+    // validation (the `is_shielded` early-return in `validate_transaction`), so an
+    // unproven transparent input/output could feed the value bridge and mint value
+    // across the veil. Forbid it outright; fail-closed. `value_balance == 0` is
+    // additionally enforced per payload version below. (Reported by @junbyjun1238
+    // on #315: the earlier check only guarded the v2 branch.)
+    if !tx.inputs.is_empty() || !tx.outputs.is_empty() {
+        return Err(Error::InvalidTransaction(
+            "shielded tx must be pure-shielded: no transparent inputs/outputs \
+             until the transparent bridge is validated (#314)"
+                .to_string(),
+        ));
+    }
+
     // v2 (SparkPayload — the canonical libspark-aligned format): STATELESS
     // structural routing only. The full verify is STATEFUL — cover set + pool
     // value + per-tx mint/spend proofs — and runs at block level in
@@ -1679,17 +1697,9 @@ fn check_shielded_tx(
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
     if let Ok(payload) = crate::consensus::spark_payload::SparkPayload::decode(&tx.extra) {
         // SECURITY (F4, issue #314): stateless mirror of the block-gate rule in
-        // chain.rs::verify_block_spark_v2 — a shielded tx must be PURE-SHIELDED
-        // (no transparent inputs/outputs, value_balance == 0) until the
-        // transparent shield-in/unshield bridge is validated + audited. Rejecting
-        // it here keeps a cross-veil-inflation-shaped tx out of the mempool/relay.
-        if !tx.inputs.is_empty() || !tx.outputs.is_empty() {
-            return Err(Error::InvalidTransaction(
-                "shielded tx must be pure-shielded: no transparent inputs/outputs \
-                 until the transparent bridge is validated (#314)"
-                    .to_string(),
-            ));
-        }
+        // chain.rs::verify_block_spark_v2. Transparent I/O is already rejected
+        // above (pure-shielded, all versions); here enforce the v2 payload's
+        // `value_balance == 0` until the shield-in/unshield bridge is validated.
         if payload.value_balance != 0 {
             return Err(Error::InvalidTransaction(
                 "shielded tx must have value_balance == 0 until the transparent \
@@ -1706,6 +1716,17 @@ fn check_shielded_tx(
     // ShieldedPayload. The stateful serial-tag double-spend + accumulator append
     // happen at block-apply against the ShieldedStore.
     let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
+    // Option A (#314): the v1 payload must also be value-neutral (pure-shielded)
+    // until the transparent bridge is validated. Transparent I/O was already
+    // rejected above; this forbids a v1 shield-in/unshield (value_balance != 0),
+    // so Option A holds for every shielded tx regardless of payload version.
+    if payload.value_balance != 0 {
+        return Err(Error::InvalidTransaction(
+            "shielded tx must have value_balance == 0 until the transparent \
+             shield-in/unshield bridge is validated (#314)"
+                .to_string(),
+        ));
+    }
     // ── ACTIVATION SLOT ───────────────────────────────────────────────────
     // Route through the shielded connector (its own crate). Under the
     // `libspark-ffi` engine the payload's `balance_proof` carries the
@@ -4964,6 +4985,7 @@ mod tests {
         // ring/range/balance checks.
         let mut tx = coinbase_tx(vec![a_valid_output()]);
         tx.tx_type = TxType::Shielded;
+        tx.outputs = Vec::new(); // pure-shielded: no transparent outputs (F4/#314)
         let utxos = UtxoSet::new();
 
         let err = validate_transaction(&tx, &utxos, 0).unwrap_err().to_string();
@@ -5093,6 +5115,7 @@ mod tests {
             };
             let mut tx = coinbase_tx(vec![a_valid_output()]);
             tx.tx_type = TxType::Shielded;
+            tx.outputs = Vec::new(); // pure-shielded: no transparent outputs (F4/#314)
             tx.extra = payload.encode();
             tx
         };
