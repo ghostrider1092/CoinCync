@@ -222,7 +222,11 @@ const LEGACY_V2_ARGON2_P_COST: u32 = 4;
 /// prior code only hardened the main wallet file, leaving sidecars
 /// with default (Windows: `Users:F`) permissions and their encrypted
 /// UTXO/history contents readable by other users.
-pub(crate) fn harden_secret_file_permissions(path: &Path) {
+// `pub` (not `pub(crate)`) so the wallet CLI bin (src/bin/wallet.rs, which
+// include!s wallet_support/legacy.rs) can harden the FROST multisig secret
+// files (key shares, round-1 nonces) with the same audited helper the wallet
+// itself uses — see issue #325.
+pub fn harden_secret_file_permissions(path: &Path) {
     // AUDIT (R-94 fix, 2026-07-03): pre-fix code did `let _ = ...`
     // on every syscall / icacls invocation, silently swallowing
     // failures. If chmod / icacls failed (host security policy,

@@ -3504,6 +3504,10 @@ async fn cmd_multisig_gen(
         let path = dir.join(&filename);
         let json = serde_json::to_string_pretty(share).map_err(|e| format!("serialize: {}", e))?;
         std::fs::write(&path, &json).map_err(|e| format!("write {}: {}", path.display(), e))?;
+        // #325: a trusted-dealer key share is secret key material. Harden to
+        // 0600 (Unix) / owner-only ACL (Windows) with the same audited helper
+        // the wallet uses, so it isn't left world-readable under the umask.
+        coincync::wallet::persistence::harden_secret_file_permissions(&path);
         println!(
             "  Share {}: {} ({})",
             share.participant_id,
@@ -3625,6 +3629,10 @@ async fn cmd_multisig_round1(share_file: &str, output: &str) -> Result<(), Strin
         .serialize()
         .map_err(|e| format!("serialize nonces: {}", e))?;
     std::fs::write(&nonce_file, &nonce_bytes).map_err(|e| format!("write nonces: {}", e))?;
+    // #325: the round-1 nonces are secret — anyone who reads them plus this
+    // participant's published signature share can recover the signing share
+    // (RFC 9591). Harden to 0600 / owner-only, matching the wallet's own files.
+    coincync::wallet::persistence::harden_secret_file_permissions(std::path::Path::new(&nonce_file));
 
     println!("  Commitment: {} (share this with other signers)", output);
     println!("  Nonces:     {} (SECRET — keep for round 2)", nonce_file);
