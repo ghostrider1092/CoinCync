@@ -154,26 +154,28 @@ If any count/result differs from §5, the baseline shifted — re-derive before 
 
 ## 8. Known gaps (declared, not hidden)
 
-> ⛔ **MUST-FIX BEFORE ACTIVATION — F4: shielded transparent outputs are not
-> range-proven (cross-veil inflation). Tracked as issue #314.**
-> A shielded tx early-returns from `validate_transaction` (`validation.rs:1601`)
-> before the output-curve / range-proof / balance checks; `check_shielded_tx` is
-> stateless; the range-proof requirement is relaxed for shielded
-> (`validation.rs:3012`); and `verify_block_spark_v2` feeds `tx.outputs`
-> commitments into `verify_transparent_shielded_balance` with **no range proof and
-> no requirement that `tx.outputs` be empty**. The code relies on "the transparent
-> output set is empty" (comment at `validation.rs:3008–3011`) but that is
-> **assumed, not enforced** — a shielded tx carrying a transparent output with a
-> wrapped ("negative") value can balance the Pedersen bridge equation while minting
-> value across the veil on an unshield.
-> **Not live:** activation is `u64::MAX` and today's engine only uses
-> `value_balance = 0` / empty transparent I/O (the soak); reachable only once
-> shielded activates.
-> **Fix (design decision, consensus-critical — CIP + two-of-N):** (A) enforce
-> `is_shielded ⇒ tx.inputs.is_empty() && tx.outputs.is_empty()` (pure-shielded +
-> mint-bundle only), or (B) range-prove `tx.outputs` on the shielded path before
-> the value bridge consumes them. Must be resolved **and re-soaked** before
-> activation.
+> ✅ **RESOLVED (2026-10-16) — F4: cross-veil inflation via unproven transparent
+> outputs on the shielded path. Tracked as #314; fixed by #315 (merged `434aa2c`).**
+> **Resolution — Option A (pure-shielded).** A single source of truth,
+> `require_pure_shielded_shape`, now enforces `is_shielded ⇒ tx.inputs.is_empty()
+> && tx.outputs.is_empty()` at every shielded entry point (`check_shielded_tx`,
+> `validate_transaction_basic`, `verify_block_spark_v2`), so any shielded tx with a
+> transparent side is rejected **before** the value bridge ever runs — the
+> cross-veil mint is unreachable by construction.
+> **Re-soak:** satisfied — the production-param 24h soak (§5, 382,100 cycles,
+> 0 anomalies) ran exactly this pure-shielded shape (`value_balance = 0` / empty
+> transparent I/O).
+> **Option B** (validated transparent bridge — range-prove `tx.outputs` + CLSAG/UTXO
+> on inputs) remains the future, gated, pre-activation feature, specified in CIP-011
+> (#323, merged) and tracked as #314.
+>
+> *Original finding (kept for audit traceability):* a shielded tx early-returned
+> from `validate_transaction` before the output-curve / range-proof / balance
+> checks, and `verify_block_spark_v2` fed `tx.outputs` commitments into
+> `verify_transparent_shielded_balance` with no range proof and no requirement that
+> `tx.outputs` be empty — so a wrapped ("negative") transparent output could balance
+> the Pedersen bridge while minting value across the veil on an unshield. Activation
+> was `u64::MAX` throughout, so it was never reachable on a live chain.
 
 - **Activation is `u64::MAX`** on testnet/mainnet — shielded is off until this
   audit clears. Regtest activation (height 100) exists only under `sketch-gk-proof`.
