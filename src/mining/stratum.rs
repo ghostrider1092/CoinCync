@@ -38,13 +38,18 @@
 //! - **§5 `handle_stratum_message` (native cync login/submit)** — INVARIANT: native
 //!   submit rejects unauthenticated, bad-hex nonce, stale job, and duplicate nonce
 //!   BEFORE running PoW, plus below-difficulty shares; a wrong-password login
-//!   strikes and returns unauthorized. THREAT: unauthenticated or replayed
-//!   submissions accepted, or wasted PoW verification on junk. TESTS:
+//!   strikes and returns unauthorized; a login is 1..=`MAX_LOGIN_BYTES` bytes
+//!   with no control characters, and a login the tally does not know is
+//!   refused with `pool full` once it holds `MAX_TALLY_LOGINS` logins. THREAT:
+//!   unauthenticated or replayed submissions accepted, wasted PoW verification
+//!   on junk, or a tally grown without bound by throwaway logins. TESTS:
 //!   `native_submit_unauthenticated_rejected`, `native_submit_bad_nonce_hex_rejected`,
 //!   `native_submit_stale_job_rejected_before_pow`,
 //!   `native_submit_duplicate_nonce_rejected_before_pow`,
 //!   `native_submit_low_difficulty_share_rejected`,
 //!   `login_wrong_password_strikes_and_returns_unauthorized`,
+//!   `login_rejects_empty_oversized_and_control_names`,
+//!   `login_refused_when_tally_full_unless_already_known`,
 //!   `cync_login_and_submit_produces_block`.
 //! - **§6 `handle_stratum_message` (legacy Stratum V1)** — INVARIANT: `mining.subscribe`
 //!   returns the extranonce1 + notify tuple, `mining.authorize` with a wrong
@@ -81,14 +86,18 @@
 //!   `write_tally` lets one writer at a time hold the file from snapshot to
 //!   rename, so an older snapshot never lands over a newer file; an
 //!   unparseable tally is moved aside as `<file>.corrupt` rather than started
-//!   over; the job updater rotates jobs on tip change. THREAT: mis-weighted
-//!   payout accounting, or credit lost with a dropped connection, a torn
-//!   write or two writers. TESTS:
+//!   over; the tally holds at most `MAX_TALLY_LOGINS` logins (`tally_has_room`
+//!   is checked again when a share is credited, not only at login); the job
+//!   updater rotates jobs on tip change. THREAT: mis-weighted payout
+//!   accounting, credit lost with a dropped connection, a torn write or two
+//!   writers, or memory and file growth bounded only by the number of logins
+//!   a client can invent. TESTS:
 //!   `share_tally_weights_valid_shares_per_login_skips_empty`,
 //!   `share_tally_survives_disconnect_and_reload`,
 //!   `test_load_tally_corrupt_json_is_safe_empty`,
 //!   `flush_tally_replaces_the_file_and_leaves_no_tmp`,
-//!   `flush_tally_waits_for_the_running_writer`.
+//!   `flush_tally_waits_for_the_running_writer`,
+//!   `tally_has_room_bounds_distinct_logins`.
 //! - **§10 coinbase / merkle helpers (`create_coinbase_prefix` / `create_coinbase_suffix`
 //!   / `compute_merkle_branches` / `difficulty_to_nbits` / `format_mining_notify`)** —
 //!   INVARIANT: the coinbase prefix/suffix layout and merkle branches match the
@@ -141,6 +150,8 @@ const VARDIFF_MAX_STEP: u64 = 4;
 const VARDIFF_MAX_DIFFICULTY: u64 = 1_000_000_000;
 const VARDIFF_GRACE_MS: u64 = 10_000;
 const MAX_INVALID_STREAK: u32 = 20;
+const MAX_LOGIN_BYTES: usize = 256;
+const MAX_TALLY_LOGINS: usize = 10_000;
 const STRATUM_BAN_THRESHOLD: u32 = 20;
 const STRATUM_BAN_DURATION_SECS: u64 = 3600;
 
@@ -1280,6 +1291,24 @@ async fn handle_stratum_message(
                     );
                 }
             }
+            if !login_ok(login_name) {
+                warn!("login: worker {} sent a bad login name", worker_id);
+                return Some(
+                    serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                        "result": serde_json::Value::Null,
+                        "error": {"code": -1, "message": "bad login"}})
+                    .to_string(),
+                );
+            }
+            if !tally_has_room(&stats.read().await.share_tally, login_name) {
+                warn!("login: worker {} refused, share tally is full", worker_id);
+                return Some(
+                    serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
+                        "result": serde_json::Value::Null,
+                        "error": {"code": -1, "message": "pool full"}})
+                    .to_string(),
+                );
+            }
             {
                 let mut w = workers.write().await;
                 if let Some(worker) = w.get_mut(&worker_id) {
@@ -1455,7 +1484,14 @@ async fn handle_stratum_message(
                 s.total_shares += 1;
                 s.valid_shares += 1;
                 if let Some((login, stepped)) = credit {
-                    credit_share(&mut s.share_tally, &login, share_work(effective));
+                    if login.is_empty() || tally_has_room(&s.share_tally, &login) {
+                        credit_share(&mut s.share_tally, &login, share_work(effective));
+                    } else {
+                        warn!(
+                            "submit: share tally is full, worker {} not credited",
+                            worker_id
+                        );
+                    }
                     if let Some((new_difficulty, tx)) = stepped {
                         info!(
                             "vardiff: worker {} difficulty {}",
@@ -1967,6 +2003,19 @@ fn persist_banlist(path: &PathBuf, bans: &HashMap<String, PersistedBanEntry>) {
             );
         }
     }
+}
+
+/// A login the pool takes: not empty, at most `MAX_LOGIN_BYTES`, nothing that
+/// would break a log line or the tally file.
+fn login_ok(login: &str) -> bool {
+    !login.is_empty() && login.len() <= MAX_LOGIN_BYTES && !login.chars().any(char::is_control)
+}
+
+/// Whether the tally can take `login`: it already has it, or it still holds
+/// fewer than `MAX_TALLY_LOGINS` logins. Checked at login so a new miner is
+/// refused up front, and again at credit time so the bound holds.
+fn tally_has_room(tally: &HashMap<String, u128>, login: &str) -> bool {
+    tally.len() < MAX_TALLY_LOGINS || tally.contains_key(login)
 }
 
 /// Credit one valid share to `login` at the worker's share difficulty. Empty
@@ -2822,6 +2871,175 @@ mod tests {
         );
         // Worker must NOT be authorized after a failed login.
         assert!(!workers.read().await.get(&1).unwrap().authorized);
+    }
+
+    /// A login has to be 1..=MAX_LOGIN_BYTES bytes and must not carry control
+    /// characters; anything else is refused with `bad login` and leaves the
+    /// worker unauthorized. A name right at the limit is fine.
+    #[tokio::test]
+    async fn login_rejects_empty_oversized_and_control_names() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(false, vec![0, 0, 0, 0]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+
+        let too_long = "a".repeat(MAX_LOGIN_BYTES + 1);
+        for bad in ["", too_long.as_str(), "pool\nw", "pool\u{0}w"] {
+            let msg = serde_json::json!({"id": 1, "method": "login",
+                "params": {"login": bad, "pass": ""}})
+            .to_string();
+            let resp = handle_stratum_message(
+                &msg,
+                1,
+                &workers,
+                &current_job,
+                &nonce_dedup,
+                &candidates,
+                &stats,
+                &chain,
+                &mempool,
+                None,
+                1000,
+                None,
+                "127.0.0.1",
+                &bans,
+                None,
+            )
+            .await
+            .expect("response");
+            assert!(resp.contains("bad login"), "login {bad:?}: {resp}");
+            assert!(!workers.read().await.get(&1).unwrap().authorized);
+        }
+        assert!(
+            bans.read().await.is_empty(),
+            "a bad login name is not a strike"
+        );
+
+        let at_limit = "a".repeat(MAX_LOGIN_BYTES);
+        let msg = serde_json::json!({"id": 1, "method": "login",
+            "params": {"login": at_limit, "pass": ""}})
+        .to_string();
+        let resp = handle_stratum_message(
+            &msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains(r#""status":"OK""#), "resp: {resp}");
+        assert_eq!(workers.read().await.get(&1).unwrap().payout_login, at_limit);
+    }
+
+    /// Once the tally holds MAX_TALLY_LOGINS logins a login it does not know is
+    /// refused with `pool full`; one it already credits still gets in.
+    #[tokio::test]
+    async fn login_refused_when_tally_full_unless_already_known() {
+        let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(false, vec![0, 0, 0, 0]));
+        let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
+        let stats = Arc::new(RwLock::new(StratumStats::default()));
+        let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
+        let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
+        let chain = Arc::new(crate::chain::Blockchain::new());
+        let mempool = crate::mempool::SharedMempool::new();
+        let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
+        {
+            let mut s = stats.write().await;
+            for i in 0..MAX_TALLY_LOGINS {
+                s.share_tally.insert(format!("miner{i}"), 1);
+            }
+        }
+
+        let msg = r#"{"id":1,"method":"login","params":{"login":"newcomer","pass":""}}"#;
+        let resp = handle_stratum_message(
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains("pool full"), "resp: {resp}");
+        assert!(!workers.read().await.get(&1).unwrap().authorized);
+
+        let msg = r#"{"id":1,"method":"login","params":{"login":"miner7","pass":""}}"#;
+        let resp = handle_stratum_message(
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
+        )
+        .await
+        .expect("response");
+        assert!(resp.contains(r#""status":"OK""#), "resp: {resp}");
+        assert!(workers.read().await.get(&1).unwrap().authorized);
+    }
+
+    /// The bound holds at credit time too: a full tally takes more credit for
+    /// a login it has, and no new entry for one it has not.
+    #[test]
+    fn tally_has_room_bounds_distinct_logins() {
+        let mut tally: HashMap<String, u128> = HashMap::new();
+        assert!(tally_has_room(&tally, "anyone"));
+        for i in 0..MAX_TALLY_LOGINS {
+            tally.insert(format!("miner{i}"), 1);
+        }
+        assert!(!tally_has_room(&tally, "newcomer"));
+        assert!(tally_has_room(&tally, "miner0"));
+        if tally_has_room(&tally, "miner0") {
+            credit_share(&mut tally, "miner0", 1000);
+        }
+        if tally_has_room(&tally, "newcomer") {
+            credit_share(&mut tally, "newcomer", 1000);
+        }
+        assert_eq!(tally.len(), MAX_TALLY_LOGINS);
+        assert_eq!(tally.get("miner0").copied(), Some(1001));
+        assert!(!tally.contains_key("newcomer"));
     }
 
     /// Native `submit` from an unauthenticated worker is rejected before any

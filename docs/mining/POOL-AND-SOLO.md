@@ -144,7 +144,11 @@ a difficulty-weighted valid-share count per miner `login` (conventionally
 `<miner_address>.<worker>`). The tally is kept per `login` rather than per
 connection and written to `stratum_shares.json` (path:
 `COINCYNC_STRATUM_TALLY_PATH`; written once a second and at shutdown), so it
-survives a miner's disconnect and a node restart. An operator distributes a
+survives a miner's disconnect and a node restart. A login is 1 to 256 bytes
+with no control characters, and the tally holds at most 10 000 distinct
+logins: once it is full, a login it does not know yet is refused with
+`pool full` until the operator rotates the tally file, while the miners it
+already credits keep working. An operator distributes a
 matured block's coinbase
 in proportion to these weights — a simple proportional/PPLNS split. Each
 connection's share target is sized to its own hashrate (vardiff), so the weighted
