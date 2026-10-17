@@ -16,6 +16,7 @@ use super::Blockchain;
 use crate::compliance::ChainView;
 use crate::crypto::{ChainAnchor, DisclosureOutputRef, KeyImage};
 use crate::error::Result;
+use crate::primitives::Hash;
 
 /// A [`ChainView`] that resolves disclosure output refs and key-image
 /// spentness against a live [`Blockchain`]. Cheap to construct (borrows the
@@ -127,4 +128,111 @@ impl ChainView for NodeChainView<'_> {
     fn block_hash_at(&self, height: u64) -> Result<Option<[u8; 32]>> {
         Ok(self.chain.get_block_hash(height).map(|h| *h.as_bytes()))
     }
+}
+
+/// Hard cap on decoys returned by [`collect_anchorable_solvency_decoys`] in one
+/// call (local DoS bound; mirrors the `get_solvency_decoys` RPC's param cap).
+pub const MAX_SOLVENCY_DECOYS: usize = 256;
+
+/// How far back (in blocks) the decoy sampler scans from the tip. Bounds the
+/// work per call on a long chain while still drawing from a wide recent window.
+const SOLVENCY_DECOY_WINDOW: u64 = 4096;
+
+/// A decoy output offered to hide a treasury among real on-chain outputs for an
+/// unlinkable-solvency proof: a ref the auditor can anchor, plus its commitment.
+#[derive(Clone, Debug)]
+pub struct SolvencyDecoy {
+    pub tx_hash: Hash,
+    pub output_index: u8,
+    pub commitment: [u8; 32],
+}
+
+/// Sample up to `count` DISTINCT, anchorable on-chain outputs to serve as
+/// unlinkable-solvency decoys, plus the chain tip the proof pins to
+/// (`(decoys, tip_height, tip_hash)`).
+///
+/// INVARIANT — the fix for the intermittent `anchored_valid:false`: every
+/// returned decoy is guaranteed to resolve through the SAME lookup
+/// [`NodeChainView::anchor`] uses during verification (`get_tx_location` →
+/// block → tx-hash match → output bounds), with a matching commitment. Block
+/// enumeration alone can surface an output the tx-location index cannot later
+/// resolve — a genesis coinbase (loaded outside the `add_block` indexing path),
+/// or a tx orphaned by a reorg — and handing such an output to a prover yields a
+/// package that fails anchoring on a draw-dependent basis. Those outputs are
+/// filtered out here so the decoy sampler and the auditor's anchor path can
+/// never disagree.
+///
+/// `exclude` (the prover's treasury ref) is never returned, so the treasury can
+/// never collide with its own decoys and shrink the caller's distinct set below
+/// the requested anonymity size. Candidates are de-duplicated, over-sampled,
+/// then shuffled and truncated to `count` (clamped to [`MAX_SOLVENCY_DECOYS`]).
+/// When the chain genuinely holds fewer than `count` distinct anchorable
+/// outputs, fewer are returned — the caller fails closed rather than padding.
+pub fn collect_anchorable_solvency_decoys(
+    chain: &Blockchain,
+    count: usize,
+    exclude: Option<(Hash, u8)>,
+) -> (Vec<SolvencyDecoy>, u64, Option<Hash>) {
+    let tip = chain.height();
+    let tip_hash = chain.get_block_hash(tip);
+    let count = count.min(MAX_SOLVENCY_DECOYS);
+    if count == 0 {
+        return (Vec::new(), tip, tip_hash);
+    }
+
+    let start = tip.saturating_sub(SOLVENCY_DECOY_WINDOW);
+    // The auditor's own resolver: a decoy is only kept if it anchors here, the
+    // same way verification will resolve it.
+    let view = NodeChainView::new(chain);
+    // Over-sample the anchorable pool so the shuffle has variety, then truncate.
+    let target_pool = count.saturating_mul(8).max(64);
+    let mut seen: std::collections::HashSet<(Hash, u8)> = std::collections::HashSet::new();
+    let mut candidates: Vec<SolvencyDecoy> = Vec::new();
+
+    let mut h = start;
+    'scan: while h <= tip && candidates.len() < target_pool {
+        if let Some(block) = chain.get_block_by_height(h) {
+            for tx in &block.transactions {
+                let txh = tx.hash();
+                for (idx, o) in tx.outputs.iter().enumerate() {
+                    // A DisclosureOutputRef indexes outputs with a `u8`; an
+                    // output beyond 255 is unrepresentable (and callers cast
+                    // `as u8`), so never offer it.
+                    if idx > u8::MAX as usize {
+                        break;
+                    }
+                    let oi = idx as u8;
+                    if exclude == Some((txh, oi)) {
+                        continue; // never return the prover's treasury
+                    }
+                    if !seen.insert((txh, oi)) {
+                        continue; // de-duplicate (a tx can recur across blocks)
+                    }
+                    // Anchorability gate: resolve exactly as the auditor will,
+                    // and require the resolved commitment to match this output.
+                    let dref = DisclosureOutputRef { tx_hash: txh, output_index: oi };
+                    if let Ok(Some(anchor)) = view.anchor(&dref) {
+                        if anchor.commitment == o.commitment {
+                            candidates.push(SolvencyDecoy {
+                                tx_hash: txh,
+                                output_index: oi,
+                                commitment: o.commitment,
+                            });
+                            if candidates.len() >= target_pool {
+                                break 'scan;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        h += 1;
+    }
+
+    {
+        use rand::seq::SliceRandom;
+        candidates.shuffle(&mut rand::rngs::OsRng);
+    }
+    candidates.truncate(count);
+    (candidates, tip, tip_hash)
 }

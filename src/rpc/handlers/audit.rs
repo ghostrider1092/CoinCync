@@ -5,9 +5,10 @@ use jsonrpsee::RpcModule;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::chain::NodeChainView;
+use crate::chain::{collect_anchorable_solvency_decoys, NodeChainView};
 use crate::compliance::SignedAuditPackage;
 use crate::error::{Error, Result};
+use crate::primitives::Hash;
 
 use super::RpcState;
 
@@ -475,9 +476,21 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // whole chain (other parties' outputs), not just the prover's own wallet.
     module
         .register_blocking_method("get_solvency_decoys", |params, state, _ext| {
-            let (count,): (usize,) = params.parse().map_err(|e: ErrorObjectOwned| {
-                ErrorObjectOwned::owned(-32602, format!("params: [count]: {e}"), None::<()>)
+            // Params: `[count]` or `[count, {tx_hash, output_index}]`. The
+            // optional second argument is the prover's TREASURY ref to EXCLUDE,
+            // so the treasury can never be returned as one of its own decoys
+            // (which would shrink the caller's distinct set below `anon_size`).
+            let raw: serde_json::Value = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("params: [count, exclude?]: {e}"), None::<()>)
             })?;
+            let arr = raw.as_array().ok_or_else(|| {
+                ErrorObjectOwned::owned(-32602, "params must be a positional array", None::<()>)
+            })?;
+            let count = arr
+                .first()
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| ErrorObjectOwned::owned(-32602, "params[0] (count) must be a u64", None::<()>))?
+                as usize;
             if count == 0 || count > 256 {
                 return Err(ErrorObjectOwned::owned(
                     -32602,
@@ -485,39 +498,50 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                     None::<()>,
                 ));
             }
-            let tip = state.chain.height();
-            // Collect candidates from a bounded recent window, then sample.
-            let start = tip.saturating_sub(4096);
-            let mut candidates: Vec<serde_json::Value> = Vec::new();
-            let mut h = start;
-            while h <= tip && candidates.len() < count.saturating_mul(8).max(64) {
-                if let Some(block) = state.chain.get_block_by_height(h) {
-                    for tx in &block.transactions {
-                        let txh = tx.hash().to_hex();
-                        for (idx, o) in tx.outputs.iter().enumerate() {
-                            candidates.push(json!({
-                                "tx_hash": txh,
-                                "output_index": idx,
-                                "commitment": hex::encode(o.commitment),
-                            }));
-                        }
+            // Optional treasury exclusion.
+            let exclude: Option<(Hash, u8)> = match arr.get(1) {
+                Some(v) if !v.is_null() => {
+                    let tx_hex = v.get("tx_hash").and_then(|x| x.as_str()).ok_or_else(|| {
+                        ErrorObjectOwned::owned(-32602, "exclude.tx_hash must be a hex string", None::<()>)
+                    })?;
+                    let tx_hash = Hash::from_hex(tx_hex).ok_or_else(|| {
+                        ErrorObjectOwned::owned(-32602, "exclude.tx_hash: bad 32-byte hex", None::<()>)
+                    })?;
+                    let oi = v.get("output_index").and_then(|x| x.as_u64()).ok_or_else(|| {
+                        ErrorObjectOwned::owned(-32602, "exclude.output_index must be a u64", None::<()>)
+                    })?;
+                    if oi > u8::MAX as u64 {
+                        return Err(ErrorObjectOwned::owned(
+                            -32602,
+                            "exclude.output_index out of range (0..=255)".to_string(),
+                            None::<()>,
+                        ));
                     }
+                    Some((tx_hash, oi as u8))
                 }
-                h += 1;
-            }
-            {
-                use rand::seq::SliceRandom;
-                candidates.shuffle(&mut rand::rngs::OsRng);
-            }
-            candidates.truncate(count);
+                _ => None,
+            };
+
+            // Delegate to the shared sampler, which emits ONLY outputs that
+            // resolve through the same lookup the auditor's anchor()/anchor_all()
+            // use — so a package built from this draw can never fail anchoring on
+            // a draw-dependent basis (the intermittent `anchored_valid:false`).
+            let (decoys, tip, tip_hash) =
+                collect_anchorable_solvency_decoys(&state.chain, count, exclude);
+            let decoys: Vec<serde_json::Value> = decoys
+                .into_iter()
+                .map(|d| {
+                    json!({
+                        "tx_hash": d.tx_hash.to_hex(),
+                        "output_index": d.output_index,
+                        "commitment": hex::encode(d.commitment),
+                    })
+                })
+                .collect();
             // The block hash at `tip` — the prover pins the proof to it, and the
             // auditor confirms their node has the same block at that height.
-            let tip_hash = state
-                .chain
-                .get_block_hash(tip)
-                .map(|h| h.to_hex())
-                .unwrap_or_default();
-            Ok::<_, ErrorObjectOwned>(json!({ "decoys": candidates, "tip": tip, "tip_hash": tip_hash }))
+            let tip_hash = tip_hash.map(|h| h.to_hex()).unwrap_or_default();
+            Ok::<_, ErrorObjectOwned>(json!({ "decoys": decoys, "tip": tip, "tip_hash": tip_hash }))
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 

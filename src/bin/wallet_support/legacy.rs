@@ -4816,7 +4816,23 @@ async fn cmd_disclose_build_payroll_audit(
             output_index: utxo.output_index,
         };
         let treasury_commitment = PedersenCommitment::commit(value, &treasury_blinding).to_bytes();
-        let resp = rpc_call(node, "get_solvency_decoys", serde_json::json!([anon_size - 1])).await?;
+        // Ask for a buffer above the (anon_size - 1) needed AND pass the treasury
+        // as an exclusion, so the node returns distinct, anchorable, non-treasury
+        // outputs with margin to spare — no more build failures when the treasury
+        // happens to land in the draw, and no draw that can't be anchored.
+        let want = (anon_size - 1).saturating_add(8).min(256);
+        let resp = rpc_call(
+            node,
+            "get_solvency_decoys",
+            serde_json::json!([
+                want,
+                {
+                    "tx_hash": hex::encode(treasury_ref.tx_hash.as_bytes()),
+                    "output_index": treasury_ref.output_index,
+                }
+            ]),
+        )
+        .await?;
         let tip = resp.get("tip").and_then(|v| v.as_u64()).unwrap_or(0);
         let decoys = resp
             .get("decoys")
@@ -4825,6 +4841,7 @@ async fn cmd_disclose_build_payroll_audit(
 
         let mut commitments: Vec<[u8; 32]> = Vec::with_capacity(anon_size);
         let mut refs: Vec<DisclosureOutputRef> = Vec::with_capacity(anon_size);
+        let mut seen: std::collections::HashSet<(String, u8)> = std::collections::HashSet::new();
         commitments.push(treasury_commitment);
         refs.push(treasury_ref.clone());
         for d in decoys {
@@ -4846,6 +4863,9 @@ async fn cmd_disclose_build_payroll_audit(
             };
             if dref == treasury_ref {
                 continue; // never let the treasury double as its own decoy
+            }
+            if !seen.insert((tx_hex.to_string(), oi)) {
+                continue; // de-duplicate (defensive: the node already dedups)
             }
             commitments.push(decode_hex32(ch, "decoy commitment")?);
             refs.push(dref);
