@@ -1016,6 +1016,57 @@ impl SignedAuditPackage {
     }
 }
 
+/// Field names an [`AuditPackage`] only carries when built with the unaudited
+/// `sketch-gk-proof` primitive. A node built without the feature has no struct
+/// members for them, so serde silently drops them on deserialize.
+#[cfg(not(feature = "sketch-gk-proof"))]
+const GK_ONLY_PACKAGE_FIELDS: [&str; 2] = ["unlinkable_solvency", "multi_unlinkable_solvency"];
+
+/// Guard for a build **without** `sketch-gk-proof`: detect an [`AuditPackage`]
+/// that carries gk-only solvency fields this node cannot interpret.
+///
+/// Without the feature those fields are absent from the struct, so serde drops
+/// them on deserialize and [`AuditPackage::signing_bytes`] is recomputed over a
+/// payload missing them. The issuer's signature then appears invalid — a
+/// misleading `signature_valid: false` that sends an auditor chasing a phantom
+/// signature problem (observed live 2026-10-16). Detecting the dropped fields
+/// from the raw request JSON lets the verify RPC fail closed with an explicit
+/// reason instead.
+///
+/// `package_json` is the raw `package` object from the request (the inner
+/// [`AuditPackage`], not the [`SignedAuditPackage`] wrapper). Returns
+/// `Some(reason)` when the package carries a non-null gk-only field this build
+/// cannot interpret, else `None`. In a gk-capable build the fields are
+/// understood and bound by the signature as normal, so this is always `None`.
+pub fn unsupported_audit_fields(package_json: Option<&serde_json::Value>) -> Option<String> {
+    #[cfg(feature = "sketch-gk-proof")]
+    {
+        let _ = package_json;
+        None
+    }
+    #[cfg(not(feature = "sketch-gk-proof"))]
+    {
+        let obj = package_json?.as_object()?;
+        let present: Vec<&str> = GK_ONLY_PACKAGE_FIELDS
+            .iter()
+            .copied()
+            // A `null` field is the serialized form of `None` from a gk-capable
+            // issuer that attached no proof: nothing to interpret, so ignore it.
+            .filter(|k| obj.get(*k).map_or(false, |v| !v.is_null()))
+            .collect();
+        if present.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "this node cannot interpret this audit package: it carries gk-only \
+             field(s) [{}] that require a build with the `sketch-gk-proof` \
+             feature. Rebuild the node with `--features sketch-gk-proof` (e.g. \
+             `--features \"testnet sketch-gk-proof\"`) to verify it.",
+            present.join(", ")
+        ))
+    }
+}
+
 /// A [`SignedAuditPackage`] sealed to one auditor's public key — an encrypted
 /// envelope only that auditor can open. This is the **leak barrier**: if the
 /// sealed file is intercepted, forwarded, or left at rest, it reveals nothing
@@ -1292,6 +1343,55 @@ mod tests {
             .with_anchor(ChainAnchor::new(t_ref, [9u8; 32], [0u8; 32], 10));
         assert!(!pkg.verify_anchored(1_000_000, &wrong).unwrap());
         assert!(!pkg.verify_anchored(1_000_000, &InMemoryChainView::new()).unwrap());
+    }
+
+    /// Without `sketch-gk-proof`, a package carrying gk-only solvency fields
+    /// must be reported as uninterpretable (explicit reason), not silently
+    /// dropped and later surfaced as a bogus `signature_valid: false`.
+    #[cfg(not(feature = "sketch-gk-proof"))]
+    #[test]
+    fn non_gk_build_reports_uninterpretable_package_explicitly() {
+        use serde_json::json;
+
+        let with_gk = json!({
+            "org": "Acme DAO",
+            "period": "2026-Q3",
+            "created_at": 1_000,
+            "items": [],
+            "unlinkable_solvency": { "statement": "treasury >= 1,000,000", "proof": {} }
+        });
+        let reason = unsupported_audit_fields(Some(&with_gk))
+            .expect("gk-only field must be reported as uninterpretable");
+        assert!(reason.contains("unlinkable_solvency"), "reason names the field: {reason}");
+        assert!(reason.contains("sketch-gk-proof"), "reason names the feature: {reason}");
+
+        // The multi-output variant is flagged the same way.
+        let with_multi = json!({ "org": "Acme DAO", "multi_unlinkable_solvency": { "x": 1 } });
+        assert!(unsupported_audit_fields(Some(&with_multi)).is_some());
+
+        // No gk fields, or explicitly `null` ones (a gk-capable issuer that
+        // attached no proof): interpretable here, so verification proceeds.
+        let plain = json!({ "org": "Acme DAO", "period": "2026-Q3", "items": [] });
+        assert!(unsupported_audit_fields(Some(&plain)).is_none());
+        let null_fields =
+            json!({ "org": "Acme DAO", "unlinkable_solvency": null, "multi_unlinkable_solvency": null });
+        assert!(unsupported_audit_fields(Some(&null_fields)).is_none());
+
+        // A missing or non-object package is not this guard's concern; typed
+        // parsing surfaces the shape error.
+        assert!(unsupported_audit_fields(None).is_none());
+        assert!(unsupported_audit_fields(Some(&json!("not-an-object"))).is_none());
+    }
+
+    /// A gk-capable build understands the solvency fields (the signature binds
+    /// them as normal), so the guard never flags a package.
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn gk_build_interprets_solvency_fields() {
+        use serde_json::json;
+        let with_gk =
+            json!({ "org": "Acme DAO", "unlinkable_solvency": { "statement": "x", "proof": {} } });
+        assert!(unsupported_audit_fields(Some(&with_gk)).is_none());
     }
 
     #[test]

@@ -379,7 +379,19 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // reports the id for the caller to record.
     module
         .register_blocking_method("verify_audit_package", |params, state, _ext| {
-            let (p,): (VerifyAuditParams,) = params.parse().map_err(|e: ErrorObjectOwned| {
+            // Parse once into a raw Value so that — on a node built WITHOUT the
+            // `sketch-gk-proof` feature — we can detect a package carrying
+            // gk-only solvency fields this build would otherwise silently drop
+            // (serde ignores unknown fields). Dropping them recomputes the
+            // signing bytes over a different payload and reports a misleading
+            // `signature_valid: false`; instead fail closed with a clear reason.
+            let (raw,): (serde_json::Value,) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("params: [ {{package, issuer_pubkey, auditor, now?}} ]: {e}"), None::<()>)
+            })?;
+            if let Some(reason) = crate::compliance::unsupported_audit_fields(raw.get("package")) {
+                return Err(ErrorObjectOwned::owned(-32010, reason, None::<()>));
+            }
+            let p: VerifyAuditParams = serde_json::from_value(raw).map_err(|e| {
                 ErrorObjectOwned::owned(-32602, format!("params: [ {{package, issuer_pubkey, auditor, now?}} ]: {e}"), None::<()>)
             })?;
 
