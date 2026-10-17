@@ -78,6 +78,22 @@ pub(super) fn scaled_fee(
     )
 }
 
+/// Fee for a transaction of a KNOWN serialized size (bytes), scaled by the
+/// multiplier. Same `size·MIN_FEE_PER_BYTE·mult/100` math as [`scaled_fee`], but
+/// driven by an actual `tx.size()` rather than the count-based estimate. Used by
+/// the shield-in path, whose `tx.extra` carries a large libspark mint bundle the
+/// count-based estimator does not see — the validator charges on `tx.size()`
+/// (which includes `extra`), so the wallet must size the fee the same way or the
+/// tx underpays and is rejected.
+pub(super) fn scaled_fee_for_size(size_bytes: usize, multiplier: FeeMultiplier) -> Amount {
+    Amount::from_atomic(
+        (size_bytes as u64)
+            .saturating_mul(MIN_FEE_PER_BYTE)
+            .saturating_mul(multiplier.0)
+            / FEE_MULTIPLIER_SCALE,
+    )
+}
+
 /// Estimate transaction size in bytes.
 pub fn estimate_tx_size(input_count: usize, output_count: usize, ring_size: usize) -> usize {
     let input_size = KEY_BYTES

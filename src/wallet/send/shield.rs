@@ -49,6 +49,18 @@ use crate::transaction::{
 };
 #[cfg(feature = "libspark-ffi")]
 use rand::{CryptoRng, RngCore};
+#[cfg(feature = "libspark-ffi")]
+use super::super::decoy_selection::{AllocatedRings, RealOutputIdentity};
+#[cfg(feature = "libspark-ffi")]
+use super::super::{KeyEpoch, UTXO};
+#[cfg(feature = "libspark-ffi")]
+use super::fee::{estimate_tx_size, scaled_fee_for_size, FeeMultiplier};
+#[cfg(feature = "libspark-ffi")]
+use super::inputs::prepare_input;
+#[cfg(feature = "libspark-ffi")]
+use super::types::PreparedInput;
+#[cfg(feature = "libspark-ffi")]
+use crate::constants::ring_size_at_height;
 
 /// Build a signed shield-in transaction that moves `shield_amount` of a
 /// transparent UTXO into the Spark pool, returning any remainder as transparent
@@ -158,4 +170,180 @@ pub fn build_shield_in<R: RngCore + CryptoRng>(
 
     builder.set_fee(final_fee);
     builder.build(rng)
+}
+
+/// Conservative upper bound (bytes) for the libspark mint bundle a 1-coin
+/// shield-in carries in `tx.extra`, added to the count-based size estimate when
+/// SELECTING the funding UTXO so the chosen note always covers the real,
+/// `tx.size()`-based fee (the estimator itself is blind to `extra`). Deliberately
+/// generous: the final fee is computed from the ACTUAL built size, so an
+/// over-estimate here only widens UTXO eligibility — it is never overpaid.
+#[cfg(feature = "libspark-ffi")]
+const SHIELD_IN_MINT_BUNDLE_ALLOWANCE_BYTES: usize = 4096;
+
+/// A selected-but-not-yet-built shield-in: one funding UTXO prepared for signing,
+/// plus the change destination, shield amount, and a conservative fee seed. The
+/// caller resolves decoys for [`real_outputs`](Self::real_outputs) (exactly as a
+/// transfer), then calls [`build_prepared_shield_in`] with the allocated ring.
+///
+/// Split into prepare/build so the network round-trip that fetches decoys sits
+/// between them, mirroring the transparent `prepare_privacy_transaction` /
+/// `build_prepared_privacy_transaction` pair.
+#[cfg(feature = "libspark-ffi")]
+pub struct PreparedShieldIn {
+    prepared_input: PreparedInput,
+    change_spend_public: PublicKey,
+    change_view_public: PublicKey,
+    shield_amount: Amount,
+    /// Conservative fee used ONLY for UTXO coverage; the built tx pays the exact
+    /// `tx.size()`-based fee, which is ≤ this by construction.
+    fee_seed: Amount,
+    target_height: u64,
+    input_amount: Amount,
+}
+
+#[cfg(feature = "libspark-ffi")]
+impl PreparedShieldIn {
+    /// The single real output whose ring the caller must resolve decoys for
+    /// (one-element vec so it drops straight into `build_covered_request` /
+    /// `allocate_unique_rings`, exactly like a transfer's `real_outputs()`).
+    pub fn real_outputs(&self) -> Vec<RealOutputIdentity> {
+        vec![self.prepared_input.real_output]
+    }
+    /// Consensus ring size at the target height (the ring the caller must build).
+    pub fn ring_size(&self) -> usize {
+        ring_size_at_height(self.target_height)
+    }
+    /// The funding note's value (for display).
+    pub fn input_amount(&self) -> Amount {
+        self.input_amount
+    }
+}
+
+/// Select ONE transparent UTXO that covers `shield_amount` + fee and prepare it
+/// for a shield-in spend. `build_shield_in` is single-input, so a shield-in
+/// larger than any one note errors (multi-input shield-in is a follow-up). Picks
+/// the SMALLEST covering note to keep larger notes intact and change minimal.
+///
+/// The fee seeded here is deliberately conservative (count estimate + a mint-
+/// bundle allowance): it only governs which notes are eligible. The exact fee,
+/// charged on the real `tx.size()`, is computed in [`build_prepared_shield_in`].
+#[cfg(feature = "libspark-ffi")]
+pub fn prepare_shield_in(
+    utxos: &[&UTXO],
+    keys: &KeyEpoch,
+    shield_amount: Amount,
+    fee_multiplier: f64,
+    target_height: u64,
+) -> Result<PreparedShieldIn> {
+    if shield_amount.as_atomic() == 0 {
+        return Err(Error::InvalidState("shield-in amount must be > 0".into()));
+    }
+    let ring_size = ring_size_at_height(target_height);
+    // Coverage fee seed: the count-based estimate (1 input, 1 change/dummy
+    // output) PLUS a mint-bundle allowance for the libspark bytes in tx.extra.
+    let seed_bytes = estimate_tx_size(1, 1, ring_size)
+        .saturating_add(SHIELD_IN_MINT_BUNDLE_ALLOWANCE_BYTES);
+    let fee_seed = scaled_fee_for_size(seed_bytes, FeeMultiplier::from_f64(fee_multiplier));
+    let need = shield_amount
+        .as_atomic()
+        .checked_add(fee_seed.as_atomic())
+        .ok_or(Error::AmountOverflow)?;
+
+    let chosen = utxos
+        .iter()
+        .copied()
+        .filter(|u| !u.spent && u.amount.as_atomic() >= need)
+        .min_by_key(|u| u.amount.as_atomic())
+        .ok_or_else(|| {
+            let largest = utxos
+                .iter()
+                .filter(|u| !u.spent)
+                .map(|u| u.amount.as_atomic())
+                .max()
+                .unwrap_or(0);
+            Error::InsufficientBalance { have: largest, need }
+        })?;
+
+    let input_amount = chosen.amount;
+    let prepared_input = prepare_input(chosen, keys)?;
+    Ok(PreparedShieldIn {
+        prepared_input,
+        change_spend_public: keys.spend_public,
+        change_view_public: keys.view_public,
+        shield_amount,
+        fee_seed,
+        target_height,
+        input_amount,
+    })
+}
+
+/// Finish a shield-in: convert the allocated single ring into its decoys and
+/// build the signed transaction, charging the EXACT `tx.size()`-based fee.
+///
+/// Builds once with the conservative seed fee to measure the real serialized
+/// size (the mint bundle in `tx.extra` dominates and is invisible to the count
+/// estimate), then rebuilds with `size·MIN_FEE_PER_BYTE·mult`. That exact fee is
+/// ≤ the seed by construction (the seed over-covers via the ×2 size margin and
+/// the mint-bundle allowance), so the funding note still covers it and no fee is
+/// overpaid. Returns the final transaction, ready for `send_raw_transaction`.
+#[cfg(feature = "libspark-ffi")]
+pub fn build_prepared_shield_in<R: RngCore + CryptoRng>(
+    prepared: PreparedShieldIn,
+    rings: AllocatedRings,
+    fee_multiplier: f64,
+    spark_seed: &[u8],
+    rng: &mut R,
+) -> Result<Transaction> {
+    let mut iter = rings.into_iter();
+    let ring = iter
+        .next()
+        .ok_or_else(|| Error::InvalidState("shield-in: no ring allocated for the input".into()))?;
+    if iter.next().is_some() {
+        return Err(Error::InvalidState(
+            "shield-in: more than one ring allocated for a single input".into(),
+        ));
+    }
+    // `into_parts` yields the ring's decoys (real excluded); `build_shield_in`
+    // re-inserts the real at a random position, so the ring position is dropped.
+    let (decoys, _real_position) = ring.into_parts();
+    let input = prepared.prepared_input.input;
+    let mult = FeeMultiplier::from_f64(fee_multiplier);
+
+    // Pass 1: build with the conservative seed fee to learn the real size.
+    let measured = build_shield_in(
+        &prepared.change_spend_public,
+        &prepared.change_view_public,
+        input.clone(),
+        decoys.clone(),
+        prepared.shield_amount,
+        prepared.fee_seed,
+        prepared.target_height,
+        spark_seed,
+        rng,
+    )?;
+    let exact_fee = scaled_fee_for_size(measured.size(), mult);
+
+    // The exact fee should never exceed the seed (seed over-covers). If a larger
+    // mint bundle ever breaks that assumption, pay the seed fee rather than
+    // underpay — the note already covers it and overpaying is always valid.
+    let final_fee = if exact_fee.as_atomic() <= prepared.fee_seed.as_atomic() {
+        exact_fee
+    } else {
+        prepared.fee_seed
+    };
+
+    // Pass 2: rebuild with the final fee. Rebuilding (rather than reusing
+    // `measured`) keeps the change output exact for the fee actually charged.
+    build_shield_in(
+        &prepared.change_spend_public,
+        &prepared.change_view_public,
+        input,
+        decoys,
+        prepared.shield_amount,
+        final_fee,
+        prepared.target_height,
+        spark_seed,
+        rng,
+    )
 }

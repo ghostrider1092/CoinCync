@@ -313,6 +313,117 @@ fn rings_for(
 }
 
 // ===========================================================================
+// shield-in (transparent -> Spark pool) — consensus validity of the built tx
+// ===========================================================================
+
+/// `build_shield_in` had no test before the `shielded-mint` CLI wired it. This
+/// pins the two shielded-specific consensus invariants a shield-in must satisfy
+/// (the transparent CLSAG side is covered by the transfer tests, since it reuses
+/// the same builder), plus the fee rule that the count-based estimator cannot see:
+///
+///   1. the transparent↔shielded **value bridge** holds on the built tx
+///      (`Σ pseudo = Σ change + (fee − value_balance)·H`), so no value is
+///      conjured or burned crossing the veil;
+///   2. the **mint bundle authenticates** to exactly the shielded-in amount
+///      (`verify_mint_shield_in`); and
+///   3. a `tx.size()`-based fee (how the wrapper sizes it) meets the validator's
+///      `size·MIN_FEE_PER_BYTE` minimum — the count estimate is blind to the
+///      large mint bundle in `tx.extra`, so a naive fee would underpay.
+#[cfg(feature = "libspark-ffi")]
+#[test]
+fn shield_in_builds_consensus_valid_mint_with_size_based_fee() {
+    use crate::constants::{ring_size_at_height, MIN_FEE_PER_BYTE};
+    use crate::consensus::spark_payload::{
+        verify_mint_shield_in, verify_transparent_shielded_balance, SparkPayload,
+        SPARK_PAYLOAD_VERSION,
+    };
+    use crate::transaction::TxType;
+    use crate::wallet::send::build_shield_in;
+
+    let mut rng = ChaCha20Rng::seed_from_u64(0x5417);
+    let target_height = 200u64; // regtest shielded active @ 100
+    let ring_size = ring_size_at_height(target_height);
+
+    // One large funding input, a single ring for it.
+    let input_atomic = 10_000_000u64;
+    let (inputs, reals) = synthetic_inputs(&[(input_atomic, 0x21, 0, 150)]);
+    let rings = rings_for(&reals, ring_size, &mut rng);
+    let (decoys, _real_position) = rings.into_iter().next().expect("one ring").into_parts();
+    let input = inputs.into_iter().next().expect("one input").input;
+
+    // Change destination = this wallet's own keys (any epoch works for the test).
+    let change = epoch_from_seed(0x42);
+    let shield_amount = Amount::from_atomic(3_000_000);
+    let spark_seed = b"shield-in-consensus-test-seed";
+
+    // Mirror the wrapper's two-pass sizing: build once to measure, set the fee
+    // from the real tx.size(), rebuild. (The wrapper itself can't be driven here
+    // because `PreparedShieldIn` has private fields; this reproduces its logic.)
+    let probe_fee = Amount::from_atomic(estimate_tx_size(1, 1, ring_size) as u64 * MIN_FEE_PER_BYTE);
+    let probe = build_shield_in(
+        &change.spend_public,
+        &change.view_public,
+        input.clone(),
+        decoys.clone(),
+        shield_amount,
+        probe_fee,
+        target_height,
+        spark_seed,
+        &mut rng,
+    )
+    .expect("probe shield-in builds");
+    let exact_fee = super::fee::scaled_fee_for_size(probe.size(), FeeMultiplier::from_f64(1.0));
+    let tx = build_shield_in(
+        &change.spend_public,
+        &change.view_public,
+        input,
+        decoys,
+        shield_amount,
+        exact_fee,
+        target_height,
+        spark_seed,
+        &mut rng,
+    )
+    .expect("shield-in builds");
+
+    // Shape: a v2 SparkPayload, mint-only, value_balance = -(shield amount).
+    assert_eq!(tx.tx_type, TxType::Shielded);
+    let payload = SparkPayload::decode(&tx.extra).expect("extra is a v2 SparkPayload");
+    assert_eq!(payload.version, SPARK_PAYLOAD_VERSION);
+    assert!(payload.mint.is_some(), "shield-in carries a mint bundle");
+    assert!(payload.spend.is_none(), "shield-in has no spend");
+    assert!(payload.outputs.is_empty(), "coins enter via the mint bundle, not bare outputs");
+    assert_eq!(payload.value_balance, -(shield_amount.as_atomic() as i64));
+
+    // 1. Value bridge holds on the real tx.
+    let pseudo_outputs: Vec<[u8; 32]> =
+        tx.inputs.iter().map(|i| i.pseudo_output_commitment).collect();
+    let output_commitments: Vec<[u8; 32]> = tx.outputs.iter().map(|o| o.commitment).collect();
+    verify_transparent_shielded_balance(
+        &pseudo_outputs,
+        &output_commitments,
+        tx.fee.as_atomic(),
+        payload.value_balance,
+    )
+    .expect("transparent<->shielded value bridge holds");
+
+    // 2. Mint bundle authenticates to exactly the shielded-in amount.
+    verify_mint_shield_in(payload.mint.as_ref().unwrap(), payload.value_balance)
+        .expect("mint bundle authenticates to -value_balance");
+
+    // 3. The size-based fee meets the validator's minimum (count estimate would
+    //    miss the mint bundle in tx.extra and underpay).
+    let min_fee = tx.size() as u64 * MIN_FEE_PER_BYTE;
+    assert!(
+        tx.fee.as_atomic() >= min_fee,
+        "shield-in fee {} < consensus minimum {} (size {} bytes)",
+        tx.fee.as_atomic(),
+        min_fee,
+        tx.size()
+    );
+}
+
+// ===========================================================================
 // prepare_privacy_transaction — arithmetic invariants + fee handling
 // ===========================================================================
 

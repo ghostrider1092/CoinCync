@@ -224,6 +224,33 @@ enum Command {
         password: Option<String>,
     },
 
+    /// Shield-in: move transparent CYNC into the shielded (Spark) pool.
+    ///
+    /// Spends one transparent UTXO of this wallet (CLSAG, ring, range proofs on
+    /// change — a real transparent spend) and MINTS `--amount` into the pool as a
+    /// note recoverable by this same wallet's Spark seed, returning change
+    /// transparently. The tx is `TxType::Shielded` carrying an authenticated
+    /// libspark mint bundle + `value_balance = -amount`; consensus enforces the
+    /// transparent↔shielded value bridge so no value is conjured or burned.
+    /// Submitted via `send_raw_transaction` (`--node`). This is how a pool is
+    /// populated so `shielded-send` has notes to spend. Shielded txs are
+    /// activation-gated: they are only accepted on beta (height ≥ 5) and regtest
+    /// (≥ 100); testnet/mainnet stay OFF pending audit. Present only in a
+    /// `sketch-gk-proof + libspark-ffi` build.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    ShieldedMint {
+        /// Amount to shield into the pool, in atomic units.
+        #[arg(long)]
+        amount: u64,
+        /// Fee multiplier (1.0 = normal, 2.0 = double fee for priority).
+        #[arg(long, default_value = "1.0")]
+        fee_multiplier: f64,
+        /// Wallet password. Use `-` to read from stdin. Reads
+        /// `COINCYNC_WALLET_PASSWORD` env if neither flag nor stdin is provided.
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+    },
+
     /// Show this wallet's shielded (Spark) balance from the node's cover set.
     ///
     /// EXPERIMENTAL / regtest-gated: fetches `get_shielded_cover_set` (`--node`)
@@ -889,6 +916,12 @@ async fn main() {
             demo,
             password,
         } => cmd_shielded_send(&wallet_path, password, &cli.node, to, amount, demo).await,
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        Command::ShieldedMint {
+            amount,
+            fee_multiplier,
+            password,
+        } => cmd_shielded_mint(&wallet_path, password, &cli.node, amount, fee_multiplier).await,
         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
         Command::ShieldedBalance {
             demo,
@@ -2155,6 +2188,183 @@ async fn cmd_shielded_send(
         shielded_send_demo(&seed, &to, amount)
     } else {
         shielded_send_live(&seed, node, &to, amount).await
+    }
+}
+
+/// Shield-in: spend one transparent UTXO and mint `amount` into the Spark pool,
+/// returning change transparently to this wallet. Builds a real transparent
+/// CLSAG spend (`src/wallet/send/shield.rs::build_shield_in`) carrying an
+/// authenticated libspark mint bundle, then submits it via `send_raw_transaction`.
+/// This is how a live pool is populated so `shielded-send` has notes to spend.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+async fn cmd_shielded_mint(
+    path: &PathBuf,
+    password: Option<String>,
+    node: &str,
+    amount: u64,
+    fee_multiplier: f64,
+) -> Result<(), String> {
+    use coincync::decoy::{DecoyDistributionSnapshot, ResolvedDecoySnapshot};
+    use coincync::primitives::Amount;
+    use coincync::wallet::decoy_selection::{
+        allocate_unique_rings, build_covered_request, validate_covered_response,
+        ValidatedDecoySnapshot,
+    };
+    use coincync::wallet::send::{build_prepared_shield_in, prepare_shield_in};
+    use coincync::wallet::{KeyEpoch, Wallet};
+
+    if amount == 0 {
+        return Err("--amount must be greater than zero".into());
+    }
+
+    // One password resolution covers both loaders (reading stdin `-` twice would
+    // fail): `data.seed` is the Spark seed the minted note is recoverable from;
+    // the `Wallet` carries the transparent UTXO set + key epoch for the spend.
+    let password = resolve_password(password, false)?;
+    let data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {e}"))?;
+    let spark_seed = data.seed;
+
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {e}"))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {e}"))?;
+    let keys: KeyEpoch = wallet
+        .current_keys()
+        .cloned()
+        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
+
+    // Anchor at the node's decoy snapshot, exactly like a transparent send.
+    let snapshot: DecoyDistributionSnapshot = serde_json::from_value(
+        rpc_call(node, "get_decoy_distribution", serde_json::json!([]))
+            .await
+            .map_err(|e| format!("rpc get_decoy_distribution: {e}"))?,
+    )
+    .map_err(|e| format!("decode decoy distribution: {e}"))?;
+    let snapshot = ValidatedDecoySnapshot::try_from(snapshot)
+        .map_err(|e| format!("validate decoy distribution: {e}"))?;
+    let current_height = snapshot.spend_height();
+    let min_decoy_age = coincync::constants::min_output_age_at_height(current_height);
+
+    mole_notice(amount);
+    println!("Building shield-in (transparent -> shielded pool):");
+    println!("  Amount:          {amount} atomic");
+    println!("  Height:          {current_height}");
+    println!("  Fee multiplier:  {fee_multiplier}");
+
+    // Select + prepare the single funding UTXO (owns its key material, so the
+    // borrow of the wallet ends here).
+    let utxos = wallet.available_utxos(current_height);
+    let prepared = prepare_shield_in(
+        &utxos,
+        &keys,
+        Amount::from_atomic(amount),
+        fee_multiplier,
+        current_height,
+    )
+    .map_err(|e| format!("select funding note: {e}"))?;
+    println!("  Funding note:    {} atomic", prepared.input_amount().as_atomic());
+    drop(utxos);
+
+    // Resolve the funding input's ring decoys from the node — identical covered
+    // request / locator round-trip a transparent send uses.
+    let mut rng = rand::rngs::OsRng;
+    let real_outputs = prepared.real_outputs();
+    let real_locators: Vec<_> = real_outputs.iter().map(|o| o.locator()).collect();
+    let requested = build_covered_request(
+        &snapshot,
+        &real_locators,
+        prepared.ring_size(),
+        min_decoy_age,
+        &mut rng,
+    )
+    .map_err(|e| format!("build covered decoy request: {e}"))?;
+    let resolved: ResolvedDecoySnapshot = serde_json::from_value(
+        rpc_call(
+            node,
+            "get_outputs_by_locators",
+            serde_json::json!([
+                snapshot.snapshot_id().height(),
+                snapshot.snapshot_id().hash(),
+                snapshot.snapshot_id().policy_version(),
+                requested.locators(),
+            ]),
+        )
+        .await
+        .map_err(|e| format!("rpc get_outputs_by_locators: {e}"))?,
+    )
+    .map_err(|e| format!("decode resolved decoys: {e}"))?;
+    let resolved = validate_covered_response(requested, resolved)
+        .map_err(|e| format!("validate resolved decoys: {e}"))?;
+    let rings = allocate_unique_rings(resolved, &real_outputs, &mut rng)
+        .map_err(|e| format!("allocate transaction rings: {e}"))?;
+
+    // Build the signed shield-in tx (exact tx.size()-based fee inside).
+    let tx = build_prepared_shield_in(prepared, rings, fee_multiplier, &spark_seed, &mut rng)
+        .map_err(|e| format!("build shield-in: {e}"))?;
+    let tx_hash = tx.hash();
+    let tx_bytes = borsh::to_vec(&tx).map_err(|e| format!("serialize tx: {e}"))?;
+    let tx_hex = hex::encode(&tx_bytes);
+
+    println!();
+    println!("Built shield-in tx:");
+    println!("  Hash:    {}", hex::encode(tx_hash.as_bytes()));
+    println!("  Inputs:  {}", tx.inputs.len());
+    println!("  Outputs: {} (transparent change)", tx.outputs.len());
+    println!("  Size:    {} bytes", tx_bytes.len());
+    println!("  Fee:     {} atomic", tx.fee.as_atomic());
+
+    // Reserve the spent input before broadcasting so a retry can't re-select it
+    // and build a conflicting tx (mirrors the transparent `send` path).
+    let mut input_keys: Vec<(coincync::primitives::Hash, u8)> = Vec::with_capacity(tx.inputs.len());
+    for ki in tx.key_images() {
+        for utxo in &wallet.all_utxos() {
+            if utxo.key_image == ki && !utxo.spent {
+                input_keys.push((utxo.tx_hash, utxo.output_index));
+                break;
+            }
+        }
+    }
+    if input_keys.len() != tx.inputs.len() {
+        return Err(format!(
+            "internal: failed to map all tx inputs back to UTXO keys (mapped {}/{}); \
+             rescan and retry",
+            input_keys.len(),
+            tx.inputs.len()
+        ));
+    }
+    if let Err(conflict) = wallet.reserve_utxos(&input_keys, tx_hash, current_height) {
+        return Err(format!("reservation conflict: {conflict} (try `wallet scan` and retry)"));
+    }
+    if let Err(e) = wallet.save(Some(&password)) {
+        wallet.release_reservations_by_tx(tx_hash);
+        return Err(format!("save reservation: {e}"));
+    }
+
+    println!("  Submitting to {node} ...");
+    match rpc_call(node, "send_raw_transaction", serde_json::json!([tx_hex])).await {
+        Ok(resp) => {
+            let accepted = resp.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false);
+            if accepted {
+                let txid = resp.get("hash").and_then(|v| v.as_str()).unwrap_or("?");
+                println!("  [SUBMITTED] accepted into the mempool — txid {txid}");
+                println!("  Once mined, `shielded-balance` shows the new note.");
+                Ok(())
+            } else {
+                // Not accepted: release the reservation so the note is spendable again.
+                wallet.release_reservations_by_tx(tx_hash);
+                let _ = wallet.save(Some(&password));
+                Err(format!(
+                    "node rejected the shield-in: {resp}  (shielded is only active on beta \
+                     (height >= 5) and regtest (>= 100); testnet/mainnet stay off until audit)"
+                ))
+            }
+        }
+        Err(e) => {
+            wallet.release_reservations_by_tx(tx_hash);
+            let _ = wallet.save(Some(&password));
+            Err(format!("submit failed: {e}"))
+        }
     }
 }
 

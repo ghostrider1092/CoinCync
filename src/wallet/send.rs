@@ -20,7 +20,7 @@ pub use fee::{calculate_fee, estimate_fee_with_multiplier, estimate_tx_size};
 pub use legacy::create_transaction;
 pub use prepare::{prepare_privacy_transaction, prepare_privacy_transaction_with_options};
 #[cfg(feature = "libspark-ffi")]
-pub use shield::build_shield_in;
+pub use shield::{build_prepared_shield_in, build_shield_in, prepare_shield_in, PreparedShieldIn};
 pub use types::{
     CoinSelection, Payment, PreparedPrivacyTransaction, PreparedVestingTransaction, SendRequest,
     SpendContext, VestingRequest,
