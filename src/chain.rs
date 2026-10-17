@@ -4910,6 +4910,236 @@ mod tests {
         );
     }
 
+    /// REGTEST END-TO-END HARNESS for the wallet shielded path:
+    /// `shielded-mint` (shield-in) → pool → `shielded-send` (transfer) → mine →
+    /// verify, driven through the REAL chain block hooks with the REAL wallet
+    /// builders — the thing the per-leg unit tests don't cover together.
+    ///
+    /// Unlike the node-side hook test above (which mints a full cover set in one
+    /// `build_mint_payload` with empty transparent inputs), this exercises the
+    /// WALLET's `build_shield_in`: a real transparent CLSAG spend whose
+    /// `value_balance < 0` must pass the transparent↔shielded value bridge in
+    /// `verify_block_spark_v2`, and whose mint bundle (bound to the input's key
+    /// image) must re-derive the identical serial context in `apply_spark_v2_txs`.
+    ///
+    /// It also pins the `tx.fee == 0` rule for a pure shielded transfer: the
+    /// pool-internal fee lives inside the libspark bundle, and a non-zero
+    /// transparent `tx.fee` with no transparent inputs would fail the bridge (the
+    /// bug this harness is built to catch).
+    ///
+    /// Shielded activation is NOT lowered here (that edits hash-locked
+    /// validation.rs to turn on unaudited crypto); the hooks are called directly,
+    /// exactly as the soak + hook tests do.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn regtest_wallet_shield_in_then_transfer_end_to_end() {
+        use crate::consensus::spark_payload::{SparkPayload, SpendBundle, SPARK_PAYLOAD_VERSION};
+        use crate::crypto::{BlindingFactor, PedersenCommitment, SecretScalar};
+        use crate::primitives::{Amount, Hash, PublicKey, SecretKey};
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{DecoyOutput, SpendableInput, Transaction, TxType};
+        use crate::wallet::send::build_shield_in;
+        use spark_connector::ffi::{
+            address_from_seed, build_spend_to_address, cover_set_size, serial_context,
+            spend_outputs, LibsparkBackend,
+        };
+        use spark_connector::{CoinBytes, SparkBackend};
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new();
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+
+        let backend = LibsparkBackend;
+        let wallet_seed = b"regtest-e2e-wallet-spark-seed";
+        let shield_atomic = 10_000_000u64;
+        let anchor_height = 1u64;
+        let mut rng = rand::rngs::OsRng;
+
+        // A distinct synthetic transparent UTXO for each shield-in (distinct
+        // one-time secret ⇒ distinct key image ⇒ distinct mint serial context).
+        let synth_input = |tag: u8| -> SpendableInput {
+            SpendableInput {
+                tx_hash: Hash::from_bytes([tag; 32]),
+                output_index: 0,
+                amount: Amount::from_atomic(50_000_000),
+                one_time_secret: SecretKey::from_bytes([tag; 32]),
+                blinding: BlindingFactor::from_bytes([tag ^ 0x0F; 32]),
+                height: anchor_height,
+            }
+        };
+        // A ring of valid (non-identity) decoy points; `build_shield_in` inserts
+        // the real at a random position. Ring size 11 (bootstrap).
+        let mut decoys = |rng: &mut rand::rngs::OsRng| -> Vec<DecoyOutput> {
+            (0..10)
+                .map(|_| DecoyOutput {
+                    public_key: PublicKey::from_bytes(SecretScalar::random(rng).to_public().to_bytes()),
+                    commitment: PedersenCommitment::commit(0, &BlindingFactor::random(rng)).to_bytes(),
+                    height: anchor_height,
+                })
+                .collect()
+        };
+        let change_spend = SecretKey::from_bytes([0x42; 32]).public_key();
+        let change_view = SecretKey::from_bytes([0x43; 32]).public_key();
+
+        // ── 1. SHIELD-IN × N: fill a full cover set via the wallet builder ──────
+        let n = cover_set_size().expect("cover set size");
+        for i in 0..n {
+            let mint_tx = build_shield_in(
+                &change_spend,
+                &change_view,
+                synth_input(0x10 + i as u8),
+                decoys(&mut rng),
+                Amount::from_atomic(shield_atomic),
+                Amount::from_atomic(1_000_000),
+                anchor_height,
+                wallet_seed,
+                &mut rng,
+            )
+            .expect("wallet shield-in builds");
+            assert_eq!(mint_tx.tx_type, TxType::Shielded);
+            // The REAL verify hook: transparent↔shielded bridge + authenticated
+            // mint. A non-zero transparent fee with no backing would fail here.
+            chain
+                .verify_block_spark_v2(std::slice::from_ref(&mint_tx))
+                .unwrap_or_else(|e| panic!("shield-in {i} rejected by verify hook: {e}"));
+            let before = store.coin_count();
+            chain.apply_spark_v2_txs(std::slice::from_ref(&mint_tx), anchor_height);
+            assert_eq!(
+                store.coin_count(),
+                before + 1,
+                "shield-in {i} fed exactly one note into the pool"
+            );
+        }
+        assert_eq!(store.coin_count(), n, "pool holds a full cover set after N shield-ins");
+        assert_eq!(
+            store.pool_value(),
+            (n as i128) * shield_atomic as i128,
+            "pool value equals the total shielded-in amount"
+        );
+
+        // ── 2. BALANCE: the wallet seed recovers every one of its notes ─────────
+        let entries = store.cover_entries_at(0, anchor_height);
+        let mut owned: Vec<(usize, Vec<u8>)> = Vec::new();
+        for (idx, (_op, coin, ctx, _h)) in entries.iter().enumerate() {
+            match backend.identify(wallet_seed, &CoinBytes(coin.clone()), ctx) {
+                Ok(Some(id)) => {
+                    assert_eq!(id.value, shield_atomic, "owned note value matches the shield-in");
+                    owned.push((idx, ctx.clone()));
+                }
+                other => panic!("wallet failed to recover its own note at {idx}: {other:?}"),
+            }
+        }
+        assert!(owned.len() >= 2, "need ≥2 owned notes for the transfer + fee-rule checks");
+        let (spend_index, owned_ctx) = owned[0].clone();
+        let cover_coins = store.cover_set_at(0, anchor_height);
+        let recipient_seed = b"regtest-e2e-recipient-spark-seed";
+        let recipient_addr = address_from_seed(recipient_seed).expect("recipient address");
+
+        // ── 2.5 FEE RULE (regression guard): a shielded transfer with a non-zero
+        //      transparent tx.fee is REJECTED by the value bridge. The
+        //      pool-internal fee lives inside the bundle; a transparent fee with
+        //      no transparent inputs breaks `Σ pseudo == Σ out + (fee)·H`. Uses an
+        //      independent, still-unspent note so the rejection is the fee, not a
+        //      double-spend. ──────────────────────────────────────────────────
+        {
+            let (bad_index, bad_ctx) = owned[1].clone();
+            let bad_bundle = build_spend_to_address(
+                wallet_seed,
+                &cover_coins,
+                bad_index,
+                &bad_ctx,
+                4_000_000,
+                &recipient_addr,
+            )
+            .expect("build throwaway transfer bundle");
+            let bad_payload = SparkPayload {
+                version: SPARK_PAYLOAD_VERSION,
+                mint: None,
+                outputs: vec![],
+                spend: Some(SpendBundle { cover_set_id: 0, anchor_height, bundle: bad_bundle.0 }),
+                value_balance: 0,
+            };
+            let bad_tx = Transaction {
+                version: 1,
+                tx_type: TxType::Shielded,
+                inputs: vec![],
+                outputs: vec![],
+                fee: Amount::from_atomic(1_000_000), // non-zero → bridge must reject
+                range_proof: vec![],
+                extra: bad_payload.encode(),
+            };
+            assert!(
+                chain.verify_block_spark_v2(std::slice::from_ref(&bad_tx)).is_err(),
+                "a pure shielded transfer with non-zero transparent tx.fee must be rejected"
+            );
+        }
+
+        // ── 3. SEND: shielded→shielded transfer to recipient B (wallet path) ────
+        let output_value = 4_000_000u64; // < note value; remainder is the in-bundle fee
+        let bundle = build_spend_to_address(
+            wallet_seed,
+            &cover_coins,
+            spend_index,
+            &owned_ctx,
+            output_value,
+            &recipient_addr,
+        )
+        .expect("wallet builds the transfer bundle");
+
+        // Wrap exactly as `shielded_send_live` does: value_balance 0, transparent
+        // tx.fee 0 (the pool-internal fee is inside the bundle).
+        let payload = SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![],
+            spend: Some(SpendBundle {
+                cover_set_id: 0,
+                anchor_height,
+                bundle: bundle.0.clone(),
+            }),
+            value_balance: 0,
+        };
+        let transfer_tx = Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: payload.encode(),
+        };
+
+        chain
+            .verify_block_spark_v2(std::slice::from_ref(&transfer_tx))
+            .expect("transfer accepted by verify hook (tx.fee == 0, value bridge holds)");
+        let coins_before = store.coin_count();
+        chain.apply_spark_v2_txs(std::slice::from_ref(&transfer_tx), 2);
+        assert!(
+            store.coin_count() > coins_before,
+            "transfer's output coin fed into the pool"
+        );
+
+        // ── 4. VERIFY: recipient recovers the output, sender does not; the spend
+        //      is now a double-spend and is rejected ───────────────────────────
+        let (out_coins, out_ctx) = spend_outputs(&bundle.0).expect("transfer output coins");
+        let recipient_recovers = out_coins
+            .iter()
+            .any(|c| matches!(backend.identify(recipient_seed, c, &out_ctx), Ok(Some(_))));
+        assert!(recipient_recovers, "recipient B recovers the transferred note");
+        let sender_recovers = out_coins
+            .iter()
+            .any(|c| matches!(backend.identify(wallet_seed, c, &out_ctx), Ok(Some(_))));
+        assert!(!sender_recovers, "sender does not recover the recipient's note");
+
+        assert!(
+            chain
+                .verify_block_spark_v2(std::slice::from_ref(&transfer_tx))
+                .is_err(),
+            "replaying the transfer is rejected (double-spend guard: tag already spent)"
+        );
+    }
+
     /// IN-BLOCK shielded-consensus SOAK. Drives mint → spend → double-spend →
     /// reorg cycles through the real chain block hooks (verify_block_spark_v2 →
     /// apply_spark_v2_txs, with checkpoint/rewind) using real libspark proofs,

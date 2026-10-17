@@ -2479,9 +2479,21 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
     // Assemble a submittable shielded Transaction — a `TxType::Shielded` tx whose
     // `extra` is the v2 `SparkPayload` (mirrors the node-side builder's wrap:
     // consensus/spark_payload.rs build_spend_payload_inner). cover_set_id is 0
-    // (the single pool), anchor_height is the set we built against, fee = input −
-    // output, value_balance = 0 (nothing crosses the veil on a transfer).
-    let fee = chosen_value.saturating_sub(amount);
+    // (the single pool), anchor_height is the set we built against, value_balance
+    // = 0 (nothing crosses the veil on a pool→pool transfer).
+    //
+    // tx.fee MUST be 0 for a pure shielded transfer. The pool-internal fee
+    // (input − output) is carried and proven INSIDE the libspark spend bundle
+    // (libspark SpendTransaction fee = input_value − output_value; see
+    // crates/spark-connector/csrc/shim.cpp). The transparent `tx.fee` is a
+    // SEPARATE, transparent-side value: with no transparent inputs/outputs and
+    // value_balance 0, the consensus value bridge requires `fee·H == identity`,
+    // i.e. tx.fee == 0 (chain::verify_transparent_shielded_balance). Setting
+    // tx.fee to the pool-internal fee here would make a mined block carrying
+    // this tx fail the bridge even though the mempool (structural-only) admits
+    // it. (NOTE: the pool-internal fee burns the funding note's remainder — a
+    // self-change output is a follow-up; pick a note close to `amount`.)
+    let pool_fee = chosen_value.saturating_sub(amount);
     let payload = coincync::consensus::spark_payload::SparkPayload {
         version: coincync::consensus::spark_payload::SPARK_PAYLOAD_VERSION,
         mint: None,
@@ -2498,13 +2510,13 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
         tx_type: coincync::transaction::TxType::Shielded,
         inputs: vec![],
         outputs: vec![],
-        fee: coincync::primitives::Amount::from_atomic(fee),
+        fee: coincync::primitives::Amount::from_atomic(0),
         range_proof: vec![],
         extra: payload.encode(),
     };
     let tx_hex = hex::encode(borsh::to_vec(&tx).map_err(|e| format!("encode shielded tx: {e}"))?);
 
-    println!("  Fee:             {fee} atomic");
+    println!("  Pool fee (in-bundle): {pool_fee} atomic (transparent tx.fee = 0)");
     println!("  Submitting to {node} ...");
     match rpc_call(node, "send_raw_transaction", serde_json::json!([tx_hex])).await {
         Ok(resp) => {
