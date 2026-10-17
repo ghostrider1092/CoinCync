@@ -393,14 +393,34 @@ impl RecipientKeys {
         tx_valid & matches
     }
 
-    /// Scan a batch of outputs and return indices of owned outputs
+    /// Scan a batch of outputs and return indices of owned outputs.
+    ///
+    /// Each output's ownership check (`owns` — EC work) is independent, so large
+    /// batches (block / chain scan) are verified in parallel across cores. This is
+    /// WALLET-LOCAL — not consensus — so there is no determinism tax and no gating:
+    /// rayon's *ordered* `collect` on an indexed parallel iterator preserves the
+    /// serial index order, so the parallel result is identical to the serial one
+    /// (proven by `parallel_scan_matches_serial_and_is_correct`). Small batches
+    /// stay serial to avoid rayon's fork/join overhead.
     pub fn scan_outputs(&self, outputs: &[(StealthAddress, u8)]) -> Vec<usize> {
-        outputs
-            .iter()
-            .enumerate()
-            .filter(|(_, (stealth, idx))| self.owns(stealth, *idx))
-            .map(|(i, _)| i)
-            .collect()
+        /// Below this many outputs, serial wins (rayon fork/join overhead > work).
+        const PARALLEL_SCAN_THRESHOLD: usize = 64;
+        if outputs.len() < PARALLEL_SCAN_THRESHOLD {
+            outputs
+                .iter()
+                .enumerate()
+                .filter(|(_, (stealth, idx))| self.owns(stealth, *idx))
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            use rayon::prelude::*;
+            outputs
+                .par_iter()
+                .enumerate()
+                .filter(|(_, (stealth, idx))| self.owns(stealth, *idx))
+                .map(|(i, _)| i)
+                .collect()
+        }
     }
 
     /// Get the spend public key
@@ -1446,6 +1466,52 @@ mod tests {
 
         let found = scan_outputs(&outputs, &view_secret, &spend_public).unwrap();
         assert_eq!(found.len(), 5);
+    }
+
+    /// Determinism: the parallel scan path (outputs ≥ PARALLEL_SCAN_THRESHOLD)
+    /// returns the IDENTICAL ordered index list as the serial path, and exactly
+    /// the owned outputs. rayon's ordered collect preserves index order, so there
+    /// is no non-determinism — this pins that guarantee.
+    #[test]
+    fn parallel_scan_matches_serial_and_is_correct() {
+        let (_our_spend_sec, our_spend_pub) = generate_ec_keypair();
+        let (our_view_sec, our_view_pub) = generate_ec_keypair();
+        let (_oth_spend_sec, oth_spend_pub) = generate_ec_keypair();
+        let (_oth_view_sec, oth_view_pub) = generate_ec_keypair();
+
+        // 90 outputs (> PARALLEL_SCAN_THRESHOLD = 64) so the parallel path runs;
+        // every 3rd is ours, the rest a different recipient's.
+        let mut outputs: Vec<(StealthAddress, u8)> = Vec::new();
+        let mut expected: Vec<usize> = Vec::new();
+        for i in 0..90u8 {
+            let (stealth, _) = if i % 3 == 0 {
+                expected.push(i as usize);
+                generate_stealth_address(&our_spend_pub, &our_view_pub, i, &mut OsRng)
+            } else {
+                generate_stealth_address(&oth_spend_pub, &oth_view_pub, i, &mut OsRng)
+            };
+            outputs.push((stealth, i));
+        }
+        let keys = RecipientKeys::new(&our_view_sec, &our_spend_pub).unwrap();
+
+        // Serial reference (the pre-parallel logic).
+        let serial: Vec<usize> = outputs
+            .iter()
+            .enumerate()
+            .filter(|(_, (s, idx))| keys.owns(s, *idx))
+            .map(|(i, _)| i)
+            .collect();
+        // Parallel path (len >= threshold).
+        let parallel = keys.scan_outputs(&outputs);
+
+        assert_eq!(
+            parallel, serial,
+            "parallel scan must equal serial scan, in order"
+        );
+        assert_eq!(
+            parallel, expected,
+            "scan must find exactly the owned outputs, in order"
+        );
     }
 
     #[test]
