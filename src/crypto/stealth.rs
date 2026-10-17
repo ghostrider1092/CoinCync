@@ -1504,8 +1504,14 @@ mod tests {
         // Parallel path (len >= threshold).
         let parallel = keys.scan_outputs(&outputs);
 
-        assert_eq!(parallel, serial, "parallel scan must equal serial scan, in order");
-        assert_eq!(parallel, expected, "scan must find exactly the owned outputs, in order");
+        assert_eq!(
+            parallel, serial,
+            "parallel scan must equal serial scan, in order"
+        );
+        assert_eq!(
+            parallel, expected,
+            "scan must find exactly the owned outputs, in order"
+        );
     }
 
     #[test]
