@@ -759,6 +759,85 @@ pub fn verify_range_proofs_bp_plus(commitments: &[PedersenCommitment], proof: &R
     .is_ok()
 }
 
+/// EXPERIMENTAL (regtest, gated — #regtest-batch-range-verify). Batch-verify
+/// multiple INDEPENDENT range-proof items in ONE BP+ multiexp instead of a
+/// `verify_batch` call per item. Each item is a commitment set + its proof.
+/// Returns `true` iff EVERY item verifies — all-or-nothing, matching "a block is
+/// invalid if any one range proof is". An empty batch is vacuously true; any
+/// structural fault (bad bytes, decompress, params) returns `false`, exactly like
+/// the per-item verifiers.
+///
+/// CRITICAL (determinism): each entry's transcript label and statement form MUST
+/// match what the per-item verifier uses — a single commitment takes the
+/// single-proof transcript + `params(1)`; multiple take the aggregated transcript
+/// + padded params — or batch ≠ serial. The property test
+/// `batch_verify_matches_serial` enforces that equivalence. NOT wired into
+/// consensus: the block-validation seam lands only after this proves out on
+/// regtest (default stays the serial per-item path).
+pub fn verify_range_proofs_batch(items: &[(&[PedersenCommitment], &RangeProof)]) -> bool {
+    if items.is_empty() {
+        return true;
+    }
+    let mut transcripts = Vec::with_capacity(items.len());
+    let mut statements = Vec::with_capacity(items.len());
+    let mut proofs = Vec::with_capacity(items.len());
+
+    for (commitments, proof) in items {
+        if commitments.is_empty()
+            || proof.is_empty()
+            || proof.version != RANGE_PROOF_VERSION_BP_PLUS
+        {
+            return false;
+        }
+        let bp_proof = match BpPlusProof::<RistrettoPoint>::from_bytes(&proof.data) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let real = commitments.len();
+        // Consensus convention (verify_output_range_proofs): the builder ALWAYS
+        // uses prove_multiple, so EVERY tx range proof — even single-output — is an
+        // AGGREGATED proof, verified with the aggregated transcript label + padded
+        // statement (`verify_range_proofs`). Mirror that for every item so batch ==
+        // the serial path consensus actually uses. (An earlier revision dispatched
+        // single vs aggregated by count and would have rejected valid single-output
+        // txs in consensus — caught before wiring.)
+        let padded = next_power_of_two(real);
+        let mut points = Vec::with_capacity(padded);
+        for c in *commitments {
+            match c.as_point().decompress() {
+                Some(p) => points.push(p),
+                None => return false,
+            }
+        }
+        if padded > real {
+            let identity = match PedersenCommitment::commit(0, &BlindingFactor::from_bytes([0u8; 32]))
+                .as_point()
+                .decompress()
+            {
+                Some(p) => p,
+                None => return false,
+            };
+            for _ in real..padded {
+                points.push(identity);
+            }
+        }
+        let params = match bp_plus_params(padded) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let statement = match BpPlusStatement::init(params, points, vec![None; padded], None) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        transcripts.push(Transcript::new(b"CoinCync_AggregatedRangeProof_BPPlus"));
+        statements.push(statement);
+        proofs.push(bp_proof);
+    }
+
+    BpPlusProof::verify_batch(&mut transcripts, &statements, &proofs, VerifyAction::VerifyOnly)
+        .is_ok()
+}
+
 // ─── Height-aware dispatch ──────────────────────────────────────────────────
 
 /// Create a single range proof, dispatching to BP+ or standard based on height.
@@ -840,6 +919,204 @@ pub fn verify_range_proofs_dispatch(
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+
+    /// EXPERIMENT (regtest-batch-range-verify): the determinism-equivalence gate.
+    /// `verify_range_proofs_batch` must accept EXACTLY the sets the per-item serial
+    /// verifier accepts — mirroring the single-vs-aggregated transcript label and
+    /// statement form per item — and must reject any set containing a bad proof.
+    /// If this ever fails, the batch path is unsound and gets deleted (it is NOT
+    /// wired into consensus; the serial path stays the default).
+    #[test]
+    fn batch_verify_matches_serial() {
+        let mut rng = OsRng;
+
+        // Consensus convention: EVERY tx range proof is aggregated (the builder
+        // always uses prove_multiple), so the serial oracle is verify_range_proofs
+        // for every item — exactly what verify_output_range_proofs calls — and
+        // every proof below is built with create_aggregated_range_proof, even the
+        // single-output ones.
+        let serial = |it: &(&[PedersenCommitment], &RangeProof)| -> bool {
+            verify_range_proofs(it.0, it.1)
+        };
+
+        // Two single-output aggregated proofs + one 2-output aggregated proof.
+        let b1 = [BlindingFactor::random(&mut rng)];
+        let p1 = create_aggregated_range_proof(&[Amount::from_atomic(1_000)], &b1, &mut rng).unwrap();
+        let c1 = [PedersenCommitment::commit(1_000, &b1[0])];
+
+        let b2 = [BlindingFactor::random(&mut rng)];
+        let p2 = create_aggregated_range_proof(&[Amount::from_atomic(42)], &b2, &mut rng).unwrap();
+        let c2 = [PedersenCommitment::commit(42, &b2[0])];
+
+        let ab = [BlindingFactor::random(&mut rng), BlindingFactor::random(&mut rng)];
+        let amts = [Amount::from_atomic(7), Amount::from_atomic(9)];
+        let pagg = create_aggregated_range_proof(&amts, &ab, &mut rng).unwrap();
+        let cagg = [
+            PedersenCommitment::commit(7, &ab[0]),
+            PedersenCommitment::commit(9, &ab[1]),
+        ];
+
+        let good: Vec<(&[PedersenCommitment], &RangeProof)> =
+            vec![(&c1[..], &p1), (&c2[..], &p2), (&cagg[..], &pagg)];
+        assert!(good.iter().all(serial), "all proofs must verify serially");
+        assert!(
+            verify_range_proofs_batch(&good),
+            "batch must accept what serial accepts"
+        );
+
+        // Corrupt the middle proof: serial and batch must BOTH reject the set.
+        let mut bad_p2 = p2.clone();
+        *bad_p2.data.last_mut().unwrap() ^= 0x01;
+        let bad: Vec<(&[PedersenCommitment], &RangeProof)> =
+            vec![(&c1[..], &p1), (&c2[..], &bad_p2), (&cagg[..], &pagg)];
+        assert!(!bad.iter().all(serial), "a corrupt proof must fail serially");
+        assert!(
+            !verify_range_proofs_batch(&bad),
+            "batch must reject any set with a bad proof"
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 16,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// Determinism gate (property form, #regtest-batch-range-verify): over
+        /// random mixes of single (1 commitment) and aggregated (2) range proofs,
+        /// with optional one-proof corruption, the batch verifier's verdict MUST
+        /// equal the per-item serial verifier's verdict on every generated set —
+        /// both directions at once (all-valid → both accept; any-corrupt → both
+        /// reject). If this ever fails the batch path is unsound and gets deleted;
+        /// it is NOT wired into consensus.
+        #[test]
+        fn batch_equivalent_to_serial_prop(
+            specs in proptest::collection::vec(
+                proptest::collection::vec(0u64..1_000_000u64, 1..=2usize),
+                1..=5usize,
+            ),
+            corrupt in proptest::option::of(0usize..8usize),
+        ) {
+            let mut rng = OsRng;
+
+            // Consensus convention: build EVERY proof as aggregated (prove_multiple),
+            // even single-output ones — 1..=2 outputs each.
+            let mut owned: Vec<(Vec<PedersenCommitment>, RangeProof)> = Vec::new();
+            for amounts in &specs {
+                let blindings: Vec<BlindingFactor> =
+                    amounts.iter().map(|_| BlindingFactor::random(&mut rng)).collect();
+                let commitments: Vec<PedersenCommitment> = amounts
+                    .iter()
+                    .zip(&blindings)
+                    .map(|(a, b)| PedersenCommitment::commit(*a, b))
+                    .collect();
+                let amts: Vec<Amount> = amounts.iter().map(|a| Amount::from_atomic(*a)).collect();
+                let proof = create_aggregated_range_proof(&amts, &blindings, &mut rng).unwrap();
+                owned.push((commitments, proof));
+            }
+
+            // Optionally corrupt one proof so ~half the cases are invalid sets.
+            if let Some(i) = corrupt {
+                let idx = i % owned.len();
+                if let Some(byte) = owned[idx].1.data.last_mut() {
+                    *byte ^= 0x01;
+                }
+            }
+
+            let items: Vec<(&[PedersenCommitment], &RangeProof)> =
+                owned.iter().map(|(c, p)| (&c[..], p)).collect();
+
+            // Serial oracle = the aggregated verifier consensus uses for every tx.
+            let serial = items.iter().all(|it| verify_range_proofs(it.0, it.1));
+            let batch = verify_range_proofs_batch(&items);
+            proptest::prop_assert_eq!(serial, batch, "batch verdict must equal serial verdict");
+        }
+    }
+
+    /// Benchmark (keep/delete decider): batch vs the serial path consensus ACTUALLY
+    /// uses — which is cached (`verify_output_range_proofs` checks the bulletproof
+    /// cache first). Per N aggregated single-output proofs:
+    ///   - cold serial = cache-MISS (first-see: new block / mempool)
+    ///   - warm serial = cache-HIT  (re-validation during sync — the hot path)
+    ///   - batch       = one multiexp, NO cache
+    /// `vs_warm` is decisive: if batch >> warm serial, the cache already beats batch
+    /// on the sync path and wiring batch would REGRESS it.
+    /// `#[ignore]`; run explicitly:
+    ///   cargo test --release --lib --features testnet \
+    ///     bench_batch_vs_serial_range_proofs -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_batch_vs_serial_range_proofs() {
+        use std::time::Instant;
+        let mut rng = OsRng;
+
+        // The cached serial path, mirroring verify_output_range_proofs.
+        let serial_cached = |commitments: &[PedersenCommitment], proof: &RangeProof| -> bool {
+            let commitment_bytes: Vec<u8> = commitments.iter().flat_map(|c| c.to_bytes()).collect();
+            let key = crate::crypto::proof_cache_key(&proof.data, &commitment_bytes);
+            let cache = crate::crypto::global_cache();
+            if let Some(hit) = cache.check_bulletproof(&key) {
+                return hit;
+            }
+            let valid = verify_range_proofs(commitments, proof);
+            cache.cache_bulletproof(key, valid);
+            valid
+        };
+
+        // Warm the BP+ params cache (one-time generator gen).
+        {
+            let b = [BlindingFactor::random(&mut rng)];
+            let p = create_aggregated_range_proof(&[Amount::from_atomic(1)], &b, &mut rng).unwrap();
+            let c = [PedersenCommitment::commit(1, &b[0])];
+            let _ = verify_range_proofs(&c, &p);
+            let _ = verify_range_proofs_batch(&[(&c[..], &p)]);
+        }
+
+        eprintln!(
+            "{:>6} {:>12} {:>12} {:>11} {:>9} {:>9}",
+            "N", "cold_ser", "warm_ser", "batch", "vs_cold", "vs_warm"
+        );
+        for &n in &[1usize, 4, 16, 64, 256] {
+            let mut owned: Vec<(Vec<PedersenCommitment>, RangeProof)> = Vec::with_capacity(n);
+            for i in 0..n {
+                let v = 1_000 + i as u64;
+                let b = [BlindingFactor::random(&mut rng)];
+                let p =
+                    create_aggregated_range_proof(&[Amount::from_atomic(v)], &b, &mut rng).unwrap();
+                owned.push((vec![PedersenCommitment::commit(v, &b[0])], p));
+            }
+            let items: Vec<(&[PedersenCommitment], &RangeProof)> =
+                owned.iter().map(|(c, p)| (&c[..], p)).collect();
+
+            // Cold: cache-miss, single pass (first-see cost).
+            let t = Instant::now();
+            assert!(items.iter().all(|it| serial_cached(it.0, it.1)));
+            let cold_ser = t.elapsed().as_micros();
+
+            // Warm: now cached → all hits. Average over many passes.
+            let warm_iters = 50u32;
+            let t = Instant::now();
+            for _ in 0..warm_iters {
+                assert!(items.iter().all(|it| serial_cached(it.0, it.1)));
+            }
+            let warm_ser = t.elapsed().as_micros() / warm_iters as u128;
+
+            // Batch: no cache. Average over a few passes.
+            let batch_iters: u32 = if n >= 64 { 3 } else { 10 };
+            let t = Instant::now();
+            for _ in 0..batch_iters {
+                assert!(verify_range_proofs_batch(&items));
+            }
+            let batch = t.elapsed().as_micros() / batch_iters as u128;
+
+            let vs_cold = cold_ser as f64 / batch.max(1) as f64;
+            let vs_warm = warm_ser as f64 / batch.max(1) as f64;
+            eprintln!(
+                "{:>6} {:>12} {:>12} {:>11} {:>8.2}x {:>8.3}x",
+                n, cold_ser, warm_ser, batch, vs_cold, vs_warm
+            );
+        }
+    }
 
     /// AUDIT ANCHOR (crypto H1): the value generator `H` is a hardcoded 32-byte
     /// literal (here and duplicated in `crypto::curve::generator_h`). Every
