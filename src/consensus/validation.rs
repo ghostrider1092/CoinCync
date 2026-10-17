@@ -4994,6 +4994,52 @@ mod tests {
         assert!(!shielded_root_permitted(&[9u8; 32], N, 123_456));
     }
 
+    /// A wallet-shaped v2 shielded SPEND tx — `SparkPayload { spend: SpendBundle }`
+    /// in `tx.extra`, exactly what `shielded-send` now assembles and submits via
+    /// `send_raw_transaction` — must pass the stateless mempool admit when shielded
+    /// is active, and be gated off otherwise. The bundle bytes are opaque here; the
+    /// stateless check only routes a well-formed v2 payload to the authoritative
+    /// block-level verify (`verify_block_spark_v2`).
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn wallet_shaped_v2_shielded_spend_is_admitted_when_active_and_gated_otherwise() {
+        use crate::config::NetworkType;
+        use crate::consensus::spark_payload::{SparkPayload, SpendBundle, SPARK_PAYLOAD_VERSION};
+
+        let payload = SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![],
+            spend: Some(SpendBundle { cover_set_id: 0, anchor_height: 10, bundle: vec![1, 2, 3, 4] }),
+            value_balance: 0,
+        };
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(5),
+            range_proof: vec![],
+            extra: payload.encode(),
+        };
+        // Beta activates shielded at height 5 → the wallet's spend tx is admitted
+        // (then it faces the authoritative block-level verify).
+        assert!(
+            check_shielded_tx(&tx, NetworkType::Beta, 5).is_ok(),
+            "an active-net v2 spend must pass the stateless mempool admit"
+        );
+        // Below beta activation → gated off.
+        assert!(
+            check_shielded_tx(&tx, NetworkType::Beta, 4).is_err(),
+            "must be gated below the activation height"
+        );
+        // Testnet/mainnet never activate (u64::MAX) → always rejected.
+        assert!(
+            check_shielded_tx(&tx, NetworkType::Testnet, 1_000_000).is_err(),
+            "testnet stays off at u64::MAX"
+        );
+    }
+
     // ── validate_transaction_basic granular gates ───────────────────────
 
     fn basic_transfer(ring_size: usize) -> Transaction {

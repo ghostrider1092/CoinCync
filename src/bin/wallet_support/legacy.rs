@@ -2265,7 +2265,54 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
 
     println!("  Funding note:    value {chosen_value} atomic at cover index {spend_index}");
     report_built_transfer(to, amount, cover_coins.len(), 1, tags.len(), spend.0.len());
-    Ok(())
+
+    // Assemble a submittable shielded Transaction — a `TxType::Shielded` tx whose
+    // `extra` is the v2 `SparkPayload` (mirrors the node-side builder's wrap:
+    // consensus/spark_payload.rs build_spend_payload_inner). cover_set_id is 0
+    // (the single pool), anchor_height is the set we built against, fee = input −
+    // output, value_balance = 0 (nothing crosses the veil on a transfer).
+    let fee = chosen_value.saturating_sub(amount);
+    let payload = coincync::consensus::spark_payload::SparkPayload {
+        version: coincync::consensus::spark_payload::SPARK_PAYLOAD_VERSION,
+        mint: None,
+        outputs: vec![],
+        spend: Some(coincync::consensus::spark_payload::SpendBundle {
+            cover_set_id: 0,
+            anchor_height,
+            bundle: spend.0.clone(),
+        }),
+        value_balance: 0,
+    };
+    let tx = coincync::transaction::Transaction {
+        version: 1,
+        tx_type: coincync::transaction::TxType::Shielded,
+        inputs: vec![],
+        outputs: vec![],
+        fee: coincync::primitives::Amount::from_atomic(fee),
+        range_proof: vec![],
+        extra: payload.encode(),
+    };
+    let tx_hex = hex::encode(borsh::to_vec(&tx).map_err(|e| format!("encode shielded tx: {e}"))?);
+
+    println!("  Fee:             {fee} atomic");
+    println!("  Submitting to {node} ...");
+    match rpc_call(node, "send_raw_transaction", serde_json::json!([tx_hex])).await {
+        Ok(resp) => {
+            let accepted = resp.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false);
+            if accepted {
+                let txid = resp.get("hash").and_then(|v| v.as_str()).unwrap_or("?");
+                println!("  [SUBMITTED] accepted into the mempool — txid {txid}");
+            } else {
+                println!("  node response: {resp}");
+            }
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "submit failed: {e}  (a rejection usually means shielded is not active on this \
+             network — only beta (activates @ height 5) and regtest (@ 100) activate; \
+             testnet/mainnet stay off at u64::MAX until the audit)"
+        )),
+    }
 }
 
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
@@ -2285,11 +2332,6 @@ fn report_built_transfer(
     println!("  Output coins:    {output_coins}");
     println!("  Nullifier tags:  {tags} (funding note spent)");
     println!("  Bundle size:     {bundle_len} bytes");
-    println!();
-    println!(
-        "NOTE: not submitted — live shielded submission awaits activation and a shielded \
-         submission RPC. The cover set was fetched from the node; the spend is ready to submit."
-    );
 }
 
 /// Fetch the node's anchored Spark cover set (`get_shielded_cover_set`) and scan
