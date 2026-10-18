@@ -432,6 +432,43 @@ static secp_primitives::Scalar seed_to_r(const unsigned char* seed, int seed_len
     return h.finalize_scalar();
 }
 
+// Derive the linking tag (Spark `T`) of a coin OWNED by the `seed` wallet, bound
+// to serial context `ctx` (the same context it was minted with). This is the
+// nullifier the coin would reveal when spent; a wallet checks it against the
+// pool's spent-tag set to exclude an already-spent note from its balance (a
+// spent coin's bytes remain in the cover set, so view-key identification alone
+// over-counts). Serializes `T` (GroupElement::serialize_size bytes) into `out`;
+// returns the length, or -1 on error / not-owned / insufficient capacity.
+int spark_ffi_coin_ltag(const unsigned char* seed, int seed_len,
+                        const unsigned char* coin_ptr, int coin_len,
+                        const unsigned char* ctx_ptr, int ctx_len,
+                        unsigned char* out, int cap) {
+    try {
+        const spark::Params* params = spark::Params::get_test();
+        spark::SpendKey spend_key(params, seed_to_r(seed, seed_len));
+        spark::FullViewKey full_view_key(spend_key);
+        spark::IncomingViewKey incoming_view_key(full_view_key);
+
+        spark::Coin coin(params);
+        CDataStream in((const char*)coin_ptr, (const char*)coin_ptr + coin_len,
+                       SER_NETWORK, PROTOCOL_VERSION);
+        in >> coin;
+        coin.setParams(params);
+        std::vector<unsigned char> ctx(ctx_ptr, ctx_ptr + ctx_len);
+        coin.setSerialContext(ctx);
+
+        spark::IdentifiedCoinData id = coin.identify(incoming_view_key);
+        spark::RecoveredCoinData rec = coin.recover(full_view_key, id);
+
+        const int enc = (int)GroupElement::serialize_size;
+        if (enc > cap) return -1;
+        rec.T.serialize(out);
+        return enc;
+    } catch (...) {
+        return -1;
+    }
+}
+
 // The bech32m address of the wallet derived from `seed`. Returns length or -1.
 int spark_ffi_address_from_seed(const unsigned char* seed, int seed_len, unsigned char* out, int cap) {
     try {

@@ -2708,11 +2708,31 @@ async fn scan_live_cover_set(
     use spark_connector::{CoinBytes, SparkBackend};
 
     let (anchor_height, entries, cover_coins) = fetch_live_cover_set(node).await?;
-    // Scan the fetched set for coins this wallet owns (seed-based).
+    // Scan the fetched set for coins this wallet owns (seed-based), EXCLUDING
+    // already-spent notes. A spent coin's bytes remain in the cover set, so
+    // identifying it by view key is not enough — we derive each owned coin's
+    // linking tag and ask the node whether it is in the spent set. This keeps
+    // the balance from double-counting a spent note (e.g. a transfer's funding
+    // note after it is spent) and stops `shielded-send` from picking a spent one.
     let backend = LibsparkBackend;
     let mut owned: Vec<(usize, u64, Vec<u8>)> = Vec::new(); // (spend_index, value, ctx)
     for (pos, (_, coin, ctx)) in entries.iter().enumerate() {
         if let Ok(Some(id)) = backend.identify(seed, &CoinBytes(coin.clone()), ctx) {
+            // Exclude if this note's linking tag is already spent on-chain.
+            if let Some(tag) = spark_connector::ffi::coin_ltag(seed, &CoinBytes(coin.clone()), ctx) {
+                let spent = rpc_call(
+                    node,
+                    "is_spark_pool_tag_spent",
+                    serde_json::json!([hex::encode(&tag.0)]),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.get("spent").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+                if spent {
+                    continue;
+                }
+            }
             owned.push((pos, id.value, ctx.clone()));
         }
     }

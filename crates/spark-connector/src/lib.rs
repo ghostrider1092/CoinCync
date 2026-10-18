@@ -194,6 +194,16 @@ pub mod ffi {
             out_tags_len: *mut c_int,
         ) -> c_int;
         fn spark_ffi_spend_fee(ptr: *const u8, len: c_int, out_fee: *mut u64) -> c_int;
+        fn spark_ffi_coin_ltag(
+            seed: *const u8,
+            seed_len: c_int,
+            coin_ptr: *const u8,
+            coin_len: c_int,
+            ctx_ptr: *const u8,
+            ctx_len: c_int,
+            out: *mut u8,
+            cap: c_int,
+        ) -> c_int;
         fn spark_ffi_gen_address(out: *mut u8, cap: c_int) -> c_int;
         fn spark_ffi_create_output(
             addr_ptr: *const u8,
@@ -557,6 +567,33 @@ pub mod ffi {
             return None;
         }
         Some(fee)
+    }
+
+    /// Derive the linking tag (`Nullifier`) of an owned `coin` (minted with
+    /// `context`) for the `seed` wallet — the tag it would reveal when spent. A
+    /// wallet checks it against the pool's spent set to exclude already-spent
+    /// notes from its balance. `None` if the coin is not owned by `seed` or on
+    /// FFI failure.
+    pub fn coin_ltag(seed: &[u8], coin: &CoinBytes, context: &[u8]) -> Option<Nullifier> {
+        let mut out = vec![0u8; 64];
+        // Safety: the shim reads the inputs and writes <= cap bytes into `out`.
+        let len = unsafe {
+            spark_ffi_coin_ltag(
+                seed.as_ptr(),
+                seed.len() as c_int,
+                coin.0.as_ptr(),
+                coin.0.len() as c_int,
+                context.as_ptr(),
+                context.len() as c_int,
+                out.as_mut_ptr(),
+                out.len() as c_int,
+            )
+        };
+        if len <= 0 {
+            return None;
+        }
+        out.truncate(len as usize);
+        Some(Nullifier(out))
     }
 
     pub fn spend_outputs(bundle: &[u8]) -> Option<(Vec<CoinBytes>, Vec<u8>)> {

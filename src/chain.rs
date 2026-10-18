@@ -772,6 +772,19 @@ impl Blockchain {
             .unwrap_or_default()
     }
 
+    /// Whether a v2 (libspark) shielded linking tag is already spent in the Spark
+    /// pool. A wallet uses this to exclude already-spent notes from its balance:
+    /// a spent coin's bytes remain in the cover set, so identifying it by view
+    /// key is not enough — its linking tag must also be unspent. `false` when the
+    /// pool store is absent (shielded inactive). Read-only.
+    #[cfg(feature = "sketch-gk-proof")]
+    pub fn spark_pool_tag_spent(&self, tag: &[u8]) -> bool {
+        self.spark_pool_store
+            .as_ref()
+            .map(|s| s.is_tag_spent(&spark_connector::Nullifier(tag.to_vec())))
+            .unwrap_or(false)
+    }
+
     /// The unified operator security sweep: run every initialized detail —
     /// Phase-2 lock-step (always) and the shielded-pool detail (gated + present)
     /// — under one `SecurityCommand` and return the report. **Pure** (does not
