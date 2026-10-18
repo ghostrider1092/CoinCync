@@ -18,6 +18,12 @@ default = []
 # unwired from consensus until externally reviewed.
 # See docs/design/cip-shielded-libspark-ffi.md.
 libspark-ffi = []
+# Audit-gated anon-set params. With this on, the shim builds against Firo's
+# production Grootle params (get_default, n=8/m=5 => N=32768) instead of
+# get_test(). For the verify-cost benchmark + a future audit-gated production
+# build ONLY — the shipped default stays get_test(). Implies libspark-ffi.
+# Flipping the shipped default is consensus-relevant and audit-gated.
+spark-prod-params = ["libspark-ffi"]
 
 [dependencies]
 

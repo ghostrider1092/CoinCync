@@ -62,6 +62,14 @@ fn main() {
     let mut cpp = cc::Build::new();
     common(&mut cpp);
     cpp.cpp(true).std("c++17");
+    // Audit-gated anon-set params: with the `spark-prod-params` feature on, the
+    // shim's shim_params() selects Firo's production Grootle params
+    // (get_default, N=32768) instead of get_test(). Used for the verify-cost
+    // benchmark and a future audit-gated production build; the SHIPPED default
+    // stays get_test() (feature off). See docs/design/cip-shielded-anonset.md.
+    if std::env::var("CARGO_FEATURE_SPARK_PROD_PARAMS").is_ok() {
+        cpp.define("SPARK_PROD_PARAMS", None);
+    }
     let files = [
         s256.join("src").join("cpp").join("GroupElement.cpp"),
         s256.join("src").join("cpp").join("Scalar.cpp"),

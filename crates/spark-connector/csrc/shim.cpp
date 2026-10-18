@@ -24,13 +24,32 @@
 using secp_primitives::GroupElement;
 using secp_primitives::Scalar;
 
+// Anon-set parameter selector. `get_test()` (small Grootle set, fast) is the
+// SHIPPED default so the gated testnet/beta pool and the 24h soak stay valid;
+// building with the `spark-prod-params` Cargo feature (which defines
+// SPARK_PROD_PARAMS via build.rs) selects `get_default()` — Firo's mainnet
+// params (n=8, m=5 => N=32768). This is ONLY a compile-time switch for the
+// verify-cost benchmark and a future audit-gated production build; a coin built
+// under one param set is NOT verifiable under the other, so the whole network
+// MUST agree — never mix. Flipping the shipped default is consensus-relevant and
+// audit-gated (see docs/design/cip-shielded-anonset.md). libspark's Params is a
+// singleton with a private ctor, so these two fixed sets are the only points we
+// can build without modifying (and un-pinning) the vendored libspark.
+static inline const spark::Params* shim_params() {
+#ifdef SPARK_PROD_PARAMS
+    return spark::Params::get_default();
+#else
+    return spark::Params::get_test();
+#endif
+}
+
 extern "C" {
 
 // Exercise the full stack: build a real coin + recover its VRF tag T, and run a
 // Chaum tag-proof prove->verify round-trip. Returns 1 iff everything succeeds.
 // Proves the vendored libspark (crypto + proof/verify machinery) is live.
 int spark_ffi_selftest(void) {
-    const spark::Params* params = spark::Params::get_test();
+    const spark::Params* params = shim_params();
 
     // Coin + tag recovery path.
     spark::SpendKey spend(params);
@@ -97,7 +116,7 @@ int spark_ffi_spend_verify_roundtrip(void) {
 }
 
 static int spend_roundtrip_impl() {
-    const spark::Params* params = spark::Params::get_test();
+    const spark::Params* params = shim_params();
     const std::string memo = "roundtrip";
 
     spark::SpendKey spend_key(params);
@@ -205,7 +224,7 @@ static void pack_or_verify_build(const spark::Params* params,
 // Returns the byte length written, or -1 if it does not fit / on error.
 int spark_ffi_make_verify_bundle(unsigned char* out, int cap) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         uint64_t cover_set_id;
         std::vector<unsigned char> rep;
         uint256 block_hash;
@@ -239,7 +258,7 @@ int spark_ffi_make_verify_bundle(unsigned char* out, int cap) {
 // what `spark_ffi_verify_bundle` verifies — closing the build -> verify loop.
 int spark_ffi_build_spend(uint64_t output_value, unsigned char* out, int cap) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         uint64_t cover_set_id;
         std::vector<unsigned char> rep;
         uint256 block_hash;
@@ -271,7 +290,7 @@ int spark_ffi_build_spend(uint64_t output_value, unsigned char* out, int cap) {
 int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
                             unsigned char* out_tags, int tags_cap, int* out_tags_len) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         CDataStream ss((const char*)ptr, (const char*)ptr + len, SER_NETWORK, PROTOCOL_VERSION);
 
         uint64_t cover_set_id;
@@ -336,7 +355,7 @@ int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
 // success, 0 on any malformed/decode error (fail-closed).
 int spark_ffi_spend_fee(const unsigned char* ptr, int len, uint64_t* out_fee) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         CDataStream ss((const char*)ptr, (const char*)ptr + len, SER_NETWORK, PROTOCOL_VERSION);
 
         uint64_t cover_set_id;
@@ -369,7 +388,7 @@ int spark_ffi_spend_fee(const unsigned char* ptr, int len, uint64_t* out_fee) {
 // wallet's concern; this produces a valid recipient address to create coins to.)
 int spark_ffi_gen_address(unsigned char* out, int cap) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         spark::SpendKey spend(params);
         spark::FullViewKey full(spend);
         spark::IncomingViewKey incoming(full);
@@ -394,7 +413,7 @@ int spark_ffi_create_output(const unsigned char* addr_ptr, int addr_len,
                             const unsigned char* memo_ptr, int memo_len,
                             unsigned char* out, int cap) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         std::string addr_str((const char*)addr_ptr, (std::size_t)addr_len);
         spark::Address address(params);
         address.decode(addr_str);
@@ -444,7 +463,7 @@ int spark_ffi_coin_ltag(const unsigned char* seed, int seed_len,
                         const unsigned char* ctx_ptr, int ctx_len,
                         unsigned char* out, int cap) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         spark::SpendKey spend_key(params, seed_to_r(seed, seed_len));
         spark::FullViewKey full_view_key(spend_key);
         spark::IncomingViewKey incoming_view_key(full_view_key);
@@ -472,7 +491,7 @@ int spark_ffi_coin_ltag(const unsigned char* seed, int seed_len,
 // The bech32m address of the wallet derived from `seed`. Returns length or -1.
 int spark_ffi_address_from_seed(const unsigned char* seed, int seed_len, unsigned char* out, int cap) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         spark::SpendKey spend(params, seed_to_r(seed, seed_len));
         spark::FullViewKey full(spend);
         spark::IncomingViewKey incoming(full);
@@ -497,7 +516,7 @@ int spark_ffi_identify(const unsigned char* seed, int seed_len,
                        uint64_t* out_value,
                        unsigned char* out_memo, int memo_cap, int* out_memo_len) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         spark::SpendKey spend(params, seed_to_r(seed, seed_len));
         spark::FullViewKey full(spend);
         spark::IncomingViewKey incoming(full);
@@ -534,7 +553,7 @@ int spark_ffi_export_incoming_view_key(const unsigned char* seed, int seed_len,
                                        unsigned char* out_p2, int p2_cap, int* out_p2_len) {
     try {
         if (s1_cap < 32 || p2_cap < 34) return 0;
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         spark::SpendKey spend(params, seed_to_r(seed, seed_len));
         spark::FullViewKey full(spend);
         spark::IncomingViewKey incoming(full);
@@ -560,7 +579,7 @@ int spark_ffi_identify_view_only(const unsigned char* s1_ptr, int s1_len,
                                  unsigned char* out_memo, int memo_cap, int* out_memo_len) {
     try {
         if (s1_len != 32 || p2_len != 34) return 0;
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         secp_primitives::Scalar s1;
         s1.deserialize(s1_ptr);
         secp_primitives::GroupElement P2;
@@ -593,7 +612,7 @@ int spark_ffi_identify_view_only(const unsigned char* s1_ptr, int s1_len,
 // creation is recoverable by the recipient.
 int spark_ffi_create_recover_roundtrip(uint64_t value, uint64_t* out_recovered) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         spark::SpendKey spend(params);
         spark::FullViewKey full(spend);
         spark::IncomingViewKey incoming(full);
@@ -708,7 +727,7 @@ static void pack_or_verify_build(const spark::Params* params,
 // params. A caller sizes its cover set to this.
 int spark_ffi_cover_set_size(void) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         return (int)pow(params->get_n_grootle(), params->get_m_grootle());
     } catch (...) {
         return -1;
@@ -723,7 +742,7 @@ int spark_ffi_mint_to_seed(const unsigned char* seed, int seed_len, uint64_t val
                            const unsigned char* ctx_ptr, int ctx_len,
                            unsigned char* out, int cap) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         spark::SpendKey spend(params, seed_to_r(seed, seed_len));
         spark::FullViewKey full(spend);
         spark::IncomingViewKey incoming(full);
@@ -768,7 +787,7 @@ int spark_ffi_build_spend_over_set(const unsigned char* seed, int seed_len,
                                    const unsigned char* recip_addr_ptr, int recip_addr_len,
                                    unsigned char* out, int cap) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         spark::SpendKey spend_key(params, seed_to_r(seed, seed_len));
         spark::FullViewKey full_view_key(spend_key);
         spark::IncomingViewKey incoming_view_key(full_view_key);
@@ -907,7 +926,7 @@ int spark_ffi_spend_outputs(const unsigned char* ptr, int len,
                             unsigned char* out_coins, int coins_cap, int* out_coins_len,
                             unsigned char* out_ctx, int ctx_cap, int* out_ctx_len) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         CDataStream ss((const char*)ptr, (const char*)ptr + len, SER_NETWORK, PROTOCOL_VERSION);
         uint64_t cover_set_id;
         std::vector<unsigned char> rep;
@@ -971,7 +990,7 @@ int spark_ffi_build_mint_bundle(const unsigned char* seed, int seed_len,
                                 const unsigned char* ctx_ptr, int ctx_len,
                                 unsigned char* out, int cap) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         spark::SpendKey spend(params, seed_to_r(seed, seed_len));
         spark::FullViewKey full(spend);
         spark::IncomingViewKey incoming(full);
@@ -1021,7 +1040,7 @@ int spark_ffi_build_mint_bundle(const unsigned char* seed, int seed_len,
 int spark_ffi_verify_mint_bundle(const unsigned char* ptr, int len, uint64_t* out_total,
                                  unsigned char* out_coins, int coins_cap, int* out_coins_len) {
     try {
-        const spark::Params* params = spark::Params::get_test();
+        const spark::Params* params = shim_params();
         std::size_t off = 0;
         auto need = [&](std::size_t n) {
             if (off + n > (std::size_t)len) throw std::runtime_error("mint bundle truncated");

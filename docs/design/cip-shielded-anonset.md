@@ -120,3 +120,60 @@ after the benchmark.**
   worst-case per-block shielded-verify fits the block time budget.
 - Confirm the bucket / cover-set model (above) composes a monotonic group of the
   chosen N that every node derives identically (determinism contract).
+
+## Benchmark results (2026-10-18) — the decision data
+
+Measured via the `spark-connector` `libspark_verify_cost_benchmark` test (gated
+`libspark-ffi`; add `spark-prod-params` for the N=32768 point). `shim_params()`
+selects `get_test()` (the shipped default) vs `get_default()` (production) at
+compile time. libspark's `Params` is a **private-ctor singleton**, so only these
+TWO points are measurable without modifying — and thus un-pinning (firo
+v0.14.18.1) — the vendored libspark; the `{256..16384}` intermediates in the plan
+above are NOT reachable.
+
+| params | N (n,m) | per-verify | bundle bytes |
+|---|---|---|---|
+| `get_test` | 16 | **20.1 ms** | 5 825 |
+| `get_default` (PROD) | 32768 (8,5) | **3 324 ms** | 7 998 375 |
+
+Debug and `--release` agree within noise (20.9/20.1 ms; 3448/3324 ms), so the
+Rust profile / cc opt-level is NOT the driver — this is a real, reproducible cost.
+
+**Cost model (from the two points):** `verify ≈ 18 ms fixed (bpplus range +
+chaum) + ~0.1 ms/coin`. The Grootle membership check is an O(N)
+multiexponentiation; the ~8 MB embedded-cover-set re-parse in this self-contained
+test bundle is only ~100 ms of the 3.3 s (point decompression ×32768), so the
+**O(N) multiexp — not the re-parse — dominates** (a real node holds the set in
+memory, so re-parse is not the production cost anyway). Extrapolated:
+
+| N (n,m) | est. verify | 10-spend block | IBD outlook |
+|---|---|---|---|
+| 512 (8,3) | ~70 ms | 0.7 s | fine |
+| 4096 (8,4) | ~430 ms | 4.3 s | borderline |
+| 32768 (8,5) | 3 324 ms | 33 s | non-viable |
+
+**★ KEY FINDING: N=32768 verify (~3.3 s) is ~100× Firo's reported Spark verify
+(tens of ms).** That gap is almost certainly a MISSING OPTIMIZATION — Firo's
+production verify uses BATCHED multiexponentiation (`secp256k1_ecmult_multi` /
+Pippenger / Straus) and amortizes the O(N) multiexp across the block, whereas the
+current shim verifies each spend singly through an unbatched path. **The anon-set
+ceiling is set by the multiexp implementation, not by N.**
+
+**Recommendation (2026-10-18):**
+1. **Do NOT ratify N=32768, and do NOT flip the shipped default to
+   `spark-prod-params`, on this evidence** — 3.3 s/verify is non-viable for block
+   validation and catastrophic for IBD (verifying chain history).
+2. **Resolve the 100× gap FIRST (the higher-value path).** Confirm/enable
+   batched multiexp verify (Firo-style, per block). If it recovers Firo-class
+   speed, Firo's AUDITED `n=8, m=5 ⇒ 32768` stays on the table and we keep a
+   Firo-class anonymity set — the "match the proven params" outcome. This is a
+   verify-path/benchmark investigation, not a consensus change.
+3. **If the gap cannot be closed (we accept the current single-verify cost),
+   ratify `n=8, m=3 ⇒ 512`** (~70 ms/verify) — a viable cost with a 512-member
+   set (far larger than Monero's ring of 16; smaller than Firo). `n=8, m=4 ⇒
+   4096` (~430 ms) is the aggressive alternative, with heavier IBD.
+4. **Interim:** the gated testnet/beta pool stays at `get_test()`; the
+   `spark-prod-params` flip remains audit-gated and user-cleared.
+
+Shipped default unchanged (`get_test()`); the selector + benchmark are additive.
+The next decision datum is a clean per-block BATCHED-verify measurement.

@@ -425,7 +425,11 @@ pub mod ffi {
     /// context), for tests and as the format `verify_spend` consumes. `None` on
     /// error. In production CoinCync's wallet produces this via `build_spend`.
     pub fn make_verify_bundle() -> Option<Vec<u8>> {
-        let mut buf = vec![0u8; 1 << 16];
+        // 32 MiB: the self-contained test bundle embeds the whole cover set, which
+        // at production Grootle params (N=32768) is multi-MB. Real txs never embed
+        // the cover set (the node reconstructs it from the pool), so this large
+        // buffer is a benchmark/test artifact, not a wire-size bound.
+        let mut buf = vec![0u8; 1 << 25];
         // Safety: shim writes at most `cap` bytes into `buf` and returns the length.
         let len = unsafe { spark_ffi_make_verify_bundle(buf.as_mut_ptr(), buf.len() as c_int) };
         if len <= 0 {
@@ -915,6 +919,52 @@ pub mod ffi {
                 .expect("valid bundle must verify");
             assert_eq!(nullifiers.len(), 1, "one input => one linking-tag nullifier");
             assert_eq!(nullifiers[0].0.len(), 34, "tag is a 34-byte group element");
+        }
+
+        /// Verify-cost benchmark at the ACTIVE anon-set params (get_test by
+        /// default; get_default / N=32768 under `--features spark-prod-params`).
+        /// The decision data for ratifying the production Grootle (n,m) in
+        /// docs/design/cip-shielded-anonset.md: pick the largest N whose
+        /// per-verify cost keeps block validation acceptable. Only TWO measurable
+        /// points exist (test vs default) — libspark's Params is a private-ctor
+        /// singleton, so intermediate N would require un-pinning the vendored
+        /// (audit-provenance-pinned) libspark. Run:
+        ///   cargo test -p spark-connector --features libspark-ffi \
+        ///     libspark_verify_cost_benchmark -- --ignored --nocapture
+        /// (add `spark-prod-params` to the feature list for the N=32768 point).
+        #[test]
+        #[ignore = "benchmark: run explicitly with --ignored --nocapture"]
+        fn libspark_verify_cost_benchmark() {
+            use std::time::Instant;
+
+            let n = cover_set_size().expect("cover set size");
+            let bundle = make_verify_bundle().expect("build verify bundle");
+            let backend = LibsparkBackend;
+            let spend = SpendBytes(bundle);
+            let bundle_len = spend.0.len();
+
+            // Warm up (first calls pay one-time init).
+            for _ in 0..3 {
+                backend.verify_spend(&[], &spend, 0, 0).expect("verify ok");
+            }
+            let iters = 50u32;
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                backend.verify_spend(&[], &spend, 0, 0).expect("verify ok");
+            }
+            let elapsed = t0.elapsed();
+            let per_ms = elapsed.as_secs_f64() * 1000.0 / iters as f64;
+            let prod = cfg!(feature = "spark-prod-params");
+            println!(
+                "LIBSPARK VERIFY-COST BENCH | params={} | anon-set N={} | bundle={} bytes | \
+                 {} iters | total={:?} | per-verify={:.3} ms",
+                if prod { "get_default (PROD)" } else { "get_test" },
+                n,
+                bundle_len,
+                iters,
+                elapsed,
+                per_ms
+            );
         }
 
         #[test]
