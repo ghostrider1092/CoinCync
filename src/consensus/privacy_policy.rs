@@ -105,6 +105,19 @@ pub fn enforce_privacy_policy(block: &Block) -> Result<()> {
 
 /// Check a single non-coinbase transaction against the three privacy rules.
 pub fn check_tx_privacy(tx: &Transaction) -> Result<()> {
+    // Shielded (Spark) txs provide sender/amount/recipient privacy via their own
+    // proof model, not the transparent CLSAG-ring rules below — §4 (Hidden
+    // senders) would reject a pure shielded transfer for having no ring inputs.
+    // Their privacy + value conservation are enforced by the shielded verifier
+    // (`validation::check_shielded_tx`, activation-gated, + the block-level
+    // `chain::verify_block_spark_v2`). This mirrors `enforce_privacy_policy`,
+    // which already skips shielded txs at the block level. (Shielded is itself
+    // fail-closed until activation.) Keeping this in sync is why the mempool's
+    // direct `check_tx_privacy` call must not diverge from the block path.
+    if tx.tx_type == TxType::Shielded {
+        return Ok(());
+    }
+
     // ── §2 Rule 1: Hidden amounts (Article III) ───────────────────
     if MANDATORY_CONFIDENTIAL {
         for output in &tx.outputs {

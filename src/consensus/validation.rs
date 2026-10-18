@@ -2907,6 +2907,38 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         return Err(Error::InvalidTxVersion(tx.version));
     }
 
+    // Shielded (Spark) txs do not fit the transparent shape this CONTEXTLESS
+    // precheck assumes. A pure shielded transfer carries empty transparent
+    // inputs/outputs and `tx.fee == 0`: the pool-internal fee and value
+    // conservation live inside the libspark bundle and the cross-veil value
+    // bridge, not in transparent commitments or the transparent fee. So the
+    // empty-in/out reject and the `fee >= size·MIN_FEE_PER_BYTE` floor below do
+    // not apply here — they are replaced by the CONTEXT-AWARE shielded path
+    // (`validate_transaction` → `check_shielded_tx`, which is activation-gated,
+    // plus block-level `chain::verify_block_spark_v2`), which always runs after
+    // this precheck (mempool `add_with_chain`, and block validation). We keep
+    // only the cheap size bounds as a DoS guard. On testnet/mainnet shielded is
+    // inactive (`SHIELDED_TX_ACTIVATION_HEIGHT` = u64::MAX), so the context-aware
+    // validator rejects these one layer later; this precheck no longer kills them
+    // first. Mirrors `privacy_policy::check_tx_privacy`, which skips shielded for
+    // the same reason.
+    if tx.is_shielded() {
+        let size = tx.size();
+        if size > crate::constants::MAX_TX_SIZE {
+            return Err(Error::TransactionTooLarge {
+                size,
+                max: crate::constants::MAX_TX_SIZE,
+            });
+        }
+        if size < crate::constants::MIN_TX_SIZE {
+            return Err(Error::TransactionTooSmall {
+                size,
+                min: crate::constants::MIN_TX_SIZE,
+            });
+        }
+        return Ok(());
+    }
+
     // SECURITY (BUG-17): Reject transactions with empty inputs or outputs.
     // This prevents mempool pollution with malformed transactions that can
     // never be mined (full validate_transaction checks this, but basic didn't).
@@ -5119,5 +5151,55 @@ mod tests {
         big_memo.outputs[0].encrypted_memo = vec![0u8; 257];
         let err = validate_transaction_basic(&big_memo).unwrap_err().to_string();
         assert!(err.contains("encrypted_memo too large"), "got: {err}");
+    }
+
+    /// The mempool admission bypass for shielded txs: a pure shielded transfer
+    /// (empty transparent inputs/outputs, `tx.fee == 0`) must pass the contextless
+    /// prechecks (`validate_transaction_basic` + `check_tx_privacy`), which assume
+    /// the transparent shape — otherwise `send_raw_transaction` could never admit
+    /// one. The authoritative, activation-gated shielded verification runs later
+    /// in `validate_transaction`/`verify_block_spark_v2`. The size bound is still
+    /// enforced (DoS guard), and the bypass is shielded-ONLY.
+    #[test]
+    fn basic_admits_shielded_transfer_shape_but_still_bounds_size_and_is_shielded_only() {
+        use crate::transaction::TxType;
+        let shielded = Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![0u8; 256], // stand-in SparkPayload, above MIN_TX_SIZE
+        };
+        assert!(
+            validate_transaction_basic(&shielded).is_ok(),
+            "mempool precheck must admit a shielded transfer (empty transparent in/out, fee 0)"
+        );
+        assert!(
+            crate::consensus::privacy_policy::check_tx_privacy(&shielded).is_ok(),
+            "privacy precheck must skip shielded txs"
+        );
+
+        // Size bound still enforced — a tiny shielded tx is rejected.
+        let tiny = Transaction {
+            extra: vec![0u8; 4],
+            ..shielded.clone()
+        };
+        assert!(
+            matches!(validate_transaction_basic(&tiny), Err(Error::TransactionTooSmall { .. })),
+            "the shielded bypass still enforces MIN_TX_SIZE"
+        );
+
+        // Regression: the bypass is shielded-ONLY — a transparent tx with empty
+        // inputs is still rejected.
+        let transparent_empty = Transaction {
+            tx_type: TxType::Transfer,
+            ..shielded.clone()
+        };
+        assert!(
+            validate_transaction_basic(&transparent_empty).is_err(),
+            "the empty-input bypass must not apply to transparent txs"
+        );
     }
 }
