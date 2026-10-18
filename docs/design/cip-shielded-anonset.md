@@ -177,3 +177,60 @@ ceiling is set by the multiexp implementation, not by N.**
 
 Shipped default unchanged (`get_test()`); the selector + benchmark are additive.
 The next decision datum is a clean per-block BATCHED-verify measurement.
+
+### Split + batch measurement (2026-10-18) — the decisive data
+
+`spark-connector` `libspark_verify_batch_split_bench` times verify over an
+IN-MEMORY cover set (so the ~8 MB FFI marshal is EXCLUDED) and compares
+libspark's `vector` BATCH overload vs single verify over a shared set. At
+N=32768:
+
+| metric | value |
+|---|---|
+| SINGLE verify, in-memory set (pure multiexp, no marshal) | **2666 ms/spend** |
+| BATCH verify (`vector` overload), k=8 over one set | **344 ms/spend** |
+| batch speedup (k=8) | **7.74×** (≈ k, near-perfect) |
+| embedded-bundle single (incl. 8 MB marshal; earlier bench) | 3324 ms |
+
+**Interpretation:**
+1. **The multiexp DOMINATES — the marshal does not.** In-memory single (2666 ms)
+   is 80% of the embedded-bundle single (3324 ms); the 8 MB cover-set marshal is
+   only ~660 ms. Caching the deserialized set saves ~660 ms but leaves the ~2.7 s
+   multiexp — NOT the fix. The O(N) Grootle multiexp is the wall.
+2. **Batching amortizes near-perfectly (7.74× at k=8).** The `vector` overload
+   shares ONE cover-set multiexp across a block's spends, so a block of K spends
+   costs ≈ `base(N)` (one multiexp) + `K × ~15 ms`. The per-block BASE is the
+   single multiexp (~2.7 s at N=32768); extra spends are nearly free.
+3. **Cost model (in-memory single):** `verify ≈ 18 ms + ~0.081 ms/coin`
+   (2666 / 32768). Per-block base by N:
+
+| N (n,m) | base verify | IBD outlook (shielded-default ⇒ ~every block has a spend) |
+|---|---|---|
+| 512 (8,3) | ~59 ms | viable (~8 h for 500k blocks, worst case) |
+| 1024 (4,5) | ~101 ms | borderline (~14 h) |
+| 4096 (8,4) | ~350 ms | too heavy (~48 h) |
+| 32768 (8,5) | 2666 ms | IBD-fatal |
+
+## FINAL RECOMMENDATION (2026-10-18)
+
+**Ratify `n = 8, m = 3 ⇒ N = 512` as the production anon-set.** The per-block
+base multiexp (~59 ms) keeps IBD tractable even when shielded spends are the NORM
+(the design goal), and additional spends in a block are ~15 ms each under batched
+verify. 512 is a genuine one-of-512 anonymity set — far stronger than Monero's
+static ring-16 — and revisitable UPWARD later if the verify floor improves.
+
+- **NOT 32768:** its ~2.7 s per-block base multiexp is intrinsic (batching can't
+  remove it; marshal-caching barely dents it) and fatal for IBD on a
+  shielded-default chain.
+- **NOT 4096:** ~350 ms base ⇒ ~48 h worst-case IBD — an adoption barrier.
+
+**Required companion work (pin-safe, do regardless of N):** wire **batched block
+verify** into `chain::verify_block_spark_v2` — verify a block's shielded spends
+together via libspark's `vector` overload (7.74× proven). This makes multi-spend
+blocks cheap at any N and is the real throughput lever. Marshal-caching is a minor
+follow-up (batching already shares the deserialized set).
+
+**Caveat:** numbers are on the MSVC portable 32-bit secp256k1 field; a 64-bit
+field (other toolchains) would ~2× them, allowing a larger N for the same budget
+— but consensus must size for the floor, so 512 stands. The flip to production
+params stays audit-gated and the user's call; shipped default remains `get_test()`.

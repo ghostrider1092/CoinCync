@@ -20,6 +20,7 @@
 #include <map>
 #include <cmath>
 #include <cstdio>
+#include <chrono>
 
 using secp_primitives::GroupElement;
 using secp_primitives::Scalar;
@@ -203,6 +204,111 @@ static int spend_roundtrip_impl() {
     bool ok = spark::SpendTransaction::verify(tx2, cover_sets);
     if (!ok) std::fprintf(stderr, "spend_roundtrip: ROUND-TRIPPED tx verify returned false\n");
     return ok ? 1 : 0;
+}
+
+// Verify-timing microbenchmark that ISOLATES the pure proof-verify multiexp from
+// the FFI cover-set marshaling: the cover set is held IN MEMORY here (never
+// serialized/deserialized), so `single` is the multiexp cost WITHOUT the ~8 MB
+// marshal the `make_verify_bundle` path pays. It also measures the `vector`
+// BATCH overload vs K single verifies over the SAME cover set, to show how much
+// a block's spends amortize (shared cover-set multiexp). Writes avg per-spend ms
+// for single and batched verify; returns 1 on success. In-memory only — no Rust
+// memory touched beyond the out pointers.
+int spark_ffi_verify_timing_bench(int k, int iters, double* out_single_ms,
+                                  double* out_batch_ms, int* out_N) {
+    try {
+        const spark::Params* params = shim_params();
+        const std::string memo = "bench";
+        spark::SpendKey spend_key(params);
+        spark::FullViewKey full_view_key(spend_key);
+        spark::IncomingViewKey incoming_view_key(full_view_key);
+        spark::Address address(incoming_view_key, 42);
+
+        std::size_t N = (std::size_t)pow(params->get_n_grootle(), params->get_m_grootle());
+        if (out_N) *out_N = (int)N;
+        if (k < 1) k = 1;
+        if (iters < 1) iters = 1;
+
+        std::vector<spark::Coin> in_coins;
+        in_coins.reserve(N);
+        for (std::size_t i = 0; i < N; i++) {
+            Scalar kk; kk.randomize();
+            std::vector<unsigned char> ctx(32);
+            Scalar t; t.randomize(); t.serialize(ctx.data());
+            in_coins.emplace_back(spark::Coin(params, spark::COIN_TYPE_MINT, kk, address,
+                                              123u + (uint64_t)i, memo, ctx));
+        }
+        const uint64_t cover_set_id = 31415;
+        std::unordered_map<uint64_t, spark::CoverSetData> cover_set_data;
+        std::unordered_map<uint64_t, std::vector<spark::Coin>> cover_sets;
+        std::vector<unsigned char> rep(32);
+        { Scalar t; t.randomize(); t.serialize(rep.data()); }
+        spark::CoverSetData setData;
+        setData.cover_set_size = in_coins.size();
+        setData.cover_set_representation = rep;
+        cover_set_data[cover_set_id] = setData;
+        cover_sets[cover_set_id] = in_coins;
+        std::map<uint64_t, uint256> block_hashes;
+        block_hashes.emplace(cover_set_id, uint256());
+
+        // K spends over the SAME cover set, distinct spend indices.
+        std::vector<spark::SpendTransaction> txs;
+        txs.reserve(k);
+        for (int j = 0; j < k; j++) {
+            std::size_t spend_index = (std::size_t)j % N;
+            spark::IdentifiedCoinData id = in_coins[spend_index].identify(incoming_view_key);
+            spark::RecoveredCoinData rec = in_coins[spend_index].recover(full_view_key, id);
+            std::vector<spark::InputCoinData> sc;
+            sc.emplace_back();
+            sc.back().cover_set_id = cover_set_id;
+            sc.back().index = spend_index;
+            sc.back().k = id.k;
+            sc.back().s = rec.s;
+            sc.back().T = rec.T;
+            sc.back().v = id.v;
+            const uint64_t out_value = 1u;
+            const uint64_t fee = id.v - out_value;
+            std::vector<spark::OutputCoinData> oc;
+            oc.emplace_back();
+            oc.back().address = address;
+            oc.back().v = out_value;
+            oc.back().memo = memo;
+            spark::SpendTransaction tx(params, full_view_key, spend_key, sc, cover_set_data,
+                                      cover_sets, fee, 0, oc, spark::SpendTransactionVersion::V2,
+                                      uint256(), block_hashes);
+            tx.setCoverSets(cover_set_data);
+            txs.push_back(std::move(tx));
+        }
+
+        using clk = std::chrono::steady_clock;
+        // Warm up.
+        (void)spark::SpendTransaction::verify(txs[0], cover_sets);
+
+        // SINGLE: each tx verified on its own, iters passes.
+        auto s0 = clk::now();
+        for (int it = 0; it < iters; it++)
+            for (int j = 0; j < k; j++)
+                if (!spark::SpendTransaction::verify(txs[j], cover_sets)) return 0;
+        auto s1 = clk::now();
+        double single_total_ms = std::chrono::duration<double, std::milli>(s1 - s0).count();
+        if (out_single_ms) *out_single_ms = single_total_ms / (double)(iters * k);
+
+        // BATCH: all K verified together (shared cover-set multiexp), iters passes.
+        auto b0 = clk::now();
+        for (int it = 0; it < iters; it++)
+            if (!spark::SpendTransaction::verify(params, txs, cover_sets)) return 0;
+        auto b1 = clk::now();
+        double batch_total_ms = std::chrono::duration<double, std::milli>(b1 - b0).count();
+        if (out_batch_ms) *out_batch_ms = batch_total_ms / (double)(iters * k);
+
+        return 1;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "verify_timing_bench threw: %s\n", e.what());
+        return 0;
+    } catch (...) {
+        std::fprintf(stderr, "verify_timing_bench threw (unknown)\n");
+        return 0;
+    }
 }
 
 // ── Stage 3c: the verify BUNDLE — CoinCync's self-contained shielded-spend

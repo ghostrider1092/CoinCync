@@ -186,6 +186,13 @@ pub mod ffi {
         fn spark_ffi_selftest() -> c_int;
         fn spark_ffi_spend_verify_roundtrip() -> c_int;
         fn spark_ffi_make_verify_bundle(out: *mut u8, cap: c_int) -> c_int;
+        fn spark_ffi_verify_timing_bench(
+            k: c_int,
+            iters: c_int,
+            out_single_ms: *mut f64,
+            out_batch_ms: *mut f64,
+            out_n: *mut c_int,
+        ) -> c_int;
         fn spark_ffi_verify_bundle(
             ptr: *const u8,
             len: c_int,
@@ -964,6 +971,37 @@ pub mod ffi {
                 iters,
                 elapsed,
                 per_ms
+            );
+        }
+
+        /// Splits the N=32768 verify into the MULTIEXP (in-memory cover set, NO
+        /// FFI marshal) vs the ~8 MB marshal the `make_verify_bundle` path pays,
+        /// and measures BATCH (libspark's `vector` overload) vs SINGLE per-spend
+        /// amortization over a shared cover set. Decides whether the N=32768 cost
+        /// is the intrinsic multiexp (→ ratify a smaller N) or the FFI marshal
+        /// (→ cache the deserialized set shim-side). Run:
+        ///   cargo test --release -p spark-connector --features spark-prod-params \
+        ///     libspark_verify_batch_split_bench -- --ignored --nocapture
+        #[test]
+        #[ignore = "benchmark: run explicitly with --ignored --nocapture"]
+        fn libspark_verify_batch_split_bench() {
+            let (k, iters) = (8i32, 5i32);
+            let (mut single_ms, mut batch_ms, mut n) = (0f64, 0f64, 0i32);
+            let rc = unsafe {
+                spark_ffi_verify_timing_bench(k, iters, &mut single_ms, &mut batch_ms, &mut n)
+            };
+            assert_eq!(rc, 1, "verify_timing_bench failed");
+            let prod = cfg!(feature = "spark-prod-params");
+            println!(
+                "LIBSPARK VERIFY SPLIT/BATCH | params={} | N={} | k={} spends | \
+                 SINGLE (in-mem set, no marshal)={:.3} ms/spend | \
+                 BATCH (vector overload)={:.3} ms/spend | batch speedup={:.2}x",
+                if prod { "get_default (PROD)" } else { "get_test" },
+                n,
+                k,
+                single_ms,
+                batch_ms,
+                if batch_ms > 0.0 { single_ms / batch_ms } else { 0.0 }
             );
         }
 
