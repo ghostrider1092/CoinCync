@@ -4986,8 +4986,8 @@ mod tests {
         use crate::transaction::{DecoyOutput, SpendableInput, Transaction, TxType};
         use crate::wallet::send::build_shield_in;
         use spark_connector::ffi::{
-            address_from_seed, build_spend_to_address, cover_set_size, serial_context,
-            spend_outputs, LibsparkBackend,
+            address_from_seed, build_spend_to_address, cover_set_size, spend_outputs,
+            LibsparkBackend,
         };
         use spark_connector::{CoinBytes, SparkBackend};
         use std::sync::Arc;

@@ -1051,6 +1051,17 @@ impl Mempool {
     /// For larger mempools this could matter; revisit with a
     /// dirty-set / changed-context optimization if it shows up in
     /// profiles.
+    /// Whether any resident tx is a shielded (Spark) tx. The node uses this to
+    /// trigger `shadow_evict_invalid` after a normal tip extension while shielded
+    /// txs are pending: a shielded tx's stateful validity (its linking tag being
+    /// unspent) can change on ANY block, and a confirmed one can be re-injected
+    /// by Dandelion fluff, so it must be re-checked per block — unlike transparent
+    /// txs, whose only post-apply invalidation (a spent key image / maturity) the
+    /// `#149` fast-path already covers via `remove_confirmed` + reorg detection.
+    pub fn has_shielded(&self) -> bool {
+        self.transactions.values().any(|e| e.tx.is_shielded())
+    }
+
     pub fn shadow_evict_invalid<C>(&mut self, chain: &C)
     where
         C: ShadowEvictChain,
@@ -1695,6 +1706,12 @@ impl SharedMempool {
         C: ShadowEvictChain,
     {
         self.write_lock().shadow_evict_invalid(chain)
+    }
+
+    /// Whether any resident tx is shielded — the node triggers a per-block
+    /// shadow-evict sweep while this holds (see [`Mempool::has_shielded`]).
+    pub fn has_shielded(&self) -> bool {
+        self.read_lock().has_shielded()
     }
 
     pub fn set_height(&self, height: u64) {

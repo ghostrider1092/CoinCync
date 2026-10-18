@@ -1283,6 +1283,15 @@ async fn start_node(
                                     event_chain.network(),
                                     event_chain.height(),
                                 )
+                                // A shielded tx's stateful validity (linking tag
+                                // unspent) can change on ANY block, and a mined
+                                // one can be re-injected by Dandelion fluff; the
+                                // #149 fast-path (key-image/maturity) does not
+                                // cover it. Sweep per block while shielded txs are
+                                // pending so a confirmed/unminable one is evicted
+                                // within a block instead of poisoning every
+                                // template ("tag already spent" block rejections).
+                                || event_mempool.has_shielded()
                             };
                             // Keep mempool aligned with chain state: remove mined txs and
                             // advance mempool height so activation-gated checks stay correct.
