@@ -2578,11 +2578,30 @@ async fn shielded_send_live(
     report_built_transfer(to, amount, cover_coins.len(), 1, tags.len(), spend.0.len());
     let tx_hex = hex::encode(borsh::to_vec(&tx).map_err(|e| format!("encode shielded tx: {e}"))?);
 
+    // Show the fee calculation IN FULL — the user must see exactly what they pay
+    // and where it goes. Nothing hidden behind a single opaque number.
+    let priority = mult_x100 as f64 / 100.0;
+    let miner_share = fee.saturating_mul(coincync::constants::FEE_MINER_NORMAL_PERCENT) / 100;
+    let burn_share = fee.saturating_sub(miner_share);
+    println!();
+    println!("  Fee calculation (shown in full — nothing hidden):");
+    println!("    tx size              = {tx_size} bytes");
+    println!("    base rate            = {MIN_FEE_PER_BYTE} atomic/byte (MIN_FEE_PER_BYTE)");
+    println!("    priority multiplier  = {priority:.2}x");
     println!(
-        "  Fee (to miner):       {fee} atomic (size {tx_size}B × {:.2}× floor; value_balance = tx.fee = fee)",
-        mult_x100 as f64 / 100.0
+        "    fee = size x rate x priority = {tx_size} x {MIN_FEE_PER_BYTE} x {priority:.2} = {fee} atomic"
     );
-    println!("  Change back to you:   {change} atomic (returned as a shielded note)");
+    println!(
+        "      -> to miner (~70%): {miner_share} atomic    burned (~30%): {burn_share} atomic"
+    );
+    println!(
+        "      (split is 70/30 normally, 50/50 if the mined block is >=80% full — fixed at mining time)"
+    );
+    println!();
+    println!("  Amount to recipient:   {amount} atomic");
+    println!("  Fee you pay:           {fee} atomic");
+    println!("  Change back to you:    {change} atomic");
+    println!("  Funding note spent:    {chosen_value} atomic  (= {amount} + {fee} + {change})");
     println!("  Submitting to {node} ...");
     match rpc_call(node, "send_raw_transaction", serde_json::json!([tx_hex])).await {
         Ok(resp) => {
