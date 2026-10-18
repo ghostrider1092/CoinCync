@@ -2454,8 +2454,64 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
         ));
     }
 
-    // Pick the smallest owned note strictly greater than `amount` (positive fee).
-    let (spend_index, chosen_value, chosen_ctx) = owned
+    // MINER-PAID, size-based fee (uniform with transparent: size ×
+    // MIN_FEE_PER_BYTE). The shielded tx size is dominated by the fixed-size
+    // libspark bundle and is invariant to the fee scalar, so a probe build at
+    // fee 0 measures it exactly; then pick a note covering `amount + fee` and
+    // build the real spend. The fee is miner-paid: `value_balance == tx.fee ==
+    // fee` (the value bridge forces `tx.fee == value_balance`, and the node binds
+    // `value_balance == the bundle's internal fee`), so it unshields to the
+    // coinbase and is split 70/30 miner/burn. The remainder (`chosen − amount −
+    // fee`) returns to this wallet as a CHANGE coin — nothing beyond the fee is
+    // burned. A size-based fee is REQUIRED, not optional: the block-level fee
+    // floor rejects any `tx.fee < size × MIN_FEE_PER_BYTE`, so a "free" shielded
+    // transfer could never be mined.
+    use coincync::constants::MIN_FEE_PER_BYTE;
+
+    // Wrap a spend of the note at `note_idx` paying `amount` to the recipient with
+    // pool-internal fee `fee`, as a submittable TxType::Shielded tx (value_balance
+    // == tx.fee == fee).
+    let mk_tx = |note_idx: usize,
+                 note_ctx: &[u8],
+                 fee: u64|
+     -> Result<(coincync::transaction::Transaction, spark_connector::SpendBytes), String> {
+        let bundle = build_spend_to_address(
+            seed,
+            &cover_coins,
+            note_idx,
+            note_ctx,
+            amount,
+            fee,
+            to.as_bytes(),
+        )
+        .ok_or_else(|| {
+            "failed to build shielded spend (bad recipient address or output value)".to_string()
+        })?;
+        let payload = coincync::consensus::spark_payload::SparkPayload {
+            version: coincync::consensus::spark_payload::SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![],
+            spend: Some(coincync::consensus::spark_payload::SpendBundle {
+                cover_set_id: 0,
+                anchor_height,
+                bundle: bundle.0.clone(),
+            }),
+            value_balance: fee as i64,
+        };
+        let tx = coincync::transaction::Transaction {
+            version: 1,
+            tx_type: coincync::transaction::TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: coincync::primitives::Amount::from_atomic(fee),
+            range_proof: vec![],
+            extra: payload.encode(),
+        };
+        Ok((tx, bundle))
+    };
+
+    // Pass 1: provisional note (smallest > amount) → probe at fee 0 to size the fee.
+    let (probe_index, _pv, probe_ctx) = owned
         .iter()
         .filter(|(_, v, _)| *v > amount)
         .min_by_key(|(_, v, _)| *v)
@@ -2464,58 +2520,36 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
             let largest = owned.iter().map(|(_, v, _)| *v).max().unwrap_or(0);
             format!("no single owned note covers {amount} atomic (largest owned note is {largest})")
         })?;
+    let (probe_tx, _) = mk_tx(probe_index, &probe_ctx, 0)?;
+    let tx_size = borsh::to_vec(&probe_tx).map(|b| b.len()).unwrap_or(0);
+    let fee = (tx_size as u64).saturating_mul(MIN_FEE_PER_BYTE);
 
-    // Build the spend to the recipient over the fetched cover set, then
-    // self-verify the bundle (standalone — the node re-verifies on submit).
-    // pool_fee 0: the funding note's remainder (chosen_value − amount) returns to
-    // this wallet as a CHANGE coin — it is NOT burned. (Picking a larger note is
-    // therefore fine; the excess comes back as change.)
-    let spend = build_spend_to_address(seed, &cover_coins, spend_index, &chosen_ctx, amount, 0, to.as_bytes())
-        .ok_or("failed to build shielded spend (bad recipient address or output value)")?;
+    // Pass 2: smallest note covering amount + fee → build the real spend.
+    let need = amount.checked_add(fee).ok_or("amount + fee overflow")?;
+    let (spend_index, chosen_value, chosen_ctx) = owned
+        .iter()
+        .filter(|(_, v, _)| *v >= need)
+        .min_by_key(|(_, v, _)| *v)
+        .cloned()
+        .ok_or_else(|| {
+            let largest = owned.iter().map(|(_, v, _)| *v).max().unwrap_or(0);
+            format!(
+                "no single owned note covers amount {amount} + fee {fee} = {need} atomic \
+                 (largest owned note is {largest})"
+            )
+        })?;
+    let (tx, spend) = mk_tx(spend_index, &chosen_ctx, fee)?;
     let tags = backend
         .verify_spend(&[], &spend, 0, 0)
         .map_err(|e| format!("built spend failed self-verification: {e}"))?;
+    let change = chosen_value.saturating_sub(amount).saturating_sub(fee);
 
     println!("  Funding note:    value {chosen_value} atomic at cover index {spend_index}");
     report_built_transfer(to, amount, cover_coins.len(), 1, tags.len(), spend.0.len());
-
-    // Assemble a submittable shielded Transaction — a `TxType::Shielded` tx whose
-    // `extra` is the v2 `SparkPayload` (mirrors the node-side builder's wrap:
-    // consensus/spark_payload.rs build_spend_payload_inner). cover_set_id is 0
-    // (the single pool), anchor_height is the set we built against, value_balance
-    // = 0 (nothing crosses the veil on a pool→pool transfer).
-    //
-    // tx.fee MUST be 0 for a pure shielded transfer. The libspark bundle carries
-    // the pool-internal fee (0 here); the transparent `tx.fee` is SEPARATE — with
-    // no transparent inputs/outputs and value_balance 0, the consensus value
-    // bridge requires `fee·H == identity`, i.e. tx.fee == 0
-    // (chain::verify_transparent_shielded_balance). A non-zero tx.fee would make
-    // a mined block carrying this tx fail the bridge even though the mempool
-    // (structural-only) admits it.
-    let change = chosen_value.saturating_sub(amount); // returns to this wallet
-    let payload = coincync::consensus::spark_payload::SparkPayload {
-        version: coincync::consensus::spark_payload::SPARK_PAYLOAD_VERSION,
-        mint: None,
-        outputs: vec![],
-        spend: Some(coincync::consensus::spark_payload::SpendBundle {
-            cover_set_id: 0,
-            anchor_height,
-            bundle: spend.0.clone(),
-        }),
-        value_balance: 0,
-    };
-    let tx = coincync::transaction::Transaction {
-        version: 1,
-        tx_type: coincync::transaction::TxType::Shielded,
-        inputs: vec![],
-        outputs: vec![],
-        fee: coincync::primitives::Amount::from_atomic(0),
-        range_proof: vec![],
-        extra: payload.encode(),
-    };
     let tx_hex = hex::encode(borsh::to_vec(&tx).map_err(|e| format!("encode shielded tx: {e}"))?);
 
-    println!("  Change back to you:   {change} atomic (returned as a shielded note; tx.fee = 0)");
+    println!("  Fee (to miner):       {fee} atomic (value_balance = tx.fee = fee)");
+    println!("  Change back to you:   {change} atomic (returned as a shielded note)");
     println!("  Submitting to {node} ...");
     match rpc_call(node, "send_raw_transaction", serde_json::json!([tx_hex])).await {
         Ok(resp) => {

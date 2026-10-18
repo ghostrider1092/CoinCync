@@ -102,30 +102,81 @@ record. None of them change consensus.
 - **Boringly uniform fees.** Wire `standardized_fee` (post-audit) so every wallet
   pays one of a handful of clean values.
 
-## Shielded fee routing (one consensus wiring item — NOT yet implemented)
+## Shielded fee routing (IMPLEMENTED — the mechanism; the amount is wallet policy)
 
-Today a shielded transfer carries `tx.fee = 0` (the transparent fee must be 0 for
-a pure pool→pool transfer: with no transparent inputs/outputs the value bridge
-requires `fee·H == identity`). The funding note's remainder returns to the sender
-as change (implemented). So shielded transfers are currently **free**.
+A shielded transfer's fee is **miner-paid**, riding the *same* rail as a
+transparent fee. The elegant result is that **no new fee market and no
+`total_fees` change were needed**:
 
-To make shielded fees **miner-paid**, riding the *same* model as transparent:
+- the shielded tx sets `value_balance = +F` — an **unshield of exactly the fee**
+  `F` across the veil (amounts/sender/recipient stay hidden; only the fee scalar
+  is public, exactly as Monero reveals the fee in the clear);
+- the transparent value bridge (`verify_transparent_shielded_balance`) already
+  forces `tx.fee == value_balance` for a pure transfer (the `(tx.fee −
+  value_balance)·H` term must vanish with empty transparent in/out), so `F` lands
+  in `tx.fee`;
+- `total_fees` is already `Σ tx.fee`, so it picks `F` up with no change;
+  `distribute_fee` splits it 70/30 (or 50/50 congested) and the coinbase claims
+  the miner share — **identical path and bounded ≤3× congestion curve as
+  transparent**;
+- **inflation guard** (`chain::verify_block_spark_v2`): `value_balance == `
+  `spend_fee(bundle)`, binding the declared fee to what the libspark bundle
+  actually released (`spark_ffi_spend_fee`). So `tx.fee == value_balance ==
+  bundle fee`, all the same `F`.
 
-- the shielded tx sets `value_balance = +fee` — an **unshield of exactly the fee**
-  across the veil (amounts/sender/recipient stay hidden; only the fee scalar is
-  public, exactly as Monero reveals the fee in the clear);
-- `total_fees` (today `Σ tx.fee` over non-coinbase txs, `validation.rs`) must also
-  include the positive `value_balance` of shielded txs, so those unshielded fees
-  count toward the block's claimable fees;
-- `distribute_fee` then splits them 70/30 (or 50/50) and the coinbase-claim check
-  accounts for them — **identical path and bounded congestion curve as
-  transparent**. No second fee market.
+**Miner-paid is required, not optional.** The block-level dynamic-fee floor
+(`validation.rs`, `fee too low for congestion`) applies to *every* non-coinbase
+tx with **no shielded exemption**, so a `tx.fee = 0` shielded transfer fails
+block validation (`0 < size·MIN_FEE_PER_BYTE`) — a "free" shielded transfer was
+never mineable. Setting `tx.fee = size·MIN_FEE_PER_BYTE` (× the user's optional
+priority multiplier) makes it meet the floor at ×1 and ride the congestion curve
+like any transparent tx. The mempool bypass (see the admission note) still admits
+the shielded *shape* (empty transparent in/out); the block floor is what the fee
+satisfies.
 
-**Status:** design intent only. Not wired. Shielded activation stays
-`u64::MAX` on testnet/mainnet until the external audit (see
-`docs/design/cip-shielded-txtype.md`, `cip-spark-block-format.md`). Until the fee
-is wired, "free + full change to the sender" is the correct testnet/beta
-behavior.
+**Status:** mechanism implemented + gated (`sketch-gk-proof + libspark-ffi`),
+activation stays `u64::MAX` on testnet/mainnet until the external audit (see
+`cip-shielded-txtype.md`, `cip-spark-block-format.md`). The wallet computes the
+amount as a size-based fee.
+
+### Supply conservation (verified)
+
+A shielded fee `F` on a pure pool→pool transfer conserves supply — no inflation —
+by the same accounting as a transparent fee:
+
+| Quantity | Change | Enforced by |
+|---|---|---|
+| Emission (`total_supply`) | **+base reward only** | `total_supply += calculate_block_reward(h)` = `base_reward`; fees are never emission |
+| Pool value | **−F** | `SparkPoolStore::apply_value_balance(+F)`, with `value_balance == bundle fee` |
+| Miner coinbase | **+ miner share** (70 % / 50 %) | `max_coinbase = reward + dist.to_miner`, `total_declared == max_coinbase` |
+| Burn (`total_burned`) | **+ burn share** (30 % / 50 %) | `block_fee_burn = Σ tx.fee × burn_pct` (sums the shielded `tx.fee`) |
+
+The supply identity `circulating = emitted − burned` holds: `Δemitted = 0`,
+`Δcirculating = −F (pool) + miner_share (new UTXO) = −burn_share`,
+`Δburned = +burn_share`. The fee the miner claims is exactly the fee removed from
+the pool, pinned to one value `F` by three independent checks (`apply_value_
+balance`, the `value_balance == bundle_fee` guard, and the `tx.fee ==
+value_balance` bridge). The bridge additionally forces `Σ transparent_outputs ==
+identity` whenever `tx.fee == value_balance`, so the current model **cannot**
+route an unshield-to-a-user's-transparent-output into the miner fee — it is
+confined to the safe (pure-transfer) case by construction.
+
+**Honest caveats (audit-relevant):**
+
+1. **Supply reconciliation doesn't check the crypto.** `total_supply ==
+   cumulative_emission` catches accounting-path drift, not a libspark bundle that
+   *verifies-but-shouldn't* (a bad balance proof inflating coin values is
+   invisible to supply accounting — that's the external audit's job, per
+   `cip-security-threat-model.md`). The guard trusts libspark's `input = Σ outputs
+   + fee` proof; it binds the *declared* fee to the *bundle's* fee.
+2. **Supply-commitment enforcement is gated OFF today** (`enforce_height =
+   u64::MAX`) — the burn/emission accounting is computed and reconcilable but not
+   yet consensus-rejecting. The general pre-audit posture, not shielded-specific.
+3. **Unshield-to-a-transparent-user-output isn't built** (the builders only make
+   pool coins). When it is, the fee accounting must *separate* the fee from the
+   unshielded value — the current `value_balance == bundle_fee` collapses them,
+   which is correct only because the bridge forbids transparent outputs here.
+   Flag for that future work.
 
 ## The honest limit, and the roadmap
 
