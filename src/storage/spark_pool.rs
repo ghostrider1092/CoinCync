@@ -77,21 +77,6 @@ struct SparkPoolPersistence {
 /// Persistence key for the running pool value in the meta CF.
 const POOL_VALUE_KEY: &[u8] = b"pool_value";
 
-/// Persistence key for the reorg checkpoint stack in the meta CF. The stack is
-/// stored as ONE borsh blob (≤ `MAX_CHECKPOINTS` small entries), rewritten on
-/// every checkpoint/rewind, so a restarted node can rewind past its restart
-/// point (a reorg deeper than the restart no longer strands Phase-2 state).
-const CHECKPOINTS_KEY: &[u8] = b"checkpoints";
-
-/// Borsh-serializable mirror of [`PoolCheckpoint`] (borsh has no `usize`, so
-/// `coins_len` widens to `u64`).
-#[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
-struct PersistedCheckpoint {
-    height: u64,
-    coins_len: u64,
-    pool_value: i128,
-}
-
 /// One coin in the pool: its libspark serialization plus the metadata needed to
 /// re-derive its spend witness (the deterministic serial context) and to place
 /// it in the cover set.
@@ -136,8 +121,11 @@ pub struct SparkPoolStore {
     /// Spent VRF-tag set: tag bytes -> spend height.
     spent_tags: RwLock<HashMap<Vec<u8>, u64>>,
     /// Reorg checkpoint stack (in lock-step with the block-apply path), capped
-    /// at `MAX_CHECKPOINTS`. Persisted to the meta CF on every checkpoint/rewind
-    /// and replayed on open, so a reorg past a restart can still rewind.
+    /// at `MAX_CHECKPOINTS`. SESSION-LOCAL (in-memory only), like the sibling
+    /// Phase-2 stores — NOT persisted, so it starts empty on reload and the
+    /// Phase-2 set uniformly refuses a reorg deeper than a restart (keeps
+    /// checkpoint depths in lock-step). The coins/tags/pool_value state is
+    /// persisted separately, so in-session rewinds stay exact.
     checkpoints: RwLock<Vec<PoolCheckpoint>>,
     /// Maintained max coin/tag heights so the security guard is O(1) on the hot
     /// path (a per-block O(n) scan would itself be a DoS as the pool grows).
@@ -226,27 +214,21 @@ impl SparkPoolStore {
             .map(i128::from_le_bytes)
             .unwrap_or(0);
 
-        // Restore the reorg checkpoint stack (restart-durable rewind): a reorg
-        // deeper than the restart can now roll the pool back instead of
-        // stranding a disconnected block's state. Persisted + rewound in
-        // lock-step with the coins/tags, so the (coins, stack) pair is
-        // consistent. Empty (default) if never written.
-        let checkpoints: Vec<PoolCheckpoint> = meta_tree
-            .get(CHECKPOINTS_KEY)
-            .ok()
-            .flatten()
-            .and_then(|v| borsh::from_slice::<Vec<PersistedCheckpoint>>(v.as_ref()).ok())
-            .map(|persisted| {
-                persisted
-                    .into_iter()
-                    .map(|p| PoolCheckpoint {
-                        height: p.height,
-                        coins_len: p.coins_len as usize,
-                        pool_value: p.pool_value,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Reorg checkpoints are SESSION-LOCAL (in-memory), exactly like the
+        // sibling Phase-2 stores (shielded/spark/kernel keep BridgeTree
+        // checkpoints in memory and do NOT persist them). Start empty on reload.
+        //
+        // Rationale: a reorg deeper than a node restart cannot be done in
+        // lock-step across the Phase-2 set — the sibling stores have no
+        // checkpoints past the restart to rewind — so such a reorg is uniformly
+        // refused (an empty checkpoint stack makes `rewind` return false, and the
+        // caller rejects the reorg). Persisting only THIS store's stack made it
+        // report a deeper checkpoint depth than its siblings after restart,
+        // tripping the lock-step guard (`checkpoint_phase2_stores`). The
+        // coins/tags/pool_value state IS persisted and reflects the applied tip,
+        // so in-session reorgs remain exact; only the unusable cross-restart
+        // rewind is dropped.
+        let checkpoints: Vec<PoolCheckpoint> = Vec::new();
 
         Ok(Self {
             coins: RwLock::new(coins),
@@ -502,46 +484,13 @@ impl SparkPoolStore {
     pub fn checkpoint_at_height(&self, height: u64) {
         let coins_len = self.coins.read().len();
         let pool_value = *self.pool_value.read();
-        let snapshot = {
-            let mut cps = self.checkpoints.write();
-            cps.push(PoolCheckpoint { height, coins_len, pool_value });
-            if cps.len() > MAX_CHECKPOINTS {
-                cps.remove(0);
-            }
-            cps.clone()
-        };
-        // Mirror the stack to disk so a reorg deeper than a node restart can
-        // still rewind (restart-durable Phase-2 rewind).
-        self.persist_checkpoints(&snapshot);
-    }
-
-    /// Persist the current in-memory checkpoint stack to the meta CF (one borsh
-    /// blob under `CHECKPOINTS_KEY`). Best-effort: a serialize/write failure is
-    /// logged, not fatal — the in-memory stack stays authoritative for the
-    /// running session, and the next successful checkpoint rewrites the blob.
-    fn persist_checkpoints(&self, cps: &[PoolCheckpoint]) {
-        let Some(p) = &self.persistence else {
-            return;
-        };
-        let persisted: Vec<PersistedCheckpoint> = cps
-            .iter()
-            .map(|c| PersistedCheckpoint {
-                height: c.height,
-                coins_len: c.coins_len as u64,
-                pool_value: c.pool_value,
-            })
-            .collect();
-        match borsh::to_vec(&persisted) {
-            Ok(bytes) => {
-                let _ = p.meta.insert(CHECKPOINTS_KEY, bytes);
-            }
-            Err(e) => {
-                tracing::error!(
-                    target: "storage::spark_pool",
-                    error = %e,
-                    "failed to serialize Spark pool checkpoint stack for persistence"
-                );
-            }
+        // Session-local stack (in-memory), like the sibling Phase-2 stores — not
+        // persisted (see `open_with_db`). The coins/tags/pool_value state is
+        // persisted separately, so an in-session rewind stays exact.
+        let mut cps = self.checkpoints.write();
+        cps.push(PoolCheckpoint { height, coins_len, pool_value });
+        if cps.len() > MAX_CHECKPOINTS {
+            cps.remove(0);
         }
     }
 
@@ -624,10 +573,7 @@ impl SparkPoolStore {
         if let Some(p) = &self.persistence {
             let _ = p.meta.insert(POOL_VALUE_KEY, restore.pool_value.to_le_bytes());
         }
-        // Mirror the now-shorter checkpoint stack so a replay reconstructs the
-        // rewound depth (restart-durable rewind).
-        let remaining = self.checkpoints.read().clone();
-        self.persist_checkpoints(&remaining);
+        // The checkpoint stack is session-local (in-memory); nothing to persist.
         true
     }
 }
@@ -826,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_stack_survives_restart_so_reorg_past_restart_rewinds() {
+    fn checkpoint_stack_is_session_local_not_persisted_across_restart() {
         use crate::db::Database;
         let dir = tempfile::tempdir().unwrap();
         let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
@@ -834,34 +780,40 @@ mod tests {
         // Session 1: apply two checkpointed blocks (coin + shield-in each).
         {
             let s = SparkPoolStore::open_with_db(&db).unwrap();
-            s.checkpoint_at_height(1); // captures pool_value 0
+            s.checkpoint_at_height(1);
             s.add_coin(b"b1:0".to_vec(), coin(1), b"c".to_vec(), 1);
             s.apply_value_balance(-100).unwrap(); // pool 100
-            s.checkpoint_at_height(2); // captures pool_value 100
+            s.checkpoint_at_height(2);
             s.add_coin(b"b2:0".to_vec(), coin(2), b"c".to_vec(), 2);
             s.apply_value_balance(-50).unwrap(); // pool 150
             assert_eq!((s.coin_count(), s.pool_value(), s.checkpoint_count()), (2, 150, 2));
         }
 
-        // Session 2 (RESTART): the checkpoint stack replays — a reorg DEEPER than
-        // the restart can now rewind (previously the stack was empty on open, so
-        // the disconnected block's state was stranded).
+        // Session 2 (RESTART): the reorg checkpoint stack is SESSION-LOCAL — it
+        // does NOT survive the restart (starts empty), matching the sibling
+        // Phase-2 stores so checkpoint depths stay in lock-step after a reload.
+        // The coins/tags/pool_value STATE is persisted and reflects the applied
+        // tip.
         let re = SparkPoolStore::open_with_db(&db).unwrap();
-        assert_eq!(re.checkpoint_count(), 2, "checkpoint stack survived the restart");
+        assert_eq!(re.checkpoint_count(), 0, "checkpoint stack does NOT survive restart");
+        assert_eq!(re.coin_count(), 2, "coins persist across restart");
+        assert_eq!(re.pool_value(), 150, "pool value persists across restart");
 
-        // Disconnect block 2 (reorg past the restart) → exact rollback.
-        assert!(re.rewind(), "reorg past restart must rewind");
-        assert_eq!(re.coin_count(), 1, "block 2's coin dropped");
-        assert_eq!(re.pool_value(), 100, "pool value restored to pre-block-2");
-        assert_eq!(re.checkpoint_count(), 1);
-        // Disconnect block 1 too.
-        assert!(re.rewind());
-        assert_eq!((re.coin_count(), re.pool_value(), re.checkpoint_count()), (0, 0, 0));
-        assert!(!re.rewind(), "stack exhausted");
+        // A reorg deeper than the restart is uniformly refused: the stack is
+        // empty, so rewind returns false and the state is left untouched (the
+        // sibling stores cannot rewind past a restart either — the reorg caller
+        // rejects it rather than unwinding the set unevenly).
+        assert!(!re.rewind(), "no checkpoints past the restart → rewind refused");
+        assert_eq!((re.coin_count(), re.pool_value()), (2, 150), "state untouched by refused rewind");
 
-        // Session 3: the rewound-to-empty state persists (no resurrection).
-        let re2 = SparkPoolStore::open_with_db(&db).unwrap();
-        assert_eq!((re2.checkpoint_count(), re2.coin_count(), re2.pool_value()), (0, 0, 0));
+        // An in-session checkpoint + rewind still works exactly (stack is live
+        // in memory for the current session).
+        re.checkpoint_at_height(3);
+        re.add_coin(b"b3:0".to_vec(), coin(3), b"c".to_vec(), 3);
+        re.apply_value_balance(-25).unwrap(); // pool 175
+        assert_eq!((re.coin_count(), re.pool_value(), re.checkpoint_count()), (3, 175, 1));
+        assert!(re.rewind(), "in-session rewind works");
+        assert_eq!((re.coin_count(), re.pool_value(), re.checkpoint_count()), (2, 150, 0));
     }
 
     #[test]
