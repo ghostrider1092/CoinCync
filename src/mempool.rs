@@ -605,6 +605,21 @@ impl Mempool {
         if tx.is_coinbase() {
             return Ok(());
         }
+        // Shielded (Spark) txs are not verified by the transparent range/balance/
+        // ring-signature crypto below — a pure transfer has no transparent
+        // outputs/inputs, and a shield-in's transparent inputs/change are already
+        // authenticated by the context-aware `chain::validate_transaction`
+        // (shielded branch) that `add_with_chain` runs BEFORE this `add`. The
+        // authoritative shielded verification (cover set, pool value, mint/spend
+        // proofs) is stateful and runs at block connect in
+        // `chain::verify_block_spark_v2`. Verifying transparent range proofs here
+        // would reject a shielded tx for having an empty `range_proof`. Skip, like
+        // coinbase — fail-closed overall because shielded stays inactive
+        // (activation u64::MAX) on testnet/mainnet and the block-level verify is
+        // the authoritative gate on beta/regtest.
+        if tx.is_shielded() {
+            return Ok(());
+        }
         if !verify_output_range_proofs(tx, chain_height) {
             return Err(Error::InvalidTransaction(
                 "Range proof verification failed — rejected at mempool".into(),
@@ -647,24 +662,36 @@ impl Mempool {
         //   fullness 25-50%: 2x base
         //   fullness 50-75%: 4x base
         //   fullness 75-100%: 8x base
-        let fullness_pct = if self.max_size > 0 {
-            (self.current_size * 100) / self.max_size
-        } else {
-            0
-        };
-        let fee_multiplier: u64 = match fullness_pct {
-            0..=24 => 1,
-            25..=49 => 2,
-            50..=74 => 4,
-            _ => 8,
-        };
-        let min_fee = (size as u64) * MIN_FEE_PER_BYTE * fee_multiplier;
-        if tx.fee.as_atomic() < min_fee {
-            let err = Error::FeeTooLow {
-                fee: tx.fee.as_atomic(),
-                min: min_fee,
+        //
+        // Shielded (Spark) txs are exempt from the transparent per-byte fee floor
+        // (a pure transfer carries tx.fee 0; the pool-internal fee lives inside
+        // the libspark bundle). Same rationale as the bypass in
+        // `validate_transaction_basic`/`verify_crypto_for_admission`. The size
+        // bound above still applies, and shielded stays inactive on
+        // testnet/mainnet (activation u64::MAX), so this cannot open a mainnet
+        // free-tx spam vector. (When miner-paid shielded fees are wired — see
+        // docs/design/fee-experience.md — this floor is replaced by the public
+        // value_balance fee, not removed.)
+        if !tx.is_shielded() {
+            let fullness_pct = if self.max_size > 0 {
+                (self.current_size * 100) / self.max_size
+            } else {
+                0
             };
-            return Err(self.reject(tx_hash, err));
+            let fee_multiplier: u64 = match fullness_pct {
+                0..=24 => 1,
+                25..=49 => 2,
+                50..=74 => 4,
+                _ => 8,
+            };
+            let min_fee = (size as u64) * MIN_FEE_PER_BYTE * fee_multiplier;
+            if tx.fee.as_atomic() < min_fee {
+                let err = Error::FeeTooLow {
+                    fee: tx.fee.as_atomic(),
+                    min: min_fee,
+                };
+                return Err(self.reject(tx_hash, err));
+            }
         }
 
         // SECURITY (BUG-12): Check for double-spend in mempool — allow RBF if fee is higher.
