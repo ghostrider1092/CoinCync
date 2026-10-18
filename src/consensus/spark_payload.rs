@@ -131,6 +131,73 @@ pub fn verify_spark_payload<B: SparkBackend>(
     Ok(tags)
 }
 
+/// BATCH-verify a block's v2 payloads. Groups the spend payloads by
+/// `(cover_set_id, anchor_height)`, reconstructs each group's node-authoritative
+/// cover set ONCE, and verifies the group's spend proofs TOGETHER via
+/// [`SparkBackend::verify_spend_batch`] — one shared cover-set multiexp
+/// amortized across the group (~Kx cheaper than K single verifies; see
+/// docs/design/cip-shielded-anonset.md). Mint-only payloads (no spend)
+/// contribute no proof. Each spend's revealed linking tags are checked UNSPENT
+/// against the pool's spent set (the solvency half of `verify_solvency`).
+///
+/// Returns per-payload tags in the SAME order as `items` (mint-only → empty),
+/// so the caller can run its own within-block duplicate-tag check. Fail-closed:
+/// any group failing (bad proof, or a tag already spent) rejects the whole batch
+/// — matching block-level all-or-nothing verification. Equivalent to calling
+/// [`verify_spark_payload`] per item, but amortized.
+pub fn verify_spark_payloads_batch<B: SparkBackend>(
+    store: &SparkPoolStore,
+    backend: &B,
+    items: &[(SparkPayload, u64)],
+) -> Result<Vec<Vec<Nullifier>>> {
+    use std::collections::HashMap;
+    let mut out: Vec<Vec<Nullifier>> = vec![Vec::new(); items.len()];
+    // Group spend payloads by their anchored cover set; mint-only items are left
+    // with empty tags (as `verify_spark_payload` returns for them).
+    let mut groups: HashMap<(u64, u64), Vec<usize>> = HashMap::new();
+    for (i, (payload, _fee)) in items.iter().enumerate() {
+        if payload.version != SPARK_PAYLOAD_VERSION {
+            return Err(Error::SparkVerifyFailed);
+        }
+        if let Some(sb) = &payload.spend {
+            groups
+                .entry((sb.cover_set_id, sb.anchor_height))
+                .or_default()
+                .push(i);
+        }
+    }
+    let spent = store.spent_tags();
+    for ((cover_set_id, anchor_height), idxs) in groups {
+        let cover = store.cover_set_at(cover_set_id, anchor_height);
+        let bundles: Vec<SpendBytes> = idxs
+            .iter()
+            .map(|&i| SpendBytes(items[i].0.spend.as_ref().unwrap().bundle.clone()))
+            .collect();
+        let fees: Vec<u64> = idxs.iter().map(|&i| items[i].1).collect();
+        let vbs: Vec<i64> = idxs.iter().map(|&i| items[i].0.value_balance).collect();
+        let group_tags = backend
+            .verify_spend_batch(&cover, &bundles, &fees, &vbs)
+            .map_err(|e| Error::CryptoError(format!("spark v2 batch verify: {e}")))?;
+        if group_tags.len() != idxs.len() {
+            return Err(Error::CryptoError(
+                "spark v2 batch: tag-list count != spend count".into(),
+            ));
+        }
+        for (slot, &i) in idxs.iter().enumerate() {
+            let tags = &group_tags[slot];
+            for t in tags {
+                if spent.contains(t) {
+                    return Err(Error::CryptoError(
+                        "spark v2 batch: linking tag already spent (coin is not unspent)".into(),
+                    ));
+                }
+            }
+            out[i] = tags.clone();
+        }
+    }
+    Ok(out)
+}
+
 /// Apply an ALREADY-VERIFIED v2 payload to the pool, in the chain's apply path
 /// (after the block's checkpoint). Marks each spend tag spent (with a
 /// double-spend guard) FIRST, then adds each mint coin keyed by its derived

@@ -104,6 +104,29 @@ pub trait SparkBackend {
         value_balance: i64,
     ) -> Result<Vec<Nullifier>>;
 
+    /// BATCH-verify K spends over ONE shared `cover_set` together — amortizing
+    /// the shared cover-set multiexp across all K (~Kx vs K single verifies; see
+    /// docs/design/cip-shielded-anonset.md). All spends MUST share the one cover
+    /// set (the caller groups a block's spends by cover_set_id + anchor first).
+    /// `fees[i]`/`value_balances[i]` pair with `spends[i]`; returns per-spend
+    /// nullifiers (`out[i]` ↔ `spends[i]`). DEFAULT: verify each spend
+    /// individually (correct, unamortized) so every backend works; a backend
+    /// overrides it for the batched speedup. Fail-closed and ATOMIC: any spend
+    /// failing rejects the whole batch.
+    fn verify_spend_batch(
+        &self,
+        cover_set: &[CoinBytes],
+        spends: &[SpendBytes],
+        fees: &[u64],
+        value_balances: &[i64],
+    ) -> Result<Vec<Vec<Nullifier>>> {
+        let mut out = Vec::with_capacity(spends.len());
+        for (i, s) in spends.iter().enumerate() {
+            out.push(self.verify_spend(cover_set, s, fees[i], value_balances[i])?);
+        }
+        Ok(out)
+    }
+
     /// Identify + recover an owned coin's value with an incoming/full view key.
     /// `Ok(None)` means "not ours". Never yields spend authority.
     ///
@@ -198,6 +221,16 @@ pub mod ffi {
             len: c_int,
             set_ptr: *const u8,
             set_len: c_int,
+            out_tags: *mut u8,
+            tags_cap: c_int,
+            out_tags_len: *mut c_int,
+        ) -> c_int;
+        fn spark_ffi_verify_spend_batch(
+            set_ptr: *const u8,
+            set_len: c_int,
+            spends: *const u8,
+            spend_lens: *const c_int,
+            k: c_int,
             out_tags: *mut u8,
             tags_cap: c_int,
             out_tags_len: *mut c_int,
@@ -881,6 +914,86 @@ pub mod ffi {
                     return Err(ConnectorError::Marshalling("truncated nullifier tags".into()));
                 }
                 out.push(Nullifier(tags[off..off + 34].to_vec()));
+                off += 34;
+            }
+            Ok(out)
+        }
+        /// Batched verify over ONE shared node cover set via libspark's `vector`
+        /// overload — amortizes the cover-set multiexp across all K spends
+        /// (~Kx vs K single verifies). Marshals the node set once + the K bundles
+        /// concatenated; the shim verifies them together and returns one linking
+        /// tag per single-input v2 spend. Fail-closed/atomic: any spend failing
+        /// rejects the whole batch.
+        fn verify_spend_batch(
+            &self,
+            cover_set: &[CoinBytes],
+            spends: &[SpendBytes],
+            _fees: &[u64],
+            _value_balances: &[i64],
+        ) -> Result<Vec<Vec<Nullifier>>> {
+            let k = spends.len();
+            if k == 0 {
+                return Ok(Vec::new());
+            }
+            if cover_set.is_empty() {
+                return Err(ConnectorError::Marshalling(
+                    "batched verify requires a node-authoritative cover set".into(),
+                ));
+            }
+            // Shared node cover set (flat form) — marshaled ONCE for all K.
+            let mut set_wire =
+                Vec::with_capacity(4 + cover_set.iter().map(|c| 4 + c.0.len()).sum::<usize>());
+            set_wire.extend_from_slice(&(cover_set.len() as u32).to_le_bytes());
+            for c in cover_set {
+                set_wire.extend_from_slice(&(c.0.len() as u32).to_le_bytes());
+                set_wire.extend_from_slice(&c.0);
+            }
+            // K bundles concatenated + their lengths.
+            let mut blob = Vec::with_capacity(spends.iter().map(|s| s.0.len()).sum());
+            let mut lens: Vec<c_int> = Vec::with_capacity(k);
+            for s in spends {
+                lens.push(s.0.len() as c_int);
+                blob.extend_from_slice(&s.0);
+            }
+            let mut tags = vec![0u8; 4 + k * 64]; // 34 B/tag; 64 generous headroom
+            let mut tags_len: c_int = 0;
+            // Safety: all pointers/lengths are valid for the call; the shim reads
+            // `set_wire`/`blob`/`lens` and writes <= tags.len() into `tags`.
+            let rc = unsafe {
+                spark_ffi_verify_spend_batch(
+                    set_wire.as_ptr(),
+                    set_wire.len() as c_int,
+                    blob.as_ptr(),
+                    lens.as_ptr(),
+                    k as c_int,
+                    tags.as_mut_ptr(),
+                    tags.len() as c_int,
+                    &mut tags_len,
+                )
+            };
+            if rc != 1 {
+                return Err(ConnectorError::Rejected(
+                    "batched shielded spend failed verification".into(),
+                ));
+            }
+            // Parse [u32 k][34-byte tag]... — one tag per single-input v2 spend.
+            let tl = tags_len.max(0) as usize;
+            if tl < 4 {
+                return Err(ConnectorError::Marshalling("batch tag buffer too short".into()));
+            }
+            let count = u32::from_le_bytes([tags[0], tags[1], tags[2], tags[3]]) as usize;
+            if count != k {
+                return Err(ConnectorError::Marshalling(
+                    "batch returned a tag count != number of spends".into(),
+                ));
+            }
+            let mut out = Vec::with_capacity(k);
+            let mut off = 4usize;
+            for _ in 0..k {
+                if off + 34 > tl {
+                    return Err(ConnectorError::Marshalling("batch tag truncated".into()));
+                }
+                out.push(vec![Nullifier(tags[off..off + 34].to_vec())]);
                 off += 34;
             }
             Ok(out)
