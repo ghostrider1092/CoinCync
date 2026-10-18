@@ -960,6 +960,30 @@ impl Blockchain {
                 crate::consensus::spark_payload::verify_mint_shield_in(mint, payload.value_balance)
                     .map_err(|e| format!("spark v2 tx {idx}: mint: {e}"))?;
             }
+            // SPEND FEE INFLATION GUARD: the value a spend removes from the pool
+            // beyond its pool outputs is the libspark bundle's internal fee
+            // (input − Σ pool outputs). That value leaves the pool across the
+            // veil and is claimed by the miner (it flows through `tx.fee` →
+            // `total_fees` → `distribute_fee`). It MUST equal the tx's declared
+            // `value_balance`, or a tx could claim a different fee to the miner
+            // than the bundle actually released — cross-veil inflation/deflation.
+            // The transparent↔shielded bridge above already ties `value_balance`
+            // to `tx.fee` (for a pure transfer, `tx.fee == value_balance`); this
+            // ties it to the bundle. For a pure pool→pool transfer the whole
+            // cross-veil amount is fee, so `value_balance == bundle_fee ≥ 0`.
+            // (Shield-in value is bound separately by `verify_mint_shield_in`.)
+            if let Some(sb) = &payload.spend {
+                let bundle_fee = spark_connector::ffi::spend_fee(&sb.bundle).ok_or_else(|| {
+                    format!("spark v2 tx {idx}: cannot read spend bundle fee")
+                })?;
+                if payload.value_balance as i128 != bundle_fee as i128 {
+                    return Err(format!(
+                        "spark v2 tx {idx}: value_balance {} != spend bundle fee {} \
+                         (cross-veil fee mismatch)",
+                        payload.value_balance, bundle_fee
+                    ));
+                }
+            }
             let tags = crate::consensus::spark_payload::verify_spark_payload(
                 store.as_ref(),
                 &backend,
@@ -5077,6 +5101,48 @@ mod tests {
             );
         }
 
+        // ── 2.6 INFLATION GUARD: a bundle that released a real fee but declares
+        //      value_balance 0 (claiming no fee crossed the veil) must be REJECTED
+        //      — otherwise the pool would deflate without the fee being accounted.
+        //      Bridge passes (tx.fee 0 == value_balance 0); the new
+        //      value_balance == bundle-fee guard is what rejects it. ─────────────
+        {
+            let (gi, gctx) = owned[1].clone();
+            let guard_bundle = build_spend_to_address(
+                wallet_seed,
+                &cover_coins,
+                gi,
+                &gctx,
+                4_000_000,
+                500_000, // bundle releases a 500k fee...
+                &recipient_addr,
+            )
+            .expect("build bundle with a real fee");
+            let guard_payload = SparkPayload {
+                version: SPARK_PAYLOAD_VERSION,
+                mint: None,
+                outputs: vec![],
+                spend: Some(SpendBundle { cover_set_id: 0, anchor_height, bundle: guard_bundle.0 }),
+                value_balance: 0, // ...but claims none crossed the veil
+            };
+            let guard_tx = Transaction {
+                version: 1,
+                tx_type: TxType::Shielded,
+                inputs: vec![],
+                outputs: vec![],
+                fee: Amount::from_atomic(0),
+                range_proof: vec![],
+                extra: guard_payload.encode(),
+            };
+            let err = chain
+                .verify_block_spark_v2(std::slice::from_ref(&guard_tx))
+                .expect_err("value_balance != bundle fee must be rejected");
+            assert!(
+                err.contains("cross-veil fee mismatch"),
+                "rejected by the inflation guard, got: {err}"
+            );
+        }
+
         // ── 3. SEND: shielded→shielded transfer to recipient B (wallet path) ────
         // Pay `output_value` to B, burn `pool_fee`, and the remainder returns to
         // the SENDER as change — NO value is burned beyond the fee (the
@@ -5095,8 +5161,11 @@ mod tests {
         )
         .expect("wallet builds the transfer bundle");
 
-        // Wrap exactly as `shielded_send_live` does: value_balance 0, transparent
-        // tx.fee 0 (the pool-internal fee is inside the bundle).
+        // Wrap the fee consistently: the miner fee is the bundle's internal fee
+        // `pool_fee`, so `value_balance == tx.fee == pool_fee`. The value bridge
+        // holds (`tx.fee − value_balance == 0` with empty transparent in/out), the
+        // inflation guard holds (`value_balance == bundle fee`), and the fee is
+        // claimed by the miner via `tx.fee` → total_fees → distribute_fee.
         let payload = SparkPayload {
             version: SPARK_PAYLOAD_VERSION,
             mint: None,
@@ -5106,27 +5175,35 @@ mod tests {
                 anchor_height,
                 bundle: bundle.0.clone(),
             }),
-            value_balance: 0,
+            value_balance: pool_fee as i64,
         };
         let transfer_tx = Transaction {
             version: 1,
             tx_type: TxType::Shielded,
             inputs: vec![],
             outputs: vec![],
-            fee: Amount::from_atomic(0),
+            fee: Amount::from_atomic(pool_fee),
             range_proof: vec![],
             extra: payload.encode(),
         };
 
+        let pool_value_before = store.pool_value();
         chain
             .verify_block_spark_v2(std::slice::from_ref(&transfer_tx))
-            .expect("transfer accepted by verify hook (tx.fee == 0, value bridge holds)");
+            .expect("transfer accepted (bridge holds, value_balance == bundle fee)");
         let coins_before = store.coin_count();
         chain.apply_spark_v2_txs(std::slice::from_ref(&transfer_tx), 2);
         assert_eq!(
             store.coin_count(),
             coins_before + 2,
             "transfer feeds TWO coins into the pool: recipient payment + sender change"
+        );
+        // Conservation: the pool shrinks by EXACTLY the fee (payment + change
+        // re-enter; only the fee leaves the veil to the miner).
+        assert_eq!(
+            store.pool_value(),
+            pool_value_before - pool_fee as i128,
+            "pool value drops by exactly the fee that crossed the veil"
         );
 
         // ── 4. VERIFY (change-burn fix): recipient recovers EXACTLY the payment

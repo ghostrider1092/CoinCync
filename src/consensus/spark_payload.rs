@@ -432,7 +432,13 @@ pub mod build {
                 anchor_height,
                 bundle: bundle.0,
             }),
-            value_balance: 0,
+            // The value crossing the veil on a pure pool→pool spend is exactly
+            // the bundle's internal fee (`input − Σ pool outputs`), which goes to
+            // the miner. `value_balance` must equal it (consensus binds the two in
+            // `chain::verify_block_spark_v2`), and the Transaction wrapper sets
+            // `tx.fee == value_balance` so the transparent value bridge holds and
+            // `total_fees` claims the fee. For a free transfer `fee == 0`.
+            value_balance: fee as i64,
         })
     }
 }

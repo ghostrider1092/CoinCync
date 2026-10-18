@@ -327,6 +327,41 @@ int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
     }
 }
 
+// Read a spend bundle's PUBLIC internal fee (libspark `SpendTransaction.getFee()`
+// = input value − Σ output values). The fee is a plaintext scalar in the bundle
+// (amounts stay hidden). Consensus binds this to the tx's public `value_balance`
+// so a shielded tx cannot claim a different fee to the miner than the bundle
+// actually released (cross-veil inflation guard). Deserializes exactly as
+// `spark_ffi_verify_bundle` does. Writes the fee to `*out_fee`; returns 1 on
+// success, 0 on any malformed/decode error (fail-closed).
+int spark_ffi_spend_fee(const unsigned char* ptr, int len, uint64_t* out_fee) {
+    try {
+        const spark::Params* params = spark::Params::get_test();
+        CDataStream ss((const char*)ptr, (const char*)ptr + len, SER_NETWORK, PROTOCOL_VERSION);
+
+        uint64_t cover_set_id;
+        std::vector<unsigned char> rep;
+        uint256 block_hash;
+        std::vector<spark::Coin> cover_set, out_coins;
+        uint64_t output_count;
+        ss >> cover_set_id;
+        ss >> rep;
+        ss >> block_hash;
+        ss >> cover_set;
+        ss >> out_coins;
+        ss >> output_count;
+        for (auto& c : cover_set) c.setParams(params);
+        for (auto& c : out_coins) c.setParams(params);
+
+        spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2, (std::size_t)output_count);
+        ss >> tx;
+        *out_fee = tx.getFee();
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
 // ── Stage 3f: the wallet BUILD side — create shielded outputs. ──────────────
 
 // Generate a fresh Spark wallet address (bech32m string) into `out`. Returns the

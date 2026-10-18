@@ -193,6 +193,7 @@ pub mod ffi {
             tags_cap: c_int,
             out_tags_len: *mut c_int,
         ) -> c_int;
+        fn spark_ffi_spend_fee(ptr: *const u8, len: c_int, out_fee: *mut u64) -> c_int;
         fn spark_ffi_gen_address(out: *mut u8, cap: c_int) -> c_int;
         fn spark_ffi_create_output(
             addr_ptr: *const u8,
@@ -543,6 +544,21 @@ pub mod ffi {
     /// deterministic + recoverable). Feeds the pool after a spend verifies, so
     /// the pool grows with spend outputs symmetric with the mint feed. `None` on
     /// error. Call only on a bundle that already verified.
+    /// Read a spend bundle's PUBLIC internal fee (`input − Σ outputs`). Used by
+    /// consensus to bind the tx's public `value_balance` to what the bundle
+    /// actually released across the veil (cross-veil inflation guard). `None` on
+    /// a malformed bundle (fail-closed). Call on a bundle whose structure already
+    /// verified; the fee itself is plaintext in the bundle.
+    pub fn spend_fee(bundle: &[u8]) -> Option<u64> {
+        let mut fee: u64 = 0;
+        // Safety: the shim reads `bundle` and writes a single u64 to `fee`.
+        let rc = unsafe { spark_ffi_spend_fee(bundle.as_ptr(), bundle.len() as c_int, &mut fee) };
+        if rc != 1 {
+            return None;
+        }
+        Some(fee)
+    }
+
     pub fn spend_outputs(bundle: &[u8]) -> Option<(Vec<CoinBytes>, Vec<u8>)> {
         let mut coins_buf = vec![0u8; 1 << 16];
         let mut coins_len: c_int = 0;
@@ -1088,6 +1104,35 @@ pub mod ffi {
                 backend.identify(a, &self_out[0], &self_ctx).unwrap().is_some(),
                 "a self-spend's change is recoverable by the spender"
             );
+        }
+
+        /// `spend_fee` reads back the exact fee a bundle was built with — the
+        /// scalar consensus will bind `value_balance` to (inflation guard).
+        #[test]
+        fn spend_fee_reads_the_bundle_internal_fee() {
+            let seed = b"spend-fee-roundtrip";
+            let n = cover_set_size().expect("n");
+            let mut coins = Vec::with_capacity(n);
+            let mut ctxs = Vec::with_capacity(n);
+            for i in 0..n {
+                let mut ctx = [0u8; 32];
+                ctx[0] = i as u8;
+                ctx[1] = 0x3f;
+                coins.push(mint_to_seed(seed, 5_000 + i as u64, &ctx).expect("mint"));
+                ctxs.push(ctx.to_vec());
+            }
+            let spend_index = 2usize; // coin value 5002
+            let fee = 123u64;
+            let bundle =
+                build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 4_000, fee)
+                    .expect("build spend with explicit fee");
+            assert_eq!(
+                spend_fee(&bundle.0),
+                Some(fee),
+                "spend_fee returns the fee the bundle was built with"
+            );
+            // A malformed bundle fails closed.
+            assert_eq!(spend_fee(&[0u8; 8]), None, "garbage bundle -> None");
         }
 
         #[test]
