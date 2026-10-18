@@ -4887,7 +4887,8 @@ mod tests {
 
         // Build a spend of the coin at vout 2 over the anchored cover set.
         let owned_op = derive_outpoint(&[], 2);
-        let spend_payload = build_spend_payload(seed, store.as_ref(), &owned_op, 3_000, 0, 1).unwrap();
+        let spend_payload =
+            build_spend_payload(seed, store.as_ref(), &owned_op, 3_000, 0, 0, 1).unwrap();
         let spend_tx = mk_shielded_tx(spend_payload.encode());
 
         // Pre-apply verify hook: accepts the unspent spend.
@@ -5050,6 +5051,7 @@ mod tests {
                 bad_index,
                 &bad_ctx,
                 4_000_000,
+                0,
                 &recipient_addr,
             )
             .expect("build throwaway transfer bundle");
@@ -5076,13 +5078,19 @@ mod tests {
         }
 
         // ── 3. SEND: shielded→shielded transfer to recipient B (wallet path) ────
-        let output_value = 4_000_000u64; // < note value; remainder is the in-bundle fee
+        // Pay `output_value` to B, burn `pool_fee`, and the remainder returns to
+        // the SENDER as change — NO value is burned beyond the fee (the
+        // change-burn fix). change = note − output − fee.
+        let output_value = 4_000_000u64;
+        let pool_fee = 1_000_000u64;
+        let expected_change = shield_atomic - output_value - pool_fee;
         let bundle = build_spend_to_address(
             wallet_seed,
             &cover_coins,
             spend_index,
             &owned_ctx,
             output_value,
+            pool_fee,
             &recipient_addr,
         )
         .expect("wallet builds the transfer bundle");
@@ -5115,22 +5123,43 @@ mod tests {
             .expect("transfer accepted by verify hook (tx.fee == 0, value bridge holds)");
         let coins_before = store.coin_count();
         chain.apply_spark_v2_txs(std::slice::from_ref(&transfer_tx), 2);
-        assert!(
-            store.coin_count() > coins_before,
-            "transfer's output coin fed into the pool"
+        assert_eq!(
+            store.coin_count(),
+            coins_before + 2,
+            "transfer feeds TWO coins into the pool: recipient payment + sender change"
         );
 
-        // ── 4. VERIFY: recipient recovers the output, sender does not; the spend
-        //      is now a double-spend and is rejected ───────────────────────────
+        // ── 4. VERIFY (change-burn fix): recipient recovers EXACTLY the payment
+        //      (value output_value); the SENDER recovers EXACTLY the change
+        //      (value note − output − fee) — nothing is burned beyond the fee; no
+        //      coin is recoverable by both; the spend is now a double-spend ──────
         let (out_coins, out_ctx) = spend_outputs(&bundle.0).expect("transfer output coins");
-        let recipient_recovers = out_coins
-            .iter()
-            .any(|c| matches!(backend.identify(recipient_seed, c, &out_ctx), Ok(Some(_))));
-        assert!(recipient_recovers, "recipient B recovers the transferred note");
-        let sender_recovers = out_coins
-            .iter()
-            .any(|c| matches!(backend.identify(wallet_seed, c, &out_ctx), Ok(Some(_))));
-        assert!(!sender_recovers, "sender does not recover the recipient's note");
+        let mut recipient_value = None;
+        let mut sender_value = None;
+        for c in &out_coins {
+            let r = backend.identify(recipient_seed, c, &out_ctx);
+            let s = backend.identify(wallet_seed, c, &out_ctx);
+            assert!(
+                !(matches!(r, Ok(Some(_))) && matches!(s, Ok(Some(_)))),
+                "no output coin may be recoverable by both parties"
+            );
+            if let Ok(Some(id)) = r {
+                recipient_value = Some(id.value);
+            }
+            if let Ok(Some(id)) = s {
+                sender_value = Some(id.value);
+            }
+        }
+        assert_eq!(
+            recipient_value,
+            Some(output_value),
+            "recipient B recovers exactly the payment"
+        );
+        assert_eq!(
+            sender_value,
+            Some(expected_change),
+            "sender recovers the change (note − payment − fee) — not burned"
+        );
 
         assert!(
             chain
@@ -5267,7 +5296,7 @@ mod tests {
             // ── TRANSFER a coin to wallet B; B must recover it, sender must not ─
             let xfer_op = derive_outpoint(&[], xfer_vout);
             let xfer_payload =
-                build_transfer_payload(wseed.as_bytes(), store.as_ref(), &xfer_op, 100, 0, 1, &addr_b)
+                build_transfer_payload(wseed.as_bytes(), store.as_ref(), &xfer_op, 100, 0, 0, 1, &addr_b)
                     .unwrap_or_else(|| anomaly!("build_transfer"));
             let xfer_tx = mk(xfer_payload.encode());
             if chain.verify_block_spark_v2(std::slice::from_ref(&xfer_tx)).is_err() {
@@ -5286,24 +5315,33 @@ mod tests {
                 let (out_coins, out_ctx) =
                     spend_outputs(&sb.bundle).unwrap_or_else(|| anomaly!("transfer_spend_outputs"));
                 let backend = LibsparkBackend;
-                let recipient_recovers = out_coins
-                    .iter()
-                    .any(|c| matches!(backend.identify(recipient_b, c, &out_ctx), Ok(Some(_))));
-                if !recipient_recovers {
+                // A transfer now has TWO output coins: the recipient's payment
+                // and the sender's change (fee 0 ⇒ change = input − payment > 0).
+                // Each party recovers exactly its own; no coin is recoverable by
+                // both (that would be a privacy breach).
+                let mut recipient_total = 0usize;
+                let mut sender_total = 0usize;
+                for c in &out_coins {
+                    let r = matches!(backend.identify(recipient_b, c, &out_ctx), Ok(Some(_)));
+                    let s = matches!(backend.identify(wseed.as_bytes(), c, &out_ctx), Ok(Some(_)));
+                    if r && s {
+                        anomaly!("coin_recoverable_by_both_parties");
+                    }
+                    recipient_total += r as usize;
+                    sender_total += s as usize;
+                }
+                if recipient_total == 0 {
                     anomaly!("recipient_cannot_recover_transfer");
                 }
-                let sender_recovers = out_coins
-                    .iter()
-                    .any(|c| matches!(backend.identify(wseed.as_bytes(), c, &out_ctx), Ok(Some(_))));
-                if sender_recovers {
-                    anomaly!("sender_recovered_transfer_output");
+                if sender_total == 0 {
+                    anomaly!("sender_cannot_recover_change");
                 }
             }
             invariants!();
 
             // ── SPEND a different owned coin (self-spend, change back to self) ─
             let owned_op = derive_outpoint(&[], spend_vout);
-            let spend_payload = build_spend_payload(wseed.as_bytes(), store.as_ref(), &owned_op, 100, 0, 1)
+            let spend_payload = build_spend_payload(wseed.as_bytes(), store.as_ref(), &owned_op, 100, 0, 0, 1)
                 .unwrap_or_else(|| anomaly!("build_spend"));
             let spend_tx = mk(spend_payload.encode());
             if chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_err() {

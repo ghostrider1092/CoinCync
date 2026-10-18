@@ -181,19 +181,22 @@ impl ShieldedNoteStore {
         seed: &[u8],
         pool: &SparkPoolStore,
         output_value: u64,
+        fee: u64,
         cover_set_id: u64,
         anchor_height: u64,
     ) -> Option<SparkPayload> {
-        // Smallest unspent note strictly greater than the output (positive fee).
+        // Smallest unspent note that covers output + fee; the remainder returns
+        // to this wallet as a change coin (nothing is burned beyond `fee`).
+        let need = output_value.checked_add(fee)?;
         let chosen = self
             .unspent()
-            .filter(|n| n.value > output_value)
+            .filter(|n| n.value >= need)
             .min_by_key(|n| n.value)?
             .outpoint
             .clone();
         // Build first; only mark spent if the spend actually built.
         let payload =
-            build_spend_payload(seed, pool, &chosen, output_value, cover_set_id, anchor_height)?;
+            build_spend_payload(seed, pool, &chosen, output_value, fee, cover_set_id, anchor_height)?;
         self.mark_spent(&chosen);
         Some(payload)
     }
@@ -203,26 +206,31 @@ impl ShieldedNoteStore {
     /// note spent.
     ///
     /// Same note-selection as [`ShieldedNoteStore::build_self_spend`] (smallest
-    /// unspent note strictly greater than `output_value`, for a positive fee),
-    /// but the output coin is paid to the recipient. Once applied, that coin
-    /// re-enters the pool and the recipient recovers it by scanning. Returns the
-    /// [`SparkPayload`], or `None` if no single note covers `output_value`, the
-    /// recipient is empty, or the build fails (nothing is marked on failure).
+    /// unspent note covering `output_value + fee`), but the payment coin is paid
+    /// to the recipient and the remainder returns to the SENDER as change. Once
+    /// applied, both coins re-enter the pool (the recipient recovers the payment,
+    /// the sender the change, by scanning). Returns the [`SparkPayload`], or
+    /// `None` if no single note covers `output_value + fee`, the recipient is
+    /// empty, or the build fails (nothing is marked on failure).
     pub fn build_transfer(
         &mut self,
         seed: &[u8],
         pool: &SparkPoolStore,
         recipient_addr: &[u8],
         output_value: u64,
+        fee: u64,
         cover_set_id: u64,
         anchor_height: u64,
     ) -> Option<SparkPayload> {
         if recipient_addr.is_empty() {
             return None;
         }
+        // Smallest unspent note covering output + fee; remainder returns to the
+        // SENDER as change (not burned).
+        let need = output_value.checked_add(fee)?;
         let chosen = self
             .unspent()
-            .filter(|n| n.value > output_value)
+            .filter(|n| n.value >= need)
             .min_by_key(|n| n.value)?
             .outpoint
             .clone();
@@ -231,6 +239,7 @@ impl ShieldedNoteStore {
             pool,
             &chosen,
             output_value,
+            fee,
             cover_set_id,
             anchor_height,
             recipient_addr,
@@ -332,7 +341,7 @@ mod tests {
         // Pay 1_500 back to ourselves → smallest note strictly > 1_500 is 2_000
         // (fee 500). Build over the height-1 cover set (cover_set_id 0).
         let payload = store
-            .build_self_spend(seed, &pool, 1_500, 0, 1)
+            .build_self_spend(seed, &pool, 1_500, 0, 0, 1)
             .expect("spend builds from the 2_000 note");
         assert!(payload.spend.is_some(), "produced a spend payload");
 
@@ -347,13 +356,13 @@ mod tests {
 
         // A second self-spend of 1_500 now selects the 3_000 note (2_000 gone).
         let payload2 = store
-            .build_self_spend(seed, &pool, 1_500, 0, 1)
+            .build_self_spend(seed, &pool, 1_500, 0, 0, 1)
             .expect("spend builds from the 3_000 note");
         assert!(payload2.spend.is_some());
         assert_eq!(store.balance(), 1_000, "only the 1_000 note remains unspent");
 
-        // 1_000 note cannot cover a 1_500 output (needs value strictly greater).
-        assert!(store.build_self_spend(seed, &pool, 1_500, 0, 1).is_none());
+        // 1_000 note cannot cover a 1_500 output (needs value >= output + fee).
+        assert!(store.build_self_spend(seed, &pool, 1_500, 0, 0, 1).is_none());
     }
 
     #[test]
@@ -372,12 +381,13 @@ mod tests {
         assert_eq!(a.scan(seed_a, &pool), 3);
         assert_eq!(a.balance(), 6_000);
 
-        // A sends 1_500 to B → funded by the 2_000 note (fee 500).
+        // A sends 1_500 to B → funded by the 2_000 note, fee 0, so 500 returns to
+        // A as change (not burned).
         let payload = a
-            .build_transfer(seed_a, &pool, &addr_b, 1_500, 0, 1)
+            .build_transfer(seed_a, &pool, &addr_b, 1_500, 0, 0, 1)
             .expect("transfer builds");
         assert!(payload.spend.is_some());
-        assert_eq!(a.balance(), 4_000, "A's funding note is spent");
+        assert_eq!(a.balance(), 4_000, "A's funding note is spent (change not yet rescanned)");
 
         // The node verifies the transfer.
         let backend = LibsparkBackend;
@@ -393,16 +403,19 @@ mod tests {
             assert!(pool.add_coin(key, coin.clone(), out_ctx.clone(), 2).is_some());
         }
 
-        // B scans the pool and finds exactly the 1_500 coin A sent.
+        // B scans the pool and finds exactly the 1_500 coin A sent (and NOT A's
+        // change coin).
         let mut b = ShieldedNoteStore::new();
         let found = b.scan(seed_b, &pool);
         assert_eq!(found, 1, "B owns exactly the transferred coin");
         assert_eq!(b.balance(), 1_500, "B receives the sent value");
 
-        // A does NOT see the coin it sent away (re-scan finds nothing new).
-        assert_eq!(a.scan(seed_a, &pool), 0, "the sent coin is not A's");
+        // A re-scans: it recovers ONLY its 500 change coin (not the 1_500 sent to
+        // B) — the change-burn fix means the remainder came back to A.
+        assert_eq!(a.scan(seed_a, &pool), 1, "A recovers its change coin, not the sent coin");
+        assert_eq!(a.balance(), 4_500, "A: 4_000 remaining + 500 change");
 
         // An empty recipient is rejected.
-        assert!(a.build_transfer(seed_a, &pool, &[], 500, 0, 1).is_none());
+        assert!(a.build_transfer(seed_a, &pool, &[], 500, 0, 0, 1).is_none());
     }
 }

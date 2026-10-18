@@ -2415,7 +2415,7 @@ fn shielded_send_demo(seed: &[u8], to: &str, amount: u64) -> Result<(), String> 
     );
 
     let payload = notes
-        .build_transfer(seed, &pool, to.as_bytes(), amount, 0, 1)
+        .build_transfer(seed, &pool, to.as_bytes(), amount, 0, 0, 1)
         .ok_or("failed to build shielded transfer (insufficient notes or bad address)")?;
     let sb = payload
         .spend
@@ -2467,7 +2467,10 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
 
     // Build the spend to the recipient over the fetched cover set, then
     // self-verify the bundle (standalone — the node re-verifies on submit).
-    let spend = build_spend_to_address(seed, &cover_coins, spend_index, &chosen_ctx, amount, to.as_bytes())
+    // pool_fee 0: the funding note's remainder (chosen_value − amount) returns to
+    // this wallet as a CHANGE coin — it is NOT burned. (Picking a larger note is
+    // therefore fine; the excess comes back as change.)
+    let spend = build_spend_to_address(seed, &cover_coins, spend_index, &chosen_ctx, amount, 0, to.as_bytes())
         .ok_or("failed to build shielded spend (bad recipient address or output value)")?;
     let tags = backend
         .verify_spend(&[], &spend, 0, 0)
@@ -2482,18 +2485,14 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
     // (the single pool), anchor_height is the set we built against, value_balance
     // = 0 (nothing crosses the veil on a pool→pool transfer).
     //
-    // tx.fee MUST be 0 for a pure shielded transfer. The pool-internal fee
-    // (input − output) is carried and proven INSIDE the libspark spend bundle
-    // (libspark SpendTransaction fee = input_value − output_value; see
-    // crates/spark-connector/csrc/shim.cpp). The transparent `tx.fee` is a
-    // SEPARATE, transparent-side value: with no transparent inputs/outputs and
-    // value_balance 0, the consensus value bridge requires `fee·H == identity`,
-    // i.e. tx.fee == 0 (chain::verify_transparent_shielded_balance). Setting
-    // tx.fee to the pool-internal fee here would make a mined block carrying
-    // this tx fail the bridge even though the mempool (structural-only) admits
-    // it. (NOTE: the pool-internal fee burns the funding note's remainder — a
-    // self-change output is a follow-up; pick a note close to `amount`.)
-    let pool_fee = chosen_value.saturating_sub(amount);
+    // tx.fee MUST be 0 for a pure shielded transfer. The libspark bundle carries
+    // the pool-internal fee (0 here); the transparent `tx.fee` is SEPARATE — with
+    // no transparent inputs/outputs and value_balance 0, the consensus value
+    // bridge requires `fee·H == identity`, i.e. tx.fee == 0
+    // (chain::verify_transparent_shielded_balance). A non-zero tx.fee would make
+    // a mined block carrying this tx fail the bridge even though the mempool
+    // (structural-only) admits it.
+    let change = chosen_value.saturating_sub(amount); // returns to this wallet
     let payload = coincync::consensus::spark_payload::SparkPayload {
         version: coincync::consensus::spark_payload::SPARK_PAYLOAD_VERSION,
         mint: None,
@@ -2516,7 +2515,7 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
     };
     let tx_hex = hex::encode(borsh::to_vec(&tx).map_err(|e| format!("encode shielded tx: {e}"))?);
 
-    println!("  Pool fee (in-bundle): {pool_fee} atomic (transparent tx.fee = 0)");
+    println!("  Change back to you:   {change} atomic (returned as a shielded note; tx.fee = 0)");
     println!("  Submitting to {node} ...");
     match rpc_call(node, "send_raw_transaction", serde_json::json!([tx_hex])).await {
         Ok(resp) => {

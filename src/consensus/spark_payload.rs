@@ -349,6 +349,7 @@ pub mod build {
         store: &SparkPoolStore,
         owned_outpoint: &[u8],
         output_value: u64,
+        fee: u64,
         cover_set_id: u64,
         anchor_height: u64,
     ) -> Option<SparkPayload> {
@@ -357,24 +358,27 @@ pub mod build {
             store,
             owned_outpoint,
             output_value,
+            fee,
             cover_set_id,
             anchor_height,
             None,
         )
     }
 
-    /// Build a TRANSFER payload: spend the pool coin at `owned_outpoint` and pay
+    /// Build a TRANSFER payload: spend the pool coin at `owned_outpoint`, pay
     /// `output_value` to `recipient_addr` (a bech32m Spark address, as bytes) —
-    /// a shielded→shielded send to another wallet. The output coin re-enters the
-    /// pool at apply and is recoverable by the recipient (fee = input −
-    /// `output_value`, `value_balance = 0` — nothing crosses the veil). `None`
-    /// if the coin is not in the anchored cover set, the recipient is empty, or
-    /// the FFI fails.
+    /// a shielded→shielded send to another wallet — and burn `fee`. The remainder
+    /// (`input − output_value − fee`) returns to the SENDER as a change coin, so
+    /// nothing beyond `fee` is burned. Both output coins re-enter the pool at
+    /// apply (recoverable by the recipient and sender respectively);
+    /// `value_balance = 0` — nothing crosses the veil. `None` if the coin is not
+    /// in the anchored cover set, the recipient is empty, or the FFI fails.
     pub fn build_transfer_payload(
         seed: &[u8],
         store: &SparkPoolStore,
         owned_outpoint: &[u8],
         output_value: u64,
+        fee: u64,
         cover_set_id: u64,
         anchor_height: u64,
         recipient_addr: &[u8],
@@ -387,6 +391,7 @@ pub mod build {
             store,
             owned_outpoint,
             output_value,
+            fee,
             cover_set_id,
             anchor_height,
             Some(recipient_addr),
@@ -395,11 +400,15 @@ pub mod build {
 
     /// Shared spend/transfer builder. `recipient_addr = None` → self-spend
     /// (change back to the spender); `Some(addr)` → transfer to that address.
+    /// `fee` is the pool-internal fee burned; the remainder returns to the
+    /// spender as change.
+    #[allow(clippy::too_many_arguments)]
     fn build_spend_payload_inner(
         seed: &[u8],
         store: &SparkPoolStore,
         owned_outpoint: &[u8],
         output_value: u64,
+        fee: u64,
         cover_set_id: u64,
         anchor_height: u64,
         recipient_addr: Option<&[u8]>,
@@ -411,8 +420,8 @@ pub mod build {
             return None; // owned coin not inside the anchored cover set
         }
         let bundle = match recipient_addr {
-            Some(addr) => build_spend_to_address(seed, &cover, idx, &ctx, output_value, addr)?,
-            None => build_spend_over_set(seed, &cover, idx, &ctx, output_value)?,
+            Some(addr) => build_spend_to_address(seed, &cover, idx, &ctx, output_value, fee, addr)?,
+            None => build_spend_over_set(seed, &cover, idx, &ctx, output_value, fee)?,
         };
         Some(SparkPayload {
             version: SPARK_PAYLOAD_VERSION,
@@ -629,7 +638,7 @@ mod tests {
         let owned_op = format!("v2:seed:{spend_index}").into_bytes();
         let ctx = store.context_for(&owned_op).unwrap();
         let cover = store.cover_set_at(0, 1);
-        let bundle = build_spend_over_set(seed, &cover, spend_index, &ctx, 3_000).unwrap();
+        let bundle = build_spend_over_set(seed, &cover, spend_index, &ctx, 3_000, 0).unwrap();
 
         let payload = SparkPayload {
             version: SPARK_PAYLOAD_VERSION,
@@ -711,7 +720,7 @@ mod tests {
         // Spend the coin at vout 2 (its outpoint is deterministic from the mint).
         let owned_op = derive_outpoint(&mint_inputs, 2);
         let spend_payload =
-            build_spend_payload(seed, &store, &owned_op, 3_000, 0, 1).expect("build spend payload");
+            build_spend_payload(seed, &store, &owned_op, 3_000, 0, 0, 1).expect("build spend payload");
 
         let backend = LibsparkBackend;
         let tags = verify_spark_payload(&store, &backend, &spend_payload, 0).expect("verify spend");

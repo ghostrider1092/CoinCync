@@ -692,6 +692,7 @@ int spark_ffi_build_spend_over_set(const unsigned char* seed, int seed_len,
                                    uint64_t spend_index,
                                    const unsigned char* ctx_ptr, int ctx_len,
                                    uint64_t output_value,
+                                   uint64_t fee,
                                    const unsigned char* recip_addr_ptr, int recip_addr_len,
                                    unsigned char* out, int cap) {
     try {
@@ -736,9 +737,15 @@ int spark_ffi_build_spend_over_set(const unsigned char* seed, int seed_len,
         spark::IdentifiedCoinData id = cover_set[(std::size_t)spend_index].identify(incoming_view_key);
         spark::RecoveredCoinData rec = cover_set[(std::size_t)spend_index].recover(full_view_key, id);
 
-        if (output_value == 0 || output_value >= id.v) {
-            throw std::invalid_argument("output_value must be in (0, input_value)");
+        // output_value goes to the recipient, `fee` is burned (pool-internal),
+        // and the REMAINDER returns to the spender as change — so a transfer does
+        // not burn the funding note's balance. Require 0 < output_value and
+        // output_value + fee <= input_value (change >= 0).
+        if (output_value == 0 || fee > id.v || output_value > id.v - fee) {
+            throw std::invalid_argument(
+                "require 0 < output_value and output_value + fee <= input_value");
         }
+        const uint64_t change = id.v - output_value - fee;
 
         const uint64_t cover_set_id = 31415;
         std::vector<unsigned char> rep(32);
@@ -762,19 +769,28 @@ int spark_ffi_build_spend_over_set(const unsigned char* seed, int seed_len,
         std::unordered_map<uint64_t, std::vector<spark::Coin>> cover_sets;
         cover_sets[cover_set_id] = cover_set;
 
-        const uint64_t fee = id.v - output_value;
-        // Pay the output to the recipient's address (transfer) or back to the
-        // spender (self-spend) when no recipient is supplied.
-        spark::Address address(incoming_view_key, 0);
+        // The spender's own address (always derivable from the view key): the
+        // change destination, and the sole output destination for a self-spend
+        // (no recipient supplied).
+        spark::Address self_address(incoming_view_key, 0);
+        spark::Address recipient = self_address;
         if (recip_addr_len > 0) {
             std::string addr_str((const char*)recip_addr_ptr, (std::size_t)recip_addr_len);
-            address.decode(addr_str);
+            recipient.decode(addr_str);
         }
         std::vector<spark::OutputCoinData> out_coin_data;
         out_coin_data.emplace_back();
-        out_coin_data.back().address = address;
+        out_coin_data.back().address = recipient;
         out_coin_data.back().v = output_value;
         out_coin_data.back().memo = "solvency";
+        // Change coin back to the spender. Omitted when zero so no 0-value /
+        // dust coin ever enters the pool.
+        if (change > 0) {
+            out_coin_data.emplace_back();
+            out_coin_data.back().address = self_address;
+            out_coin_data.back().v = change;
+            out_coin_data.back().memo = "change";
+        }
 
         std::map<uint64_t, uint256> block_hashes;
         block_hashes.emplace(cover_set_id, block_hash);

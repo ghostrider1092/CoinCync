@@ -981,7 +981,7 @@ mod tests {
         let owned_outpoint = format!("e2e:tx:{spend_index}").into_bytes();
         let ctx = store.context_for(&owned_outpoint).expect("stored ctx");
         let cover = store.cover_set();
-        let spend = build_spend_over_set(seed, &cover, spend_index, &ctx, 4_000)
+        let spend = build_spend_over_set(seed, &cover, spend_index, &ctx, 4_000, 0)
             .expect("build spend over store cover set");
 
         let backend = LibsparkBackend;

@@ -224,6 +224,7 @@ pub mod ffi {
             ctx_ptr: *const u8,
             ctx_len: c_int,
             output_value: u64,
+            fee: u64,
             recip_addr_ptr: *const u8,
             recip_addr_len: c_int,
             out: *mut u8,
@@ -624,9 +625,11 @@ pub mod ffi {
     }
 
     /// Build a shielded spend over a CALLER-SUPPLIED `cover_set`, spending the
-    /// coin the `seed` wallet owns at `spend_index` (minted with `context`) and
-    /// paying `output_value` back to the WALLET (a change/consolidation
-    /// self-spend). Returns the verify bundle [`SpendBytes`] (what
+    /// coin the `seed` wallet owns at `spend_index` (minted with `context`),
+    /// paying `output_value` back to the WALLET and burning `fee`
+    /// (pool-internal). The remainder (`input − output_value − fee`) returns to
+    /// the wallet as a CHANGE coin, so a spend never burns the note's balance.
+    /// Returns the verify bundle [`SpendBytes`] (what
     /// [`LibsparkBackend::verify_spend`] consumes), or `None` on error. The cover
     /// set marshals as `[u32 count][ (u32 len)(coin bytes) ]...`.
     pub fn build_spend_over_set(
@@ -635,29 +638,33 @@ pub mod ffi {
         spend_index: usize,
         context: &[u8],
         output_value: u64,
+        fee: u64,
     ) -> Option<SpendBytes> {
         // Empty recipient → the shim pays the output back to the spender.
-        build_spend_inner(seed, cover_set, spend_index, context, output_value, &[])
+        build_spend_inner(seed, cover_set, spend_index, context, output_value, fee, &[])
     }
 
     /// Build a shielded spend that pays `output_value` to `recipient_addr` (a
     /// bech32m Spark address, as bytes) — a shielded→shielded TRANSFER to another
-    /// wallet. The spend consumes the spender's owned coin at `spend_index`; its
-    /// output coin re-enters the pool and is recoverable/spendable by the
-    /// recipient (fee = input − `output_value`). Returns the verify bundle, or
-    /// `None` on error (bad index, `output_value` ∉ (0, input), bad address, …).
+    /// wallet — burning `fee` (pool-internal). The spend consumes the spender's
+    /// owned coin at `spend_index`; the `output_value` coin re-enters the pool
+    /// recoverable/spendable by the recipient, and the remainder (`input −
+    /// output_value − fee`) returns to the SENDER as a change coin (no balance is
+    /// burned beyond `fee`). Returns the verify bundle, or `None` on error (bad
+    /// index, `output_value + fee` > input, bad address, …).
     pub fn build_spend_to_address(
         seed: &[u8],
         cover_set: &[CoinBytes],
         spend_index: usize,
         context: &[u8],
         output_value: u64,
+        fee: u64,
         recipient_addr: &[u8],
     ) -> Option<SpendBytes> {
         if recipient_addr.is_empty() {
             return None; // a transfer must name a recipient
         }
-        build_spend_inner(seed, cover_set, spend_index, context, output_value, recipient_addr)
+        build_spend_inner(seed, cover_set, spend_index, context, output_value, fee, recipient_addr)
     }
 
     /// Shared spend builder: `recipient_addr` empty → self-spend, else transfer.
@@ -667,6 +674,7 @@ pub mod ffi {
         spend_index: usize,
         context: &[u8],
         output_value: u64,
+        fee: u64,
         recipient_addr: &[u8],
     ) -> Option<SpendBytes> {
         // Marshal the cover set: [u32 count][ (u32 len)(bytes) ]...
@@ -688,6 +696,7 @@ pub mod ffi {
                 context.as_ptr(),
                 context.len() as c_int,
                 output_value,
+                fee,
                 recipient_addr.as_ptr(),
                 recipient_addr.len() as c_int,
                 out.as_mut_ptr(),
@@ -1004,7 +1013,7 @@ pub mod ffi {
 
             // Spend the owned coin at index 1 (value 1001), paying 400 back (fee 601).
             let spend_index = 1usize;
-            let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 400)
+            let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 400, 0)
                 .expect("build spend over caller-supplied set");
 
             // The bundle must verify and yield exactly one linking-tag nullifier.
@@ -1037,34 +1046,42 @@ pub mod ffi {
                 ctxs.push(ctx.to_vec());
             }
 
-            // A spends its coin at index 2 (value 5002), paying 3_000 to B (fee 2002).
+            // A spends its coin at index 2 (value 5002), paying 3_000 to B with
+            // fee 0 → 2_002 returns to A as change (no balance burned).
             let spend_index = 2usize;
             let bundle =
-                build_spend_to_address(a, &coins, spend_index, &ctxs[spend_index], 3_000, &addr_b)
+                build_spend_to_address(a, &coins, spend_index, &ctxs[spend_index], 3_000, 0, &addr_b)
                     .expect("build transfer to B");
 
             let backend = LibsparkBackend;
             let tags = backend.verify_spend(&[], &bundle, 0, 0).expect("transfer verifies");
             assert_eq!(tags.len(), 1, "one input → one nullifier");
 
-            // The output coin re-enters the pool with its recoverable context.
+            // The output coins re-enter the pool: B's payment + A's change.
             let (out_coins, out_ctx) = spend_outputs(&bundle.0).expect("extract spend outputs");
-            assert_eq!(out_coins.len(), 1, "one payment output");
+            assert_eq!(out_coins.len(), 2, "payment + change");
 
-            // B recovers the 3_000 coin; A cannot see it (it is not A's).
-            let recovered = backend
-                .identify(b_seed, &out_coins[0], &out_ctx)
-                .expect("identify call")
-                .expect("B owns the transfer output");
-            assert_eq!(recovered.value, 3_000, "B receives the transferred value");
-            assert!(
-                backend.identify(a, &out_coins[0], &out_ctx).unwrap().is_none(),
-                "the sender must NOT be able to recover a coin paid to the recipient"
-            );
+            // B recovers exactly the 3_000 payment; A recovers exactly the 2_002
+            // change; no coin is recoverable by both party keys.
+            let mut b_value = None;
+            let mut a_value = None;
+            for c in &out_coins {
+                let rb = backend.identify(b_seed, c, &out_ctx).unwrap();
+                let ra = backend.identify(a, c, &out_ctx).unwrap();
+                assert!(!(rb.is_some() && ra.is_some()), "coin recoverable by both parties");
+                if let Some(id) = rb {
+                    b_value = Some(id.value);
+                }
+                if let Some(id) = ra {
+                    a_value = Some(id.value);
+                }
+            }
+            assert_eq!(b_value, Some(3_000), "B receives the transferred value");
+            assert_eq!(a_value, Some(2_002), "A keeps the change (5002 − 3000 − fee 0)");
 
             // A self-spend (no recipient) still pays A: identify with A succeeds.
             let self_bundle =
-                build_spend_over_set(a, &coins, spend_index, &ctxs[spend_index], 3_000)
+                build_spend_over_set(a, &coins, spend_index, &ctxs[spend_index], 3_000, 0)
                     .expect("self-spend builds");
             let (self_out, self_ctx) = spend_outputs(&self_bundle.0).expect("self outputs");
             assert!(
@@ -1091,7 +1108,7 @@ pub mod ffi {
                 ctxs.push(ctx.to_vec());
             }
             let spend_index = partial - 1;
-            let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 300)
+            let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 300, 0)
                 .expect("partial-set spend builds");
             let b = LibsparkBackend;
             let tags = b.verify_spend(&[], &bundle, 0, 0).expect("partial-set spend verifies");
@@ -1125,7 +1142,7 @@ pub mod ffi {
             let owned_ctx = serial_context(owned_op.as_bytes()).expect("owned ctx");
 
             // Correct outpoint context → spend builds + verifies.
-            let bundle = build_spend_over_set(seed, &coins, spend_index, &owned_ctx, 900)
+            let bundle = build_spend_over_set(seed, &coins, spend_index, &owned_ctx, 900, 0)
                 .expect("outpoint-derived ctx spends");
             let b = LibsparkBackend;
             assert!(b.verify_spend(&[], &bundle, 0, 0).is_ok());
@@ -1133,7 +1150,7 @@ pub mod ffi {
             // Wrong outpoint context → cannot recover the coin → fail-closed.
             let wrong_ctx = serial_context(b"tx:cover:vout:999").expect("wrong ctx");
             assert!(
-                build_spend_over_set(seed, &coins, spend_index, &wrong_ctx, 900).is_none(),
+                build_spend_over_set(seed, &coins, spend_index, &wrong_ctx, 900, 0).is_none(),
                 "a mismatched serial context must not produce a spend"
             );
         }
@@ -1154,7 +1171,7 @@ pub mod ffi {
                 ctxs.push(ctx.to_vec());
             }
             let spend_index = 1usize;
-            let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 700)
+            let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 700, 0)
                 .expect("build solvency proof");
             let b = LibsparkBackend;
 
@@ -1187,12 +1204,12 @@ pub mod ffi {
             }
             // Out-of-range index → fail closed.
             assert!(
-                build_spend_over_set(seed, &coins, n + 5, &ctxs[0], 100).is_none(),
+                build_spend_over_set(seed, &coins, n + 5, &ctxs[0], 100, 0).is_none(),
                 "out-of-range spend_index must fail"
             );
             // Over-spend (output >= input value at index 2 = 502) → fail closed.
             assert!(
-                build_spend_over_set(seed, &coins, 2, &ctxs[2], 10_000).is_none(),
+                build_spend_over_set(seed, &coins, 2, &ctxs[2], 10_000, 0).is_none(),
                 "over-spend must fail"
             );
         }
