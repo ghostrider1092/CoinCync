@@ -23,11 +23,41 @@ use std::sync::Arc;
 /// `Blockchain` below.
 pub trait ShadowEvictChain {
     fn validate_transaction(&self, tx: &Transaction) -> Result<()>;
+
+    /// True if `tx` is a shielded tx that can no longer be mined against the
+    /// CURRENT pool state — chiefly: its linking tag is already spent on-chain
+    /// (a confirmed spend, or a double-spend attempt). `validate_transaction` is
+    /// only a STRUCTURAL check for shielded txs (the stateful cover-set/spent-tag
+    /// verification is block-level), so without this a confirmed shielded
+    /// transfer that is re-added to the mempool — e.g. by Dandelion fluff after
+    /// it was mined — would never be evicted, and the miner would re-propose it
+    /// into every template, stalling on "tag already spent" block rejections.
+    /// Non-shielded txs and builds without the shielded engine: always false.
+    fn shielded_unminable(&self, tx: &Transaction) -> bool;
 }
 
 impl ShadowEvictChain for crate::chain::Blockchain {
     fn validate_transaction(&self, tx: &Transaction) -> Result<()> {
         crate::chain::Blockchain::validate_transaction(self, tx)
+    }
+
+    fn shielded_unminable(&self, tx: &Transaction) -> bool {
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        {
+            if tx.is_shielded() {
+                // The store-aware v2 verify returns Err when a revealed linking
+                // tag is already in the pool's spent set (among other faults) —
+                // exactly the "no longer minable" condition. Read-only; no state
+                // mutation. Inert (Ok) when the pool store is uninitialized.
+                return crate::chain::Blockchain::verify_block_spark_v2(
+                    self,
+                    std::slice::from_ref(tx),
+                )
+                .is_err();
+            }
+        }
+        let _ = tx;
+        false
     }
 }
 
@@ -1031,6 +1061,12 @@ impl Mempool {
         for (hash, entry) in &self.transactions {
             if let Err(e) = chain.validate_transaction(&entry.tx) {
                 invalid_hashes.push((*hash, format!("{}", e)));
+            } else if chain.shielded_unminable(&entry.tx) {
+                // A shielded tx whose linking tag is now spent on-chain (e.g. a
+                // confirmed transfer re-added by Dandelion fluff). Structurally
+                // valid, so validate_transaction passed, but it can never be
+                // mined again — evict it before it poisons block templates.
+                invalid_hashes.push((*hash, "shielded tx no longer minable (tag spent)".into()));
             }
         }
 

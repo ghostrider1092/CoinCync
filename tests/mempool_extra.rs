@@ -250,6 +250,10 @@ impl ShadowEvictChain for FakeShadowChain {
             Ok(())
         }
     }
+
+    fn shielded_unminable(&self, _tx: &Transaction) -> bool {
+        false
+    }
 }
 
 // ===========================================================================

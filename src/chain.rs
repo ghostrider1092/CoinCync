@@ -899,7 +899,7 @@ impl Blockchain {
     /// real backend) — the only config where the libspark pool exists; inert and
     /// fail-closed otherwise. Returns `Err(reason)` to reject the block.
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-    fn verify_block_spark_v2(
+    pub(crate) fn verify_block_spark_v2(
         &self,
         transactions: &[Transaction],
     ) -> std::result::Result<(), String> {
