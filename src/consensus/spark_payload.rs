@@ -169,9 +169,11 @@ pub fn verify_spark_payloads_batch<B: SparkBackend>(
     let spent = store.spent_tags();
     for ((cover_set_id, anchor_height), idxs) in groups {
         let cover = store.cover_set_at(cover_set_id, anchor_height);
-        let bundles: Vec<SpendBytes> = idxs
+        // Borrow each spend's bundle bytes (no copy) — they live in `items` for
+        // the whole call, and `verify_spend_batch` only reads them.
+        let bundles: Vec<&[u8]> = idxs
             .iter()
-            .map(|&i| SpendBytes(items[i].0.spend.as_ref().unwrap().bundle.clone()))
+            .map(|&i| items[i].0.spend.as_ref().unwrap().bundle.as_slice())
             .collect();
         let fees: Vec<u64> = idxs.iter().map(|&i| items[i].1).collect();
         let vbs: Vec<i64> = idxs.iter().map(|&i| items[i].0.value_balance).collect();
