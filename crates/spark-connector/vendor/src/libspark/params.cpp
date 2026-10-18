@@ -47,6 +47,36 @@ Params const* Params::get_test() {
     }
 }
 
+// CoinCync production parameters: n=8, m=3 => N = 8^3 = 512 cover-set members.
+// The anonymity set CoinCync RATIFIED from the libspark verify-cost benchmark
+// (docs/design/cip-shielded-anonset.md): 512 keeps the per-block Grootle verify
+// ~59 ms, so a chain where shielded spends are the norm stays IBD-viable --
+// unlike Firo's get_default (n=8,m=5=32768, ~2.7 s/block base multiexp on
+// CoinCync's secp256k1 build). Same non-Grootle params as get_default; only the
+// Grootle (n,m) differ. m>=3 is required by the Params ctor, so 512 is the
+// smallest valid n=8 set.
+//
+// *** COINCYNC DELTA vs vendored firo v0.14.18.1 *** (see vendor/PROVENANCE.md):
+// this factory is the ONLY change to the otherwise byte-identical pinned tree.
+Params const* Params::get_coincync() {
+    if (instance) {
+        return instance.get();
+    } else {
+        LOCK(cs_instance);
+        if (instance) {
+            return instance.get();
+        }
+
+        std::size_t memo_bytes = 31; // 32 bytes after length prepending!
+        std::size_t max_M_range = 16;
+        std::size_t n_grootle = 8;
+        std::size_t m_grootle = 3;
+
+        instance.reset(new Params(memo_bytes, max_M_range, n_grootle, m_grootle));
+        return instance.get();
+    }
+}
+
 Params::Params(
     const std::size_t memo_bytes,
     const std::size_t max_M_range,

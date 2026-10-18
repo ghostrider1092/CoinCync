@@ -1,7 +1,9 @@
 # CIP-Shielded — Anonymity-Set Determinism Contract
 
-Status: **DRAFT / provisional** (not ratified; not activated). Companion to
-`cip-shielded-txtype.md` and `cip-shielded-proof.md`.
+Status: **RATIFIED (params): `n = 8, m = 3 ⇒ N = 512`** (2026-10-18), backed by a
+direct benchmark; **NOT yet activated** (shielded stays gated OFF, `u64::MAX`),
+and the shipped build default stays `get_test()` until the audit-gated flip +
+24h soak at 512. Companion to `cip-shielded-txtype.md` and `cip-shielded-proof.md`.
 
 ## Problem
 
@@ -211,13 +213,31 @@ N=32768:
 | 4096 (8,4) | ~350 ms | too heavy (~48 h) |
 | 32768 (8,5) | 2666 ms | IBD-fatal |
 
-## FINAL RECOMMENDATION (2026-10-18)
+## RATIFIED — `n = 8, m = 3 ⇒ N = 512` (2026-10-18)
 
-**Ratify `n = 8, m = 3 ⇒ N = 512` as the production anon-set.** The per-block
-base multiexp (~59 ms) keeps IBD tractable even when shielded spends are the NORM
-(the design goal), and additional spends in a block are ~15 ms each under batched
-verify. 512 is a genuine one-of-512 anonymity set — far stronger than Monero's
-static ring-16 — and revisitable UPWARD later if the verify floor improves.
+**The production anon-set is `n = 8, m = 3 ⇒ N = 512`.** The per-block base
+multiexp keeps IBD tractable even when shielded spends are the NORM (the design
+goal), and additional spends in a block are cheap under batched verify. 512 is a
+genuine one-of-512 anonymity set — far stronger than Monero's static ring-16 —
+and revisitable UPWARD later if the verify floor improves (e.g. the Ristretto-GK
+experiment).
+
+**DIRECT MEASUREMENT (2026-10-18) — ratification confirmed, not extrapolated.**
+A `get_coincync()` factory (n=8, m=3) was added to the vendored libspark (see
+`vendor/PROVENANCE.md` — the one CoinCync delta) and `spark-prod-params` now
+selects it, so N=512 is directly benchmarkable:
+
+| metric (N=512, release) | predicted | **measured** |
+|---|---|---|
+| per-block base — single verify, in-memory set (pure multiexp) | ~59 ms | **63.8 ms** |
+| embedded-set verify (incl. marshal) | — | 76.1 ms (bundle 127 KB) |
+| batch speedup (k=8, `vector` overload) | — | **5.76×** (11.1 ms/spend) |
+
+Measured 63.8 ms vs the extrapolated 59 ms — the `18 ms + 0.081 ms/coin` model
+holds. A 10-spend batched block ≈ 64 ms base + ~9×11 ms ≈ 160 ms; IBD stays
+tractable. The 127 KB embedded-set bundle also confirms the ~130 KB figure that
+motivated the keep-wire follow-up. Shipped default remains `get_test()`; the flip
+to `get_coincync` + a 24h soak at 512 are the remaining audit-gated steps.
 
 - **NOT 32768:** its ~2.7 s per-block base multiexp is intrinsic (batching can't
   remove it; marshal-caching barely dents it) and fatal for IBD on a

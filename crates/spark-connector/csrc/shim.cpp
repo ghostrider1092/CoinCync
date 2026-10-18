@@ -29,17 +29,18 @@ using secp_primitives::Scalar;
 // Anon-set parameter selector. `get_test()` (small Grootle set, fast) is the
 // SHIPPED default so the gated testnet/beta pool and the 24h soak stay valid;
 // building with the `spark-prod-params` Cargo feature (which defines
-// SPARK_PROD_PARAMS via build.rs) selects `get_default()` — Firo's mainnet
-// params (n=8, m=5 => N=32768). This is ONLY a compile-time switch for the
-// verify-cost benchmark and a future audit-gated production build; a coin built
-// under one param set is NOT verifiable under the other, so the whole network
-// MUST agree — never mix. Flipping the shipped default is consensus-relevant and
-// audit-gated (see docs/design/cip-shielded-anonset.md). libspark's Params is a
-// singleton with a private ctor, so these two fixed sets are the only points we
-// can build without modifying (and un-pinning) the vendored libspark.
+// SPARK_PROD_PARAMS via build.rs) selects `get_coincync()` — CoinCync's RATIFIED
+// production params (n=8, m=3 => N=512; a COINCYNC DELTA added to the vendored
+// libspark, see vendor/PROVENANCE.md). 512 was chosen from the verify-cost
+// benchmark (docs/design/cip-shielded-anonset.md): ~59 ms/block base, IBD-viable,
+// vs Firo's get_default (n=8,m=5=32768, ~2.7 s/block base — non-viable here).
+// This is a compile-time switch for the verify-cost benchmark and the
+// audit-gated production build; a coin built under one param set is NOT
+// verifiable under another, so the whole network MUST agree — never mix.
+// Flipping the SHIPPED default is consensus-relevant and audit-gated.
 static inline const spark::Params* shim_params() {
 #ifdef SPARK_PROD_PARAMS
-    return spark::Params::get_default();
+    return spark::Params::get_coincync();
 #else
     return spark::Params::get_test();
 #endif

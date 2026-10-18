@@ -1100,7 +1100,7 @@ pub mod ffi {
             println!(
                 "LIBSPARK VERIFY-COST BENCH | params={} | anon-set N={} | bundle={} bytes | \
                  {} iters | total={:?} | per-verify={:.3} ms",
-                if prod { "get_default (PROD)" } else { "get_test" },
+                if prod { "get_coincync (512, PROD)" } else { "get_test" },
                 n,
                 bundle_len,
                 iters,
@@ -1131,7 +1131,7 @@ pub mod ffi {
                 "LIBSPARK VERIFY SPLIT/BATCH | params={} | N={} | k={} spends | \
                  SINGLE (in-mem set, no marshal)={:.3} ms/spend | \
                  BATCH (vector overload)={:.3} ms/spend | batch speedup={:.2}x",
-                if prod { "get_default (PROD)" } else { "get_test" },
+                if prod { "get_coincync (512, PROD)" } else { "get_test" },
                 n,
                 k,
                 single_ms,

@@ -90,6 +90,33 @@ done
 ```
 
 An auditor who checks out `c03cd0a1` and runs the LF-normalized compare confirms
-the entire crypto surface is unmodified Firo v0.14.18.1, reducing the
-shielded-crypto review to (a) upstream Firo's own audited Spark implementation
-and (b) these five infra shims.
+the entire crypto surface is unmodified Firo v0.14.18.1 **except for the single
+CoinCync delta documented below**, reducing the shielded-crypto review to
+(a) upstream Firo's own audited Spark implementation, (b) these five infra
+shims, and (c) that one additive params factory.
+
+## CoinCync deltas (NOT upstream Firo)
+
+Beyond the five infra shims above, CoinCync adds exactly ONE consensus-relevant
+change to the vendored libspark tree:
+
+### `src/libspark/params.{h,cpp}` — `get_coincync()` production params
+
+A new `static Params const* Params::get_coincync()` factory constructing Spark
+params with **n_grootle = 8, m_grootle = 3 ⇒ N = 8³ = 512** cover-set members,
+using the SAME non-Grootle values as `get_default()` (`memo_bytes = 31`,
+`max_M_range = 16`). This is CoinCync's **RATIFIED** production anonymity set
+(see `docs/design/cip-shielded-anonset.md`): 512 keeps the per-block Grootle
+verify in the tens of ms (IBD-viable on CoinCync's secp256k1 build), whereas
+Firo's `get_default` (n=8, m=5 = 32768) costs ~2.7 s/block base multiexp here and
+is not viable for a chain where shielded spends are the norm. The `Params` ctor
+enforces `m ≥ 3`, so 512 is the smallest valid n=8 set.
+
+This is the ONLY byte-level change to libspark's own files beyond the infra
+shims; the entire crypto/proof surface (coin, grootle, chaum, bpplus, schnorr,
+spend/mint transaction, hash, keys, aead, kdf, transcript, …) remains
+byte-identical to firo v0.14.18.1. The LF-normalized verbatim compare above
+should therefore ALSO exclude `src/libspark/params.cpp` and
+`src/libspark/params.h` — two additive factory functions plus one declaration,
+self-contained and audit-reviewable in isolation (it adds a parameter set; it
+changes no crypto).
