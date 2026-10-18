@@ -196,6 +196,8 @@ pub mod ffi {
         fn spark_ffi_verify_bundle(
             ptr: *const u8,
             len: c_int,
+            set_ptr: *const u8,
+            set_len: c_int,
             out_tags: *mut u8,
             tags_cap: c_int,
             out_tags_len: *mut c_int,
@@ -830,15 +832,35 @@ pub mod ffi {
         /// verifier-side context libspark needs (cover set, its representation,
         /// output coins, block hash). Returns the linking-tag nullifiers on a
         /// valid spend; fail-closed otherwise.
-        fn verify_spend(&self, _cover_set: &[CoinBytes], spend: &SpendBytes, _f: u64, _vb: i64) -> Result<Vec<Nullifier>> {
+        fn verify_spend(&self, cover_set: &[CoinBytes], spend: &SpendBytes, _f: u64, _vb: i64) -> Result<Vec<Nullifier>> {
+            // #258: marshal the NODE-RESOLVED cover set to the flat FFI form
+            // `[u32 count][ (u32 len)(coin bytes) ]...`. When non-empty it is
+            // AUTHORITATIVE — the shim verifies the Grootle proof against it and
+            // recomputes the cover-set representation from it, so a spender cannot
+            // substitute a made-up set. Empty (`set_len == 0`) keeps the permissive
+            // stateless admit (the self-contained bundle's own set), used by the
+            // store-less admit paths that pass `&[]`.
+            let set_wire: Vec<u8> = if cover_set.is_empty() {
+                Vec::new()
+            } else {
+                let mut w = Vec::with_capacity(4 + cover_set.iter().map(|c| 4 + c.0.len()).sum::<usize>());
+                w.extend_from_slice(&(cover_set.len() as u32).to_le_bytes());
+                for c in cover_set {
+                    w.extend_from_slice(&(c.0.len() as u32).to_le_bytes());
+                    w.extend_from_slice(&c.0);
+                }
+                w
+            };
             let mut tags = vec![0u8; 8192];
             let mut tags_len: c_int = 0;
             // Safety: pointers/lengths are valid for the duration of the call; the
-            // shim only reads `spend` and writes up to `tags.len()` into `tags`.
+            // shim reads `spend` + `set_wire` and writes up to `tags.len()` into `tags`.
             let rc = unsafe {
                 spark_ffi_verify_bundle(
                     spend.0.as_ptr(),
                     spend.0.len() as c_int,
+                    set_wire.as_ptr(),
+                    set_wire.len() as c_int,
                     tags.as_mut_ptr(),
                     tags.len() as c_int,
                     &mut tags_len,

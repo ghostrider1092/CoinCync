@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <chrono>
+#include <stdexcept>
 
 using secp_primitives::GroupElement;
 using secp_primitives::Scalar;
@@ -42,6 +43,60 @@ static inline const spark::Params* shim_params() {
 #else
     return spark::Params::get_test();
 #endif
+}
+
+// ── #258 helpers: node-authoritative cover set ──────────────────────────────
+// When the node resolves the anchored cover set from its OWN store and passes it
+// to verify, these recompute the cover-set representation DETERMINISTICALLY from
+// the ordered coins (so a spender cannot prove membership in a set they made up:
+// the Grootle proof is checked against the node's coins + this rep, bound into
+// the proof's challenge, and only matches if the sets are identical) and parse
+// the flat FFI wire form `[u32 count][ (u32 len)(coin) ]...`.
+
+// Deterministic cover-set representation: a domain-separated hash over the
+// ORDERED cover-set coins, as a canonical 32-byte scalar. Both the wallet
+// (build) and the node (verify) compute the same value from the same set.
+static std::vector<unsigned char> cc_cover_set_rep(const std::vector<spark::Coin>& coins) {
+    spark::Hash h(std::string("coincync_spark_cover_set_rep_v1"));
+    CDataStream s(SER_NETWORK, PROTOCOL_VERSION);
+    s << (uint64_t)coins.size();
+    for (const auto& c : coins) s << c;
+    h.include(s);
+    Scalar sc = h.finalize_scalar();
+    std::vector<unsigned char> rep(32);
+    sc.serialize(rep.data());
+    return rep;
+}
+
+// Parse the flat FFI cover-set wire form into libspark coins.
+static std::vector<spark::Coin> cc_parse_cover_set(const unsigned char* set_ptr, int set_len,
+                                                   const spark::Params* params) {
+    std::vector<spark::Coin> cover_set;
+    std::size_t off = 0;
+    auto need = [&](std::size_t n) {
+        if (off + n > (std::size_t)set_len) throw std::runtime_error("cover set truncated");
+    };
+    auto rd_u32 = [&]() -> uint32_t {
+        need(4);
+        uint32_t v = (uint32_t)set_ptr[off] | ((uint32_t)set_ptr[off + 1] << 8) |
+                     ((uint32_t)set_ptr[off + 2] << 16) | ((uint32_t)set_ptr[off + 3] << 24);
+        off += 4;
+        return v;
+    };
+    uint32_t count = rd_u32();
+    cover_set.reserve(count);
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t clen = rd_u32();
+        need(clen);
+        spark::Coin c(params);
+        CDataStream in((const char*)set_ptr + off, (const char*)set_ptr + off + clen,
+                       SER_NETWORK, PROTOCOL_VERSION);
+        in >> c;
+        c.setParams(params);
+        cover_set.push_back(c);
+        off += clen;
+    }
+    return cover_set;
 }
 
 extern "C" {
@@ -394,6 +449,7 @@ int spark_ffi_build_spend(uint64_t output_value, unsigned char* out, int cap) {
 // out_tags as [u32 count][34-byte tag]... and returns 1. Returns 0 on an invalid
 // spend or any error (fail-closed).
 int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
+                            const unsigned char* set_ptr, int set_len,
                             unsigned char* out_tags, int tags_cap, int* out_tags_len) {
     try {
         const spark::Params* params = shim_params();
@@ -410,6 +466,26 @@ int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
         ss >> cover_set;
         ss >> out_coins;
         ss >> output_count;
+
+        // #258: when the node supplies its authoritative anchored cover set
+        // (set_len > 0), it REPLACES the set + representation carried in the
+        // spender's bundle. The Grootle proof is then verified against the node's
+        // REAL pool coins, and the DETERMINISTICALLY-recomputed rep only matches
+        // if the proof was built against that identical set — so a spender can no
+        // longer prove membership in a set they made up. An empty set_len keeps
+        // the legacy self-contained (stateless) admit.
+        //
+        // NOTE: #258's value_balance/vout binding is intentionally NOT ported.
+        // CoinCync binds value_balance to the spend bundle's internal fee `f`
+        // (the whole amount leaving the pool) via the transparent value bridge +
+        // `verify_block_spark_v2`, and keeps libspark `vout = 0`. Binding
+        // `getVout() == value_balance` would force value_balance == 0 and reject
+        // the unshield path — so it is omitted (and no vendored `getVout()` is
+        // needed).
+        if (set_len > 0) {
+            cover_set = cc_parse_cover_set(set_ptr, set_len, params);
+            rep = cc_cover_set_rep(cover_set);
+        }
         for (auto& c : cover_set) c.setParams(params);
         for (auto& c : out_coins) c.setParams(params);
 
@@ -772,8 +848,7 @@ static void pack_or_verify_build(const spark::Params* params,
 
     const std::size_t spend_index = 1;
     cover_set_id = 31415;
-    rep.resize(32);
-    { Scalar t; t.randomize(); t.serialize(rep.data()); }
+    rep = cc_cover_set_rep(cover_set); // #258: deterministic; matches the node's recompute
     block_hash = uint256();
 
     spark::IdentifiedCoinData id = cover_set[spend_index].identify(incoming_view_key);
@@ -945,8 +1020,7 @@ int spark_ffi_build_spend_over_set(const unsigned char* seed, int seed_len,
         const uint64_t change = id.v - output_value - fee;
 
         const uint64_t cover_set_id = 31415;
-        std::vector<unsigned char> rep(32);
-        { Scalar t; t.randomize(); t.serialize(rep.data()); }
+        std::vector<unsigned char> rep = cc_cover_set_rep(cover_set); // #258: deterministic
         uint256 block_hash = uint256();
 
         std::vector<spark::InputCoinData> spend_coin_data;
