@@ -260,6 +260,25 @@ enum Command {
         password: Option<String>,
     },
 
+    /// Unshield pool value back to this wallet's TRANSPARENT balance: spend an
+    /// owned shielded note, pay `amount` OUT of the pool as a value-revealing
+    /// transparent output (public amount, to this wallet), and return the pool
+    /// remainder as shielded change. The mirror of `shielded-mint`. Same gating.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    ShieldedUnshield {
+        /// Amount to unshield out of the pool, in atomic units.
+        #[arg(long)]
+        amount: u64,
+        /// Fee multiplier (1.0 = the base per-byte floor). Miner fee is
+        /// `tx_size × MIN_FEE_PER_BYTE × this`. Clamped to [1.0, 100.0].
+        #[arg(long, default_value = "1.0")]
+        fee_multiplier: f64,
+        /// Wallet password. Use `-` to read from stdin. Reads
+        /// `COINCYNC_WALLET_PASSWORD` env if neither flag nor stdin is provided.
+        #[arg(short, long, env = "COINCYNC_WALLET_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+    },
+
     /// Show this wallet's shielded (Spark) balance from the node's cover set.
     ///
     /// EXPERIMENTAL / regtest-gated: fetches `get_shielded_cover_set` (`--node`)
@@ -936,6 +955,12 @@ async fn main() {
             fee_multiplier,
             password,
         } => cmd_shielded_mint(&wallet_path, password, &cli.node, amount, fee_multiplier).await,
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        Command::ShieldedUnshield {
+            amount,
+            fee_multiplier,
+            password,
+        } => cmd_shielded_unshield(&wallet_path, password, &cli.node, amount, fee_multiplier).await,
         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
         Command::ShieldedBalance {
             demo,
@@ -2449,6 +2474,238 @@ fn shielded_send_demo(seed: &[u8], to: &str, amount: u64) -> Result<(), String> 
 /// scan it for this wallet's notes, and build + self-verify a shielded spend to
 /// `to` against that set — the real client→node path. NOT submitted (there is no
 /// shielded submission RPC yet; see the endpoint's docs).
+/// Unshield: spend an owned shielded note and pay `amount` OUT of the pool to
+/// this wallet's TRANSPARENT address as a value-revealing output (public amount,
+/// ZERO blinding — coinbase-shaped), returning the pool remainder as a shielded
+/// CHANGE coin. The mirror of `shielded-mint`.
+///
+/// Consensus (`verify_block_spark_v2` + the transparent value bridge) binds:
+///   * `value_balance = amount + miner_fee` == the spend bundle's internal fee
+///     (the WHOLE amount leaving the pool), and
+///   * the bridge `Σ pseudo(∅) == Σ out + (tx.fee − value_balance)·H` reduces to
+///     `amount·H + (miner_fee − (amount + miner_fee))·H == 0`, tying the public
+///     output value to exactly what left the pool.
+///
+/// `tx.fee = miner_fee` (the miner's share, split 70/30 at mining time); the
+/// unshielded `amount` becomes the transparent output. A size-based miner fee is
+/// REQUIRED (the block-level fee floor rejects `tx.fee < size × MIN_FEE_PER_BYTE`).
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+async fn cmd_shielded_unshield(
+    path: &PathBuf,
+    password: Option<String>,
+    node: &str,
+    amount: u64,
+    fee_multiplier: f64,
+) -> Result<(), String> {
+    use coincync::consensus::spark_payload::{SparkPayload, SpendBundle, SPARK_PAYLOAD_VERSION};
+    use coincync::constants::MIN_FEE_PER_BYTE;
+    use coincync::primitives::Amount;
+    use coincync::transaction::{build_revealed_output, Transaction, TxType};
+    use coincync::wallet::{KeyEpoch, Wallet};
+    use spark_connector::ffi::{build_spend_over_set, LibsparkBackend};
+    use spark_connector::SparkBackend;
+
+    if amount == 0 {
+        return Err("--amount must be greater than zero".into());
+    }
+
+    let password = resolve_password(password, false)?;
+    let data =
+        load_wallet(path, Some(password.as_str())).map_err(|e| format!("unlock failed: {e}"))?;
+    let seed = data.seed;
+
+    // The wallet's own TRANSPARENT address receives the unshielded value.
+    let mut wallet = Wallet::open(path.clone()).map_err(|e| format!("open wallet: {e}"))?;
+    wallet
+        .unlock(&password)
+        .map_err(|e| format!("unlock wallet: {e}"))?;
+    let keys: KeyEpoch = wallet
+        .current_keys()
+        .cloned()
+        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
+    let recip_spend = keys.spend_public;
+    let recip_view = keys.view_public;
+    drop(wallet);
+
+    let (anchor_height, cover_coins, owned) = scan_live_cover_set(&seed, node).await?;
+    println!(
+        "Cover set: {} coin(s) at anchor height {anchor_height}; {} owned by this wallet",
+        cover_coins.len(),
+        owned.len()
+    );
+    if owned.is_empty() {
+        return Err(format!(
+            "no owned shielded notes in the pool at anchor height {anchor_height} — nothing to \
+             unshield."
+        ));
+    }
+    let backend = LibsparkBackend;
+
+    // Wrap a spend of the note at `note_idx` (value `note_value`) that pays
+    // `amount` OUT of the pool as a transparent output and `miner_fee` to the
+    // miner, returning `note_value − amount − miner_fee` to the pool as a change
+    // coin. `value_balance = amount + miner_fee` = the whole amount leaving the
+    // pool (the bundle's internal fee). `None` if the note can't cover it with a
+    // strictly-positive pool change.
+    let mk_tx = |note_idx: usize,
+                 note_value: u64,
+                 note_ctx: &[u8],
+                 miner_fee: u64|
+     -> Result<(Transaction, spark_connector::SpendBytes), String> {
+        let leaving = amount.checked_add(miner_fee).ok_or("amount + fee overflow")?;
+        let pool_change = note_value
+            .checked_sub(leaving)
+            .ok_or_else(|| format!("note {note_value} < unshield {amount} + fee {miner_fee}"))?;
+        if pool_change == 0 {
+            return Err(
+                "full unshield (no pool change) is unsupported — unshield a little less, or split \
+                 the note first"
+                    .into(),
+            );
+        }
+        // Self-spend: `pool_change` re-enters the pool; `leaving` exits across
+        // the veil (the bundle's internal fee), so value_balance == leaving.
+        let bundle =
+            build_spend_over_set(&seed, &cover_coins, note_idx, note_ctx, pool_change, leaving)
+                .ok_or("failed to build unshield spend bundle (bad note index or value)")?;
+        // The value-revealing transparent output (public amount, zero blinding)
+        // paying `amount` to this wallet's transparent address.
+        let revealed = build_revealed_output(
+            &recip_spend,
+            &recip_view,
+            Amount::from_atomic(amount),
+            0,
+            &mut rand::rngs::OsRng,
+        )
+        .map_err(|e| format!("build revealed output: {e}"))?;
+        let payload = SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![],
+            spend: Some(SpendBundle {
+                cover_set_id: 0,
+                anchor_height,
+                bundle: bundle.0.clone(),
+            }),
+            value_balance: leaving as i64,
+        };
+        let tx = Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![revealed],
+            fee: Amount::from_atomic(miner_fee),
+            range_proof: vec![],
+            extra: payload.encode(),
+        };
+        Ok((tx, bundle))
+    };
+
+    // Pass 1: smallest note strictly covering `amount` (pool_change>0 at fee 0)
+    // → probe to size the fee.
+    let (probe_index, probe_value, probe_ctx) = owned
+        .iter()
+        .filter(|(_, v, _)| *v > amount)
+        .min_by_key(|(_, v, _)| *v)
+        .cloned()
+        .ok_or_else(|| {
+            let largest = owned.iter().map(|(_, v, _)| *v).max().unwrap_or(0);
+            format!("no single owned note covers {amount} atomic (largest owned note is {largest})")
+        })?;
+    let (probe_tx, _) = mk_tx(probe_index, probe_value, &probe_ctx, 0)?;
+    let tx_size = borsh::to_vec(&probe_tx).map(|b| b.len()).unwrap_or(0);
+    let mult_x100: u64 = {
+        let m = if fee_multiplier.is_nan() { 1.0 } else { fee_multiplier };
+        ((m.max(1.0) * 100.0).min(10_000.0)) as u64
+    };
+    let miner_fee = (tx_size as u64)
+        .saturating_mul(MIN_FEE_PER_BYTE)
+        .saturating_mul(mult_x100)
+        / 100;
+
+    // Pass 2: smallest note strictly covering amount + fee (pool_change>0).
+    let need = amount.checked_add(miner_fee).ok_or("amount + fee overflow")?;
+    let (spend_index, chosen_value, chosen_ctx) = owned
+        .iter()
+        .filter(|(_, v, _)| *v > need)
+        .min_by_key(|(_, v, _)| *v)
+        .cloned()
+        .ok_or_else(|| {
+            let largest = owned.iter().map(|(_, v, _)| *v).max().unwrap_or(0);
+            format!(
+                "no single owned note covers amount {amount} + fee {miner_fee} = {need} atomic \
+                 with change (largest owned note is {largest})"
+            )
+        })?;
+    let (tx, spend) = mk_tx(spend_index, chosen_value, &chosen_ctx, miner_fee)?;
+    let tags = backend
+        .verify_spend(&[], &spend, 0, 0)
+        .map_err(|e| format!("built spend failed self-verification: {e}"))?;
+    let pool_change = chosen_value.saturating_sub(amount).saturating_sub(miner_fee);
+
+    // DISCLOSURE (auditable privacy): unshielding SURFACES value and is the one
+    // privacy-reducing action in the shielded flow. It is opt-in — you chose it
+    // by running this command — and it CANNOT be undone. The transparent output
+    // is public the moment it is mined: crossing the veil IS the disclosure, so
+    // we state plainly what becomes public. This informs; it makes NO compliance
+    // claim (see LEGAL.md / the receipt line is a short note only).
+    println!("================= UNSHIELD DISCLOSURE =================");
+    println!("  You chose to UNSHIELD — this SURFACES value out of the private pool:");
+    println!("    * {amount} atomic becomes PUBLIC on the transparent chain,");
+    println!("    * linked to THIS wallet's transparent address, and");
+    println!("    * it CANNOT be made private again.");
+    println!("  To keep funds private, do not unshield — use `shielded-send` instead.");
+    println!("======================================================");
+    println!("Unshield (shielded pool -> transparent, to this wallet):");
+    println!("  Funding note:    value {chosen_value} atomic at cover index {spend_index}");
+    println!("  Spend tags:      {} linking tag(s)", tags.len());
+    let tx_hex = hex::encode(borsh::to_vec(&tx).map_err(|e| format!("encode unshield tx: {e}"))?);
+
+    // Show the fee calculation IN FULL — nothing hidden.
+    let priority = mult_x100 as f64 / 100.0;
+    let miner_share =
+        miner_fee.saturating_mul(coincync::constants::FEE_MINER_NORMAL_PERCENT) / 100;
+    let burn_share = miner_fee.saturating_sub(miner_share);
+    println!();
+    println!("  Fee calculation (shown in full — nothing hidden):");
+    println!("    tx size              = {tx_size} bytes");
+    println!("    base rate            = {MIN_FEE_PER_BYTE} atomic/byte (MIN_FEE_PER_BYTE)");
+    println!("    priority multiplier  = {priority:.2}x");
+    println!(
+        "    miner fee = size x rate x priority = {tx_size} x {MIN_FEE_PER_BYTE} x {priority:.2} = {miner_fee} atomic"
+    );
+    println!(
+        "      -> to miner (~70%): {miner_share} atomic    burned (~30%): {burn_share} atomic"
+    );
+    println!();
+    println!("  Unshielded to your transparent balance: {amount} atomic");
+    println!("  Miner fee you pay:                       {miner_fee} atomic");
+    println!("  Pool change back to you (shielded):      {pool_change} atomic");
+    println!(
+        "  Funding note spent:                      {chosen_value} atomic  (= {amount} + {miner_fee} + {pool_change})"
+    );
+    println!(
+        "  value_balance (leaves the pool):         {} atomic",
+        amount.saturating_add(miner_fee)
+    );
+    println!("  Submitting to {node} ...");
+    match rpc_call(node, "send_raw_transaction", serde_json::json!([tx_hex])).await {
+        Ok(resp) => {
+            let accepted = resp.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false);
+            if accepted {
+                println!(
+                    "  Accepted. Once mined, {amount} atomic appears in your TRANSPARENT balance \
+                     (run `scan` to see it)."
+                );
+                Ok(())
+            } else {
+                Err(format!("node did not accept the unshield tx: {resp}"))
+            }
+        }
+        Err(e) => Err(format!("rpc send_raw_transaction: {e}")),
+    }
+}
+
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
 async fn shielded_send_live(
     seed: &[u8],

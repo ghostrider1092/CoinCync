@@ -824,6 +824,55 @@ impl TransactionBuilder {
     }
 }
 
+/// Build a value-REVEALING transparent output (public value, ZERO blinding —
+/// coinbase-shaped) paying `value` to `(recipient_spend, recipient_view)`.
+///
+/// This materializes an UNSHIELD's pool-exit value on the transparent side. The
+/// transparent value bridge (`verify_transparent_shielded_balance`) forces
+/// `Σ out_blinding == Σ in_blinding`; an unshield has NO transparent inputs, so
+/// the single pool-exit output MUST carry zero blinding — i.e. its value is
+/// public, committed exactly like a coinbase output (and like the fee term in
+/// the bridge). The recipient detects and spends it via the scanner's existing
+/// zero-blinding (coinbase-style) path: it decrypts the amount from
+/// `encrypted_amount`, recomputes `Commit(amount, 0)`, and records the note with
+/// a zero blinding factor — the same handling coinbase outputs already get.
+///
+/// Gated `libspark-ffi` (only the unshield assembly uses it).
+#[cfg(feature = "libspark-ffi")]
+pub fn build_revealed_output<R: RngCore + CryptoRng>(
+    recipient_spend: &PublicKey,
+    recipient_view: &PublicKey,
+    value: Amount,
+    output_index: u8,
+    rng: &mut R,
+) -> Result<TxOutput> {
+    let (stealth, tx_secret) = generate_stealth_address_checked_ext(
+        recipient_spend,
+        recipient_view,
+        output_index,
+        false,
+        rng,
+    )?;
+    // ZERO blinding → public value (bridge requirement; identical form to a
+    // coinbase output so the scanner's zero-blinding path recovers it).
+    let commitment = PedersenCommitment::commit(value.as_atomic(), &BlindingFactor::zero());
+    // Public amount, stored as plaintext LE u64 — the SAME convention coinbase
+    // outputs use, so the recipient's scanner zero-blinding path reads it
+    // directly (it reconstructs Commit(amount, 0) and records blinding = 0). The
+    // value is public regardless (the zero-blinding commitment reveals it).
+    let encrypted_amount = value.as_atomic().to_le_bytes().to_vec();
+    let view_tag = compute_view_tag(&tx_secret, recipient_view, output_index);
+    Ok(TxOutput {
+        stealth_address: stealth.public_key,
+        tx_public_key: stealth.tx_public_key,
+        commitment: commitment.to_bytes(),
+        encrypted_amount,
+        view_tag,
+        lock_height: None,
+        encrypted_memo: vec![],
+    })
+}
+
 /// Encrypt amount using ECDH shared secret derivation
 ///
 /// SECURITY: Uses proper ECDH and the same derivation chain as scanner.rs decrypt_amount:

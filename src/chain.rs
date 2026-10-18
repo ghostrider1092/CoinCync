@@ -5265,6 +5265,133 @@ mod tests {
                 .is_err(),
             "replaying the transfer is rejected (double-spend guard: tag already spent)"
         );
+
+        // ── 5. UNSHIELD (pool → transparent): spend an owned note, pay value OUT
+        //      of the pool as a value-REVEALING transparent output (public amount,
+        //      zero blinding), returning the remainder as pool change. verify
+        //      accepts; apply shrinks the pool by the WHOLE amount that left
+        //      (value_balance = unshield + miner_fee); the output is spendable
+        //      (commits to the public amount with zero blinding, amount
+        //      recoverable); a tampered output value is rejected by the value
+        //      bridge. owned[2] is still unspent (owned[0] was spent by the
+        //      transfer; owned[1] only fed the rejected bad-fee build). ───────────
+        {
+            use crate::consensus::spark_payload::build::build_unshield_payload;
+            use crate::transaction::build_revealed_output;
+
+            assert!(owned.len() >= 3, "need a third owned note for the unshield");
+            let entries = store.cover_entries_at(0, anchor_height);
+            let outpoint = entries[owned[2].0].0.clone();
+
+            let unshield_value = 4_000_000u64;
+            let miner_fee = 1_000u64;
+            let leaving = unshield_value + miner_fee; // the whole amount leaving the veil
+            let payload = build_unshield_payload(
+                wallet_seed,
+                &store,
+                &outpoint,
+                shield_atomic, // the note's value
+                unshield_value,
+                miner_fee,
+                0,
+                anchor_height,
+            )
+            .expect("unshield payload builds");
+            assert_eq!(
+                payload.value_balance, leaving as i64,
+                "value_balance = unshield + miner_fee (the whole amount leaving the pool)"
+            );
+
+            // The value-revealing transparent output (public amount, zero blinding).
+            let recip_spend = SecretKey::from_bytes([0x55; 32]).public_key();
+            let recip_view = SecretKey::from_bytes([0x56; 32]).public_key();
+            let revealed = build_revealed_output(
+                &recip_spend,
+                &recip_view,
+                Amount::from_atomic(unshield_value),
+                0,
+                &mut rng,
+            )
+            .expect("revealed output builds");
+            // Spendability: Commit(amount, 0) + plaintext amount — exactly what the
+            // scanner's zero-blinding (coinbase-style) path reconstructs.
+            assert_eq!(
+                revealed.commitment,
+                PedersenCommitment::commit(unshield_value, &BlindingFactor::zero()).to_bytes(),
+                "revealed output commits to the public amount with zero blinding"
+            );
+            let mut amt_le = [0u8; 8];
+            amt_le.copy_from_slice(&revealed.encrypted_amount[..8]);
+            assert_eq!(
+                u64::from_le_bytes(amt_le),
+                unshield_value,
+                "revealed output's plaintext amount is recoverable"
+            );
+
+            let unshield_tx = Transaction {
+                version: 1,
+                tx_type: TxType::Shielded,
+                inputs: vec![],
+                outputs: vec![revealed],
+                fee: Amount::from_atomic(miner_fee),
+                range_proof: vec![],
+                extra: payload.encode(),
+            };
+            // verify: the value bridge `Σ pseudo(∅) == Σ out + (fee − vb)·H` holds
+            // (reduces to `unshield·H − unshield·H == 0`), and the inflation guard
+            // `value_balance == spend_fee(bundle)` holds (both equal `leaving`).
+            chain
+                .verify_block_spark_v2(std::slice::from_ref(&unshield_tx))
+                .expect("unshield accepted (bridge holds; value_balance == bundle fee)");
+
+            let pv_before = store.pool_value();
+            chain.apply_spark_v2_txs(std::slice::from_ref(&unshield_tx), 3);
+            assert_eq!(
+                store.pool_value(),
+                pv_before - leaving as i128,
+                "pool shrinks by the WHOLE amount that left the veil (unshield + miner fee)"
+            );
+
+            // TAMPER (cross-veil inflation guard): an unshield whose transparent
+            // output value EXCEEDS what left the pool is rejected by the bridge.
+            // Spend an independent still-unspent note (owned[1]) so the rejection
+            // is the value mismatch, not a double-spend.
+            let tamper_outpoint = entries[owned[1].0].0.clone();
+            let tamper_payload = build_unshield_payload(
+                wallet_seed,
+                &store,
+                &tamper_outpoint,
+                shield_atomic,
+                unshield_value,
+                miner_fee,
+                0,
+                anchor_height,
+            )
+            .expect("second unshield payload builds");
+            let tampered_out = build_revealed_output(
+                &recip_spend,
+                &recip_view,
+                Amount::from_atomic(unshield_value + 1), // claims MORE than left the pool
+                0,
+                &mut rng,
+            )
+            .expect("tampered revealed output builds");
+            let tampered_tx = Transaction {
+                version: 1,
+                tx_type: TxType::Shielded,
+                inputs: vec![],
+                outputs: vec![tampered_out],
+                fee: Amount::from_atomic(miner_fee),
+                range_proof: vec![],
+                extra: tamper_payload.encode(),
+            };
+            assert!(
+                chain
+                    .verify_block_spark_v2(std::slice::from_ref(&tampered_tx))
+                    .is_err(),
+                "an unshield whose output value exceeds what left the pool is rejected (bridge)"
+            );
+        }
     }
 
     /// IN-BLOCK shielded-consensus SOAK. Drives mint → spend → double-spend →

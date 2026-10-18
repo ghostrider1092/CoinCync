@@ -398,6 +398,66 @@ pub mod build {
         )
     }
 
+    /// Build an UNSHIELD payload: spend the pool coin at `owned_outpoint`, send
+    /// `unshield_value` OUT of the pool to the transparent side (the wallet
+    /// materializes it as a value-revealing transparent output — public value,
+    /// ZERO blinding, exactly like a coinbase output), and pay `miner_fee` to
+    /// the miner. The remainder (`note_value − unshield_value − miner_fee`)
+    /// returns to the spender as a pool CHANGE coin.
+    ///
+    /// `value_balance = unshield_value + miner_fee` — POSITIVE: the WHOLE amount
+    /// crossing the veil OUT of the pool (unshielded value + miner fee). This is
+    /// exactly the spend bundle's internal fee (`input − Σ pool outputs`), so the
+    /// `value_balance == spend_fee(bundle)` inflation guard in
+    /// `chain::verify_block_spark_v2` holds with no new branch — unshield and a
+    /// pure transfer differ only in the WALLET's transparent assembly:
+    ///   * transfer: `tx.fee == value_balance`, no transparent outputs; the
+    ///     transparent value bridge forces `Σ out = 0`.
+    ///   * unshield: `tx.fee == miner_fee` and ONE transparent output committing
+    ///     `unshield_value` with zero blinding; the bridge
+    ///     `Σ pseudo == Σ out + (fee − value_balance)·H` reduces to
+    ///     `0 == unshield·H + (miner_fee − (unshield + miner_fee))·H = 0`. ✓
+    ///
+    /// `None` if the coin is not in the anchored cover set, the note cannot cover
+    /// `unshield_value + miner_fee` with a positive pool change, or the FFI fails.
+    /// A FULL unshield (no pool change) is rejected here — it would need a
+    /// zero-value pool output; splitting the note first is the workaround (a
+    /// change-less-unshield is a follow-up).
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_unshield_payload(
+        seed: &[u8],
+        store: &SparkPoolStore,
+        owned_outpoint: &[u8],
+        note_value: u64,
+        unshield_value: u64,
+        miner_fee: u64,
+        cover_set_id: u64,
+        anchor_height: u64,
+    ) -> Option<SparkPayload> {
+        if unshield_value == 0 {
+            return None;
+        }
+        // Total value leaving the pool across the veil = the bundle's internal
+        // fee. The pool change (what stays in the pool) must be strictly
+        // positive — a zero-value pool output is rejected (see docstring).
+        let leaving = unshield_value.checked_add(miner_fee)?;
+        let pool_change = note_value.checked_sub(leaving)?;
+        if pool_change == 0 {
+            return None;
+        }
+        build_spend_payload_inner(
+            seed,
+            store,
+            owned_outpoint,
+            pool_change, // output_value: the change coin re-entering the pool
+            leaving,     // fee: the whole amount leaving the pool (bundle getFee)
+            cover_set_id,
+            anchor_height,
+            None, // self-spend: the pool change returns to the spender
+        )
+        // value_balance = `leaving` = unshield_value + miner_fee (set by inner).
+    }
+
     /// Shared spend/transfer builder. `recipient_addr = None` → self-spend
     /// (change back to the spender); `Some(addr)` → transfer to that address.
     /// `fee` is the pool-internal fee burned; the remainder returns to the

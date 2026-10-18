@@ -1616,17 +1616,35 @@ pub(crate) fn validate_transaction_for_network_ctx(
     // bridge). Only when shielded is actually active (regtest/beta in a gated
     // build; never testnet/mainnet) and the tx carries transparent inputs.
     if tx.is_shielded() {
-        if crate::constants::shielded_tx_active_at_height(expected_network, current_height)
-            && !tx.inputs.is_empty()
-        {
-            check_output_curve_points(tx)?;
-            if contextual {
-                check_tx_no_double_spend(tx, utxos)?;
-                check_tx_ring_members(expected_network, tx, utxos, current_height, v1_0_12_active)?;
-                check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
+        if crate::constants::shielded_tx_active_at_height(expected_network, current_height) {
+            if !tx.inputs.is_empty() {
+                // SHIELD-IN: the tx spends TRANSPARENT inputs into the pool. Run
+                // the same transparent-input authentication a normal spend gets
+                // (ring sigs bind each pseudo-output to a real owned input) plus
+                // range proofs on any transparent change — without these, value
+                // could be minted into the pool for free. The in==out+fee rule
+                // is replaced by the cross-veil value bridge in verify_block_spark_v2.
+                check_output_curve_points(tx)?;
+                if contextual {
+                    check_tx_no_double_spend(tx, utxos)?;
+                    check_tx_ring_members(expected_network, tx, utxos, current_height, v1_0_12_active)?;
+                    check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
+                }
+                check_tx_ring_signatures(tx)?;
+                check_tx_range_proofs(tx, current_height)?;
+            } else if !tx.outputs.is_empty() {
+                // UNSHIELD: the tx has NO transparent inputs (the value comes OUT
+                // of the pool) but carries value-REVEALING transparent output(s)
+                // — public value committed with ZERO blinding (coinbase-shaped).
+                // No ring signatures or range proofs apply (there is no hidden
+                // amount to prove in range). We only reject malformed outputs
+                // here; the output VALUE is bound to what left the pool by the
+                // transparent value bridge + the `value_balance == spend_fee`
+                // inflation guard in verify_block_spark_v2 (which sums these exact
+                // output commitments). A pure pool→pool transfer has empty
+                // outputs and skips this.
+                check_output_curve_points(tx)?;
             }
-            check_tx_ring_signatures(tx)?;
-            check_tx_range_proofs(tx, current_height)?;
         }
         return check_shielded_tx(tx, expected_network, current_height);
     }
