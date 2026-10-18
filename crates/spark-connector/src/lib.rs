@@ -525,7 +525,10 @@ pub mod ffi {
     /// The bundle carries a Schnorr value proof so a verifier can trust each
     /// coin's public value without the recipient's view key. `None` on error.
     pub fn build_mint_bundle(seed: &[u8], values: &[u64], context: &[u8]) -> Option<Vec<u8>> {
-        let mut out = vec![0u8; 1 << 16];
+        // 2 MiB: a production shield-in mints ONE coin, but the soak mints a full
+        // cover set (N=512) in a single bundle — 512 coins + per-coin value proofs
+        // (~340 B each) is ~175 KB, well over the old 64 KB. Generous headroom.
+        let mut out = vec![0u8; 1 << 21];
         // Safety: pointers/lengths valid for the call; shim writes <= cap into `out`.
         let len = unsafe {
             spark_ffi_build_mint_bundle(
@@ -555,7 +558,9 @@ pub mod ffi {
     /// transparent commitments.
     pub fn verify_mint_bundle(bundle: &[u8]) -> Option<(u64, Vec<CoinBytes>)> {
         let mut total: u64 = 0;
-        let mut coins_buf = vec![0u8; 1 << 16];
+        // 2 MiB: matches build_mint_bundle — a soak mint of a full N=512 cover set
+        // yields 512 coins (~125 KB), over the old 64 KB. Production mints are 1 coin.
+        let mut coins_buf = vec![0u8; 1 << 21];
         let mut coins_len: c_int = 0;
         // Safety: shim reads `bundle`, writes `total` + up to coins_buf.len() into coins_buf.
         let rc = unsafe {

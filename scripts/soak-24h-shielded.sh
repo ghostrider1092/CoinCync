@@ -45,7 +45,20 @@ export SPARK_OPENSSL_DIR="${SPARK_OPENSSL_DIR:-C:/Users/unkno/dev/spark-openssl-
 SECS="${1:-86400}"
 export SHIELDED_SOAK_SECS="$SECS"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-LOG="soak-shielded-${STAMP}.log"
+
+# Production anonymity set: with SPARK_PROD_PARAMS=1 the soak builds against the
+# RATIFIED N=512 params (spark-connector/spark-prod-params => get_coincync),
+# instead of the small get_test set. This is the post-ratification 24h soak AT
+# PRODUCTION PARAMS (post-soak plan step 9; the prior soak ran at N<=16).
+EXTRA_FEATURES=""
+PARAM_TAG="testparams-N16"
+if [ "${SPARK_PROD_PARAMS:-0}" = "1" ]; then
+  EXTRA_FEATURES="spark-connector/spark-prod-params"
+  PARAM_TAG="prodparams-N512"
+  echo "PRODUCTION PARAMS: soaking at N=512 (get_coincync) via spark-prod-params."
+fi
+FEATURES="testnet sketch-gk-proof libspark-ffi ${EXTRA_FEATURES}"
+LOG="soak-shielded-${PARAM_TAG}-${STAMP}.log"
 
 if [ ! -f "$SPARK_OPENSSL_DIR/lib/libcrypto.lib" ]; then
   echo "ERROR: libcrypto.lib not found under SPARK_OPENSSL_DIR=$SPARK_OPENSSL_DIR" >&2
@@ -53,16 +66,16 @@ if [ ! -f "$SPARK_OPENSSL_DIR/lib/libcrypto.lib" ]; then
   exit 1
 fi
 
-echo "Building --release soak binary (features: testnet sketch-gk-proof libspark-ffi)…"
+echo "Building --release soak binary (features: ${FEATURES})…"
 cargo build --release --locked --lib \
-  --features "testnet sketch-gk-proof libspark-ffi" 2>&1 | tail -3
+  --features "${FEATURES}" 2>&1 | tail -3
 
 echo "Starting shielded soak for ${SECS}s → ${LOG}"
 echo "  (tail -f ${LOG} to watch; a clean finish prints 'SHIELDED SOAK OK: <n> … cycles')"
 # --lib avoids compiling integration-test targets (a pre-existing librocksdb_sys
 # rlib error on this toolchain). Direct redirect — do NOT pipe through tee.
 cargo test --release --locked --lib \
-  --features "testnet sketch-gk-proof libspark-ffi" \
+  --features "${FEATURES}" \
   soak_shielded_in_block_consensus -- --ignored --nocapture > "$LOG" 2>&1
 
 echo "Soak finished. Result:"
