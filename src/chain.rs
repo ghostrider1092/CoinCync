@@ -710,14 +710,15 @@ impl Blockchain {
             if !tx.is_shielded() {
                 continue;
             }
-            let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "CONSENSUS FAULT: shielded tx {} at height {} has an undecodable \
-                         payload post-validation: {}. Halting to preserve on-disk state.",
-                        idx, height, e
-                    )
-                });
+            // A v2 `SparkPayload` tx is applied to the `SparkPoolStore` by
+            // `apply_spark_v2_txs`, not this native-GK (v1) path. It is not
+            // v1-decodable, so skip non-v1 payloads here — decoding would
+            // otherwise panic this consensus-fault guard on a perfectly valid v2
+            // tx. (A genuinely corrupt v1 payload is caught at validation before
+            // apply; anything that reaches apply and is not v1 is a v2 tx.)
+            let Ok(payload) = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra) else {
+                continue;
+            };
             crate::consensus::shielded::apply_shielded_payload(store, &payload, height, idx as u32)
                 .unwrap_or_else(|e| {
                     panic!(
@@ -871,7 +872,14 @@ impl Blockchain {
             if !tx.is_shielded() {
                 continue;
             }
-            let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
+            // A v2 `SparkPayload` tx is verified against the `SparkPoolStore` by
+            // `verify_block_spark_v2`, not by this native-GK (v1) path. Decoding
+            // it as a v1 `ShieldedPayload` fails ("Unexpected length of input");
+            // skip non-v1 payloads here rather than rejecting the block. Garbage
+            // is already caught upstream by `validation::check_shielded_tx`.
+            let Ok(payload) = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra) else {
+                continue;
+            };
             crate::consensus::shielded_pipeline::gk::verify_shielded_payload(
                 store,
                 &payload,

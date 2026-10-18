@@ -191,7 +191,16 @@ pub fn check_block_shielded_double_spends(
         if !tx.is_shielded() {
             continue;
         }
-        let payload = ShieldedPayload::decode(&tx.extra)?;
+        // A v2 `SparkPayload` tx (TxType::Shielded, but NOT a native-GK v1
+        // `ShieldedPayload`) does not use this nullifier model; its double-spend
+        // is enforced against the `SparkPoolStore` spent-tag set by
+        // `chain::verify_block_spark_v2`. Decoding it as a v1 payload fails
+        // ("Unexpected length of input"), so skip non-v1 payloads here rather
+        // than failing the whole block. Garbage is already rejected upstream by
+        // `validation::check_shielded_tx` (which runs per-tx in block validation).
+        let Ok(payload) = ShieldedPayload::decode(&tx.extra) else {
+            continue;
+        };
         for input in &payload.inputs {
             if is_spent(&input.nullifier) {
                 return Err(Error::DuplicateNullifier); // already spent on-chain
@@ -312,6 +321,35 @@ mod tests {
             check_block_shielded_double_spends(&dup, |_| false).unwrap_err(),
             Error::DuplicateNullifier
         ));
+    }
+
+    /// Regression (found by the live beta run): a v2 `SparkPayload` tx is
+    /// `TxType::Shielded` but is NOT a v1 `ShieldedPayload`, so decoding it as v1
+    /// fails ("Unexpected length of input"). This V1 double-spend check must SKIP
+    /// it (its double-spend is enforced by `chain::verify_block_spark_v2` against
+    /// the SparkPoolStore) rather than erroring and rejecting the whole block —
+    /// which stalled every block carrying a v2 shielded tx.
+    #[test]
+    fn v2_spark_payload_is_skipped_not_decoded_as_v1() {
+        use crate::transaction::{Transaction, TxType};
+        // A TxType::Shielded tx whose extra is NOT a decodable v1 ShieldedPayload
+        // (stands in for a v2 SparkPayload; v1 decode fails on it).
+        let v2_like = Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: vec![0xABu8; 64],
+        };
+        assert!(ShieldedPayload::decode(&v2_like.extra).is_err(), "sanity: not v1-decodable");
+        // Must be skipped (Ok), not error — even mixed with a real v1 tx.
+        let mixed = vec![v2_like, shielded_tx(vec![[5u8; 32]])];
+        assert!(
+            check_block_shielded_double_spends(&mixed, |_| false).is_ok(),
+            "a non-v1 (v2) shielded payload must be skipped, not fail block validation"
+        );
     }
 
     #[test]
