@@ -212,6 +212,13 @@ enum Command {
         /// Amount to send, in atomic units.
         #[arg(long)]
         amount: u64,
+        /// Fee multiplier (1.0 = the base per-byte floor, 2.0 = double for
+        /// priority). The miner fee is `tx_size × MIN_FEE_PER_BYTE × this`. Pay
+        /// above 1.0 to clear the block-level congestion floor when blocks are
+        /// busy (≥50% full needs ≥1.5×, ≥75% ≥2×, ≥90% ≥3×); at 1.0 the tx waits
+        /// for a non-congested block. Clamped to [1.0, 100.0].
+        #[arg(long, default_value = "1.0")]
+        fee_multiplier: f64,
         /// Self-contained REGTEST run: bootstrap a local pool, fund this
         /// wallet, then build + verify — no node needed. Without this the
         /// command fetches the live node's cover set via `get_shielded_cover_set`
@@ -913,9 +920,13 @@ async fn main() {
         Command::ShieldedSend {
             to,
             amount,
+            fee_multiplier,
             demo,
             password,
-        } => cmd_shielded_send(&wallet_path, password, &cli.node, to, amount, demo).await,
+        } => {
+            cmd_shielded_send(&wallet_path, password, &cli.node, to, amount, fee_multiplier, demo)
+                .await
+        }
         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
         Command::ShieldedMint {
             amount,
@@ -2166,6 +2177,7 @@ async fn cmd_shielded_send(
     node: &str,
     to: String,
     amount: u64,
+    fee_multiplier: f64,
     demo: bool,
 ) -> Result<(), String> {
     if to.is_empty() {
@@ -2187,7 +2199,7 @@ async fn cmd_shielded_send(
     if demo {
         shielded_send_demo(&seed, &to, amount)
     } else {
-        shielded_send_live(&seed, node, &to, amount).await
+        shielded_send_live(&seed, node, &to, amount, fee_multiplier).await
     }
 }
 
@@ -2435,7 +2447,13 @@ fn shielded_send_demo(seed: &[u8], to: &str, amount: u64) -> Result<(), String> 
 /// `to` against that set — the real client→node path. NOT submitted (there is no
 /// shielded submission RPC yet; see the endpoint's docs).
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> Result<(), String> {
+async fn shielded_send_live(
+    seed: &[u8],
+    node: &str,
+    to: &str,
+    amount: u64,
+    fee_multiplier: f64,
+) -> Result<(), String> {
     use spark_connector::ffi::{build_spend_to_address, LibsparkBackend};
     use spark_connector::SparkBackend;
 
@@ -2522,7 +2540,19 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
         })?;
     let (probe_tx, _) = mk_tx(probe_index, &probe_ctx, 0)?;
     let tx_size = borsh::to_vec(&probe_tx).map(|b| b.len()).unwrap_or(0);
-    let fee = (tx_size as u64).saturating_mul(MIN_FEE_PER_BYTE);
+    // fee = size × MIN_FEE_PER_BYTE × multiplier, integer math mirroring the
+    // lib's `FeeMultiplier`/`scaled_fee` (clamp [1.0, 100.0], NaN → 1.0) so the
+    // wallet and validator agree. ×1 meets the floor in a non-congested block;
+    // bump via --fee-multiplier to clear the ≥50% / ≥75% / ≥90% congestion tiers
+    // (≥1.5× / ≥2× / ≥3×).
+    let mult_x100: u64 = {
+        let m = if fee_multiplier.is_nan() { 1.0 } else { fee_multiplier };
+        ((m.max(1.0) * 100.0).min(10_000.0)) as u64
+    };
+    let fee = (tx_size as u64)
+        .saturating_mul(MIN_FEE_PER_BYTE)
+        .saturating_mul(mult_x100)
+        / 100;
 
     // Pass 2: smallest note covering amount + fee → build the real spend.
     let need = amount.checked_add(fee).ok_or("amount + fee overflow")?;
@@ -2548,7 +2578,10 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
     report_built_transfer(to, amount, cover_coins.len(), 1, tags.len(), spend.0.len());
     let tx_hex = hex::encode(borsh::to_vec(&tx).map_err(|e| format!("encode shielded tx: {e}"))?);
 
-    println!("  Fee (to miner):       {fee} atomic (value_balance = tx.fee = fee)");
+    println!(
+        "  Fee (to miner):       {fee} atomic (size {tx_size}B × {:.2}× floor; value_balance = tx.fee = fee)",
+        mult_x100 as f64 / 100.0
+    );
     println!("  Change back to you:   {change} atomic (returned as a shielded note)");
     println!("  Submitting to {node} ...");
     match rpc_call(node, "send_raw_transaction", serde_json::json!([tx_hex])).await {
