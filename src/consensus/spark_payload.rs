@@ -868,4 +868,234 @@ mod tests {
             "double-spend of the built spend is rejected once its tag is recorded"
         );
     }
+
+    // ───────────────────────── adversarial / property coverage ────────────────
+    // Audit-prep negative tests for the unshield shape and the batched verify
+    // path, complementing the e2e happy-path in chain.rs.
+
+    #[test]
+    fn unshield_bridge_holds_only_for_zero_blinding_output_and_exact_value_balance() {
+        // The UNSHIELD shape through the value bridge: NO transparent inputs
+        // (pseudo-outputs empty), ONE value-revealing output committing the public
+        // unshield amount with ZERO blinding, `fee = miner_fee`, and
+        // `value_balance = unshield + miner_fee` (the whole amount crossing the veil
+        // OUT). The bridge reduces to `0 == unshield·H + (miner_fee − vb)·H`.
+        let unshield = 4_000u64;
+        let miner_fee = 7u64;
+        let vb = (unshield + miner_fee) as i64;
+        let zero = [0u8; 32];
+
+        // Correct: zero-blinding output + exact value_balance → holds.
+        assert!(verify_transparent_shielded_balance(
+            &[],
+            &[commit_bytes(unshield, zero)],
+            miner_fee,
+            vb,
+        )
+        .is_ok());
+
+        // Adversarial 1: a NON-zero blinding on the revealed output leaves a
+        // dangling r·G that no transparent input cancels → rejected. (This is why
+        // the unshield output MUST be coinbase-shaped / zero-blinding.)
+        let r = [3u8; 32];
+        assert!(verify_transparent_shielded_balance(
+            &[],
+            &[commit_bytes(unshield, r)],
+            miner_fee,
+            vb,
+        )
+        .is_err());
+
+        // Adversarial 2: value_balance understates what the output reveals left the
+        // pool (vb − 1) → a 1·H cross-veil inflation → rejected.
+        assert!(verify_transparent_shielded_balance(
+            &[],
+            &[commit_bytes(unshield, zero)],
+            miner_fee,
+            vb - 1,
+        )
+        .is_err());
+        // …and overstating (vb + 1) is equally rejected.
+        assert!(verify_transparent_shielded_balance(
+            &[],
+            &[commit_bytes(unshield, zero)],
+            miner_fee,
+            vb + 1,
+        )
+        .is_err());
+    }
+
+    #[cfg(feature = "libspark-ffi")]
+    #[test]
+    fn build_unshield_rejects_zero_full_and_overspend() {
+        use super::build::build_unshield_payload;
+        use spark_connector::ffi::{cover_set_size, mint_to_seed, serial_context};
+
+        let store = SparkPoolStore::new();
+        let seed = b"adv-unshield-build";
+        let n = cover_set_size().unwrap();
+        let note = 10_000u64; // every seeded note has the same value
+        for i in 0..n {
+            let op = format!("u:seed:{i}").into_bytes();
+            let ctx = serial_context(&op).unwrap();
+            let coin = mint_to_seed(seed, note, &ctx).unwrap();
+            store.add_coin(op, coin, ctx, 1).unwrap();
+        }
+        let op = b"u:seed:2".to_vec();
+
+        // unshield_value == 0 → rejected.
+        assert!(build_unshield_payload(seed, &store, &op, note, 0, 1, 0, 1).is_none());
+        // leaving (unshield + fee) > note → checked_sub underflow → rejected.
+        assert!(build_unshield_payload(seed, &store, &op, note, note, 1, 0, 1).is_none());
+        // FULL unshield (pool_change == 0: unshield + fee == note) → rejected (a
+        // change-less unshield would need a zero-value pool output).
+        assert!(build_unshield_payload(seed, &store, &op, note, note - 1, 1, 0, 1).is_none());
+
+        // Valid PARTIAL unshield → Some, value_balance = unshield + miner_fee.
+        let p = build_unshield_payload(seed, &store, &op, note, 4_000, 10, 0, 1)
+            .expect("valid partial unshield builds");
+        assert_eq!(p.value_balance, 4_010, "value_balance = unshield + miner_fee");
+        assert!(p.spend.is_some() && p.mint.is_none());
+    }
+
+    #[cfg(feature = "libspark-ffi")]
+    fn adv_seeded_pool(seed: &[u8], tag: &str) -> SparkPoolStore {
+        use spark_connector::ffi::{cover_set_size, mint_to_seed, serial_context};
+        let store = SparkPoolStore::new();
+        let n = cover_set_size().unwrap();
+        for i in 0..n {
+            let op = format!("{tag}:{i}").into_bytes();
+            let ctx = serial_context(&op).unwrap();
+            let coin = mint_to_seed(seed, 10_000 + i as u64, &ctx).unwrap();
+            store.add_coin(op, coin, ctx, 1).unwrap();
+        }
+        store
+    }
+
+    #[cfg(feature = "libspark-ffi")]
+    fn adv_spend(
+        seed: &[u8],
+        tag: &str,
+        store: &SparkPoolStore,
+        idx: usize,
+        out_value: u64,
+        fee: u64,
+    ) -> SparkPayload {
+        use spark_connector::ffi::build_spend_over_set;
+        let op = format!("{tag}:{idx}").into_bytes();
+        let ctx = store.context_for(&op).unwrap();
+        let cover = store.cover_set_at(0, 1);
+        let bundle = build_spend_over_set(seed, &cover, idx, &ctx, out_value, fee).unwrap();
+        SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![],
+            spend: Some(SpendBundle {
+                cover_set_id: 0,
+                anchor_height: 1,
+                bundle: bundle.0,
+            }),
+            value_balance: fee as i64,
+        }
+    }
+
+    #[cfg(feature = "libspark-ffi")]
+    #[test]
+    fn batch_is_atomic_when_one_spend_is_invalid() {
+        // Block-level all-or-nothing: if ANY spend in a batch fails (here a
+        // corrupted bundle), the WHOLE batch is rejected — no spend is admitted.
+        use spark_connector::ffi::LibsparkBackend;
+        let seed = b"adv-atomic";
+        let store = adv_seeded_pool(seed, "atomic");
+        let backend = LibsparkBackend;
+
+        let good = adv_spend(seed, "atomic", &store, 2, 3_000, 0);
+        let mut bad = adv_spend(seed, "atomic", &store, 5, 3_000, 0);
+        // Corrupt the second spend's proof bytes.
+        {
+            let b = &mut bad.spend.as_mut().unwrap().bundle;
+            let mid = b.len() / 2;
+            b[mid] ^= 0xFF;
+        }
+
+        // The good spend alone verifies…
+        assert!(verify_spark_payloads_batch(&store, &backend, &[(good.clone(), 0)]).is_ok());
+        // …but batched with the corrupt one, the whole batch fails closed.
+        assert!(verify_spark_payloads_batch(&store, &backend, &[(good, 0), (bad, 0)]).is_err());
+    }
+
+    #[cfg(feature = "libspark-ffi")]
+    #[test]
+    fn batch_rejects_an_already_spent_tag() {
+        // Solvency inside the batch: a spend whose linking tag is already in the
+        // pool's spent-set is rejected (the coin is not unspent).
+        use spark_connector::ffi::LibsparkBackend;
+        let seed = b"adv-solvency";
+        let store = adv_seeded_pool(seed, "solv");
+        let backend = LibsparkBackend;
+
+        let p = adv_spend(seed, "solv", &store, 1, 2_000, 0);
+        // Learn its tag, then record it spent in the pool.
+        let tags = verify_spark_payload(&store, &backend, &p, 0).unwrap();
+        assert_eq!(tags.len(), 1);
+        assert!(store.mark_tag_spent(&tags[0], 2));
+
+        // The same spend now fails the batch's unspent-solvency check.
+        assert!(verify_spark_payloads_batch(&store, &backend, &[(p, 0)]).is_err());
+    }
+
+    #[cfg(feature = "libspark-ffi")]
+    #[test]
+    fn batch_preserves_order_with_interleaved_mint_only() {
+        // Order property: `out[i]` pairs with `items[i]`. A mint-only (no spend)
+        // item contributes empty tags and must NOT shift the spend items' tags.
+        use spark_connector::ffi::LibsparkBackend;
+        let seed = b"adv-order";
+        let store = adv_seeded_pool(seed, "ord");
+        let backend = LibsparkBackend;
+
+        let s0 = adv_spend(seed, "ord", &store, 2, 3_000, 0);
+        let s1 = adv_spend(seed, "ord", &store, 7, 3_000, 0);
+        let mint_only = SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![],
+            spend: None,
+            value_balance: 0,
+        };
+
+        let t0 = verify_spark_payload(&store, &backend, &s0, 0).unwrap();
+        let t1 = verify_spark_payload(&store, &backend, &s1, 0).unwrap();
+        assert_ne!(t0, t1, "distinct notes → distinct tags");
+
+        let batched = verify_spark_payloads_batch(
+            &store,
+            &backend,
+            &[(s0, 0), (mint_only, 0), (s1, 0)],
+        )
+        .unwrap();
+        assert_eq!(batched.len(), 3);
+        assert_eq!(batched[0], t0, "slot 0 spend tag preserved");
+        assert!(batched[1].is_empty(), "mint-only slot yields no tags");
+        assert_eq!(batched[2], t1, "slot 2 spend tag preserved despite interleaving");
+    }
+
+    #[cfg(feature = "libspark-ffi")]
+    #[test]
+    fn batch_empty_is_ok_and_single_matches_single_path() {
+        // K-edge: empty batch → empty result; K=1 must equal the single-verify path.
+        use spark_connector::ffi::LibsparkBackend;
+        let seed = b"adv-k01";
+        let store = adv_seeded_pool(seed, "k01");
+        let backend = LibsparkBackend;
+
+        assert!(verify_spark_payloads_batch(&store, &backend, &[])
+            .unwrap()
+            .is_empty());
+
+        let p = adv_spend(seed, "k01", &store, 4, 2_500, 0);
+        let single = verify_spark_payload(&store, &backend, &p, 0).unwrap();
+        let batched = verify_spark_payloads_batch(&store, &backend, &[(p, 0)]).unwrap();
+        assert_eq!(batched, vec![single], "K=1 batch == single-verify path");
+    }
 }
