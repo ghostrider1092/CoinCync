@@ -1183,7 +1183,15 @@ int spark_ffi_build_spend_over_set(const unsigned char* seed, int seed_len,
         ss << cover_set_id;
         ss << rep;
         ss << block_hash;
-        ss << cover_set;
+        // KEEP-WIRE: the cover set is NODE-AUTHORITATIVE (#258) — the verifier
+        // resolves it from its own store and OVERRIDES any set carried here, so
+        // serializing the full set is pure wire bloat (~130 KB/tx at N=512). Emit
+        // an EMPTY set: the Grootle proof above is still built over the REAL cover
+        // set (the prover needs it), it just does not travel on the wire. The
+        // self-contained test helper (spark_ffi_make_verify_bundle) still embeds
+        // the full set for the store-less stateless verify path. Format unchanged
+        // (an empty vector), so every deserializer reads it without any change.
+        ss << std::vector<spark::Coin>();
         ss << out_coins;
         ss << (uint64_t)out_coins.size();
         ss.insert(ss.end(), tx_stream.begin(), tx_stream.end());

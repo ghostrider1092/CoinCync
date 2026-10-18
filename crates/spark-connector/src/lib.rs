@@ -1295,7 +1295,7 @@ pub mod ffi {
             // The bundle must verify and yield exactly one linking-tag nullifier.
             let b = LibsparkBackend;
             let tags = b
-                .verify_spend(&[], &bundle, 0, 0)
+                .verify_spend(&coins, &bundle, 0, 0)
                 .expect("caller-set spend must verify");
             assert_eq!(tags.len(), 1, "one input => one nullifier tag");
             assert_eq!(tags[0].0.len(), 34, "tag is a 34-byte group element");
@@ -1330,7 +1330,7 @@ pub mod ffi {
                     .expect("build transfer to B");
 
             let backend = LibsparkBackend;
-            let tags = backend.verify_spend(&[], &bundle, 0, 0).expect("transfer verifies");
+            let tags = backend.verify_spend(&coins, &bundle, 0, 0).expect("transfer verifies");
             assert_eq!(tags.len(), 1, "one input → one nullifier");
 
             // The output coins re-enter the pool: B's payment + A's change.
@@ -1416,7 +1416,7 @@ pub mod ffi {
             let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 300, 0)
                 .expect("partial-set spend builds");
             let b = LibsparkBackend;
-            let tags = b.verify_spend(&[], &bundle, 0, 0).expect("partial-set spend verifies");
+            let tags = b.verify_spend(&coins, &bundle, 0, 0).expect("partial-set spend verifies");
             assert_eq!(tags.len(), 1);
         }
 
@@ -1450,7 +1450,7 @@ pub mod ffi {
             let bundle = build_spend_over_set(seed, &coins, spend_index, &owned_ctx, 900, 0)
                 .expect("outpoint-derived ctx spends");
             let b = LibsparkBackend;
-            assert!(b.verify_spend(&[], &bundle, 0, 0).is_ok());
+            assert!(b.verify_spend(&coins, &bundle, 0, 0).is_ok());
 
             // Wrong outpoint context → cannot recover the coin → fail-closed.
             let wrong_ctx = serial_context(b"tx:cover:vout:999").expect("wrong ctx");
@@ -1482,14 +1482,14 @@ pub mod ffi {
 
             // Unspent: empty spent set → solvency holds, returns the tag.
             let tags = b
-                .verify_solvency(&[], &bundle, 0, 0, &[])
+                .verify_solvency(&coins, &bundle, 0, 0, &[])
                 .expect("unspent coin proves solvency");
             assert_eq!(tags.len(), 1);
 
             // Now that tag is recorded as spent → the SAME proof must be rejected.
             let spent = tags.clone();
             assert!(
-                b.verify_solvency(&[], &bundle, 0, 0, &spent).is_err(),
+                b.verify_solvency(&coins, &bundle, 0, 0, &spent).is_err(),
                 "a spent linking tag must fail the unspent-solvency check"
             );
         }

@@ -939,7 +939,7 @@ mod tests {
         let backend = LibsparkBackend;
         // Unspent: the store's (empty) spent-tag set → solvency holds.
         let tags = backend
-            .verify_solvency(&[], &spend, 0, 0, &store.spent_tags())
+            .verify_solvency(&cover, &spend, 0, 0, &store.spent_tags())
             .expect("unspent coin proves solvency");
         assert_eq!(tags.len(), 1);
 
@@ -947,7 +947,7 @@ mod tests {
         assert!(store.mark_tag_spent(&tags[0], 5));
         assert!(
             backend
-                .verify_solvency(&[], &spend, 0, 0, &store.spent_tags())
+                .verify_solvency(&cover, &spend, 0, 0, &store.spent_tags())
                 .is_err(),
             "once the store marks the tag spent, the coin is no longer unspent"
         );

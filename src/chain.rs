@@ -5476,6 +5476,17 @@ mod tests {
             let (tx_a, pa, fa) = mk_transfer(3);
             let (tx_b, pb, fb) = mk_transfer(4);
 
+            // KEEP-WIRE: production bundles OMIT the cover set (node-authoritative,
+            // #258) — the verifier resolves it from its store and overrides any
+            // embedded set. At N=16 a self-contained bundle is ~5825 B (16 coins
+            // embedded); keep-wire drops them, so a production bundle is well under
+            // 3000 B, yet still verifies below (the node supplies the real set).
+            assert!(
+                pa.spend.as_ref().unwrap().bundle.len() < 3000,
+                "keep-wire: production bundle must omit the cover set (got {} B)",
+                pa.spend.as_ref().unwrap().bundle.len()
+            );
+
             // Batched tags == per-tx verify tags (same verification, amortized).
             let single_a = verify_spark_payload(store.as_ref(), &backend, &pa, fa).expect("single a");
             let single_b = verify_spark_payload(store.as_ref(), &backend, &pb, fb).expect("single b");
