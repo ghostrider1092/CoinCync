@@ -39,6 +39,7 @@
 //! sibling Phase-2 stores when that wiring lands.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use parking_lot::RwLock;
@@ -137,6 +138,15 @@ pub struct SparkPoolStore {
     /// The "no inflation across the veil" invariant is `pool_value >= 0` — you
     /// cannot unshield more than was ever shielded in. Persisted + reorg-aware.
     pool_value: RwLock<i128>,
+    /// Cover-set GROUP (bucket) size `N` — the libspark `cover_set_size()`. A
+    /// Grootle one-of-many proof is over exactly one group of `N` coins (padded
+    /// when a group holds fewer), so once the pool exceeds `N` coins it must be
+    /// split into `cover_set_id`-indexed groups: group `g` is the `g`-th chunk of
+    /// `N` coins among those at `height <= anchor`. `0` disables bucketing (the
+    /// whole pool is one group — the legacy behavior, valid only while the pool
+    /// is `<= N`). The chain sets this to `cover_set_size()` at store init.
+    /// Atomic so it can be set after construction without a write lock.
+    group_size: AtomicU64,
     /// RocksDB-backed persistence. `None` for in-memory tests.
     persistence: Option<SparkPoolPersistence>,
 }
@@ -152,8 +162,22 @@ impl SparkPoolStore {
             max_coin_height: RwLock::new(None),
             max_spent_tag_height: RwLock::new(None),
             pool_value: RwLock::new(0),
+            group_size: AtomicU64::new(0),
             persistence: None,
         }
+    }
+
+    /// Set the cover-set group size `N` (the libspark `cover_set_size()`). The
+    /// chain calls this once at store init so `cover_set_at` buckets the pool
+    /// into `N`-sized Grootle groups. `0` (the default) keeps the whole pool as
+    /// one group. Idempotent; safe to call before any coins are added.
+    pub fn set_group_size(&self, n: usize) {
+        self.group_size.store(n as u64, Ordering::Relaxed);
+    }
+
+    /// The configured cover-set group size `N` (`0` = unbucketed / whole pool).
+    pub fn group_size(&self) -> usize {
+        self.group_size.load(Ordering::Relaxed) as usize
     }
 
     /// Open a persistent pool store. Replays coins by `cover_index`, loads spent
@@ -238,6 +262,7 @@ impl SparkPoolStore {
             max_coin_height: RwLock::new(max_coin_height),
             max_spent_tag_height: RwLock::new(max_spent_tag_height),
             pool_value: RwLock::new(pool_value),
+            group_size: AtomicU64::new(0),
             persistence: Some(SparkPoolPersistence {
                 coins: coins_tree,
                 tags: tags_tree,
@@ -307,13 +332,47 @@ impl SparkPoolStore {
     /// the identical `{C_i}` a Grootle proof was built against). `cover_set_id`
     /// is reserved for multi-group buckets (cip-shielded-anonset); today the
     /// whole pool is one monotonic group, so it is accepted and ignored.
-    pub fn cover_set_at(&self, _cover_set_id: u64, anchor_height: u64) -> Vec<CoinBytes> {
-        self.coins
-            .read()
+    pub fn cover_set_at(&self, cover_set_id: u64, anchor_height: u64) -> Vec<CoinBytes> {
+        let guard = self.coins.read();
+        let n = self.group_size.load(Ordering::Relaxed) as usize;
+        let visible = guard.iter().filter(|c| c.height <= anchor_height);
+        if n == 0 {
+            // Unbucketed (legacy / `set_group_size` not called): the whole
+            // anchored pool is one group — valid only while the pool is <= N.
+            visible.map(|c| c.coin.clone()).collect()
+        } else {
+            // Group `cover_set_id` = the g-th chunk of N coins among those visible
+            // at the anchor, in cover-index order. A trailing partial group
+            // (< N coins) is returned as-is; the Grootle proof pads it up to N.
+            let g = cover_set_id as usize;
+            visible
+                .skip(g.saturating_mul(n))
+                .take(n)
+                .map(|c| c.coin.clone())
+                .collect()
+        }
+    }
+
+    /// For the coin at `outpoint`, the `(cover_set_id, spend_index_within_group)`
+    /// a spend must anchor to at `anchor_height`: the coin's position among those
+    /// visible at the anchor is `pos`; with group size `N`, that is group
+    /// `pos / N` at within-group index `pos % N`. `None` if the coin isn't in the
+    /// pool (or is above the anchor). This is the builder's counterpart to
+    /// [`cover_set_at`] — both chunk the identical visible list, so a spend built
+    /// here verifies against the group the node reconstructs. With bucketing off
+    /// (`N == 0`) it returns `(0, pos)` — the whole-pool index.
+    pub fn spend_index_in_cover(&self, outpoint: &[u8], anchor_height: u64) -> Option<(u64, usize)> {
+        let guard = self.coins.read();
+        let pos = guard
             .iter()
             .filter(|c| c.height <= anchor_height)
-            .map(|c| c.coin.clone())
-            .collect()
+            .position(|c| c.outpoint == outpoint)?;
+        let n = self.group_size.load(Ordering::Relaxed) as usize;
+        if n == 0 {
+            Some((0, pos))
+        } else {
+            Some(((pos / n) as u64, pos % n))
+        }
     }
 
     /// Number of coins in the cover set.

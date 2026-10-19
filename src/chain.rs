@@ -537,9 +537,18 @@ impl Blockchain {
             // (in-memory here; the persistent node uses `with_database`). Gated
             // OFF in production, so default builds stay byte-identical.
             #[cfg(feature = "sketch-gk-proof")]
-            spark_pool_store: Some(Arc::new(
-                crate::storage::spark_pool::SparkPoolStore::new(),
-            )),
+            spark_pool_store: Some(Arc::new({
+                let s = crate::storage::spark_pool::SparkPoolStore::new();
+                // Bucket the cover set into `cover_set_size()`-sized Grootle
+                // groups so the pool works past N coins (a Grootle proof is over
+                // exactly one group). libspark-gated — the group size is a
+                // libspark param; the native sketch path leaves it unbucketed.
+                #[cfg(feature = "libspark-ffi")]
+                if let Some(n) = spark_connector::ffi::cover_set_size() {
+                    s.set_group_size(n);
+                }
+                s
+            })),
             cut_through: None,
             security_log: Arc::new(crate::security::IncidentLog::default()),
             // CIP-009.D rolling finality: dormant until the operator
@@ -556,11 +565,19 @@ impl Blockchain {
         // struct. Gated `sketch-gk-proof`; a consensus store that cannot open is
         // a hard fault (halt) rather than a silent None.
         #[cfg(feature = "sketch-gk-proof")]
-        let spark_pool_store = Some(Arc::new(
-            crate::storage::spark_pool::SparkPoolStore::open_with_db(&db).unwrap_or_else(|e| {
-                panic!("failed to open SparkPoolStore (sketch-gk-proof build): {e}")
-            }),
-        ));
+        let spark_pool_store = Some(Arc::new({
+            let s = crate::storage::spark_pool::SparkPoolStore::open_with_db(&db)
+                .unwrap_or_else(|e| {
+                    panic!("failed to open SparkPoolStore (sketch-gk-proof build): {e}")
+                });
+            // Bucket the cover set into `cover_set_size()`-sized Grootle groups
+            // (see the in-memory `new()` path). libspark-gated.
+            #[cfg(feature = "libspark-ffi")]
+            if let Some(n) = spark_connector::ffi::cover_set_size() {
+                s.set_group_size(n);
+            }
+            s
+        }));
         Blockchain {
             apply_lock: parking_lot::Mutex::new(()),
             inner: RwLock::new(BlockchainInner {

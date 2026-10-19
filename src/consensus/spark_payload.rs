@@ -538,15 +538,22 @@ pub mod build {
         owned_outpoint: &[u8],
         output_value: u64,
         fee: u64,
-        cover_set_id: u64,
+        _cover_set_id: u64,
         anchor_height: u64,
         recipient_addr: Option<&[u8]>,
     ) -> Option<SparkPayload> {
+        // The group (`cover_set_id`) and within-group spend index are DERIVED
+        // from the owned coin's position in the anchored pool — the `_cover_set_id`
+        // argument is advisory/ignored. A Grootle proof is over exactly one group
+        // of `cover_set_size` coins, so a spend must anchor to the group that
+        // actually contains the owned coin; `spend_index_in_cover` and
+        // `cover_set_at` chunk the identical visible list, so this proof verifies
+        // against the group the node reconstructs.
+        let (cover_set_id, idx) = store.spend_index_in_cover(owned_outpoint, anchor_height)?;
         let cover = store.cover_set_at(cover_set_id, anchor_height);
         let ctx = store.context_for(owned_outpoint)?;
-        let idx = store.index_of(owned_outpoint)? as usize;
         if idx >= cover.len() {
-            return None; // owned coin not inside the anchored cover set
+            return None; // owned coin not inside the anchored cover group
         }
         let bundle = match recipient_addr {
             Some(addr) => build_spend_to_address(seed, &cover, idx, &ctx, output_value, fee, addr)?,
@@ -1097,5 +1104,59 @@ mod tests {
         let single = verify_spark_payload(&store, &backend, &p, 0).unwrap();
         let batched = verify_spark_payloads_batch(&store, &backend, &[(p, 0)]).unwrap();
         assert_eq!(batched, vec![single], "K=1 batch == single-verify path");
+    }
+
+    #[cfg(feature = "libspark-ffi")]
+    #[test]
+    fn spend_works_when_pool_exceeds_group_size() {
+        // The pool > N case the e2e test and soak NEVER exercise (they mint
+        // exactly cover_set_size). With cover-set bucketing, a coin in ANY group
+        // spends over its own N-sized Grootle group, and the node verifies against
+        // the same group (cover_set_at(cover_set_id)). This is the regression that
+        // guards "the shielded pool keeps working once it grows past one group."
+        use super::build::build_spend_payload;
+        use spark_connector::ffi::{cover_set_size, mint_to_seed, serial_context, LibsparkBackend};
+
+        let store = SparkPoolStore::new();
+        let n = cover_set_size().unwrap();
+        store.set_group_size(n);
+        let seed = b"pool-exceeds-n";
+        let total = 2 * n + 5; // groups: [0,N) full, [N,2N) full, [2N,2N+5) partial
+        for i in 0..total {
+            let op = format!("x:{i}").into_bytes();
+            let ctx = serial_context(&op).unwrap();
+            let coin = mint_to_seed(seed, 10_000 + i as u64, &ctx).unwrap();
+            store.add_coin(op, coin, ctx, 1).unwrap();
+        }
+        let backend = LibsparkBackend;
+
+        // A coin in the MIDDLE group (group 1): global index N+3 → (group 1, idx 3).
+        let owned = format!("x:{}", n + 3).into_bytes();
+        assert_eq!(
+            store.spend_index_in_cover(&owned, 1),
+            Some((1, 3)),
+            "coin N+3 maps to group 1 at within-group index 3"
+        );
+        let p = build_spend_payload(seed, &store, &owned, 3_000, 0, 0, 1)
+            .expect("build spend in group 1");
+        assert_eq!(
+            p.spend.as_ref().unwrap().cover_set_id,
+            1,
+            "payload anchors to the group that actually holds the coin, not 0"
+        );
+        let tags = verify_spark_payload(&store, &backend, &p, 0)
+            .expect("verify over the node-reconstructed group 1");
+        assert_eq!(tags.len(), 1);
+
+        // A coin in the trailing PARTIAL group (group 2) also spends (padded set).
+        let owned2 = format!("x:{}", 2 * n + 1).into_bytes();
+        assert_eq!(store.spend_index_in_cover(&owned2, 1).map(|(g, _)| g), Some(2));
+        let p2 = build_spend_payload(seed, &store, &owned2, 3_000, 0, 0, 1)
+            .expect("build spend in partial group 2");
+        assert_eq!(p2.spend.as_ref().unwrap().cover_set_id, 2);
+        assert!(
+            verify_spark_payload(&store, &backend, &p2, 0).is_ok(),
+            "a coin in a trailing partial group spends (Grootle pads to N)"
+        );
     }
 }

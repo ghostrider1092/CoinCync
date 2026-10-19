@@ -2551,7 +2551,7 @@ async fn cmd_shielded_unshield(
                  note_value: u64,
                  note_ctx: &[u8],
                  miner_fee: u64|
-     -> Result<(Transaction, spark_connector::SpendBytes), String> {
+     -> Result<(Transaction, spark_connector::SpendBytes, Vec<spark_connector::CoinBytes>), String> {
         let leaving = amount.checked_add(miner_fee).ok_or("amount + fee overflow")?;
         let pool_change = note_value
             .checked_sub(leaving)
@@ -2563,10 +2563,13 @@ async fn cmd_shielded_unshield(
                     .into(),
             );
         }
-        // Self-spend: `pool_change` re-enters the pool; `leaving` exits across
-        // the veil (the bundle's internal fee), so value_balance == leaving.
+        // Self-spend over the note's Grootle GROUP (not the whole pool), matching
+        // the node's `cover_set_at(cover_set_id, anchor)`. `pool_change` re-enters
+        // the pool; `leaving` exits across the veil (the bundle's internal fee),
+        // so value_balance == leaving.
+        let (group, cover_set_id, within) = cover_group_for(&cover_coins, note_idx);
         let bundle =
-            build_spend_over_set(&seed, &cover_coins, note_idx, note_ctx, pool_change, leaving)
+            build_spend_over_set(&seed, &group, within, note_ctx, pool_change, leaving)
                 .ok_or("failed to build unshield spend bundle (bad note index or value)")?;
         // The value-revealing transparent output (public amount, zero blinding)
         // paying `amount` to this wallet's transparent address.
@@ -2583,7 +2586,7 @@ async fn cmd_shielded_unshield(
             mint: None,
             outputs: vec![],
             spend: Some(SpendBundle {
-                cover_set_id: 0,
+                cover_set_id,
                 anchor_height,
                 bundle: bundle.0.clone(),
             }),
@@ -2598,7 +2601,7 @@ async fn cmd_shielded_unshield(
             range_proof: vec![],
             extra: payload.encode(),
         };
-        Ok((tx, bundle))
+        Ok((tx, bundle, group))
     };
 
     // Pass 1: smallest note strictly covering `amount` (pool_change>0 at fee 0)
@@ -2612,7 +2615,7 @@ async fn cmd_shielded_unshield(
             let largest = owned.iter().map(|(_, v, _)| *v).max().unwrap_or(0);
             format!("no single owned note covers {amount} atomic (largest owned note is {largest})")
         })?;
-    let (probe_tx, _) = mk_tx(probe_index, probe_value, &probe_ctx, 0)?;
+    let (probe_tx, _, _) = mk_tx(probe_index, probe_value, &probe_ctx, 0)?;
     let tx_size = borsh::to_vec(&probe_tx).map(|b| b.len()).unwrap_or(0);
     let mult_x100: u64 = {
         let m = if fee_multiplier.is_nan() { 1.0 } else { fee_multiplier };
@@ -2637,9 +2640,10 @@ async fn cmd_shielded_unshield(
                  with change (largest owned note is {largest})"
             )
         })?;
-    let (tx, spend) = mk_tx(spend_index, chosen_value, &chosen_ctx, miner_fee)?;
+    let (tx, spend, group) = mk_tx(spend_index, chosen_value, &chosen_ctx, miner_fee)?;
+    // Self-verify against the note's Grootle group (the node-authoritative set).
     let tags = backend
-        .verify_spend(&[], &spend, 0, 0)
+        .verify_spend(&group, &spend, 0, 0)
         .map_err(|e| format!("built spend failed self-verification: {e}"))?;
     let pool_change = chosen_value.saturating_sub(amount).saturating_sub(miner_fee);
 
@@ -2752,11 +2756,22 @@ async fn shielded_send_live(
     let mk_tx = |note_idx: usize,
                  note_ctx: &[u8],
                  fee: u64|
-     -> Result<(coincync::transaction::Transaction, spark_connector::SpendBytes), String> {
+     -> Result<
+        (
+            coincync::transaction::Transaction,
+            spark_connector::SpendBytes,
+            Vec<spark_connector::CoinBytes>,
+        ),
+        String,
+    > {
+        // The note lives in Grootle group `cover_set_id`; build the proof over
+        // THAT group (not the whole pool) at its within-group index, matching the
+        // group the node reconstructs via `cover_set_at(cover_set_id, anchor)`.
+        let (group, cover_set_id, within) = cover_group_for(&cover_coins, note_idx);
         let bundle = build_spend_to_address(
             seed,
-            &cover_coins,
-            note_idx,
+            &group,
+            within,
             note_ctx,
             amount,
             fee,
@@ -2770,7 +2785,7 @@ async fn shielded_send_live(
             mint: None,
             outputs: vec![],
             spend: Some(coincync::consensus::spark_payload::SpendBundle {
-                cover_set_id: 0,
+                cover_set_id,
                 anchor_height,
                 bundle: bundle.0.clone(),
             }),
@@ -2785,7 +2800,7 @@ async fn shielded_send_live(
             range_proof: vec![],
             extra: payload.encode(),
         };
-        Ok((tx, bundle))
+        Ok((tx, bundle, group))
     };
 
     // Pass 1: provisional note (smallest > amount) → probe at fee 0 to size the fee.
@@ -2798,7 +2813,7 @@ async fn shielded_send_live(
             let largest = owned.iter().map(|(_, v, _)| *v).max().unwrap_or(0);
             format!("no single owned note covers {amount} atomic (largest owned note is {largest})")
         })?;
-    let (probe_tx, _) = mk_tx(probe_index, &probe_ctx, 0)?;
+    let (probe_tx, _, _) = mk_tx(probe_index, &probe_ctx, 0)?;
     let tx_size = borsh::to_vec(&probe_tx).map(|b| b.len()).unwrap_or(0);
     // fee = size × MIN_FEE_PER_BYTE × multiplier, integer math mirroring the
     // lib's `FeeMultiplier`/`scaled_fee` (clamp [1.0, 100.0], NaN → 1.0) so the
@@ -2828,9 +2843,11 @@ async fn shielded_send_live(
                  (largest owned note is {largest})"
             )
         })?;
-    let (tx, spend) = mk_tx(spend_index, &chosen_ctx, fee)?;
+    let (tx, spend, group) = mk_tx(spend_index, &chosen_ctx, fee)?;
+    // Self-verify against the SAME group the node will reconstruct (not store-less
+    // `&[]`): the proof is over `group`, so that is the authoritative cover set.
     let tags = backend
-        .verify_spend(&[], &spend, 0, 0)
+        .verify_spend(&group, &spend, 0, 0)
         .map_err(|e| format!("built spend failed self-verification: {e}"))?;
     let change = chosen_value.saturating_sub(amount).saturating_sub(fee);
 
@@ -2997,6 +3014,30 @@ async fn scan_live_cover_set(
         }
     }
     Ok((anchor_height, cover_coins, owned))
+}
+
+/// Slice the full anchored pool into the Grootle GROUP that holds the coin at
+/// global position `note_idx`: returns `(group_coins, cover_set_id, within_index)`.
+/// A Grootle one-of-many proof is over exactly one group of `cover_set_size`
+/// coins (padded when a group holds fewer), so a spend must anchor to the group
+/// containing its note. This chunks the fetched cover set identically to the
+/// node's `SparkPoolStore::cover_set_at(cover_set_id, anchor)` (both take the
+/// `cover_set_id`-th chunk of `N` coins), so the proof verifies against the group
+/// the node reconstructs. `N == 0` (unbucketed) returns the whole pool.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+fn cover_group_for(
+    full: &[spark_connector::CoinBytes],
+    note_idx: usize,
+) -> (Vec<spark_connector::CoinBytes>, u64, usize) {
+    let n = spark_connector::ffi::cover_set_size().unwrap_or(0);
+    if n == 0 {
+        return (full.to_vec(), 0, note_idx);
+    }
+    let bucket = note_idx / n;
+    let within = note_idx % n;
+    let lo = bucket * n;
+    let hi = (lo + n).min(full.len());
+    (full[lo..hi].to_vec(), bucket as u64, within)
 }
 
 /// Parse a `<s1hex>:<p2hex>` view key string into its exported material.
