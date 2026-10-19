@@ -18,17 +18,14 @@ scrape_configs:
   - job_name: 'coincync-nodes'
     static_configs:
       - targets:
-          # 2026-06-06: scraped fleet rewritten to the live 5-node
-          # Vultr roster. Dead targets (45.55.32.13, 138.68.172.80,
-          # 192.34.59.42, 46.101.138.120, 165.245.161.62, 143.110.218.99,
-          # 165.245.140.113, 64.227.49.44, 164.92.153.24, 170.64.142.146)
-          # were removed — those boxes are decommissioned or never
-          # existed in the live fleet.
-          - '66.135.23.193:9091'    # seed1 — New York
-          - '140.82.57.168:9091'    # seed2 — Amsterdam
-          - '207.148.6.50:9091'     # explorer — Dallas
-          - '207.148.111.76:9091'   # seed3 — Tokyo
-          - '95.179.165.225:9091'   # api — Frankfurt
+          # 2026-10-19: the earlier 5-node Vultr roster (66.135.23.193,
+          # 140.82.57.168, 207.148.6.50, 207.148.111.76, 95.179.165.225)
+          # is decommissioned. The current testnet is a single published
+          # seed; community peers are not scraped. Point this at the seed's
+          # metrics endpoint (:9091) from a host that can reach it —
+          # metrics are not public, so run Prometheus on/next to the seed
+          # or over a private link. Re-populate as the fleet grows.
+          - '2.29.34.197:9091'    # seed1 — published testnet seed
         labels:
           network: testnet
     relabel_configs:

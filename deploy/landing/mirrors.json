@@ -1,7 +1,7 @@
 {
   "$schema": "https://coincync.network/mirrors.schema.json",
   "version": 1,
-  "generated": "manual",
+  "generated": "2026-10-19",
   "notes": [
     "Canonical list of CoinCync public infrastructure endpoints.",
     "Served from https://coincync.network/mirrors.json and",
@@ -13,10 +13,11 @@
   "explorer": {
     "primary": {
       "url": "https://explorer.coincync.network",
-      "host": "Dallas",
-      "ipv4": "207.148.6.50",
+      "host": null,
+      "ipv4": null,
       "operator": "coincync-core",
-      "status": "live",
+      "status": "down",
+      "note": "2026-10-19: origin down (Cloudflare returns 522). Backend was 207.148.6.50 (Dallas), now decommissioned. DNS still resolves via Cloudflare; needs a redeploy behind the deploy/explorer nginx stack. Refresh ipv4/status when re-established.",
       "capabilities": ["testnet", "mainnet-pre-launch"]
     },
     "mirrors": []
@@ -25,10 +26,11 @@
   "api": {
     "primary": {
       "url": "https://api.coincync.network",
-      "host": "Frankfurt",
-      "ipv4": "95.179.165.225",
+      "host": null,
+      "ipv4": null,
       "operator": "coincync-core",
-      "status": "live",
+      "status": "down",
+      "note": "2026-10-19: api.coincync.network does not resolve; backend was 95.179.165.225 (Frankfurt), now decommissioned. Refresh ipv4/status when re-established.",
       "capabilities": ["json-rpc", "rest-v1", "testnet", "mainnet-pre-launch"]
     },
     "mirrors": []
@@ -36,25 +38,12 @@
 
   "seeds": [
     {
-      "hostname": "seed1.coincync.network",
-      "host": "New York",
-      "ipv4": "66.135.23.193",
+      "hostname": null,
+      "host": null,
+      "ipv4": "2.29.34.197",
       "p2p_port_testnet": 28080,
-      "p2p_port_mainnet": 19080
-    },
-    {
-      "hostname": "seed2.coincync.network",
-      "host": "Amsterdam",
-      "ipv4": "140.82.57.168",
-      "p2p_port_testnet": 28080,
-      "p2p_port_mainnet": 19080
-    },
-    {
-      "hostname": "seed3.coincync.network",
-      "host": "Tokyo",
-      "ipv4": "207.148.111.76",
-      "p2p_port_testnet": 28080,
-      "p2p_port_mainnet": 19080
+      "p2p_port_mainnet": 19080,
+      "note": "2026-10-19: single published testnet seed (P2P 28080 reachable; RPC 28081 loopback-only). The earlier 3-seed Vultr roster (66.135.23.193 NY, 140.82.57.168 AMS, 207.148.111.76 TYO) is decommissioned and the seedN.coincync.network hostnames no longer resolve. Community peers are not listed (operator privacy)."
     }
   ],
 
