@@ -1208,4 +1208,48 @@ mod tests {
             "a spend claiming an out-of-range group is rejected"
         );
     }
+
+    #[cfg(feature = "libspark-ffi")]
+    #[test]
+    fn batch_verify_spans_multiple_cover_set_groups() {
+        // With bucketing a single block can hold spends from DIFFERENT groups.
+        // The batch verifier groups by (cover_set_id, anchor) and reconstructs
+        // each group's cover set separately — a path that, before grouping, only
+        // ever saw cover_set_id=0. Exercise it with spends from group 0 AND 1.
+        use super::build::build_spend_payload;
+        use spark_connector::ffi::{cover_set_size, mint_to_seed, serial_context, LibsparkBackend};
+
+        let store = SparkPoolStore::new();
+        let n = cover_set_size().unwrap();
+        store.set_group_size(n);
+        let seed = b"multi-group-batch";
+        for i in 0..(2 * n) {
+            // exactly two full groups
+            let op = format!("m:{i}").into_bytes();
+            let ctx = serial_context(&op).unwrap();
+            let coin = mint_to_seed(seed, 10_000 + i as u64, &ctx).unwrap();
+            store.add_coin(op, coin, ctx, 1).unwrap();
+        }
+        let backend = LibsparkBackend;
+
+        let p0 = build_spend_payload(seed, &store, &format!("m:{}", 2).into_bytes(), 3_000, 0, 0, 1)
+            .expect("build group-0 spend");
+        let p1 =
+            build_spend_payload(seed, &store, &format!("m:{}", n + 5).into_bytes(), 3_000, 0, 0, 1)
+                .expect("build group-1 spend");
+        assert_eq!(p0.spend.as_ref().unwrap().cover_set_id, 0);
+        assert_eq!(p1.spend.as_ref().unwrap().cover_set_id, 1);
+
+        let t0 = verify_spark_payload(&store, &backend, &p0, 0).unwrap();
+        let t1 = verify_spark_payload(&store, &backend, &p1, 0).unwrap();
+        assert_ne!(t0, t1, "distinct notes in distinct groups → distinct tags");
+
+        // Batched verify across the two groups returns the same per-spend tags,
+        // in order — each group reconstructed independently.
+        let batched = verify_spark_payloads_batch(&store, &backend, &[(p0, 0), (p1, 0)])
+            .expect("batch across two groups");
+        assert_eq!(batched.len(), 2);
+        assert_eq!(batched[0], t0, "group-0 tag preserved in a multi-group batch");
+        assert_eq!(batched[1], t1, "group-1 tag preserved in a multi-group batch");
+    }
 }
