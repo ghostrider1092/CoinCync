@@ -696,6 +696,57 @@ mod tests {
     }
 
     #[test]
+    fn cover_set_grouping_chunks_pool_and_indexes_consistently() {
+        // With group size N the pool splits into N-sized groups keyed by
+        // cover_set_id; `spend_index_in_cover`'s (cover_set_id, within) must index
+        // back into `cover_set_at(cover_set_id)` to the SAME coin — the invariant
+        // that lets a spender's proof verify against the node's reconstructed group.
+        let s = SparkPoolStore::new();
+        let n = 4usize;
+        s.set_group_size(n);
+        assert_eq!(s.group_size(), 4);
+        // 2N+1 = 9 coins → groups [0,4) [4,8) [8,9)partial, all visible at height 1.
+        for i in 0u8..9 {
+            s.add_coin(format!("g:{i}").into_bytes(), coin(i), format!("c:{i}").into_bytes(), 1)
+                .unwrap();
+        }
+        assert_eq!(s.cover_set_at(0, 1), (0..4).map(coin).collect::<Vec<_>>());
+        assert_eq!(s.cover_set_at(1, 1), (4..8).map(coin).collect::<Vec<_>>());
+        assert_eq!(s.cover_set_at(2, 1), vec![coin(8)], "trailing partial group");
+        assert!(s.cover_set_at(3, 1).is_empty(), "a group past the end is empty");
+
+        for i in 0u8..9 {
+            let op = format!("g:{i}").into_bytes();
+            let (gid, within) = s.spend_index_in_cover(&op, 1).unwrap();
+            assert_eq!((gid, within), ((i as u64) / 4, (i as usize) % 4));
+            assert_eq!(
+                s.cover_set_at(gid, 1)[within],
+                coin(i),
+                "within-index recovers the coin inside its group"
+            );
+        }
+
+        // Height filter composes with chunking: a coin above the anchor is
+        // invisible and does not join a group at that anchor.
+        s.add_coin(b"future".to_vec(), coin(99), b"cf".to_vec(), 20).unwrap();
+        assert!(s.spend_index_in_cover(b"future", 1).is_none(), "coin above anchor not visible");
+        assert_eq!(s.cover_set_at(2, 1), vec![coin(8)], "future coin absent from group 2 at anchor 1");
+    }
+
+    #[test]
+    fn group_size_zero_is_the_whole_pool() {
+        // Legacy / `set_group_size` not called: the whole anchored pool is one
+        // group and cover_set_id is ignored (valid only while pool <= N).
+        let s = SparkPoolStore::new(); // group_size 0
+        for i in 0u8..5 {
+            s.add_coin(format!("z:{i}").into_bytes(), coin(i), vec![], 1).unwrap();
+        }
+        assert_eq!(s.cover_set_at(0, 1).len(), 5, "unbucketed: whole pool is group 0");
+        assert_eq!(s.cover_set_at(7, 1).len(), 5, "unbucketed: any cover_set_id = whole pool");
+        assert_eq!(s.spend_index_in_cover(b"z:3", 1), Some((0, 3)), "whole-pool index");
+    }
+
+    #[test]
     fn cover_entries_at_filters_by_height_and_preserves_cover_order() {
         let s = SparkPoolStore::new();
         s.add_coin(b"op:0".to_vec(), coin(1), b"ctx-a".to_vec(), 5).unwrap();

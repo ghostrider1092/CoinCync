@@ -1159,4 +1159,53 @@ mod tests {
             "a coin in a trailing partial group spends (Grootle pads to N)"
         );
     }
+
+    #[cfg(feature = "libspark-ffi")]
+    #[test]
+    fn spend_with_wrong_or_out_of_range_cover_set_id_is_rejected() {
+        // A spender must not be able to lie about which group holds their coin.
+        // A proof built over the coin's REAL group fails to verify when the payload
+        // claims a DIFFERENT cover_set_id (the node reconstructs that other group,
+        // which doesn't contain the coin), and an out-of-range id (empty group)
+        // also fails. This guards the cover_set_id channel the grouping introduced.
+        use super::build::build_spend_payload;
+        use spark_connector::ffi::{cover_set_size, mint_to_seed, serial_context, LibsparkBackend};
+
+        let store = SparkPoolStore::new();
+        let n = cover_set_size().unwrap();
+        store.set_group_size(n);
+        let seed = b"wrong-group";
+        for i in 0..(2 * n + 5) {
+            let op = format!("w:{i}").into_bytes();
+            let ctx = serial_context(&op).unwrap();
+            let coin = mint_to_seed(seed, 10_000 + i as u64, &ctx).unwrap();
+            store.add_coin(op, coin, ctx, 1).unwrap();
+        }
+        let backend = LibsparkBackend;
+
+        // Honest spend of a coin in group 1 (global index N+2) verifies.
+        let owned = format!("w:{}", n + 2).into_bytes();
+        let mut p =
+            build_spend_payload(seed, &store, &owned, 3_000, 0, 0, 1).expect("build group 1");
+        assert_eq!(p.spend.as_ref().unwrap().cover_set_id, 1);
+        assert!(
+            verify_spark_payload(&store, &backend, &p, 0).is_ok(),
+            "the honest group-1 spend verifies"
+        );
+
+        // Tamper: claim group 0. The node verifies the group-1 proof against
+        // group 0's coins (which do not include this coin) → rejected.
+        p.spend.as_mut().unwrap().cover_set_id = 0;
+        assert!(
+            verify_spark_payload(&store, &backend, &p, 0).is_err(),
+            "a spend claiming the wrong group is rejected"
+        );
+
+        // Out-of-range group id → empty reconstructed group → rejected.
+        p.spend.as_mut().unwrap().cover_set_id = 999;
+        assert!(
+            verify_spark_payload(&store, &backend, &p, 0).is_err(),
+            "a spend claiming an out-of-range group is rejected"
+        );
+    }
 }
