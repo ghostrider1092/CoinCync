@@ -54,11 +54,7 @@ async function poll(){
   }
 
   $('status').textContent=info.height>0?'Connected':'Starting...';$('live-dot').classList.remove('off');
-  // Block-propagation viz on the globe — fires arcs + ring pulse from a
-  // randomly-chosen online fleet node every time the chain advances.
-  // Cheap (just height comparison + one arcsData/ringsData refresh).
-  // Safe to call when globe isn't initialized — function is a no-op then.
-  try { maybeFireBlockPropagation(info.height); } catch(_){/* never block poll on viz */}
+  // (Globe block-propagation viz removed in the explorer shrink.)
   chainHeight=info.height;chainDiff=parseInt(info.difficulty);
   const hr=chainDiff/120;
   // Animate height counter + trigger block pulse

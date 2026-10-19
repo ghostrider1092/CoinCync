@@ -1,17 +1,5 @@
-function toggleGlobeMode(){
-  if(!_globe)return;
-  _globeAuto=!_globeAuto;
-  _globe.controls().autoRotate=_globeAuto;
-  const btn=$('globe-mode-btn');
-  if(btn)btn.textContent=_globeAuto?' Pause':'▶ Spin';
-}
-function globeResetView(){
-  if(!_globe)return;
-  _globe.pointOfView({lat:39,lng:-98,altitude:2.2},1000);
-  _globeAuto=true;
-  _globe.controls().autoRotate=true;
-  const btn=$('globe-mode-btn');if(btn)btn.textContent=' Pause';
-}
+// (Globe controls removed in the explorer shrink — the 3D network globe
+// and its module were dropped.)
 
 // Map pages to their parent dropdown
 const DROP_MAP={
@@ -45,9 +33,7 @@ function go(id){
   if(id==='blocks'){renderAllBlocks();void ensureBlocksBackfillToGenesis();}
   if(id==='mempool'){loadMempool();}else{if(_mpAutoInterval){clearInterval(_mpAutoInterval);_mpAutoInterval=null;const cb=$('mp-auto-sync');if(cb)cb.checked=false;}}
   if(id==='network'){loadPeers();setTimeout(renderHrHistChart,300);}
-  if(id==='globe'){setTimeout(()=>{initGlobe().catch(()=>{});},200);}
   if(id==='home'){
-    setTimeout(()=>{try{initConstellation();}catch(_){}}, 200);
     // Kick the v1.0.10 status panel; will start its own 15s interval
     setTimeout(()=>{try{ensureV108Polling();}catch(_){}}, 100);
   }else{
@@ -61,15 +47,13 @@ function go(id){
     if(_healthInterval){clearInterval(_healthInterval);_healthInterval=null;}
     if(_healthMetaInterval){clearInterval(_healthMetaInterval);_healthMetaInterval=null;}
   }
-  if(id==='supply'){setTimeout(renderEmissionChart,200);setTimeout(renderAnonChart,300);loadChainEvents();}
+  if(id==='supply'){setTimeout(renderEmissionChart,200);loadChainEvents();}
   if(id==='soak'){loadSoakStatus();}
   if(id==='leaderboard'){loadFleetLeaderboard();}
   if(id==='privacymetrics'){setTimeout(renderPrivacyMetrics,300);}
-  if(id==='anonset'){setTimeout(renderAnonSetDepth,200);}
   if(id==='reorghistory'){setTimeout(renderReorgHistory,200);}
   if(id==='mininglive'){startMiningLivePoll();}else{stopMiningLivePoll();}
   if(id==='feemarket'){setTimeout(renderFeeMarket,200);}
-  if(id==='privacypools'){setTimeout(renderPrivacyPools,200);}
 
 
   if(id==='status'){setTimeout(renderVersionChart,200);renderMinersLeaderboard();}

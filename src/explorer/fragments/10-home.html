@@ -188,21 +188,9 @@
       </div>
     </div>
 
-    <!--  NETWORK CONSTELLATION  -->
-    <!-- 3D particle ring rendered with three.js (lazy-loaded by
-         ensureNetworkVizDeps). Inner ring + outer ring of glowing dots,
-         slow rotation. The user's chosen wallpaper SVG is textured onto
-         a backdrop plane inside the same scene, so the wallpaper
-         appears as part of the 3D depth (camera moves and the plane
-         parallaxes naturally). Both particle colour and backdrop swap
-         live when the user picks a new theme/wallpaper. -->
-    <div class="constellation-panel" id="constellation-panel">
-      <canvas id="constellation-canvas"></canvas>
-      <button class="constellation-btn constellation-expand" id="constellation-expand" type="button" title="Expand (drag to rotate, scroll to zoom)" aria-label="Expand constellation">&#9974;</button>
-      <button class="constellation-btn constellation-close" id="constellation-close" type="button" title="Close (Esc)" aria-label="Close fullscreen">&times;</button>
-      <div class="constellation-label" id="constellation-label">Live anonymity set</div>
-      <div class="constellation-hint">Drag to rotate &middot; scroll to zoom &middot; Esc to close</div>
-    </div>
+    <!-- (Network constellation removed in the explorer shrink — it rendered
+         a "live anonymity set" for the shielded pool, which is gated off
+         pending audit.) -->
     <!--  LIVE BLOCK FEED  -->
     <div class="live-feed">
       <div class="live-feed-head">

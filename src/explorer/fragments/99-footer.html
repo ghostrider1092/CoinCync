@@ -16,10 +16,9 @@
       <span onclick="go('supply')">Supply</span>
     </div>
     <div>
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-        <input id="newsletter-email" placeholder="your@email.com" class="form-input" style="width:180px;padding:5px 10px;font-size:11px"/>
-        <button class="btn btn-primary" onclick="const e=$('newsletter-email');if(e&&e.value.includes('@')){const list=JSON.parse(localStorage.getItem('cync-newsletter')||'[]');list.push({email:e.value,ts:Date.now()});localStorage.setItem('cync-newsletter',JSON.stringify(list));showToast('✉','Subscribed',e.value,3000);e.value=''}else{showToast('⚠','Invalid email','Enter a valid email',2000)}" style="padding:5px 12px;font-size:11px">Subscribe</button>
-      </div>
+      <!-- (Newsletter signup removed in the explorer shrink — it only wrote
+           to localStorage and sent nowhere, implying a mailing list that
+           does not exist.) -->
       <div class="footer-credit">Developed by Cync Lab · v2.0.0 · testnet · hard fork at h=13,000 · <span class="badge">✓ Auditable</span></div>
     </div>
   </div>

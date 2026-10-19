@@ -171,21 +171,7 @@ async function requestFaucet() {
   }
 }
 
-//
-// FULLSCREEN GLOBE (#20)
-//
-function toggleGlobeFullscreen() {
-  const wrap = $('globe-wrap');
-  const btn = $('globe-fs-btn');
-  if (!wrap) return;
-  if (document.fullscreenElement) {
-    document.exitFullscreen();
-    if (btn) btn.textContent = '⛶ Fullscreen';
-  } else {
-    wrap.requestFullscreen().catch(() => {});
-    if (btn) btn.textContent = '✕ Exit';
-  }
-}
+// (Fullscreen-globe control removed in the explorer shrink.)
 
 //
 // CHAIN EVENTS TIMELINE (#25)

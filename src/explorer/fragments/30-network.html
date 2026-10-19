@@ -54,52 +54,15 @@
   </div>
 </div>
 
-<!--  GLOBE  -->
-<div class="page" id="page-globe">
-  <div class="content">
-    <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Globe</div>
-    <div class="page-title" style="margin-bottom:6px">Network globe</div>
-    <div class="page-sub" style="margin-bottom:12px">3D peer map in dedicated view</div>
-    <div class="panel">
-      <div class="panel-head">
-        Node map
-        <span style="font-size:11px;color:var(--t3);font-weight:400;text-transform:none;letter-spacing:0">— drag to rotate · scroll to zoom</span>
-        <span style="display:flex;gap:6px;margin-left:auto">
-          <button onclick="toggleGlobeMode()" id="globe-mode-btn" style="padding:3px 10px;border-radius:5px;border:1px solid var(--b);background:var(--s2);color:var(--t2);font-size:10px;cursor:pointer;font-family:var(--mono)"> Pause</button>
-          <button onclick="toggleGlobeFullscreen()" id="globe-fs-btn" style="padding:3px 10px;border-radius:5px;border:1px solid var(--b);background:var(--s2);color:var(--t2);font-size:10px;cursor:pointer;font-family:var(--mono)">⛶ Fullscreen</button>
-          <button onclick="globeResetView()" style="padding:3px 10px;border-radius:5px;border:1px solid var(--b);background:var(--s2);color:var(--ac2);font-size:10px;cursor:pointer;font-family:var(--mono)">⌖ Reset</button>
-        </span>
-      </div>
-      <div id="globe-wrap" style="position:relative;width:100%;background:#000;border-radius:0 0 12px 12px;overflow:hidden;display:block;transition:all .3s">
-        <div id="globe-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;background:var(--s2);z-index:5">
-          <div style="font-family:var(--mono);font-size:12px;color:var(--t3)">Loading 3D globe...</div>
-          <div style="width:120px;height:3px;background:var(--s3);border-radius:2px;overflow:hidden"><div style="height:100%;background:var(--ac2);border-radius:2px;animation:loadbar 1.5s ease-in-out infinite"></div></div>
-        </div>
-        <div id="globe-el" style="width:100%;height:560px"></div>
-        <div id="globe-tt" style="display:none;position:absolute;background:var(--surface);border:1px solid var(--b);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:11px;color:var(--t);pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.3);z-index:20;min-width:180px"></div>
-        <div style="position:absolute;bottom:14px;right:14px;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:8px 12px;font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.7);display:flex;flex-direction:column;gap:5px">
-          <div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#D4A059;box-shadow:0 0 6px #D4A059;display:inline-block;flex-shrink:0"></span>Active node</div>
-          <div style="display:flex;align-items:center;gap:6px"><span style="width:18px;height:1px;background:rgba(212,160,89,.6);display:inline-block;flex-shrink:0"></span>P2P connection</div>
-          <div style="margin-top:2px;color:#D4A059;cursor:pointer" onclick="go('health')">Health dashboard →</div>
-        </div>
-      </div>
-      <div style="padding:10px 20px;background:var(--s2);border-top:1px solid var(--b);display:flex;gap:20px;align-items:center;font-size:11px;font-family:var(--mono);color:var(--t3);flex-wrap:wrap">
-        <span><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#7EB87C;margin-right:5px;box-shadow:0 0 4px #7EB87C"></span>Live fleet map</span>
-        <span style="margin-left:auto">Drag to rotate · Scroll to zoom · Click node for details</span>
-      </div>
-    </div>
-  </div>
-</div>
-
-
-
+<!-- (Network globe page removed in the explorer shrink — a 3D node-location
+     map raises operator-doxxing risk and pulled in ~1.5 MB of CDN libs.) -->
 
 <!--  NODE HEALTH  -->
 <div class="page" id="page-health">
   <div class="content">
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span>Node Health</div>
     <div class="page-title" style="margin-bottom:4px">Node health dashboard</div>
-    <div class="page-sub" style="margin-bottom:20px">Live status of the active 8-host CoinCync public testnet fleet (3 seeds + explorer + miner + 2 relays + api-nginx)</div>
+    <div class="page-sub" style="margin-bottom:20px">Live status of the published CoinCync testnet seed. Community-run peers are not listed here (operator privacy).</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:-8px 0 12px 0">
       <span class="badge">source: <span id="health-source">/health/*</span></span>
       <span class="badge">freshness: <span id="health-freshness">—</span></span>

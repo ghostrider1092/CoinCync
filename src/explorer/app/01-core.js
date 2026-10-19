@@ -157,14 +157,8 @@ document.addEventListener('DOMContentLoaded', function() {
   // the rest of the boot sequence — RPC keys, network restore, layout —
   // finishes before three.js starts allocating GPU buffers.
   if (!savedPage || savedPage === 'home') {
-    setTimeout(function(){
-      if (typeof initConstellation === 'function') {
-        try { initConstellation(); } catch(_){}
-      }
-    }, 300);
-    // v1.0.10 status panel: kick on initial paint too. Same reason as
-    // initConstellation above — go() isn't called on first load when
-    // page-home starts active in the DOM.
+    // v1.0.10 status panel: kick on initial paint. go() isn't called on
+    // first load when page-home starts active in the DOM.
     setTimeout(function(){
       if (typeof ensureV108Polling === 'function') {
         try { ensureV108Polling(); } catch(_){}
@@ -181,11 +175,12 @@ document.addEventListener('DOMContentLoaded', function() {
 // (loopback-only)" badge — intentional, not a problem.
 // `apiNginxOnly` flag: api host runs nginx only (no coincync-node);
 // probing it would always 504. Shown for topology completeness only.
-// Single Hetzner box (cync-node-hel1, Falkenstein DE): seed with public P2P
-// (28080) and loopback-only RPC (28081). Add entries here — plus matching
-// GNODES/MNODES rows and a `/health/<id>` nginx route — as the fleet grows.
+// Single published bootstrap seed: public P2P (28080) and loopback-only
+// RPC (28081, firewalled from the public). Community peers are run by
+// others and intentionally NOT listed here (operator privacy). Add entries
+// here — plus a matching `/health/<id>` nginx route — as the fleet grows.
 const NODES=[
-  {id:'hel1',label:'hel1',    loc:'Hetzner · Falkenstein DE', role:'Seed · public P2P, loopback RPC', proxy:'/health/hel1', _rpc:'http://127.0.0.1:28081', loopbackRpc:true},
+  {id:'seed1',label:'seed1', loc:'Published testnet seed', role:'Seed · public P2P, loopback RPC', proxy:'/health/seed1', _rpc:'http://127.0.0.1:28081', loopbackRpc:true},
 ];
 const $=id=>document.getElementById(id);
 const num=n=>Number(n).toLocaleString();
@@ -215,34 +210,8 @@ const EXPLORER_ALLOW_EXTERNAL_DEPS=(
   IS_LOCALHOST &&
   new URLSearchParams(window.location.search).get('allow_external_deps')==='1'
 );
-const SCRIPT_URLS = {
-  d3: '/static/vendor/d3/7/d3.min.js',
-  topojson: '/static/vendor/topojson-client/3/topojson-client.min.js',
-  globe: '/static/vendor/globe.gl/2.27.3/globe.gl.min.js',
-};
-const _scriptLoadCache = {};
-function ensureScriptLoaded(url, globalName) {
-  const isExternal = /^https?:\/\//i.test(url);
-  if (isExternal && !EXPLORER_ALLOW_EXTERNAL_DEPS) {
-    return Promise.reject(new Error('External explorer dependencies are disabled'));
-  }
-  if (globalName && typeof window[globalName] !== 'undefined') return Promise.resolve();
-  if (_scriptLoadCache[url]) return _scriptLoadCache[url];
-  _scriptLoadCache[url] = new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = url;
-    s.async = true;
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error('Failed to load script: ' + url));
-    document.head.appendChild(s);
-  });
-  return _scriptLoadCache[url];
-}
-async function ensureNetworkVizDeps() {
-  await ensureScriptLoaded(SCRIPT_URLS.d3, 'd3');
-  await ensureScriptLoaded(SCRIPT_URLS.topojson, 'topojson');
-  await ensureScriptLoaded(SCRIPT_URLS.globe, 'Globe');
-}
+// (The d3 / topojson / globe.gl lazy-loader was removed in the explorer
+// shrink along with the world-map and 3D-globe modules that used it.)
 // CoinCync 1.0 is RandomX-only — see `consensus::pow::PowAlgorithm`.
 // The pre-1.0 multi-algorithm rotation (Yescrypt-heavy / Yescrypt-light)
 // was removed in the trim. Any non-zero algorithm id here is either a

@@ -217,26 +217,10 @@ function trackAnonSet(info) {
   _anonHistory.push({ t: Date.now(), val: info.anonymity_set });
   if (_anonHistory.length > 200) _anonHistory.shift();
 }
-let anonChart = null;
-function renderAnonChart() {
-  const el = $('anon-growth-canvas');
-  if (!el || _anonHistory.length < 2) return;
-  const isDark = document.documentElement.classList.contains('dark');
-  const tc = isDark ? 'rgba(242,240,236,0.5)' : 'rgba(74,72,68,0.5)';
-  if (anonChart) anonChart.destroy();
-  anonChart = new Chart(el, {
-    type: 'line',
-    data: { labels: _anonHistory.map((_, i) => i), datasets: [{
-      label: 'Anonymity Set', data: _anonHistory.map(h => h.val),
-      borderColor: '#A855F7', backgroundColor: 'rgba(168,85,247,0.1)',
-      borderWidth: 2, pointRadius: 0, fill: true, tension: 0.3
-    }] },
-    options: { responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: { x: { display: false }, y: { ticks: { color: tc, font: { size: 9 } }, grid: { color: isDark ? 'rgba(46,44,42,0.3)' : 'rgba(228,225,216,0.3)' } } }
-    }
-  });
-}
+// (renderAnonChart removed in the explorer shrink — the shielded pool is
+// gated off pending audit, so there is no live anonymity set to chart.
+// trackAnonSet above is retained as a harmless no-op: anonymity_set is
+// absent pre-activation, so it never accumulates.)
 
 //
 // SOCIAL SHARE (#9)
