@@ -10,6 +10,10 @@
 #
 # Usage:  scripts/soak-24h-shielded.sh [SECONDS]      (default 86400 = 24h)
 #         SHIELDED_SOAK_SEED=<n> scripts/soak-24h-shielded.sh 3600
+#         SPARK_PROD_PARAMS=1 scripts/soak-24h-shielded.sh 86400   (N=512 params)
+#         SHIELDED_SOAK_POOL_MULT=3 scripts/soak-24h-shielded.sh   (pool spans 3
+#             cover-set GROUPS per cycle — stresses the cover-set grouping; the
+#             default 1 is the historical pool==N behavior)
 #
 # Run it from a dedicated terminal (Git Bash). It builds --release first (the
 # only step that needs OpenSSL for linking), then runs the self-contained
@@ -56,6 +60,12 @@ if [ "${SPARK_PROD_PARAMS:-0}" = "1" ]; then
   EXTRA_FEATURES="spark-connector/spark-prod-params"
   PARAM_TAG="prodparams-N512"
   echo "PRODUCTION PARAMS: soaking at N=512 (get_coincync) via spark-prod-params."
+fi
+# Cover-set grouping stress: pool spans SHIELDED_SOAK_POOL_MULT groups per cycle.
+if [ "${SHIELDED_SOAK_POOL_MULT:-1}" != "1" ]; then
+  export SHIELDED_SOAK_POOL_MULT
+  PARAM_TAG="${PARAM_TAG}-groups${SHIELDED_SOAK_POOL_MULT}"
+  echo "GROUPING STRESS: pool = ${SHIELDED_SOAK_POOL_MULT} cover-set group(s) per cycle."
 fi
 FEATURES="testnet sketch-gk-proof libspark-ffi ${EXTRA_FEATURES}"
 LOG="soak-shielded-${PARAM_TAG}-${STAMP}.log"

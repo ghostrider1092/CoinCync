@@ -5005,6 +5005,70 @@ mod tests {
         );
     }
 
+    /// The cover-set GROUPING case through the REAL block hooks: with a pool of
+    /// 2N coins (two full Grootle groups), a spend of a coin in a NON-ZERO group
+    /// must verify and apply via `verify_block_spark_v2` / `apply_spark_v2_txs`.
+    /// The store-level tests cover `verify_spark_payload` directly; this proves
+    /// the whole block-validation+apply path reconstructs the right group. (The
+    /// pre-grouping pool could not exceed one group — this is the regression that
+    /// guards the fix end-to-end in consensus.)
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn spark_v2_chain_hooks_verify_and_apply_a_spend_from_a_nonzero_group() {
+        use crate::consensus::spark_payload::build::{build_mint_payload, build_spend_payload};
+        use crate::consensus::spark_payload::derive_outpoint;
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxType};
+        use spark_connector::ffi::cover_set_size;
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new();
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+        let n = cover_set_size().unwrap();
+        // The production Blockchain constructors set this; this harness builds the
+        // store directly, so enable grouping explicitly.
+        store.set_group_size(n);
+
+        let mk_shielded_tx = |extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+
+        // Shield in 2N coins = two full groups.
+        let seed = b"chain-hook-grouped";
+        let values: Vec<u64> = (0..(2 * n) as u64).map(|i| 10_000 + i).collect();
+        let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
+        chain.apply_spark_v2_txs(std::slice::from_ref(&mk_shielded_tx(mint_payload.encode())), 1);
+        assert_eq!(store.coin_count(), 2 * n, "pool holds two full groups");
+
+        // Spend a coin in GROUP 1 (vout N+2) — impossible before grouping.
+        let owned_op = derive_outpoint(&[], (n + 2) as u32);
+        let spend_payload =
+            build_spend_payload(seed, store.as_ref(), &owned_op, 3_000, 0, 0, 1).unwrap();
+        assert_eq!(
+            spend_payload.spend.as_ref().unwrap().cover_set_id,
+            1,
+            "the spend anchors to group 1"
+        );
+        let spend_tx = mk_shielded_tx(spend_payload.encode());
+
+        assert!(
+            chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_ok(),
+            "block verify accepts a group-1 spend when the pool spans 2 groups"
+        );
+        chain.apply_spark_v2_txs(std::slice::from_ref(&spend_tx), 2);
+        assert!(
+            chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_err(),
+            "the group-1 spend is rejected once applied (double-spend guard)"
+        );
+    }
+
     /// REGTEST END-TO-END HARNESS for the wallet shielded path:
     /// `shielded-mint` (shield-in) → pool → `shielded-send` (transfer) → mine →
     /// verify, driven through the REAL chain block hooks with the REAL wallet
@@ -5575,6 +5639,18 @@ mod tests {
         let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
         let n = cover_set_size().expect("cover set size");
         assert!(n >= 2, "soak needs a cover set of at least 2 coins");
+        // Enable cover-set grouping (the production Blockchain constructors do
+        // this; this harness builds the store directly). SHIELDED_SOAK_POOL_MULT
+        // > 1 mints that many GROUPS per cycle so the pool spans multiple Grootle
+        // groups and spends anchor to non-zero cover_set_ids — stressing the
+        // grouping. MULT=1 (default) is the historical pool==N behavior.
+        store.set_group_size(n);
+        let pool_mult: u64 = std::env::var("SHIELDED_SOAK_POOL_MULT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&m| m >= 1)
+            .unwrap_or(1);
+        let pool_size = (n as u64).saturating_mul(pool_mult) as usize;
         // A fixed second wallet: transfer recipient, distinct from the per-cycle
         // sender seed. Its address is stable across cycles.
         let recipient_b = b"soak-recipient-B";
@@ -5627,8 +5703,10 @@ mod tests {
             cycles += 1;
             let wseed = format!("soak-{seed0}-{cycles}");
 
-            // ── MINT a fresh cover set (shield-in) at height 1 ───────────────
-            let values: Vec<u64> = (0..n as u64).map(|i| 1_000 + (rand() % 9_000) + i).collect();
+            // ── MINT a fresh pool (shield-in) at height 1 — `pool_size` coins
+            //    (pool_mult full groups) so spends can span cover-set groups ────
+            let values: Vec<u64> =
+                (0..pool_size as u64).map(|i| 1_000 + (rand() % 9_000) + i).collect();
             let (mint_payload, _) = build_mint_payload(wseed.as_bytes(), &values, &[])
                 .unwrap_or_else(|| anomaly!("build_mint"));
             let mint_tx = mk(mint_payload.encode());
@@ -5639,7 +5717,7 @@ mod tests {
             // stresses the mint→spend→reorg STATE machine + the spend verify.
             chain.checkpoint_phase2_stores(1);
             chain.apply_spark_v2_txs(std::slice::from_ref(&mint_tx), 1);
-            if store.coin_count() != n {
+            if store.coin_count() != pool_size {
                 anomaly!("mint_coin_count");
             }
             invariants!();
@@ -5651,8 +5729,11 @@ mod tests {
             // Two DISTINCT owned coins: one transferred to B, one self-spent.
             // Distinct so the self-spend never re-spends the transfer's input
             // (which would be a spurious double-spend).
-            let xfer_vout = (rand() as u32) % (n as u32);
-            let spend_vout = (xfer_vout + 1 + (rand() as u32) % (n as u32 - 1)) % (n as u32);
+            // Range over the WHOLE pool so, when pool_mult > 1, the two coins land
+            // in different cover-set groups (distinct cover_set_ids) across cycles.
+            let xfer_vout = (rand() as u32) % (pool_size as u32);
+            let spend_vout =
+                (xfer_vout + 1 + (rand() as u32) % (pool_size as u32 - 1)) % (pool_size as u32);
 
             // ── TRANSFER a coin to wallet B; B must recover it, sender must not ─
             let xfer_op = derive_outpoint(&[], xfer_vout);
@@ -5730,7 +5811,8 @@ mod tests {
         }
 
         eprintln!(
-            "SHIELDED SOAK OK: {cycles} mint/transfer/spend/reorg cycles in {secs}s, seed={seed0}"
+            "SHIELDED SOAK OK: {cycles} mint/transfer/spend/reorg cycles in {secs}s, \
+             seed={seed0}, pool_size={pool_size} ({pool_mult} group(s) of N={n})"
         );
         assert!(cycles > 0, "soak ran zero cycles");
     }
