@@ -17,15 +17,13 @@ LOCAL_RPC = os.environ.get('COINCYNC_EXPLORER_RPC', 'http://127.0.0.1:28081').st
 LOCAL_REST = os.environ.get('COINCYNC_EXPLORER_REST', 'http://127.0.0.1:28083').strip() or 'http://127.0.0.1:28083'
 HEALTH = {}
 if ALLOW_LIVE_HEALTH:
-    # 2026-06-06: rewritten to live Vultr fleet. Old routes (lon,
-    # nyc1, fra, nyc3, ams, syd, ric, tor, atl, sfo) pointed at boxes
-    # that no longer exist.
+    # 2026-10-18: the earlier multi-region Vultr fleet (New York,
+    # Amsterdam, Tokyo, Dallas, Frankfurt) is no longer deployed — those
+    # boxes are gone. The current testnet is a single PUBLISHED bootstrap
+    # seed plus community-run peers whose IPs are intentionally NOT listed
+    # (operator privacy). Only the published seed is health-proxied here.
     HEALTH = {
-        '/health/seed1': 'http://66.135.23.193:28081',     # New York
-        '/health/seed2': 'http://140.82.57.168:28081',     # Amsterdam
-        '/health/seed3': 'http://207.148.111.76:28081',    # Tokyo
-        '/health/explorer': 'http://207.148.6.50:28081',   # Dallas
-        '/health/api': 'http://95.179.165.225:28081',      # Frankfurt
+        '/health/seed1': 'http://2.29.34.197:28081',       # published testnet seed
     }
 
 class H(http.server.BaseHTTPRequestHandler):

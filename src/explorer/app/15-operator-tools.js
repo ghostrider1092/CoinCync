@@ -249,12 +249,13 @@ async function loadBurnStats(){
 // Fleet IPs aren't displayed publicly — operators see them via SSH; this
 // page shows logical names only.
 //
+// The testnet is currently a single PUBLISHED bootstrap seed plus
+// community-run peers. The earlier multi-region fleet (NJ / Amsterdam /
+// Tokyo / Dallas / Frankfurt) is no longer deployed, so it is not shown.
+// Community peer IPs are intentionally not listed (operator privacy); only
+// the published seed appears here.
 const FLEET_BOXES = [
-  { name:'seed1',    region:'New Jersey, USA',        role:'Seed (US-East)',     proxy:'/health/seed1' },
-  { name:'seed2',    region:'Amsterdam, Netherlands', role:'Seed (Europe)',      proxy:'/health/seed2' },
-  { name:'seed3',    region:'Tokyo, Japan',           role:'Seed (Asia-Pacific)',proxy:'/health/seed3' },
-  { name:'explorer', region:'Dallas, USA',            role:'Explorer + Relay',   proxy:'/health/explorer' },
-  { name:'api',      region:'Frankfurt, Germany',     role:'Public API + Relay', proxy:'/health/api' },
+  { name:'seed1', region:'—', role:'Published testnet seed', proxy:'/health/seed1' },
 ];
 
 async function _pollFleetBox(box){
