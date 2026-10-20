@@ -389,84 +389,17 @@ impl LightWalletServer {
         base_fee + base_fee / 5
     }
 
-    /// Reorg-handling Task #4: find the deepest height ≤ `known_height`
-    /// where the wallet's `known_hash` is on the canonical chain.
-    ///
-    /// The wallet calls this when it suspects a reorg (its
-    /// `scanner.last_hash` no longer matches `chain.get_block_hash(last_height)`).
-    /// The server walks backwards from `known_height` looking for a
-    /// height where the wallet's previously-seen hash matches the
-    /// canonical chain's current view.
-    ///
-    /// Returns:
-    /// - `Some(height)` — the fork point. Wallet rewinds to here, then
-    ///   re-scans forward from `height + 1` along the new canonical chain.
-    /// - `None` — `known_hash` is not on the canonical chain at any
-    ///   height ≤ `known_height` (catastrophic — the wallet's last-known
-    ///   state diverged so deeply that there's no shared ancestor in
-    ///   our walk window, OR the chain itself doesn't have the blocks
-    ///   we're searching). Wallet must fall back to rescanning from a
-    ///   hardcoded checkpoint or genesis.
-    ///
-    /// The walk is bounded by `max_walk_depth` (default 256) to keep
-    /// the call cheap. A wallet that was offline through a deeper
-    /// reorg falls through to the `None` path, which the wallet
-    /// orchestrator handles via full rescan.
-    ///
-    /// Server cost: O(walk_depth) hash comparisons via
-    /// `chain.get_block_hash`. Each is an O(log N) tree lookup.
-    /// Cheap enough to not need rate-limiting beyond the existing
-    /// per-IP RPC caps.
-    pub fn find_fork_point(
-        &self,
-        known_hash: crate::primitives::Hash,
-        known_height: u64,
-        max_walk_depth: Option<u64>,
-    ) -> Option<u64> {
-        let walk_depth = max_walk_depth.unwrap_or(256);
-
-        // Cheap path: check if known_height + known_hash IS still on
-        // the canonical chain. If so the wallet wasn't reorged off and
-        // the fork point is just known_height.
-        if let Some(canonical) = self.chain.get_block_hash(known_height) {
-            if canonical == known_hash {
-                return Some(known_height);
-            }
-        }
-
-        // Walk backwards looking for the first height where the
-        // wallet's recorded hash matches the canonical chain's hash.
-        // The wallet's full history isn't accessible to the server
-        // — we can only check the SINGLE pair (known_hash, known_height)
-        // against the canonical chain. If that doesn't match, the
-        // server has to give up (it can't ask "was hash X EVER on
-        // your chain at some lower height?" without the wallet
-        // sending more state).
-        //
-        // For the v1.0 minimum-viable implementation, we accept this:
-        // the wallet either passes a known-good (hash, height) pair
-        // that's still canonical → Some(height), or it doesn't →
-        // None and full-rescan fallback.
-        //
-        // The full algorithm (wallet sends a journal of recent
-        // (height, hash) pairs and server picks the deepest one that
-        // matches its canonical chain) belongs in a v1.1 enhancement.
-        // Tracked in docs/wallet-v2-reorg-handling-design.md §3.5.
-        let _ = walk_depth; // suppress unused-var warning for v1.0 stub
-        None
-    }
-
-    /// v1.1 fork-finding (design §3.5): given the wallet's recent
+    /// Fork-finding (design §3.5): given the wallet's recent
     /// `(height, hash)` journal — the same tip-history its scanner keeps in
     /// its `BlockApplyDiff` journal — return the DEEPEST height whose hash
     /// still matches this node's canonical chain. That height is the last
     /// common ancestor: the wallet rewinds to it and resumes scanning from
     /// `height + 1`, instead of the v1.0 full-rescan fallback.
     ///
-    /// Unlike [`find_fork_point`](Self::find_fork_point) — which can only
-    /// check the wallet's single most-recent pair, so any reorg that moved
-    /// the wallet's tip forced a full rescan — the journal lets the server
-    /// locate a fork point anywhere in the wallet's recent history.
+    /// Unlike a single most-recent `(height, hash)` check — which any reorg
+    /// that moved the wallet's tip would force into a full rescan — the journal
+    /// lets the server locate a fork point anywhere in the wallet's recent
+    /// history. (This supersedes the removed v1.0 single-pair `find_fork_point`.)
     ///
     /// Returns `None` only if NO journal entry is still canonical (the reorg
     /// is deeper than the wallet's whole journal). With the scanner journal
