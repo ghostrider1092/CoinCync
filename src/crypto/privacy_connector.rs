@@ -49,8 +49,6 @@ pub enum Scheme {
     LelantusSpark,
     /// MimbleWimble cut-through kernels (excess-signature verified).
     MwCutThrough,
-    /// Shielded note-commitment pool (nullifier double-spend set).
-    Shielded,
     /// Dead-man's-switch recovery-address sweep authorization.
     DeadMansSwitch,
 }
@@ -60,7 +58,6 @@ impl Scheme {
         match self {
             Scheme::LelantusSpark => "lelantus-spark",
             Scheme::MwCutThrough => "mw-cut-through",
-            Scheme::Shielded => "shielded-pool",
             Scheme::DeadMansSwitch => "dead-mans-switch",
         }
     }
@@ -71,7 +68,7 @@ impl Scheme {
             Scheme::LelantusSpark => cfg!(feature = "sketch-lelantus-spark"),
             // These are compiled in the default build (but inert until the gate
             // activates them).
-            Scheme::MwCutThrough | Scheme::Shielded | Scheme::DeadMansSwitch => true,
+            Scheme::MwCutThrough | Scheme::DeadMansSwitch => true,
         }
     }
 }
@@ -239,36 +236,9 @@ pub fn connect_mw_kernels(
     Ok(())
 }
 
-// ── Shielded note-commitment pool routing (compiled in default build) ───────
-
-/// Connect a new shielded note commitment to the pool. Gate → append. Returns
-/// the assigned tree position. Fail-closed.
-pub fn connect_shielded_note(
-    gate: &mut ConnectorGate,
-    store: &crate::storage::ShieldedStore,
-    entry: crate::storage::NoteCommitmentEntry,
-) -> Result<u64> {
-    gate.admit(Scheme::Shielded)?;
-    Ok(store.append_commitment(entry))
-}
-
-/// Connect a shielded spend: gate → nullifier double-spend check → record. The
-/// nullifier is the public tag that burns a note; a repeat is a double-spend
-/// and is rejected before it is recorded. Fail-closed.
-pub fn connect_shielded_spend(
-    gate: &mut ConnectorGate,
-    store: &crate::storage::ShieldedStore,
-    nullifier: [u8; 32],
-) -> Result<()> {
-    gate.admit(Scheme::Shielded)?;
-    if store.is_nullifier_spent(&nullifier) {
-        return Err(Error::InvalidState(
-            "privacy connector: shielded nullifier already spent (double-spend)".into(),
-        ));
-    }
-    store.mark_nullifier_spent(nullifier, gate.current_height);
-    Ok(())
-}
+// (The native-GK v1 shielded note-commitment routing — `connect_shielded_note`
+// / `connect_shielded_spend` over the v1 `ShieldedStore` — was removed in the
+// one-pool narrowing. The shielded pool is Lelantus Spark, routed below.)
 
 // ── Lelantus Spark routing (feature-gated) ──────────────────────────────────
 
@@ -428,7 +398,6 @@ pub fn privacy_feature_registry(gate: &ConnectorGate) -> Vec<PrivacyFeature> {
         // Gated consensus schemes — routed through this connector.
         PrivacyFeature { name: "lelantus-spark", status: scheme_status(Scheme::LelantusSpark), note: "serial-tag spend proofs; hand-rolled ZK awaits audit" },
         PrivacyFeature { name: "mw-cut-through", status: scheme_status(Scheme::MwCutThrough), note: "kernel excess-signature verified pruning" },
-        PrivacyFeature { name: "shielded-pool", status: scheme_status(Scheme::Shielded), note: "note-commitment + nullifier pool" },
         PrivacyFeature { name: "dead-mans-switch", status: scheme_status(Scheme::DeadMansSwitch), note: "recovery-address sweep authorization" },
     ]
 }
@@ -524,28 +493,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn connect_shielded_note_and_nullifier_double_spend() {
-        let mut g = regtest_active();
-        let store = crate::storage::ShieldedStore::new();
-
-        // Mint a note commitment through the connector.
-        let entry = crate::storage::NoteCommitmentEntry {
-            commitment: [1u8; 32],
-            height: 5,
-            tx_index: 0,
-            position: 0,
-        };
-        assert!(connect_shielded_note(&mut g, &store, entry).is_ok());
-
-        // First spend of a nullifier is accepted; the second is a double-spend.
-        let nf = [9u8; 32];
-        assert!(connect_shielded_spend(&mut g, &store, nf).is_ok());
-        assert!(
-            connect_shielded_spend(&mut g, &store, nf).is_err(),
-            "connector must reject the shielded double-spend via the nullifier set"
-        );
-    }
 
     #[test]
     fn connect_recovery_sweep_gates_on_address_and_timeout() {
@@ -567,7 +514,7 @@ mod tests {
         // Mainnet (unaudited): gated schemes inert, live features active, deniable disabled.
         let g = ConnectorGate::new(NetworkType::Mainnet, 1000, Some(1));
         let reg = privacy_feature_registry(&g);
-        assert_eq!(reg.len(), 10, "registry must cover all privacy features");
+        assert_eq!(reg.len(), 9, "registry must cover all privacy features");
         let by = |n: &str| reg.iter().find(|f| f.name == n).unwrap().status;
         assert_eq!(by("decoy-defense"), FeatureStatus::Active);
         assert_eq!(by("encrypted-memos"), FeatureStatus::Active);
@@ -575,7 +522,6 @@ mod tests {
         assert_eq!(by("deniable-wallets"), FeatureStatus::Disabled);
         assert_eq!(by("lelantus-spark"), FeatureStatus::GatedInert);
         assert_eq!(by("mw-cut-through"), FeatureStatus::GatedInert);
-        assert_eq!(by("shielded-pool"), FeatureStatus::GatedInert);
         assert_eq!(by("dead-mans-switch"), FeatureStatus::GatedInert);
     }
 
@@ -587,7 +533,6 @@ mod tests {
         let reg = privacy_feature_registry(&g);
         let by = |n: &str| reg.iter().find(|f| f.name == n).unwrap().status;
         assert_eq!(by("mw-cut-through"), FeatureStatus::Active);
-        assert_eq!(by("shielded-pool"), FeatureStatus::Active);
         assert_eq!(by("dead-mans-switch"), FeatureStatus::Active);
         assert_eq!(by("decoy-defense"), FeatureStatus::Active);
     }

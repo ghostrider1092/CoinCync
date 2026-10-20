@@ -1121,22 +1121,9 @@ async fn start_node(
         }
     }
 
-    // Mirror init for the other two Phase 2 stores — same light wire-up
-    // posture: observation-only, no consensus integration in v1.0. The
-    // /privacy-pools explorer page reads all three through get_privacy_stats.
-    match coincync::storage::ShieldedStore::open_with_db(&db) {
-        Ok(store) => {
-            info!("Shielded tree loaded ({} notes)", store.tree_size());
-            chain.shielded_store = Some(Arc::new(store));
-        }
-        Err(e) => {
-            warn!(
-                "Shielded store init failed: {} — get_privacy_stats will show \
-                 zeros for shielded_root/shielded_tree_size",
-                e
-            );
-        }
-    }
+    // Kernel (MW) Phase-2 store — light wire-up, observation-only, no consensus
+    // integration in v1.0. (The native-GK v1 ShieldedStore was removed in the
+    // one-pool narrowing; the production shielded pool is the Spark pool store.)
     match coincync::storage::KernelStore::open_with_db(&db) {
         Ok(store) => {
             info!("Kernel store loaded");

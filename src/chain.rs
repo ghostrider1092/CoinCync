@@ -437,11 +437,6 @@ pub struct Blockchain {
     /// field (`SparkPoolStore`). Native pre-FFI sketch store; retained gated,
     /// never instantiated in production. See `storage::spark`.
     pub spark_store: Option<Arc<crate::storage::SparkStore>>,
-    /// LEGACY (one-pool consolidation) — superseded by the `spark_pool_store`
-    /// field. Halo2/native-GK note store (ZK circuit never built); retained
-    /// gated as a differential oracle pending the libspark audit. See
-    /// `storage::shielded`.
-    pub shielded_store: Option<Arc<crate::storage::ShieldedStore>>,
     pub kernel_store: Option<Arc<crate::storage::KernelStore>>,
     /// The libspark-FFI-aligned Spark pool store (coins by outpoint + VRF-tag
     /// spent-set). A fourth Phase-2 store, gated + inert: it participates in the
@@ -530,7 +525,6 @@ impl Blockchain {
             last_block_received_at: std::sync::atomic::AtomicU64::new(0),
             // Phase 2 stores: None until Phase 2 activation
             spark_store: None,
-            shielded_store: None,
             kernel_store: None,
             // Sketch-gk builds instantiate the canonical Spark pool store so the
             // shielded verify/apply path and reorg lock-step run end-to-end
@@ -608,7 +602,6 @@ impl Blockchain {
             last_block_received_at: std::sync::atomic::AtomicU64::new(0),
             // Phase 2 stores: None until Phase 2 activation
             spark_store: None,
-            shielded_store: None,
             kernel_store: None,
             // Persistent Spark pool store (opened above from `db`), gated
             // `sketch-gk-proof`; None in production builds.
@@ -647,10 +640,10 @@ impl Blockchain {
     // Returns [0u8; 32] when Phase 2 stores are not initialized (None).
 
     pub fn shielded_root(&self) -> [u8; 32] {
-        self.shielded_store
-            .as_ref()
-            .map(|s| s.current_root())
-            .unwrap_or([0u8; 32])
+        // The native v1 (GK) shielded tree was removed (one-pool narrowing); its
+        // root is permanently zero. The production shielded pool is Spark —
+        // see `spark_root()`.
+        [0u8; 32]
     }
 
     pub fn spark_root(&self) -> [u8; 32] {
@@ -704,58 +697,14 @@ impl Blockchain {
     /// release. Also gated on "all three stores initialized" because
     /// during the v1.0 ship → Phase 2 activation window some stores
     /// will be `None`; that's expected, not a bug.
-    /// Apply the block's shielded (Spark) transactions to the `ShieldedStore`:
-    /// serial-tag double-spend guard + accumulator append (see
-    /// `consensus::shielded::apply_shielded_payload`). Inert while the store is
-    /// `None` (default) — shielded is gated off in validation, so this is a
-    /// no-op in production today. The store was checkpointed by
-    /// `checkpoint_phase2_stores` before this block's apply, so a reorg rewinds
-    /// these mutations in lock-step.
-    ///
-    /// PRE-ACTIVATION TODO (2c): the serial-tag double-spend must ALSO be
-    /// checked in validation (contextual, against the store) so an invalid block
-    /// is rejected pre-apply, mirroring the transparent key-image check. Here a
-    /// fault mid-apply can only mean validation admitted an invalid block, so we
-    /// HALT (panic) to preserve on-disk state — consistent with the
-    /// supply-accumulator corruption arms in `add_block`.
-    fn apply_shielded_txs(&self, transactions: &[Transaction], height: u64) {
-        let store = match self.shielded_store {
-            Some(ref s) => s,
-            None => return,
-        };
-        for (idx, tx) in transactions.iter().enumerate() {
-            if !tx.is_shielded() {
-                continue;
-            }
-            // A v2 `SparkPayload` tx is applied to the `SparkPoolStore` by
-            // `apply_spark_v2_txs`, not this native-GK (v1) path. It is not
-            // v1-decodable, so skip non-v1 payloads here — decoding would
-            // otherwise panic this consensus-fault guard on a perfectly valid v2
-            // tx. (A genuinely corrupt v1 payload is caught at validation before
-            // apply; anything that reaches apply and is not v1 is a v2 tx.)
-            let Ok(payload) = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra) else {
-                continue;
-            };
-            crate::consensus::shielded::apply_shielded_payload(store, &payload, height, idx as u32)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "CONSENSUS FAULT: shielded apply failed for tx {} at height {}: {}. \
-                         Serial-tag double-spend should have been rejected in validation. \
-                         Halting to preserve on-disk state.",
-                        idx, height, e
-                    )
-                });
-        }
-    }
+    // (The native-GK v1 `apply_shielded_txs` was removed in the one-pool
+    // narrowing. v2 Spark coins are applied by `apply_spark_v2_txs`.)
 
     /// Collect the initialized Phase-2 stores as the unified `Phase2Store`
     /// seam, in the canonical order (shielded, spark, kernel). Stores still
     /// `None` during the v1.0 → Phase-2 activation window are simply absent.
     fn phase2_stores(&self) -> Vec<&dyn crate::storage::Phase2Store> {
         let mut v: Vec<&dyn crate::storage::Phase2Store> = Vec::with_capacity(3);
-        if let Some(ref s) = self.shielded_store {
-            v.push(s.as_ref());
-        }
         if let Some(ref s) = self.spark_store {
             v.push(s.as_ref());
         }
@@ -885,39 +834,8 @@ impl Blockchain {
         .sweep()
     }
 
-    /// Verify every shielded tx's spend proofs against the live accumulator —
-    /// membership (bucket anon-set) + nullifier binding + spend message. This is
-    /// the store-aware verification the stateless `check_shielded_tx` cannot do;
-    /// it runs pre-apply, alongside `check_block_shielded_double_spends`. Gated
-    /// `sketch-gk-proof`: NEVER compiled into a production node (where shielded
-    /// txs are rejected at validation and activation is `u64::MAX`), so it is
-    /// only exercised in gated regtest. Value conservation (balance + range) is a
-    /// separate proof still to be added before any activation.
-    #[cfg(feature = "sketch-gk-proof")]
-    fn verify_block_shielded_spends(
-        store: &crate::storage::ShieldedStore,
-        transactions: &[Transaction],
-    ) -> Result<()> {
-        for tx in transactions {
-            if !tx.is_shielded() {
-                continue;
-            }
-            // A v2 `SparkPayload` tx is verified against the `SparkPoolStore` by
-            // `verify_block_spark_v2`, not by this native-GK (v1) path. Decoding
-            // it as a v1 `ShieldedPayload` fails ("Unexpected length of input");
-            // skip non-v1 payloads here rather than rejecting the block. Garbage
-            // is already caught upstream by `validation::check_shielded_tx`.
-            let Ok(payload) = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra) else {
-                continue;
-            };
-            crate::consensus::shielded_pipeline::gk::verify_shielded_payload(
-                store,
-                &payload,
-                tx.fee.as_atomic(),
-            )?;
-        }
-        Ok(())
-    }
+    // (The native-GK v1 `verify_block_shielded_spends` was removed in the
+    // one-pool narrowing. v2 Spark verify is `verify_block_spark_v2` below.)
 
     /// v2 (libspark) store-aware spend verification — the pre-apply
     /// block-rejection check for `SparkPayload` v2 shielded txs (see
@@ -2142,32 +2060,6 @@ impl Blockchain {
                             )
                         });
 
-                    // ── Phase 2 store reorg checkpoint (site 1: clean tip-extend) ──
-                    // Shielded (Spark) contextual double-spend check: reject the
-                    // block BEFORE any mutation if a shielded serial tag is
-                    // already spent on-chain or duplicated within the block —
-                    // the pre-apply guard mirroring the transparent key-image
-                    // check. Inert while the store is None (gated off).
-                    if let Some(ref sstore) = self.shielded_store {
-                        if let Err(e) = crate::consensus::shielded::check_block_shielded_double_spends(
-                            &block.transactions,
-                            |t| sstore.is_nullifier_spent(t),
-                        ) {
-                            let reason = format!("shielded double-spend: {}", e);
-                            tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
-                            return Ok(BlockStatus::Invalid(reason));
-                        }
-                        // Gated store-aware spend-proof verification (membership +
-                        // nullifier + message). Only compiled under sketch-gk-proof.
-                        #[cfg(feature = "sketch-gk-proof")]
-                        if let Err(e) =
-                            Self::verify_block_shielded_spends(sstore, &block.transactions)
-                        {
-                            let reason = format!("shielded spend proof invalid: {}", e);
-                            tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
-                            return Ok(BlockStatus::Invalid(reason));
-                        }
-                    }
                     // Gated store-aware verification for libspark v2 shielded txs
                     // (SparkPayload) against the SparkPoolStore. Inert unless both
                     // features are on and the pool store is initialized.
@@ -2187,9 +2079,6 @@ impl Blockchain {
                     let batch = UtxoSet::batch_from_block(block.header.height.as_u64(), &block.transactions);
                     inner.utxos.apply_batch(batch);
 
-                    // Shielded (Spark) apply: serial-tag double-spend + accumulator
-                    // append into the ShieldedStore (inert while None / gated off).
-                    self.apply_shielded_txs(&block.transactions, block.header.height.as_u64());
                     // Feed the libspark v2 pool (add_coin per mint, mark_tag_spent
                     // per spend). Inert unless both features + the pool store.
                     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
@@ -2907,38 +2796,6 @@ impl Blockchain {
                             }
                         }
 
-                        // Shielded (Spark) contextual double-spend check for this
-                        // fork block, pre-apply — mirrors the main path. Checked
-                        // against the store as progressively mutated by earlier
-                        // fork blocks in this same reorg, so a tag spent by an
-                        // earlier fork block is caught here. On failure, abandon
-                        // the reorg gracefully (no panic). Inert while None.
-                        if let Some(ref sstore) = self.shielded_store {
-                            if let Err(e) =
-                                crate::consensus::shielded::check_block_shielded_double_spends(
-                                    &fork_block.transactions,
-                                    |t| sstore.is_nullifier_spent(t),
-                                )
-                            {
-                                reorg_error = Some(format!(
-                                    "shielded double-spend in fork block at height {}: {}",
-                                    fork_block.header.height, e
-                                ));
-                                break;
-                            }
-                            // Gated store-aware spend-proof verification, mirroring
-                            // the main path. Only compiled under sketch-gk-proof.
-                            #[cfg(feature = "sketch-gk-proof")]
-                            if let Err(e) =
-                                Self::verify_block_shielded_spends(sstore, &fork_block.transactions)
-                            {
-                                reorg_error = Some(format!(
-                                    "shielded spend proof invalid in fork block at height {}: {}",
-                                    fork_block.header.height, e
-                                ));
-                                break;
-                            }
-                        }
                         // Gated libspark v2 store-aware verification, mirroring
                         // the main path.
                         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
@@ -3010,12 +2867,6 @@ impl Blockchain {
                             &fork_block.transactions,
                         );
                         inner.utxos.apply_batch(batch);
-                        // Shielded (Spark) apply for the adopted fork block
-                        // (inert while None / gated off).
-                        self.apply_shielded_txs(
-                            &fork_block.transactions,
-                            fork_block.header.height.as_u64(),
-                        );
                         // Feed the libspark v2 pool for the adopted fork block.
                         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
                         self.apply_spark_v2_txs(
@@ -4670,37 +4521,20 @@ mod tests {
     #[test]
     fn phase2_stores_rewind_together_through_helpers() {
         use crate::crypto::mw_cutthrough::MwKernel;
-        use crate::storage::{
-            KernelStore, NoteCommitmentEntry, ShieldedStore, SparkCoinEntry, SparkStore,
-        };
+        use crate::storage::{KernelStore, SparkCoinEntry, SparkStore};
 
         let mut chain = Blockchain::new();
-        chain.shielded_store = Some(Arc::new(ShieldedStore::new()));
         chain.spark_store = Some(Arc::new(SparkStore::new()));
         chain.kernel_store = Some(Arc::new(KernelStore::new()));
 
         // Genesis (empty) roots — the state a full rewind must restore.
-        let genesis_roots = (
-            chain.shielded_root(),
-            chain.spark_root(),
-            chain.mw_kernel_root(),
-        );
+        let genesis_roots = (chain.spark_root(), chain.mw_kernel_root());
 
         // Apply one block's worth of Phase-2 state the way the chain
         // will once activation wires the appends: site-1 checkpoint
         // FIRST (Interp-B contract), THEN the block's appends.
         let apply_block = |chain: &Blockchain, height: u64, byte: u8| {
             chain.checkpoint_phase2_stores(height);
-            chain
-                .shielded_store
-                .as_ref()
-                .unwrap()
-                .append_commitment(NoteCommitmentEntry {
-                    commitment: [byte; 32],
-                    height,
-                    tx_index: 0,
-                    position: 0,
-                });
             chain
                 .spark_store
                 .as_ref()
@@ -4718,19 +4552,13 @@ mod tests {
             });
         };
 
-        let roots = |chain: &Blockchain| {
-            (
-                chain.shielded_root(),
-                chain.spark_root(),
-                chain.mw_kernel_root(),
-            )
-        };
+        let roots = |chain: &Blockchain| (chain.spark_root(), chain.mw_kernel_root());
 
         apply_block(&chain, 1, 0xA1);
         let roots_after_1 = roots(&chain);
         assert_ne!(
             roots_after_1, genesis_roots,
-            "block 1 must move all three store roots"
+            "block 1 must move both store roots"
         );
 
         apply_block(&chain, 2, 0xB1);
@@ -4834,103 +4662,10 @@ mod tests {
         );
     }
 
-    /// Integration of the COMPLETE shielded spend path through the chain's
-    /// store-aware verifier (`verify_block_shielded_spends` → `verify_shielded_payload`):
-    /// a full payload (bound spend + range + mint-binding + balance) over a minted
-    /// anon-set verifies, and tampering the outputs is rejected.
-    #[cfg(feature = "sketch-gk-proof")]
-    #[test]
-    fn shielded_spend_path_verifies_end_to_end_and_rejects_tampered_outputs() {
-        use crate::consensus::shielded::{
-            ShieldedInput, ShieldedOutput, ShieldedPayload, SHIELDED_PAYLOAD_VERSION,
-        };
-        use crate::consensus::shielded_pipeline::{shielded_tx_message, StoreAnonSetResolver};
-        use crate::crypto::groth_kohlweiss::{
-            bound_coin_commitment, prove_mint_binding, prove_spend_bound,
-        };
-        use crate::crypto::spark_balance::{prove_balance, value_commitment};
-        use crate::crypto::spark_range::prove_value_range;
-        use crate::crypto::PeerPoint;
-        use crate::storage::shielded::NoteCommitmentEntry;
-        use crate::storage::ShieldedStore;
-        use crate::transaction::{Transaction, TxType};
-        use curve25519_dalek::scalar::Scalar;
-        use rand::SeedableRng;
-        use rand_chacha::ChaCha20Rng;
-
-        let mut rng = ChaCha20Rng::seed_from_u64(7);
-        let store = ShieldedStore::new();
-        let vals = [5u64, 3, 11, 2];
-        let sers: Vec<Scalar> = (0..4).map(|_| Scalar::random(&mut rng)).collect();
-        let blinds: Vec<Scalar> = (0..4).map(|_| Scalar::random(&mut rng)).collect();
-        for i in 0..4 {
-            store.append_commitment(NoteCommitmentEntry {
-                commitment: bound_coin_commitment(vals[i], &sers[i], &blinds[i]).compress().to_bytes(),
-                height: 1,
-                tx_index: 0,
-                position: 0,
-            });
-        }
-        let fee = 2u64;
-        let ob = Scalar::random(&mut rng);
-        let (s_out, r_out) = (Scalar::random(&mut rng), Scalar::random(&mut rng));
-        let outputs = vec![ShieldedOutput {
-            note_commitment: bound_coin_commitment(6, &s_out, &r_out).compress().to_bytes(),
-            value_commitment: value_commitment(6, &ob).compress().to_bytes(),
-            range_proof: prove_value_range(6, &ob, &mut rng).unwrap().encode(),
-            mint_binding: prove_mint_binding(6, &s_out, &r_out, &ob, &mut rng).encode(),
-        }];
-        let message = shielded_tx_message(fee, 0, &outputs);
-        let coins: Vec<_> = StoreAnonSetResolver::new(&store)
-            .resolve_bucket(0)
-            .unwrap()
-            .commitments
-            .iter()
-            .map(|c| PeerPoint::decode_non_identity(*c).unwrap().into_point())
-            .collect();
-        let (vb0, vb1) = (Scalar::random(&mut rng), Scalar::random(&mut rng));
-        let mut mk = |l: usize, vb: &Scalar, rng: &mut ChaCha20Rng| {
-            let sp = prove_spend_bound(&coins, l, vals[l], &sers[l], &blinds[l], vb, &message, rng)
-                .unwrap();
-            ShieldedInput {
-                bucket_index: 0,
-                nullifier: sp.nullifier(),
-                spend_proof: sp.encode(),
-                range_proof: prove_value_range(vals[l], vb, rng).unwrap().encode(),
-            }
-        };
-        let inputs = vec![mk(0, &vb0, &mut rng), mk(1, &vb1, &mut rng)];
-        let bal = prove_balance(&[5, 3], &[vb0, vb1], &[6], &[ob], fee, &message, &mut rng).unwrap();
-        let payload = ShieldedPayload {
-            version: SHIELDED_PAYLOAD_VERSION,
-            inputs,
-            outputs,
-            value_balance: 0,
-            balance_proof: bal.encode(),
-        };
-        let tx = Transaction {
-            version: 1,
-            tx_type: TxType::Shielded,
-            inputs: vec![],
-            outputs: vec![],
-            fee: crate::primitives::Amount::from_atomic(fee),
-            range_proof: vec![],
-            extra: payload.encode(),
-        };
-
-        // The chain's store-aware verifier accepts the complete tx.
-        assert!(Blockchain::verify_block_shielded_spends(&store, std::slice::from_ref(&tx)).is_ok());
-
-        // Tampering an output commitment breaks the tx message binding → rejected.
-        let mut bad_tx = tx.clone();
-        let mut bad = ShieldedPayload::decode(&bad_tx.extra).unwrap();
-        bad.outputs[0].note_commitment = [8u8; 32];
-        bad_tx.extra = bad.encode();
-        assert!(
-            Blockchain::verify_block_shielded_spends(&store, std::slice::from_ref(&bad_tx)).is_err(),
-            "tampered output must be rejected"
-        );
-    }
+    // (Removed `shielded_spend_path_verifies_end_to_end_and_rejects_tampered_outputs`:
+    // it exercised the native-GK v1 spend path, removed in the one-pool
+    // narrowing. The v2 Spark equivalents are the chain block-hook tests
+    // (`spark_v2_chain_hooks_*`) + the spark_payload tests.)
 
     /// Drive a REAL `TxType::Shielded` transaction (extra = a builder-produced
     /// libspark v2 `SparkPayload`) through the chain's actual consensus hooks —

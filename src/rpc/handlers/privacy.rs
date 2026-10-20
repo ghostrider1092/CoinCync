@@ -16,8 +16,11 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     module.register_method("get_privacy_stats", |_params, state, _ext| {
         let cut_through = state.chain.cut_through_stats();
         Ok::<_, ErrorObjectOwned>(json!({
+            // Native-GK v1 shielded tree was removed in the one-pool narrowing;
+            // the shielded pool is Spark v2 (see spark_root / get_spark_anchor).
+            // Reported dormant for wire-compat with existing stat consumers.
             "shielded_root":      hex::encode(state.chain.shielded_root()),
-            "shielded_tree_size": state.chain.shielded_store.as_ref().map(|s| s.tree_size()).unwrap_or(0),
+            "shielded_tree_size": 0,
             "spark_root":         hex::encode(state.chain.spark_root()),
             "spark_accumulator_size": state.chain.spark_store.as_ref().map(|s| s.size()).unwrap_or(0),
             "mw_kernel_root":     hex::encode(state.chain.mw_kernel_root()),
@@ -36,7 +39,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     module.register_method("get_shielded_anchor", |_params, state, _ext| {
         Ok::<_, ErrorObjectOwned>(json!({
             "anchor": hex::encode(state.chain.shielded_root()),
-            "tree_size": state.chain.shielded_store.as_ref().map(|s| s.tree_size()).unwrap_or(0),
+            "tree_size": 0,
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
@@ -140,7 +143,9 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         nf.copy_from_slice(&bytes);
         Ok::<_, ErrorObjectOwned>(json!({
             "nullifier": hex::encode(nf),
-            "spent": state.chain.shielded_store.as_ref().map(|s| s.is_nullifier_spent(&nf)).unwrap_or(false),
+            // v1 shielded nullifier set removed (one-pool narrowing); always
+            // dormant. Spark v2 double-spends: see is_spark_serial_spent.
+            "spent": false,
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 

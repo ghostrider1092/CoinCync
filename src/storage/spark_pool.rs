@@ -21,13 +21,13 @@
 //!    is still unspent."
 //!
 //! ## Relationship to the other stores (honest note)
-//! The tree accumulated three partial shielded designs: the Halo2/Orchard
-//! [`shielded`](crate::storage::shielded) tree (BLAKE3 leaves; ZK spend never
-//! implemented) and the native [`spark`](crate::storage::spark) `SparkStore`
-//! (32-byte commitments + 32-byte serials, pre-FFI sketch). Neither matches the
-//! libspark FFI's data shapes (variable-length `CoinBytes`, 34-byte VRF tags).
-//! This store is the FFI-aligned one; retiring the other two under the one-pool
-//! consolidation is follow-up migration, not done here.
+//! The tree once carried partial shielded designs. The native-GK `shielded`
+//! tree (BLAKE3 leaves; ZK spend never implemented) was removed in the one-pool
+//! narrowing. The native [`spark`](crate::storage::spark) `SparkStore` (32-byte
+//! commitments + 32-byte serials, pre-FFI sketch) remains for the gated sketch
+//! build but does not match the libspark FFI's data shapes (variable-length
+//! `CoinBytes`, 34-byte VRF tags). This store is the FFI-aligned one — the
+//! single shielded pool the chain feeds.
 //!
 //! ## Status
 //! Gated `sketch-gk-proof`, **in-memory**, and **unwired from consensus** — it
@@ -986,17 +986,16 @@ mod tests {
     #[test]
     fn satisfies_phase2_seam_and_rewinds_in_lockstep() {
         // SparkPoolStore, driven ONLY through the Phase2Store seam + shared
-        // drivers, must checkpoint/rewind together with the three existing
-        // Phase-2 stores — the reorg lock-step contract a fourth store must
-        // satisfy before it can be wired into chain.rs.
+        // drivers, must checkpoint/rewind together with the existing Phase-2
+        // stores — the reorg lock-step contract a store must satisfy before it
+        // can be wired into chain.rs.
         use crate::storage::phase2::{checkpoint_all, rewind_all, Phase2Store, RewindOutcome};
-        use crate::storage::{KernelStore, ShieldedStore, SparkStore};
+        use crate::storage::{KernelStore, SparkStore};
 
-        let shielded = ShieldedStore::new();
         let spark = SparkStore::new();
         let kernel = KernelStore::new();
         let pool = SparkPoolStore::new();
-        let stores: [&dyn Phase2Store; 4] = [&shielded, &spark, &kernel, &pool];
+        let stores: [&dyn Phase2Store; 3] = [&spark, &kernel, &pool];
 
         for h in 1..=5u64 {
             assert_eq!(checkpoint_all(&stores, h).unwrap(), h as usize, "lock-step at {h}");

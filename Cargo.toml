@@ -291,15 +291,11 @@ hashlink   = "0.9"
 bloomfilter = "1"
 prometheus  = "0.14"
 
-# â”€â”€ ZK / Halo2 (Phase 2) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# (The dead `orchard-side` crate was removed 2026-10-19; CoinCync ships one
-# shielded pool — Spark. These Halo2 deps remain for the gated-off native v1
-# path until that too is retired.)
-halo2_proofs          = "0.3"
-halo2_gadgets         = "0.3"
-incrementalmerkletree = "0.5"
+# bridgetree: the Phase-2 reorg-rewindable Merkle accumulator used by the Spark
+# pool + kernel stores. (The halo2_proofs / halo2_gadgets / incrementalmerkletree
+# / pasta_curves deps were dropped with the native-GK v1 shielded engine in the
+# one-pool narrowing — nothing in the crate uses them anymore.)
 bridgetree            = "0.4"
-pasta_curves          = "0.5"
 blake2b_simd          = "1.0"
 ff                    = "0.13"
 group                 = "0.13"

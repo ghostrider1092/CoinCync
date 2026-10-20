@@ -1723,28 +1723,15 @@ fn check_shielded_tx(
         return Ok(());
     }
 
-    // v1 (ShieldedPayload — the legacy native-GK engine, see
-    // cip-shielded-one-pool-consolidation.md). Stateless structural check: the
-    // payload in `tx.extra` must be a well-formed, current-version
-    // ShieldedPayload. The stateful serial-tag double-spend + accumulator append
-    // happen at block-apply against the ShieldedStore.
-    let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
-    // ── ACTIVATION SLOT ───────────────────────────────────────────────────
-    // Route through the shielded connector (its own crate). Under the
-    // `libspark-ffi` engine the payload's `balance_proof` carries the
-    // self-contained libspark spend bundle (the native gk fields are unused on
-    // this path), verified by the vendored Firo Spark backend. Without the
-    // feature the connector's fail-closed StubBackend rejects — an activation
-    // height can never precede a working, reviewed verifier. The stateful
-    // cover-set + serial-tag double-spend verify runs at block-apply.
-    #[cfg(feature = "libspark-ffi")]
-    {
-        crate::consensus::shielded_connector::verify_bundle(&payload.balance_proof)
-    }
-    #[cfg(not(feature = "libspark-ffi"))]
-    {
-        crate::consensus::shielded_connector::verify_payload(&payload, tx.fee.as_atomic())
-    }
+    // Spark v2 is the ONE shielded format. Anything else — a non-v2 payload, or
+    // a build without the libspark backend — is rejected here. (The legacy
+    // native-GK v1 engine was removed; CoinCync ships a single shielded pool. A
+    // v1 payload was never valid — `shielded_tx_active_at_height` is `u64::MAX`
+    // on every network — so this is a strict narrowing of what a shielded tx may
+    // carry, not a consensus rule change.)
+    Err(Error::InvalidTransaction(
+        "unsupported shielded payload — only Spark v2 is accepted".to_string(),
+    ))
 }
 
 // ── §9–§13  validate_transaction sub-checks (AUDIT 2026-06-30 H1) ──────────
@@ -4915,77 +4902,25 @@ mod tests {
             "below activation must reject as not-activated, got: {err}"
         );
 
-        // At/after activation with a WELL-FORMED payload: still fail-closed at
-        // the (unwired) verifier — activation can never precede a real verifier.
-        tx.extra = crate::consensus::shielded::ShieldedPayload {
-            version: crate::consensus::shielded::SHIELDED_PAYLOAD_VERSION,
-            inputs: vec![crate::consensus::shielded::ShieldedInput {
-                bucket_index: 0,
-                nullifier: [2u8; 32],
-                spend_proof: vec![],
-                range_proof: vec![],
-            }],
-            outputs: vec![],
-            value_balance: 0,
-            balance_proof: vec![],
-        }
-        .encode();
+        // At/after activation, ONLY a valid Spark v2 payload is accepted; any
+        // other shielded payload is rejected (the native-GK v1 engine was removed
+        // — CoinCync ships one shielded pool). In a build without the libspark
+        // backend, every shielded payload is rejected here.
+        tx.extra = vec![0xFFu8; 8];
         let err_hi = validate_transaction(&tx, &utxos, u64::MAX)
             .unwrap_err()
             .to_string();
         assert!(
-            err_hi.contains("shielded") && err_hi.contains("verifier"),
-            "post-activation must reject as verifier-not-wired, got: {err_hi}"
-        );
-
-        // At/after activation with a MALFORMED payload: rejected at decode.
-        tx.extra = vec![0xFFu8; 3];
-        let err_bad = validate_transaction(&tx, &utxos, u64::MAX)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err_bad.contains("shielded payload decode"),
-            "malformed payload must be rejected at decode, got: {err_bad}"
+            err_hi.contains("shielded"),
+            "post-activation, a non-Spark-v2 payload must be rejected, got: {err_hi}"
         );
     }
 
-    #[cfg(feature = "libspark-ffi")]
-    #[test]
-    fn shielded_tx_with_valid_libspark_bundle_verifies_post_activation() {
-        use crate::consensus::shielded::{ShieldedPayload, SHIELDED_PAYLOAD_VERSION};
-        let bundle = spark_connector::ffi::make_verify_bundle().expect("build libspark bundle");
-
-        let mk = |bp: Vec<u8>| {
-            let payload = ShieldedPayload {
-                version: SHIELDED_PAYLOAD_VERSION,
-                inputs: vec![],
-                outputs: vec![],
-                value_balance: 0,
-                balance_proof: bp, // libspark engine: the spend bundle rides here
-            };
-            let mut tx = coinbase_tx(vec![a_valid_output()]);
-            tx.tx_type = TxType::Shielded;
-            tx.extra = payload.encode();
-            tx
-        };
-        let utxos = UtxoSet::new();
-
-        // A valid libspark spend bundle verifies through the node post-activation
-        // (activation == u64::MAX, so height u64::MAX exercises the active path).
-        assert!(
-            validate_transaction(&mk(bundle.clone()), &utxos, u64::MAX).is_ok(),
-            "a valid libspark spend bundle must verify post-activation"
-        );
-
-        // A proof-region tamper is rejected (fail-closed).
-        let mut bad = bundle;
-        let n = bad.len();
-        bad[n - 10] ^= 0x01;
-        assert!(
-            validate_transaction(&mk(bad), &utxos, u64::MAX).is_err(),
-            "a tampered libspark bundle must be rejected"
-        );
-    }
+    // (Removed `shielded_tx_with_valid_libspark_bundle_verifies_post_activation`:
+    // it exercised the legacy v1 ShieldedPayload carrier for a libspark bundle,
+    // removed in the one-pool narrowing. The v2 structural admit is covered by
+    // `regtest_activates_shielded_and_routes_v2_payload_statelessly` below, and
+    // the full stateful v2 verify by the chain block-hook + spark payload tests.)
 
     /// Increment #3: regtest gets a finite shielded activation height, and a v2
     /// `SparkPayload` is routed statelessly (structural admit → the authoritative

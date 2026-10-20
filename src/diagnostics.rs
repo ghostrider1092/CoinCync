@@ -19,7 +19,7 @@
 //!    = invariant : ShieldedPoolValue ≥ 0 (running Σ value_balance)
 //!    = expected  : >= 0
 //!    = got       : -500
-//!    = where     : src/chain.rs::verify_block_shielded_spends
+//!    = where     : src/chain.rs::verify_block_spark_v2
 //!    = spec      : docs/design/cip-shielded-anonset.md (pool turnstile)
 //!    = reproduce : SHIELDED_SOAK_SEED=828927513140
 //!    = help      : a spend's value_balance exceeded the pool — check
@@ -429,7 +429,7 @@ pub const CATALOG: &[Diagnostic] = &[
         severity: Severity::Error,
         title: "shielded pool value went negative",
         invariant: "ShieldedPoolValue >= 0 (running sum of value_balance)",
-        location: "src/chain.rs::verify_block_shielded_spends",
+        location: "src/chain.rs::verify_block_spark_v2",
         spec: "docs/design/cip-shielded-anonset.md (pool turnstile)",
         help: "a spend's value_balance exceeded the pool — value was created across \
                the veil. Check the balance/turnstile in crypto/spark_turnstile.rs.",
@@ -855,7 +855,7 @@ mod tests {
         assert!(out.starts_with("error[CYNC-SHLD-001]: shielded pool value went negative"));
         assert!(out.contains("--> height 142, block 3af9c1…"));
         assert!(out.contains("= got       : -500"));
-        assert!(out.contains("= where     : src/chain.rs::verify_block_shielded_spends"));
+        assert!(out.contains("= where     : src/chain.rs::verify_block_spark_v2"));
         assert!(out.contains("= reproduce : SHIELDED_SOAK_SEED=828927513140"));
         assert!(out.contains("= help      :"));
     }

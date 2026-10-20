@@ -19,8 +19,9 @@ use spark_connector::{CoinBytes, Nullifier, SparkBackend, SpendBytes};
 use crate::error::{Error, Result};
 use crate::storage::spark_pool::SparkPoolStore;
 
-/// Payload version for the libspark Spark format. `1` is the native sketch
-/// ([`ShieldedPayload`](crate::consensus::shielded)); `2` is this.
+/// Payload version for the libspark Spark format. Version `1` was the native-GK
+/// sketch payload (removed in the one-pool narrowing); `2` is this, the only
+/// shielded format the chain accepts.
 pub const SPARK_PAYLOAD_VERSION: u8 = 2;
 
 /// A shielded spend: the pool anchor its Grootle membership is over, plus the

@@ -1,5 +1,7 @@
-//! `Phase2Store` — the unified reorg seam for the three Phase-2 accumulator
-//! stores ([`SparkStore`], [`ShieldedStore`], [`KernelStore`]).
+//! `Phase2Store` — the unified reorg seam for the Phase-2 accumulator
+//! stores ([`SparkStore`], [`KernelStore`], and the gated `SparkPoolStore`).
+//! (The native-GK v1 `ShieldedStore` arm was removed in the one-pool
+//! narrowing — the shielded pool is Spark v2.)
 //!
 //! All three carry the *same* reorg contract: a checkpoint is taken **before**
 //! each block is applied, and one `rewind` disconnects one block. They must move
@@ -16,7 +18,7 @@
 //! calls the store's own `rewind`, never this trait method — the
 //! `mock_store_*`/`real_stores_*` tests would stack-overflow if that regressed).
 
-use crate::storage::{KernelStore, ShieldedStore, SparkStore};
+use crate::storage::{KernelStore, SparkStore};
 
 /// The common reorg + accumulator surface every Phase-2 store exposes.
 pub trait Phase2Store: Send + Sync {
@@ -48,27 +50,6 @@ pub trait Phase2Store: Send + Sync {
     /// path (operator/audit only), never as a per-block consensus guard.
     fn recompute_root(&self) -> Option<[u8; 32]> {
         None
-    }
-}
-
-impl Phase2Store for ShieldedStore {
-    fn store_label(&self) -> &'static str {
-        "shielded"
-    }
-    fn checkpoint_at_height(&self, height: u64) {
-        self.checkpoint_at_height(height)
-    }
-    fn checkpoint_count(&self) -> usize {
-        self.checkpoint_count()
-    }
-    fn rewind(&self) -> bool {
-        self.rewind()
-    }
-    fn element_count(&self) -> usize {
-        self.tree_size()
-    }
-    fn current_root(&self) -> [u8; 32] {
-        self.current_root()
     }
 }
 
@@ -584,24 +565,16 @@ mod tests {
         assert!(check_root_integrity(&stores).is_ok(), "empty real stores agree");
         assert_eq!(kernel.recompute_root(), Some(kernel.current_root()));
         assert_eq!(spark.recompute_root(), Some(spark.current_root()));
-        // ShieldedStore cannot recompute → None (skipped by the guard).
-        let shielded = ShieldedStore::new();
-        assert_eq!(
-            Phase2Store::recompute_root(&shielded),
-            None,
-            "BridgeTree-backed ShieldedStore has no cheap independent recompute"
-        );
     }
 
     #[test]
     fn real_stores_satisfy_the_trait_and_rewind_in_lockstep() {
-        // The three real stores, driven ONLY through the Phase2Store seam +
+        // The real stores, driven ONLY through the Phase2Store seam +
         // shared drivers, must checkpoint/rewind together exactly like the mock.
         // (A recursion regression in any impl would stack-overflow here.)
-        let shielded = ShieldedStore::new();
         let spark = SparkStore::new();
         let kernel = KernelStore::new();
-        let stores: [&dyn Phase2Store; 3] = [&shielded, &spark, &kernel];
+        let stores: [&dyn Phase2Store; 2] = [&spark, &kernel];
 
         for h in 1..=5u64 {
             assert_eq!(checkpoint_all(&stores, h).unwrap(), h as usize);
@@ -615,9 +588,9 @@ mod tests {
             }
         }
         assert_eq!(
-            (shielded.checkpoint_count(), spark.checkpoint_count(), kernel.checkpoint_count()),
-            (0, 0, 0),
-            "all three drained in lock-step"
+            (spark.checkpoint_count(), kernel.checkpoint_count()),
+            (0, 0),
+            "both drained in lock-step"
         );
     }
 }
