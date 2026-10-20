@@ -118,7 +118,9 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // ── is_nullifier_spent ────────────────────────────────────
     // Wallet calls before building a shielded spend to make sure it
     // won't be rejected as a double-spend.
-    module.register_method("is_nullifier_spent", |params, state, _ext| {
+    // `state` unused: the v1 nullifier set was removed (one-pool narrowing), so
+    // this always returns dormant `false` (Spark v2 uses is_spark_serial_spent).
+    module.register_method("is_nullifier_spent", |params, _state, _ext| {
         let (hex_nf,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
         })?;

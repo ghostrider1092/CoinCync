@@ -31,6 +31,15 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SPARK_OPENSSL_DIR");
     println!("cargo:rerun-if-changed=csrc/shim.cpp");
 
+    // Target detection for cross-platform build selection. MSVC lacks
+    // `__int128` (so it can't use secp256k1's fast 64-bit limbs), and the
+    // Windows platform defines must not leak into a Linux build. These select
+    // pre-existing in-tree code paths only — no vendored Firo crypto is edited.
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let is_msvc = target_env == "msvc";
+    let is_windows = target_os == "windows";
+
     let common = |b: &mut cc::Build| {
         // Force the vendored C/C++ (secp256k1 + libspark) to compile OPTIMIZED
         // regardless of the cargo profile. Without this the `cc` build inherits
@@ -51,13 +60,53 @@ fn main() {
             .define("USE_NUM_NONE", None)
             .define("USE_FIELD_INV_BUILTIN", None)
             .define("USE_SCALAR_INV_BUILTIN", None)
-            .define("USE_FIELD_10X26", None)
-            .define("USE_SCALAR_8X32", None)
             .define("SECP256K1_BUILD", None)
-            .define("WIN32", None)
-            .define("NOMINMAX", None)
-            .define("WIN32_LEAN_AND_MEAN", None)
             .warnings(false);
+
+        // secp256k1 field/scalar backend. MSVC has no `__int128`, so it must use
+        // the 32-bit limb impls (`10x26`/`8x32`); Clang/GCC use the fast 64-bit
+        // limbs (`5x52`/`4x64`) — the field-arithmetic edge Firo's Linux build
+        // has and the MSVC build cannot match.
+        if is_msvc {
+            b.define("USE_FIELD_10X26", None)
+                .define("USE_SCALAR_8X32", None);
+        } else {
+            // The 64-bit limb impls use `uint128_t`, which secp256k1's util.h
+            // only typedefs under HAVE___INT128 (vendored build ships no
+            // autoconf config). Clang/GCC have the extension (verified).
+            b.define("USE_FIELD_5X52", None)
+                .define("USE_SCALAR_4X64", None)
+                .define("HAVE___INT128", None);
+        }
+
+        // Windows-only platform defines — must NOT be set on Linux, or
+        // <windows.h>-shaped assumptions leak into the glibc build.
+        if is_windows {
+            b.define("WIN32", None)
+                .define("NOMINMAX", None)
+                .define("WIN32_LEAN_AND_MEAN", None);
+        }
+
+        // Linux/glibc: make the Bitcoin-core compat/endian.h defer to the system
+        // <endian.h>. It ships no bitcoin-config.h, so without these HAVE_* it
+        // emits its own inline htobe*/le* that collide with glibc's macros. Pure
+        // build-config; no source edit.
+        //
+        // INVARIANT — keep this `linux` ONLY, never widen to "non-Windows":
+        // macOS must NOT get HAVE_ENDIAN_H. compat/endian.h and byteswap.h have
+        // their own `#elif defined(__APPLE__)` branches (<libkern/OSByteOrder.h>)
+        // reached only when HAVE_ENDIAN_H is unset; defining it on macOS forces a
+        // non-existent <endian.h> include and breaks the Mac build. (macOS still
+        // gets the 64-bit limbs + HAVE___INT128 from the non-MSVC branch above.)
+        if target_os == "linux" {
+            b.define("HAVE_ENDIAN_H", "1");
+            for m in [
+                "HTOBE16", "HTOLE16", "BE16TOH", "LE16TOH", "HTOBE32", "HTOLE32",
+                "BE32TOH", "LE32TOH", "HTOBE64", "HTOLE64", "BE64TOH", "LE64TOH",
+            ] {
+                b.define(&format!("HAVE_DECL_{m}"), "1");
+            }
+        }
     };
 
     // secp256k1 C library.
@@ -116,8 +165,17 @@ fn main() {
     cpp.compile("spark_libspark");
 
     println!("cargo:rustc-link-search=native={}", ossl.join("lib").display());
-    println!("cargo:rustc-link-lib=libcrypto");
-    for l in ["advapi32", "crypt32", "ws2_32", "user32", "gdi32"] {
-        println!("cargo:rustc-link-lib={l}");
+    if is_windows {
+        // MSVC: OpenSSL import lib is `libcrypto.lib`; plus the Win32 system
+        // libs libspark's crypto/entropy paths pull in.
+        println!("cargo:rustc-link-lib=libcrypto");
+        for l in ["advapi32", "crypt32", "ws2_32", "user32", "gdi32"] {
+            println!("cargo:rustc-link-lib={l}");
+        }
+    } else {
+        // Linux/Unix: link OpenSSL's `crypto` (the system default search path
+        // resolves libcrypto.{a,so}); no Win32 system libs. The C++ standard
+        // library for the compiled objects is linked by the `cc` crate.
+        println!("cargo:rustc-link-lib=crypto");
     }
 }

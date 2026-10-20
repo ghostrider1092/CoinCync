@@ -1,6 +1,17 @@
 # CIP — libspark FFI cross-platform build (Linux/Clang + 64-bit limbs)
 
-**Status:** planned, not yet executed. **Author track:** shielded (Spark) pool.
+**Status: PROVEN on Linux (2026-10-19).** `libspark-ffi` — previously MSVC-only —
+now builds and runs correctly on Linux (WSL Ubuntu, clang-18, rustc 1.88.0):
+`spark-connector` compiles; its gated crypto suite is **23 passed / 0 failed**
+with the 64-bit-limb path; and a full `coincync-node --features "testnet
+sketch-gk-proof libspark-ffi"` builds to an x86-64 ELF. Verify-cost at the
+ratified N=512 (get_coincync): **single 45.6 ms/spend, batched 7.3 ms/spend
+(6.28×)** — ~1.44× faster than the MSVC 32-bit-limb build (65.6 / 10.4). Four
+blockers were cleared, all in our shim/build layer (no Firo crypto edited):
+endian defines, the `CDataStream::write` append, the `5x52`/`4x64` limb
+selection, and `HAVE___INT128` (the last discovered during the port — the 64-bit
+limb impls need it to typedef `uint128_t`). MSVC byte-identity reconfirm is the
+one remaining gate before commit. **Author track:** shielded (Spark) pool.
 **Why now:** the anon-set verify-cost bench showed shielded Grootle verify at
 ~100× Firo. Investigation (2026-10-19) found this is **not** a missing-batched-
 multiexp bug — libspark's Pippenger batched multiexp is present and runs
@@ -87,6 +98,40 @@ if target_is_msvc {
 This is the lever that recovers most of Firo's edge (Firo benches on Linux/GCC
 with 64-bit limbs). The secp256k1 source already contains both implementations;
 this only selects which compiles.
+
+## macOS
+
+macOS is handled by the **same** target gating, by construction — no extra
+`build.rs` branch is required:
+
+- Non-MSVC → `5x52`/`4x64` + `HAVE___INT128` (Apple clang has `__int128` on both
+  x86_64 and arm64).
+- Non-Windows → no `WIN32` defines; link `crypto`, no Win32 syslibs.
+- The endian defines stay **`target_os == "linux"` only** (not "non-Windows") on
+  purpose: the vendored `compat/endian.h` / `byteswap.h` have their own
+  `#elif defined(__APPLE__)` branches (`<libkern/OSByteOrder.h>`), reached only
+  when `HAVE_ENDIAN_H` is unset. Defining `HAVE_ENDIAN_H` on macOS would force a
+  non-existent `<endian.h>` include and break the build — so macOS must *not*
+  get the Linux endian defines. (A `build.rs` comment guards this invariant.)
+
+### macOS build recipe (for the Mac testers)
+
+```bash
+brew install openssl@3 cmake llvm            # OpenSSL (keg-only) + randomx deps
+export SPARK_OPENSSL_DIR="$(brew --prefix openssl@3)"   # has include/ + lib/
+export LIBCLANG_PATH="$(brew --prefix llvm)/lib"        # for randomx bindgen (node build)
+# connector only (fast crypto check):
+cargo test -p spark-connector --features libspark-ffi
+# full shielded node:
+cargo build --release --bin coincync-node \
+  --features "testnet sketch-gk-proof libspark-ffi"
+```
+
+**Status: unverified** — correct by construction + file-scan, but there is no Mac
+in this environment to build on. The Mac testers running the recipe above is the
+verification; any gap it surfaces (Homebrew prefix layout, a missing Apple
+framework such as `Security`/`CoreFoundation`, libc++ quirk) is then a small
+build-config follow-up, not a crypto change.
 
 ## Test plan (after the toolchain frees)
 
