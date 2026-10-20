@@ -115,8 +115,10 @@ allowed plaintext P2P — fixed (`bc15a1db`). Dead seed IPs + duplicate
 **Wallet fund-safety.** W-B: the "subaddresses disabled on mainnet" gate was
 incomplete (covered only generation); address parsing, send-to-subaddress, and
 the v2 `--subaddress` flag were ungated. Closed at the parse + send boundary
-(`09bc504a`), live-verified on the built binary. See §5 for the underlying open
-item (W-A).
+(`09bc504a`), live-verified on the built binary. **Superseded:** the underlying
+W-A spend bug has since been fixed (per-subaddress `m_i` offset) and this
+mainnet-disable gate *lifted* — subaddresses are now fully spendable (§5a, W-A
+RESOLVED).
 
 ### 3b. Shielded pool — Lelantus Spark v2 (2026-09 → 2026-10)
 
@@ -214,22 +216,32 @@ list below is the latter.
 
 These touch a default/mainnet binary and are the short list that matters most:
 
-- **W-A (deferred, mitigated): subaddress *spend* is broken.** Subaddress-
-  received outputs are unspendable (spend-side key-image derivation omits the
-  per-subaddress offset `m_i`). **Mitigation:** subaddresses are comprehensively
-  disabled on mainnet (W-B, §3a), so no fund loss at launch. Real fix (thread
-  `(account,index)` + `compute_subaddress_spend_secret`, gated behind a
-  receive→spend round-trip test) is post-launch. Enabled on testnet/regtest.
-- **Bootstrap ring-member relaxation (blocks 1–99).** Below
-  `STRICT_RING_MEMBER_HEIGHT = 100`, a ring member absent from the UTXO set is
-  warned-and-allowed with no commitment check (a mint-from-nothing window).
-  Closed **operationally** by the genesis runbook (self-mine ≥100 blocks with
-  `--no-peers` before opening the network), not in code. `validation.rs`;
-  `CONSENSUS_SPEC.md` §8.1.
-- **`total_burned` not accumulated into chain state.** Burns are computed
-  per-fee in `distribute_fee` but never summed into a persisted counter;
-  `total_supply` tracks gross emission. Documented divergence, not a safety bug
-  (`CONSENSUS_SPEC.md` §8.4).
+- **~~W-A: subaddress spend broken~~ — RESOLVED (fix + gate lift).** The
+  spend-side one-time-secret / key-image derivation now applies the
+  per-subaddress offset `m_i`, so subaddress-received funds are spendable,
+  including on mainnet; the prior mainnet-disable arm (W-B) was removed. Verified
+  by the receive→spend→validate round-trip test
+  `real_crypto_subaddress_output_spendable_e2e` (`legacy.rs:1067`). No longer an
+  open item.
+- **~~Bootstrap ring-member relaxation (blocks 1–99)~~ — RESOLVED in code
+  (#219).** A ring member absent from both the live UTXO set and the permanent
+  output index is now rejected at **every** height (`validation.rs:2186-2213`),
+  not just ≥ `STRICT_RING_MEMBER_HEIGHT`. The old blocks-1–99 escape hatch (warn
+  and fall through) is gone; the comment documents it as a strict tightening, not
+  a chain split (coinbase maturity 100 from genesis means no pre-100 spend could
+  legitimately reach the check anyway). **Follow-up: reconcile `CONSENSUS_SPEC.md
+  §8.1`**, which still lists this as an operational-only mitigation.
+- **~~`total_burned` not accumulated~~ — RESOLVED; it is accumulated and
+  reorg-correct.** `CONSENSUS_SPEC.md §8.4` is stale: `ChainStats.total_burned`
+  is a persisted `u128` running total moved by `block_fee_burn()` at every
+  connect / disconnect / fork-apply / fork-undo site (`chain.rs:1508/2050/2659/
+  2903/3069/3267/3358`), with `checked_add`/`checked_sub` underflow panics, the
+  consensus invariant `total_burned ≤ total_supply`, `circulating =
+  total_supply − total_burned`, and symmetric-reorg tests
+  (`total_burned_apply_disconnect_is_symmetric_and_reorg_correct`,
+  `rollback_to_height_unwinds_total_burned_through_the_real_disconnect_site`).
+  It also feeds the supply **digest**. **Follow-up: reconcile `CONSENSUS_SPEC.md
+  §8.4`** to drop the obsolete "not accumulated" divergence.
 - **Merkle duplication malleability (CVE-2012-2459).** `primitives/hash.rs`
   `merkle_root`: `root([A,B,C]) == root([A,B,C,C])`. Consensus-frozen; relies on
   downstream block checks. Acknowledged (`findings.md` INFO-1).
@@ -242,10 +254,16 @@ These touch a default/mainnet binary and are the short list that matters most:
 - **Node-internal miner is a stub.** `src/mining/miner.rs` `Miner::start` is a
   no-op by design — real mining is external (pools / `coincync-rig`). Reachable
   but intentionally does nothing.
-- **Light-wallet fork-point finder is a v1.0 stub.** `rpc/lightwallet.rs:446`
-  `find_fork_point` checks only the most-recent (hash,height) pair and otherwise
-  falls back to a full rescan (safe degradation). Journal-based v1.1 algorithm is
-  a documented follow-up.
+- **Light-wallet fork-point finder — v1.1 shipped; residual is a wallet-v2
+  stub.** The node RPC `find_fork_point` (`rpc/handlers/chain.rs:148`) already
+  runs the journal-based v1.1 algorithm (`parse_journal_hex` →
+  `fork_point_in_journal`, deepest canonical ancestor, journal-size-capped), and
+  the legacy CLI wallet (`legacy.rs:3309`) already sends its journal to it. Two
+  loose ends remain, neither on the shipped reorg-recovery path: the superseded
+  v1.0 `LightWalletServer::find_fork_point` (`lightwallet.rs:420`, returns
+  `None`) is dead code; and the wallet-v2 `BlockFetcher::find_fork_point`
+  (`background_sync.rs:560`) still has an unimplemented default on the old
+  single-pair signature. Clean-up + wallet-v2 wiring are follow-ups.
 - **`create_deniable_wallet` disabled.** `wallet/persistence.rs:2480` returns a
   distinct error rather than ship a knowingly-broken deniability primitive (three
   structural bugs, C37/C38/C39). Mitigation = fully disabled; restore only after
