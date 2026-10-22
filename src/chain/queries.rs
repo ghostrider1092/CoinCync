@@ -92,6 +92,17 @@ impl Blockchain {
     pub fn utxo_commitment_at_tip(&self) -> Hash {
         self.inner.read().utxos.commitment_hash()
     }
+
+    /// Monotonic count of transparent outputs ever created on the active chain
+    /// (never decremented by spends; see `UtxoSet::total_outputs_ever`). This is
+    /// the `total_outputs` field a tip [`SyncCheckpoint`](crate::wallet::lightsync::SyncCheckpoint)
+    /// commits to, so a light wallet that fast-skips to the checkpoint inherits a
+    /// consistent global-output index for ring-member positioning. Pairs with
+    /// [`utxo_commitment_at_tip`](Self::utxo_commitment_at_tip) — both are read at
+    /// the same tip under the same lock when a checkpoint is minted.
+    pub fn total_outputs_ever(&self) -> u64 {
+        self.inner.read().utxos.total_outputs_ever()
+    }
 }
 
 // ── additional read-only getters (issue #108, queries expansion) ──

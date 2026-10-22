@@ -424,17 +424,44 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // Periodic trust anchors so a fresh light wallet can skip
     // ancient history and start scanning from a recent height.
     //
-    // SECURITY NOTE: Authentication of these checkpoints is
-    // currently a checksum, not a signature (Gap 2 in
-    // LIGHTSYNC_AUDIT.md). For v1.0 the wallet MUST cross-check
-    // returned checkpoints against the binary's hardcoded consensus
-    // checkpoints (`NetworkType::consensus_checkpoints`, the single
-    // source of truth) before trusting them. Miner-signed checkpoints
-    // arrive in v1.0.1 (CIP-009.D activation track).
+    // AUTHENTICATION (audit Gap 2 — now wired two ways):
+    //   1. Historical checkpoints carry a real `block_hash` (from the active
+    //      chain). A wallet authenticates one by matching that hash against the
+    //      binary's hardcoded consensus checkpoints
+    //      (`SyncCheckpoint::authenticate` → `CheckpointAuth::Authenticated`).
+    //      `total_outputs`/`utxo_hash` are left 0/default for historical heights
+    //      — the node only holds UTXO state at the TIP, so a truthful UTXO
+    //      commitment at an arbitrary past height can't be produced cheaply, and
+    //      stuffing a fabricated one would be worse than leaving it empty.
+    //   2. The TIP checkpoint (`tip_checkpoint`) carries a REAL `utxo_hash`
+    //      (`utxo_commitment_at_tip`) and `total_outputs` (`total_outputs_ever`),
+    //      read together under one lock. When the operator configures a
+    //      checkpoint-signing seed (`COINCYNC_CHECKPOINT_SIGNING_SEED`, 32-byte
+    //      hex), the node Ed25519-signs the tip checkpoint and returns the
+    //      sidecar as `signed_tip`; a wallet verifies it against its own trusted
+    //      -signer allowlist (`verify_checkpoint_signature`) before fast-skipping.
+    //      Absent a seed, `signed_tip` is null and wallets fall back to the
+    //      hardcoded-checkpoint path (or a full scan).
+    //
+    // The signing seed is operator-provided (interim trust root); the governed
+    // key set is a pre-mainnet decision. The seed NEVER leaves the node — only
+    // the derived public key is published, in `signer_pubkey`.
     //
     // Params: optional [stride: u64] — emit one checkpoint every
     // `stride` blocks. Default 10000 (~14 days at 120s).
-    module.register_method("get_sync_checkpoints", |params, state, _ext| {
+    let checkpoint_signing_seed: Option<[u8; 32]> = std::env::var("COINCYNC_CHECKPOINT_SIGNING_SEED")
+        .ok()
+        .and_then(|h| {
+            let bytes = hex::decode(h.trim()).ok()?;
+            <[u8; 32]>::try_from(bytes.as_slice()).ok()
+        });
+    if checkpoint_signing_seed.is_some() {
+        tracing::info!(
+            "checkpoint signing ENABLED — tip checkpoints served by get_sync_checkpoints will be Ed25519-signed (signer pubkey {})",
+            crate::wallet::sync_checkpoint_signing::pubkey_for_seed(checkpoint_signing_seed.as_ref().unwrap())
+        );
+    }
+    module.register_method("get_sync_checkpoints", move |params, state, _ext| {
         let requested: u64 = params.parse::<(u64,)>().map(|(s,)| s).unwrap_or(10_000);
         let chain_height = state.chain.height();
         // SECURITY (DoS): bound the work regardless of the requested stride.
@@ -448,7 +475,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         const MAX_CHECKPOINTS: u64 = 512;
         let min_stride = chain_height.div_ceil(MAX_CHECKPOINTS).max(1);
         let stride = requested.max(min_stride).min(50_000);
-        let checkpoints = tokio::task::block_in_place(|| {
+        let (checkpoints, tip_checkpoint) = tokio::task::block_in_place(|| {
             let mut checkpoints = Vec::new();
             let mut h = stride;
             while h <= chain_height {
@@ -457,8 +484,8 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                     let cp = crate::wallet::lightsync::SyncCheckpoint::new(
                         h,
                         block_hash,
-                        0, // total_outputs not tracked at this layer
-                        crate::primitives::Hash::default(), // utxo_hash deferred to Gap 2
+                        0, // total_outputs: only meaningful at the tip (see note)
+                        crate::primitives::Hash::default(), // utxo_hash: tip-only
                     );
                     checkpoints.push(cp);
                 }
@@ -467,14 +494,53 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                     None => break,
                 };
             }
-            checkpoints
+            // The tip checkpoint is the one height where a truthful UTXO
+            // commitment + global-output count exist. Read block hash,
+            // commitment and count for the SAME tip height so the three fields
+            // are mutually consistent even if a block connects concurrently.
+            //
+            // DoS: only mint it when signing is configured. `utxo_commitment_at_tip`
+            // hashes the ENTIRE UTXO set, and this endpoint is reachable
+            // UNAUTHENTICATED via the REST allowlist. An UNSIGNED tip checkpoint
+            // is `Unverifiable` to a wallet (no hardcoded entry at the tip) and
+            // `plan_fast_sync` ignores it, so computing it for every caller would
+            // be a pure full-set-hash spam amplifier with no consumer benefit.
+            let tip_checkpoint = if checkpoint_signing_seed.is_some() {
+                state.chain.get_block_by_height(chain_height).map(|tip_block| {
+                    crate::wallet::lightsync::SyncCheckpoint::new(
+                        chain_height,
+                        tip_block.hash(),
+                        state.chain.total_outputs_ever(),
+                        state.chain.utxo_commitment_at_tip(),
+                    )
+                })
+            } else {
+                None
+            };
+            (checkpoints, tip_checkpoint)
         });
+
+        // Sign the tip checkpoint if the operator configured a signing seed.
+        let signed_tip = match (&tip_checkpoint, &checkpoint_signing_seed) {
+            (Some(cp), Some(seed)) => {
+                let sig = crate::wallet::sync_checkpoint_signing::sign_checkpoint(seed, cp);
+                Some(json!({ "checkpoint": cp, "signature": sig }))
+            }
+            _ => None,
+        };
+        let signer_pubkey = checkpoint_signing_seed
+            .as_ref()
+            .map(crate::wallet::sync_checkpoint_signing::pubkey_for_seed);
+
         Ok::<_, ErrorObjectOwned>(json!({
             "stride": stride,
             "chain_height": chain_height,
             "count": checkpoints.len(),
             "checkpoints": checkpoints,
-            "auth_note": "Cross-check against the node's hardcoded consensus checkpoints. Miner-signed authentication queued for v1.0.1 (CIP-009.D).",
+            "tip_checkpoint": tip_checkpoint,
+            "signed_tip": signed_tip,
+            "signer_pubkey": signer_pubkey,
+            "auth_note": "Historical checkpoints: match block_hash against the node's hardcoded consensus checkpoints (SyncCheckpoint::authenticate). Tip checkpoint: if signed_tip is present, verify its signature against your trusted-signer allowlist before fast-skipping; otherwise fall back to a hardcoded-checkpoint anchor or a full scan.",
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 

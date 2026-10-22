@@ -239,11 +239,13 @@ const RPC_ALLOWED_METHODS: &[&str] = &[
     // Mempool
     "get_mempool_info",
     "get_mempool_transactions",
-    // Stub-but-public methods. They return -32601 NotImplemented
-    // with a labelled message, which is safer than 403-blocking
-    // them — a `MethodNotFound` from the backend tells the
-    // explorer to render "not yet wired" instead of "blocked".
+    // Wired: tx-by-hash lookup via the txid→location index
+    // (`chain::get_tx_location`; real impl in handlers/transactions.rs).
     "get_transaction",
+    // Stub-but-public method. Returns -32601 NotImplemented with a
+    // labelled message, which is safer than 403-blocking it — a
+    // `MethodNotFound` from the backend tells the explorer to render
+    // "not yet wired" instead of "blocked". (No assets exist yet.)
     "get_asset_info",
     // Shielded / Spark anchors (public, intentionally transparent)
     "get_shielded_anchor",

@@ -1465,6 +1465,18 @@ impl Blockchain {
                                 all_orphaned_txs.push(tx.clone());
                             }
                         }
+                        // Keep the tx_index consistent on disconnect: drop this
+                        // disconnected block's tx entries so a post-reorg
+                        // `get_transaction` can't resolve a stale `(height, idx)`
+                        // pointing at a block that is no longer canonical.
+                        // Non-consensus convenience index → best-effort direct
+                        // removal (the get_transaction handler also re-validates
+                        // the fetched tx hash as defense-in-depth).
+                        if let Some(ref db) = self.db {
+                            for tx in &txs {
+                                db.remove_tx_index(tx.hash().as_bytes());
+                            }
+                        }
                         // Subtract emission
                         let emission = calculate_block_reward(h);
                         // Burn accumulator moves in lockstep with supply: the
@@ -5550,6 +5562,170 @@ mod tests {
              seed={seed0}, pool_size={pool_size} ({pool_mult} group(s) of N={n})"
         );
         assert!(cycles > 0, "soak ran zero cycles");
+    }
+
+    /// LIVE end-to-end test of the transaction index wiring (the `get_transaction`
+    /// RPC's data path): mine a real block through the connect pipeline on a
+    /// DB-backed chain, then resolve the mined coinbase BY HASH via the same
+    /// `chain::get_tx_location` the RPC uses — proving block-connect populates the
+    /// `txid → (height, idx)` index, a lookup hits it, and a reorg removes it.
+    /// Needs `test-fast-pow` (nonce-0 blocks accepted).
+    #[cfg(feature = "test-fast-pow")]
+    #[test]
+    fn get_transaction_index_wired_end_to_end() {
+        use crate::chain::BlockStatus;
+        use crate::mining::block_builder::{build_candidate_block, submit_mined_block};
+        use crate::primitives::SecretKey;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let net = NetworkType::Testnet;
+        crate::consensus::bind_randomx_genesis_for_network(net);
+        let chain: crate::chain::SharedBlockchain =
+            Arc::new(Blockchain::with_database(Arc::clone(&db), net));
+        chain.init_genesis().unwrap();
+        let mempool = crate::mempool::SharedMempool::new();
+        let spend = SecretKey::from_bytes([7u8; 32]).public_key();
+        let view = SecretKey::from_bytes([9u8; 32]).public_key();
+
+        // Mine one real block through the connect pipeline.
+        let cand = build_candidate_block(
+            &chain,
+            &mempool,
+            &spend,
+            &view,
+            net,
+            crate::consensus::fork_signal::SignalBits(0),
+        )
+        .expect("candidate");
+        let blk = cand.into_block(0);
+        let coinbase_hash = blk.transactions[0].hash();
+        let status = submit_mined_block(&chain, &mempool, blk).expect("submit");
+        assert!(
+            matches!(status, BlockStatus::Accepted | BlockStatus::AcceptedFork),
+            "mined block must be accepted, got {status:?}"
+        );
+        assert_eq!(chain.height(), 1, "tip at height 1 after one block");
+
+        // THE WIRING: resolve the coinbase BY HASH via the tx index.
+        assert_eq!(
+            chain.get_tx_location(coinbase_hash.as_bytes()),
+            Some((1, 0)),
+            "get_tx_location must resolve the mined coinbase to (height 1, index 0) — the index was populated at connect"
+        );
+        // Fetch the block at that height and confirm the tx round-trips (the
+        // second half of the RPC's data path).
+        let fetched = chain.get_block_by_height(1).expect("block at height 1");
+        assert_eq!(
+            fetched.transactions[0].hash(),
+            coinbase_hash,
+            "the indexed location points at the right transaction"
+        );
+
+        // An unknown hash resolves to None (clean 'not found').
+        assert_eq!(chain.get_tx_location(&[0xABu8; 32]), None);
+
+        // Reorg-correctness: rolling back the block removes its index entries.
+        chain.rollback_to_height(0).expect("rollback");
+        assert_eq!(
+            chain.get_tx_location(coinbase_hash.as_bytes()),
+            None,
+            "rollback must remove the tx_index entry (no stale lookup after a reorg)"
+        );
+    }
+
+    /// Audit **Gap 2** end-to-end: mint a tip `SyncCheckpoint` from REAL chain
+    /// state (the node-side accessors), Ed25519-sign it (the node-side signing
+    /// path), then run the wallet-side `plan_fast_sync` consumer against it.
+    /// Proves the three wired pieces line up on a live chain and that tampering
+    /// is refused.
+    #[cfg(feature = "test-fast-pow")]
+    #[test]
+    fn sync_checkpoint_fast_sync_end_to_end() {
+        use crate::mining::block_builder::{build_candidate_block, submit_mined_block};
+        use crate::primitives::{Hash, SecretKey};
+        use crate::wallet::lightsync::{plan_fast_sync, FastSyncBasis, SyncCheckpoint};
+        use crate::wallet::sync_checkpoint_signing::{pubkey_for_seed, sign_checkpoint};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let net = NetworkType::Testnet;
+        crate::consensus::bind_randomx_genesis_for_network(net);
+        let chain: crate::chain::SharedBlockchain =
+            Arc::new(Blockchain::with_database(Arc::clone(&db), net));
+        chain.init_genesis().unwrap();
+        let mempool = crate::mempool::SharedMempool::new();
+        let spend = SecretKey::from_bytes([7u8; 32]).public_key();
+        let view = SecretKey::from_bytes([9u8; 32]).public_key();
+
+        // Mine a few blocks so total_outputs_ever advances past genesis.
+        for _ in 0..3 {
+            let cand = build_candidate_block(
+                &chain,
+                &mempool,
+                &spend,
+                &view,
+                net,
+                crate::consensus::fork_signal::SignalBits(0),
+            )
+            .expect("candidate");
+            let blk = cand.into_block(0);
+            submit_mined_block(&chain, &mempool, blk).expect("submit");
+        }
+        let tip = chain.height();
+        assert_eq!(tip, 3, "three blocks mined");
+
+        // NODE SIDE: mint a tip checkpoint from real chain state (Unit A
+        // accessors), not the historical 0/default stub.
+        let tip_hash = chain.get_block_by_height(tip).unwrap().hash();
+        let cp = SyncCheckpoint::new(
+            tip,
+            tip_hash,
+            chain.total_outputs_ever(),
+            chain.utxo_commitment_at_tip(),
+        );
+        assert!(
+            cp.total_outputs > 0,
+            "tip checkpoint carries a real, non-stub output count"
+        );
+        assert_ne!(
+            cp.utxo_hash,
+            Hash::default(),
+            "tip checkpoint carries a real UTXO commitment"
+        );
+
+        // NODE SIDE: sign the tip checkpoint. WALLET SIDE: a wallet whose trusted
+        // allowlist contains the signer, born at the tip, fast-skips to it.
+        let seed = [42u8; 32];
+        let sig = sign_checkpoint(&seed, &cp);
+        let trusted = vec![pubkey_for_seed(&seed)];
+
+        let decision = plan_fast_sync(&[], Some((&cp, &sig)), tip, net, &trusted);
+        assert_eq!(
+            decision.basis,
+            FastSyncBasis::SignedTip,
+            "a trusted signed tip is a valid fast-sync anchor"
+        );
+        assert_eq!(decision.start_height, tip);
+        assert_eq!(
+            decision.anchor.unwrap().total_outputs,
+            chain.total_outputs_ever(),
+            "the anchor carries the chain's real output count"
+        );
+
+        // Tamper: a forged utxo_hash under the same signature must be refused —
+        // the signature binds utxo_hash, so verification fails → no fast-skip.
+        let mut forged = cp.clone();
+        forged.utxo_hash = Hash::from_bytes([0xEE; 32]);
+        let refused = plan_fast_sync(&[], Some((&forged, &sig)), tip, net, &trusted);
+        assert_eq!(
+            refused.basis,
+            FastSyncBasis::NoFastSkip,
+            "a tampered tip checkpoint is refused; the wallet falls back to a full scan"
+        );
+        assert_eq!(refused.start_height, tip);
     }
 
     /// The verify hook rejects UNAUTHENTICATED coin entry: a shielded payload

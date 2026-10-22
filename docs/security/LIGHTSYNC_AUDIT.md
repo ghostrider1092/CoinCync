@@ -96,29 +96,56 @@ height (already supported by `BlockDigest::from_block`), wrap in
 `DigestResponse`, send back. Estimated: ~50 lines, half a day with
 tests.
 
-### Gap 2 — checkpoint authentication is unimplemented
+### Gap 2 — checkpoint authentication — **WIRED** (two paths)
 
-`SyncCheckpoint::verify_hash()` returns the hash of the checkpoint's
-own fields. That's a checksum, not authentication. A malicious server
-can fabricate a checkpoint, claim `height = K` with a bogus
-`utxo_hash`, and a fresh light wallet trusts it.
+> **Status (2026-10-21): CLOSED for the hardcoded + operator-signed
+> paths.** `SyncCheckpoint::verify_hash()` was only a checksum (it hashes
+> the checkpoint's own fields, so a malicious server can fabricate a
+> self-consistent checkpoint with a bogus `utxo_hash`). Authentication is
+> now wired end-to-end on both the node and the wallet side; a light
+> wallet refuses to fast-skip on anything it cannot authenticate.
 
-Real authentication needs ONE of:
+Two authentication paths are implemented and tested:
 
-- **Miner signatures.** Each block header carries an optional
-  checkpoint vote; a checkpoint at height `K` is valid only if a
-  super-majority of headers in `K-N..K` voted for it. (`BlockHeader`
-  already has a `checkpoint_vote: Option<...>` field — wired but
-  unused.)
-- **Hard-coded checkpoint set.** Project ships a known set of
-  checkpoint hashes baked into the binary. Operator updates them at
-  release time. Crude but effective for the early phase, fine until
-  the chain is long enough that bake-in becomes painful.
-- **Both.** Hard-coded for the binary's contemporaneous head, miner
-  signatures for anything past that. Bitcoin Core does this.
+- **Hard-coded checkpoint set** (`NetworkType::consensus_checkpoints`,
+  the single source of truth). `SyncCheckpoint::authenticate(network)`
+  matches a server-provided checkpoint's `block_hash` against the baked-in
+  set and returns `CheckpointAuth::{Authenticated, Forged, Unverifiable}`.
+  Historical checkpoints from `get_sync_checkpoints` carry a real
+  `block_hash` for this path (their `total_outputs`/`utxo_hash` are left
+  0/default — the node only holds UTXO state at the tip, so a truthful
+  commitment at an arbitrary past height can't be produced cheaply, and a
+  fabricated one would be worse than an empty one).
 
-Estimated: 1 day for hard-coded set, 2-3 days for miner signature
-verification (the field exists, the verification code does not).
+- **Operator-signed tip checkpoint** (interim trust root ahead of full
+  miner signatures). The tip is the one height with a truthful
+  `utxo_hash` (`utxo_commitment_at_tip`) and `total_outputs`
+  (`total_outputs_ever`). When the operator sets
+  `COINCYNC_CHECKPOINT_SIGNING_SEED` (32-byte hex), the node Ed25519-signs
+  the tip checkpoint (`sync_checkpoint_signing::sign_checkpoint`) and
+  returns the sidecar as `signed_tip`; the signature binds all four fields
+  (including `utxo_hash`). The seed never leaves the node — only the
+  derived pubkey is published. DoS note: the tip checkpoint (and its
+  full-UTXO-set hash) is minted ONLY when a signing seed is configured,
+  because an unsigned tip is `Unverifiable` and the consumer ignores it —
+  so the unauthenticated REST path can't be used to force a full-set hash.
+
+- **Consumer (`plan_fast_sync`).** The wallet side. It accepts the
+  historical array + the optional signed tip + the wallet's birth height +
+  its trusted-signer allowlist, and returns a `FastSyncDecision`. It is
+  **fail-closed**: a checkpoint becomes the fast-skip anchor only if it is
+  authenticated (a hardcoded block-hash match, or a trusted signature no
+  hardcoded checkpoint contradicts) AND its height ≤ birth height (never
+  skip past a block that could hold the owner's own first output). The
+  highest such height wins; `Forged`/`Unverifiable`/untrusted are ignored,
+  so a lying server can at worst fail to accelerate a wallet.
+
+**Remaining for a later release (not launch-blocking):** full
+**miner-signed** checkpoints — `BlockHeader` already has a
+`checkpoint_vote: Option<...>` field (wired but unused), so a checkpoint
+at height `K` could become valid on a super-majority of votes in `K-N..K`
+with no operator trust root. The operator-signed path above is the interim
+mitigation; the governed signer set is a pre-mainnet decision.
 
 ### Gap 3 — no bloom-filter optimization
 

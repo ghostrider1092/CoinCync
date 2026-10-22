@@ -21,12 +21,20 @@
 //! - **View tag pre-filtering**: reject 255/256 outputs without ECDH
 //! - **Parallel scanning**: process multiple digests concurrently via rayon
 //! - **Sync checkpoints**: periodic trust anchors for fast initial sync.
-//!   Audit **Gap 2** (checkpoint *authentication*): a consumer must call
-//!   [`SyncCheckpoint::authenticate`] and only fast-skip on
-//!   [`CheckpointAuth::Authenticated`] — this validates a server-provided
-//!   checkpoint against the binary's hardcoded consensus checkpoints.
-//!   Full miner-signed checkpoints remain the v1.0.1 solution; until then an
-//!   unhardcoded height is `Unverifiable` and must fall back to a full scan.
+//!   Audit **Gap 2** (checkpoint *authentication*) is wired two ways, and the
+//!   consumer [`plan_fast_sync`] ties them together **fail-closed**:
+//!     1. [`SyncCheckpoint::authenticate`] validates a server-provided
+//!        checkpoint's `block_hash` against the binary's hardcoded consensus
+//!        checkpoints → [`CheckpointAuth::Authenticated`] / `Forged` /
+//!        `Unverifiable`.
+//!     2. The tip checkpoint is Ed25519-signed by the node (when an operator
+//!        seed is configured) and verified against the wallet's trusted-signer
+//!        allowlist (`sync_checkpoint_signing::verify_checkpoint_signature`).
+//!   [`plan_fast_sync`] only fast-skips to an authenticated checkpoint whose
+//!   height is at or below the wallet's birth height; anything unauthenticated
+//!   (`Unverifiable`, `Forged`, untrusted signer) falls back to a full scan.
+//!   Full *miner-signed* checkpoints (header `checkpoint_vote`) remain a later
+//!   enhancement with no operator trust root.
 //!
 //! Bandwidth savings: ~50-100x reduction vs downloading full blocks.
 //!
@@ -266,7 +274,7 @@ impl BlockDigest {
 ///
 /// Allows light wallets to skip scanning blocks before the checkpoint height,
 /// trusting the UTXO commitment hash for verification.
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SyncCheckpoint {
     /// Block height of the checkpoint
     pub height: u64,
@@ -355,6 +363,126 @@ pub enum CheckpointAuth {
     /// checkpoints land (v1.0.1) and the hardcoded table is populated, this
     /// is the expected common case.
     Unverifiable,
+}
+
+/// How a [`FastSyncDecision`] anchor was authenticated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FastSyncBasis {
+    /// No trustworthy checkpoint at or below the wallet's birth height; the
+    /// wallet scans normally from `start_height` (its birth height).
+    NoFastSkip,
+    /// The anchor's `block_hash` matched a hardcoded consensus checkpoint
+    /// ([`CheckpointAuth::Authenticated`]).
+    HardcodedCheckpoint,
+    /// The anchor is a tip checkpoint, Ed25519-signed by a signer on the
+    /// wallet's trusted allowlist (and not contradicted by any hardcoded
+    /// checkpoint at the same height).
+    SignedTip,
+}
+
+/// The outcome of evaluating server-provided sync checkpoints for a light
+/// wallet: how far it may safely fast-skip, and on what authority. Produced by
+/// [`plan_fast_sync`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FastSyncDecision {
+    /// The height the wallet should begin scanning from (inclusive). Never
+    /// greater than the wallet's birth height — a fast-skip must never jump
+    /// past a block that could hold the owner's own first output. When no
+    /// checkpoint is trustworthy this equals the birth height (a normal scan).
+    pub start_height: u64,
+    /// The authenticated checkpoint the skip rests on, or `None` when no
+    /// checkpoint was trustworthy (`basis == NoFastSkip`).
+    pub anchor: Option<SyncCheckpoint>,
+    /// How `anchor` was authenticated.
+    pub basis: FastSyncBasis,
+}
+
+/// Decide how far a light wallet may fast-skip scanning, given the checkpoints a
+/// node returned from `get_sync_checkpoints`. This is the **consumer** side of
+/// audit Gap 2 (checkpoint authentication): it refuses to fast-skip on anything
+/// it cannot authenticate.
+///
+/// Inputs:
+/// - `historical`: the `checkpoints` array (each carries a real `block_hash`,
+///   authenticated against the binary's hardcoded consensus checkpoints).
+/// - `signed_tip`: the optional `(tip_checkpoint, signature)` pair, verified
+///   against `trusted_pubkeys`.
+/// - `birth_height`: the earliest block that could hold the wallet's funds.
+/// - `network`: resolves the hardcoded checkpoint table.
+/// - `trusted_pubkeys`: the wallet's trusted checkpoint-signer allowlist (hex
+///   Ed25519 keys) for the signed tip.
+///
+/// SECURITY — **fail-closed**. A checkpoint becomes the anchor only if BOTH:
+/// (a) it is authenticated — a hardcoded-checkpoint block-hash match, or a
+/// signature from a trusted signer that no hardcoded checkpoint contradicts —
+/// AND (b) its height is `<= birth_height`. The highest such height wins.
+/// `Forged`, `Unverifiable`, and untrusted-signer checkpoints are ignored, so a
+/// lying server can at worst fail to accelerate a wallet, never make it skip a
+/// block that holds its own output or trust a false UTXO state.
+pub fn plan_fast_sync(
+    historical: &[SyncCheckpoint],
+    signed_tip: Option<(&SyncCheckpoint, &crate::wallet::sync_checkpoint_signing::SyncCheckpointSignature)>,
+    birth_height: u64,
+    network: crate::config::NetworkType,
+    trusted_pubkeys: &[String],
+) -> FastSyncDecision {
+    fn consider(
+        best: &mut Option<(SyncCheckpoint, FastSyncBasis)>,
+        cp: &SyncCheckpoint,
+        basis: FastSyncBasis,
+        birth_height: u64,
+    ) {
+        // Birth-height gate: never fast-skip past a block that could hold the
+        // owner's own first output.
+        if cp.height > birth_height {
+            return;
+        }
+        let better = match best {
+            Some((b, _)) => cp.height > b.height,
+            None => true,
+        };
+        if better {
+            *best = Some((cp.clone(), basis));
+        }
+    }
+
+    let mut best: Option<(SyncCheckpoint, FastSyncBasis)> = None;
+
+    // 1. Historical checkpoints authenticated by a hardcoded block-hash match.
+    for cp in historical {
+        if cp.authenticate(network) == CheckpointAuth::Authenticated {
+            consider(&mut best, cp, FastSyncBasis::HardcodedCheckpoint, birth_height);
+        }
+    }
+
+    // 2. The signed tip — only if the signature verifies against the trusted
+    //    allowlist AND no hardcoded checkpoint at that height contradicts it
+    //    (a `Forged` cross-check beats a valid signature: a signer that signs a
+    //    checkpoint conflicting with consensus history is not to be trusted).
+    if let Some((cp, sig)) = signed_tip {
+        let sig_ok = crate::wallet::sync_checkpoint_signing::verify_checkpoint_signature(
+            cp,
+            sig,
+            trusted_pubkeys,
+        )
+        .is_ok();
+        if sig_ok && cp.authenticate(network) != CheckpointAuth::Forged {
+            consider(&mut best, cp, FastSyncBasis::SignedTip, birth_height);
+        }
+    }
+
+    match best {
+        Some((cp, basis)) => FastSyncDecision {
+            start_height: cp.height,
+            anchor: Some(cp),
+            basis,
+        },
+        None => FastSyncDecision {
+            start_height: birth_height,
+            anchor: None,
+            basis: FastSyncBasis::NoFastSkip,
+        },
+    }
 }
 
 // =============================================================================
@@ -2011,5 +2139,134 @@ mod tests {
             reg_amount as u128 + reward as u128,
             "total_amount accumulates across digests including coinbase"
         );
+    }
+
+    // ── plan_fast_sync (audit Gap 2 consumer) ───────────────────────────────
+    mod fast_sync {
+        use super::*;
+        use crate::wallet::sync_checkpoint_signing::{pubkey_for_seed, sign_checkpoint};
+
+        fn seed(b: u8) -> [u8; 32] {
+            [b; 32]
+        }
+
+        /// A checkpoint whose block_hash matches the hardcoded table at `height`
+        /// (so it authenticates), or a deliberately wrong hash when `genuine` is
+        /// false.
+        fn hardcoded_cp(height: u64, genuine: bool) -> SyncCheckpoint {
+            let expected = crate::constants::expected_checkpoint_hash(NetworkType::Testnet, height)
+                .expect("test height must be in the testnet hardcoded table");
+            let hash = if genuine {
+                Hash::from_bytes(expected)
+            } else {
+                let mut b = expected;
+                b[0] ^= 0xFF;
+                Hash::from_bytes(b)
+            };
+            SyncCheckpoint::new(height, hash, 0, Hash::default())
+        }
+
+        fn tip_cp(height: u64) -> SyncCheckpoint {
+            // A tip-style checkpoint at a height with NO hardcoded entry, so its
+            // only authority is the signature (authenticate() == Unverifiable).
+            SyncCheckpoint::new(
+                height,
+                Hash::from_bytes([0x11; 32]),
+                42,
+                Hash::from_bytes([0x22; 32]),
+            )
+        }
+
+        #[test]
+        fn signed_tip_fast_skips_to_trusted_tip() {
+            let s = seed(7);
+            let cp = tip_cp(500);
+            let sig = sign_checkpoint(&s, &cp);
+            let trusted = vec![pubkey_for_seed(&s)];
+            let d = plan_fast_sync(&[], Some((&cp, &sig)), 1000, NetworkType::Testnet, &trusted);
+            assert_eq!(d.basis, FastSyncBasis::SignedTip);
+            assert_eq!(d.start_height, 500);
+            assert_eq!(d.anchor.as_ref().unwrap().height, 500);
+        }
+
+        #[test]
+        fn birth_height_gate_blocks_skip_past_birth() {
+            // A valid, trusted tip ABOVE the birth height must never be an
+            // anchor — skipping past birth could miss the owner's first output.
+            let s = seed(7);
+            let cp = tip_cp(1500);
+            let sig = sign_checkpoint(&s, &cp);
+            let trusted = vec![pubkey_for_seed(&s)];
+            let d = plan_fast_sync(&[], Some((&cp, &sig)), 1000, NetworkType::Testnet, &trusted);
+            assert_eq!(d.basis, FastSyncBasis::NoFastSkip);
+            assert_eq!(d.start_height, 1000, "falls back to the birth height");
+            assert!(d.anchor.is_none());
+        }
+
+        #[test]
+        fn untrusted_signer_tip_ignored() {
+            let s = seed(7);
+            let cp = tip_cp(500);
+            let sig = sign_checkpoint(&s, &cp);
+            let trusted = vec![pubkey_for_seed(&seed(8))]; // different signer
+            let d = plan_fast_sync(&[], Some((&cp, &sig)), 1000, NetworkType::Testnet, &trusted);
+            assert_eq!(d.basis, FastSyncBasis::NoFastSkip);
+            assert_eq!(d.start_height, 1000);
+        }
+
+        #[test]
+        fn tampered_signed_tip_ignored() {
+            // Signature binds utxo_hash; mutating it after signing breaks the sig.
+            let s = seed(7);
+            let cp = tip_cp(500);
+            let sig = sign_checkpoint(&s, &cp);
+            let mut forged = cp.clone();
+            forged.utxo_hash = Hash::from_bytes([0xEE; 32]);
+            let trusted = vec![pubkey_for_seed(&s)];
+            let d =
+                plan_fast_sync(&[], Some((&forged, &sig)), 1000, NetworkType::Testnet, &trusted);
+            assert_eq!(d.basis, FastSyncBasis::NoFastSkip);
+        }
+
+        #[test]
+        fn hardcoded_checkpoint_authenticates() {
+            // Height 0 (genesis) is always in the testnet table.
+            let cp = hardcoded_cp(0, true);
+            let d = plan_fast_sync(&[cp], None, 1000, NetworkType::Testnet, &[]);
+            assert_eq!(d.basis, FastSyncBasis::HardcodedCheckpoint);
+            assert_eq!(d.start_height, 0);
+            assert_eq!(d.anchor.as_ref().unwrap().height, 0);
+        }
+
+        #[test]
+        fn forged_hardcoded_checkpoint_ignored() {
+            let cp = hardcoded_cp(0, false); // right height, wrong hash → Forged
+            let d = plan_fast_sync(&[cp], None, 1000, NetworkType::Testnet, &[]);
+            assert_eq!(d.basis, FastSyncBasis::NoFastSkip);
+            assert_eq!(d.start_height, 1000);
+            assert!(d.anchor.is_none());
+        }
+
+        #[test]
+        fn prefers_highest_authenticated_anchor() {
+            // Genuine genesis (height 0, hardcoded) AND a trusted signed tip at
+            // 500 → the higher authenticated height wins.
+            let s = seed(7);
+            let tip = tip_cp(500);
+            let sig = sign_checkpoint(&s, &tip);
+            let trusted = vec![pubkey_for_seed(&s)];
+            let hist = vec![hardcoded_cp(0, true)];
+            let d = plan_fast_sync(&hist, Some((&tip, &sig)), 1000, NetworkType::Testnet, &trusted);
+            assert_eq!(d.basis, FastSyncBasis::SignedTip);
+            assert_eq!(d.start_height, 500);
+        }
+
+        #[test]
+        fn empty_inputs_no_fast_skip() {
+            let d = plan_fast_sync(&[], None, 1000, NetworkType::Testnet, &[]);
+            assert_eq!(d.basis, FastSyncBasis::NoFastSkip);
+            assert_eq!(d.start_height, 1000);
+            assert!(d.anchor.is_none());
+        }
     }
 }
