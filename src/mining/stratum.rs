@@ -93,7 +93,10 @@
 //!   count the real (power-of-two) share target per valid share, `share_work`.
 //!   The tally holds at most `MAX_TALLY_LOGINS` logins (`tally_has_room` is
 //!   checked again when a share is credited, not only at login). The job
-//!   updater rotates jobs on tip change. THREAT: mis-weighted payout
+//!   updater rotates jobs on tip change and writes the tally first in every
+//!   tick, on a blocking thread, so a failed candidate build skips neither
+//!   the write nor the retry; both files live in the node's per-network data
+//!   directory unless the env vars point elsewhere. THREAT: mis-weighted payout
 //!   accounting, credit lost with a dropped connection, a round close, a torn
 //!   write or two writers, or memory and file growth bounded only by the
 //!   number of logins a client can invent. TESTS:
@@ -105,7 +108,8 @@
 //!   `share_work_is_the_power_of_two_target_difficulty`,
 //!   `flush_tally_replaces_the_file_and_leaves_no_tmp`,
 //!   `flush_tally_waits_for_the_running_writer`,
-//!   `tally_has_room_bounds_distinct_logins`.
+//!   `tally_has_room_bounds_distinct_logins`,
+//!   `config_files_follow_the_data_dir_unless_the_env_points_elsewhere`.
 //! - **§10 coinbase / merkle helpers (`create_coinbase_prefix` / `create_coinbase_suffix`
 //!   / `compute_merkle_branches` / `difficulty_to_nbits` / `format_mining_notify`)** —
 //!   INVARIANT: the coinbase prefix/suffix layout and merkle branches match the
@@ -163,6 +167,14 @@ const MAX_TALLY_LOGINS: usize = 10_000;
 const STRATUM_BAN_THRESHOLD: u32 = 20;
 const STRATUM_BAN_DURATION_SECS: u64 = 3600;
 
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
 fn env_bool(name: &str) -> bool {
     std::env::var(name)
         .ok()
@@ -217,6 +229,10 @@ pub struct StratumConfig {
     pub payout_spend_public: Option<PublicKey>,
     /// See [`payout_spend_public`](Self::payout_spend_public).
     pub payout_view_public: Option<PublicKey>,
+    /// Share tally file; `None` keeps the tally in memory only.
+    pub tally_path: Option<PathBuf>,
+    /// Banlist file; `None` keeps the bans in memory only.
+    pub banlist_path: Option<PathBuf>,
 }
 
 impl Default for StratumConfig {
@@ -264,8 +280,50 @@ impl Default for StratumConfig {
             // the server can produce blocks. Absent = shares only.
             payout_spend_public: None,
             payout_view_public: None,
+            tally_path: env_path("COINCYNC_STRATUM_TALLY_PATH")
+                .or_else(|| Some(PathBuf::from("stratum_shares.json"))),
+            banlist_path: env_path("COINCYNC_STRATUM_BANLIST_PATH")
+                .or_else(|| Some(PathBuf::from("stratum_bans.json"))),
         }
     }
+}
+
+impl StratumConfig {
+    /// Keep the tally and the banlist in `dir` (the node's per-network data
+    /// directory) unless the env vars point somewhere else.
+    pub fn files_in(mut self, dir: &std::path::Path) -> Self {
+        if env_path("COINCYNC_STRATUM_TALLY_PATH").is_none() {
+            self.tally_path = Some(moved_default(
+                dir,
+                "stratum_shares.json",
+                "COINCYNC_STRATUM_TALLY_PATH",
+            ));
+        }
+        if env_path("COINCYNC_STRATUM_BANLIST_PATH").is_none() {
+            self.banlist_path = Some(moved_default(
+                dir,
+                "stratum_bans.json",
+                "COINCYNC_STRATUM_BANLIST_PATH",
+            ));
+        }
+        self
+    }
+}
+
+/// The default place for `name` moved from the working directory into the
+/// data directory. Point at the new place, and say so when only the old file
+/// exists, so an upgrade does not quietly start from an empty tally or banlist.
+fn moved_default(dir: &std::path::Path, name: &str, env: &str) -> PathBuf {
+    let new = dir.join(name);
+    if !new.exists() && std::path::Path::new(name).exists() {
+        warn!(
+            "stratum: {} is in the working directory but the node now uses {}; move it there or set {}",
+            name,
+            new.display(),
+            env
+        );
+    }
+    new
 }
 
 fn validate_stratum_exposure_policy(config: &StratumConfig) -> Result<()> {
@@ -684,19 +742,9 @@ impl StratumServer {
     /// Create a new Stratum server
     pub fn new(config: StratumConfig, chain: SharedBlockchain, mempool: SharedMempool) -> Self {
         let (job_broadcast, _) = broadcast::channel(16);
-        let banlist_path = std::env::var("COINCYNC_STRATUM_BANLIST_PATH")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| Some(PathBuf::from("stratum_bans.json")));
+        let banlist_path = config.banlist_path.clone();
         let bans = banlist_path.as_ref().map(load_banlist).unwrap_or_default();
-        let tally_path = std::env::var("COINCYNC_STRATUM_TALLY_PATH")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| Some(PathBuf::from("stratum_shares.json")));
+        let tally_path = config.tally_path.clone();
         let share_tally = tally_path.as_deref().map(load_tally).unwrap_or_default();
 
         StratumServer {
@@ -932,6 +980,14 @@ impl StratumServer {
             let mut persisted_valid_shares = stats.read().await.valid_shares;
 
             while running.load(Ordering::SeqCst) {
+                // Write the share tally when it moved: at most one file write
+                // per second, outside the stats lock. First thing in the tick,
+                // so a candidate build that fails and retries cannot skip it.
+                if let Some(path) = tally_path.as_ref() {
+                    if stats.read().await.valid_shares != persisted_valid_shares {
+                        persisted_valid_shares = write_tally(&tally_lock, &stats, path).await;
+                    }
+                }
                 let tip = chain.tip_hash();
 
                 // Check if we need a new job
@@ -976,6 +1032,7 @@ impl StratumServer {
                                 }
                                 Err(e) => {
                                     warn!("stratum: build_candidate_block failed: {e}; retrying");
+                                    last_tip = Hash::zero();
                                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                                     continue;
                                 }
@@ -1018,14 +1075,6 @@ impl StratumServer {
                         job_height,
                         payout_spend.is_some()
                     );
-                }
-
-                // Write the share tally when it moved: at most one file write
-                // per second, outside the stats lock.
-                if let Some(path) = tally_path.as_ref() {
-                    if stats.read().await.valid_shares != persisted_valid_shares {
-                        persisted_valid_shares = write_tally(&tally_lock, &stats, path).await;
-                    }
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -2186,8 +2235,9 @@ fn load_tally(path: &std::path::Path) -> HashMap<String, u128> {
 
 /// Snapshot the tally and write it, one writer at a time from snapshot to
 /// rename: the job updater and the shutdown flush both come through here, so
-/// an older snapshot is never renamed over a newer file. Returns the valid
-/// share count the snapshot was taken at.
+/// an older snapshot is never renamed over a newer file. The file work runs on
+/// a blocking thread, off the runtime. Returns the valid share count the
+/// snapshot was taken at.
 async fn write_tally(
     lock: &tokio::sync::Mutex<()>,
     stats: &RwLock<StratumStats>,
@@ -2198,7 +2248,10 @@ async fn write_tally(
         let s = stats.read().await;
         (s.valid_shares, s.share_tally.clone())
     };
-    persist_tally(path, &tally);
+    let path = path.to_path_buf();
+    if let Err(e) = tokio::task::spawn_blocking(move || persist_tally(&path, &tally)).await {
+        warn!("stratum: tally writer failed: {e}");
+    }
     valid
 }
 
@@ -2287,9 +2340,39 @@ mod tests {
     use std::io::Write;
     use std::sync::{Mutex, OnceLock};
 
+    /// A server with no files, so a tally or a banlist left behind by a local
+    /// pool run cannot leak into the tests.
+    fn test_server(chain: SharedBlockchain, mempool: SharedMempool) -> StratumServer {
+        let config = StratumConfig {
+            tally_path: None,
+            banlist_path: None,
+            ..StratumConfig::default()
+        };
+        StratumServer::new(config, chain, mempool)
+    }
+
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// The node keeps the tally and the banlist in its per-network data
+    /// directory; an env var still wins for the file it names.
+    #[test]
+    fn config_files_follow_the_data_dir_unless_the_env_points_elsewhere() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::remove_var("COINCYNC_STRATUM_TALLY_PATH");
+        std::env::remove_var("COINCYNC_STRATUM_BANLIST_PATH");
+        let dir = std::path::Path::new("/var/lib/coincync/testnet");
+        let cfg = StratumConfig::default().files_in(dir);
+        assert_eq!(cfg.tally_path, Some(dir.join("stratum_shares.json")));
+        assert_eq!(cfg.banlist_path, Some(dir.join("stratum_bans.json")));
+
+        std::env::set_var("COINCYNC_STRATUM_TALLY_PATH", "/srv/pool/tally.json");
+        let cfg = StratumConfig::default().files_in(dir);
+        assert_eq!(cfg.tally_path, Some(PathBuf::from("/srv/pool/tally.json")));
+        assert_eq!(cfg.banlist_path, Some(dir.join("stratum_bans.json")));
+        std::env::remove_var("COINCYNC_STRATUM_TALLY_PATH");
     }
 
     #[test]
@@ -3524,7 +3607,7 @@ mod tests {
     async fn share_tally_weights_valid_shares_per_login_skips_empty() {
         let chain = Arc::new(crate::chain::Blockchain::new());
         let mempool = crate::mempool::SharedMempool::new();
-        let server = StratumServer::new(StratumConfig::default(), chain, mempool);
+        let server = test_server(chain, mempool);
 
         {
             let mut s = server.stats.write().await;
@@ -3550,7 +3633,7 @@ mod tests {
     async fn share_tally_survives_disconnect_and_reload() {
         let chain = Arc::new(crate::chain::Blockchain::new());
         let mempool = crate::mempool::SharedMempool::new();
-        let server = StratumServer::new(StratumConfig::default(), chain, mempool);
+        let server = test_server(chain, mempool);
         {
             let mut w = server.workers.write().await;
             let mut a = mk_worker(true, vec![0, 0, 0, 0]);
@@ -3608,7 +3691,7 @@ mod tests {
     async fn flush_tally_waits_for_the_running_writer() {
         let chain = Arc::new(crate::chain::Blockchain::new());
         let mempool = crate::mempool::SharedMempool::new();
-        let mut server = StratumServer::new(StratumConfig::default(), chain, mempool);
+        let mut server = test_server(chain, mempool);
         let uniq = format!(
             "coincync-stratum-shares-lock-{}-{}.json",
             std::process::id(),
@@ -3635,7 +3718,7 @@ mod tests {
     async fn flush_tally_replaces_the_file_and_leaves_no_tmp() {
         let chain = Arc::new(crate::chain::Blockchain::new());
         let mempool = crate::mempool::SharedMempool::new();
-        let mut server = StratumServer::new(StratumConfig::default(), chain, mempool);
+        let mut server = test_server(chain, mempool);
         let uniq = format!(
             "coincync-stratum-shares-flush-{}-{}.json",
             std::process::id(),
@@ -3717,7 +3800,7 @@ mod tests {
     async fn worker_stats_and_pool_hashrate_follow_the_work_behind_valid_shares() {
         let chain = Arc::new(crate::chain::Blockchain::new());
         let mempool = crate::mempool::SharedMempool::new();
-        let server = StratumServer::new(StratumConfig::default(), chain, mempool);
+        let server = test_server(chain, mempool);
         {
             let mut w = server.workers.write().await;
             let mut a = mk_worker(true, vec![0, 0, 0, 0]);
@@ -3749,7 +3832,7 @@ mod tests {
     async fn close_round_waits_for_the_running_writer() {
         let chain = Arc::new(crate::chain::Blockchain::new());
         let mempool = crate::mempool::SharedMempool::new();
-        let mut server = StratumServer::new(StratumConfig::default(), chain, mempool);
+        let mut server = test_server(chain, mempool);
         let uniq = format!(
             "coincync-stratum-round-lock-{}-{}.json",
             std::process::id(),
@@ -3776,7 +3859,7 @@ mod tests {
     async fn close_round_moves_the_tally_to_a_dated_file_and_starts_the_next_from_zero() {
         let chain = Arc::new(crate::chain::Blockchain::new());
         let mempool = crate::mempool::SharedMempool::new();
-        let mut server = StratumServer::new(StratumConfig::default(), chain, mempool);
+        let mut server = test_server(chain, mempool);
         let uniq = format!(
             "coincync-stratum-round-{}-{}.json",
             std::process::id(),

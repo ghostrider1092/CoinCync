@@ -131,7 +131,11 @@ mod tests {
     async fn stratum_rpcs_read_the_attached_pool() {
         let state = state();
         let pool = Arc::new(StratumServer::new(
-            StratumConfig::default(),
+            StratumConfig {
+                tally_path: None,
+                banlist_path: None,
+                ..StratumConfig::default()
+            },
             state.chain.clone(),
             state.mempool.clone(),
         ));

@@ -2026,7 +2026,8 @@ async fn start_node(
     if let Some(stratum_bind) = stratum {
         match stratum_bind.parse::<std::net::SocketAddr>() {
             Ok(bind_addr) => {
-                let mut scfg = coincync::mining::stratum::StratumConfig::default();
+                let mut scfg =
+                    coincync::mining::stratum::StratumConfig::default().files_in(&db_path);
                 scfg.bind_addr = bind_addr;
                 match stratum_address.as_deref() {
                     Some(s) => match coincync::primitives::Address::from_string(s) {

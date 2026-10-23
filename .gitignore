@@ -184,3 +184,8 @@ __pycache__/
 # Local 24h-soak harness output (pure run/build artifacts — never tracked)
 .localnet-soak24/
 target-soak/
+
+# Stratum pool state written by a local --stratum run (share tally, closed rounds, banlist)
+stratum_shares.json
+stratum_shares.*.json
+stratum_bans.json

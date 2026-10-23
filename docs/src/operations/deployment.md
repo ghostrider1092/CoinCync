@@ -151,7 +151,7 @@ If you run Stratum (`coincync-miner` pool mode), abuse tracking now persists acr
 
 - Banlist file path:
   - `COINCYNC_STRATUM_BANLIST_PATH=/var/lib/coincync/stratum_bans.json`
-  - default if unset: `stratum_bans.json` in the process working directory
+  - default if unset: `stratum_bans.json` in the node's data directory for that network (`<data-dir>/<network>/`)
 
 Use the built-in maintenance tool:
 

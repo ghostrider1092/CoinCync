@@ -142,8 +142,9 @@ miners from the pool wallet based on their contribution.
 The server now **measures** contribution: `StratumServer::share_tally()` returns
 a difficulty-weighted valid-share count per miner `login` (conventionally
 `<miner_address>.<worker>`). The tally is kept per `login` rather than per
-connection and written to `stratum_shares.json` (path:
-`COINCYNC_STRATUM_TALLY_PATH`; written once a second and at shutdown), so it
+connection and written to `stratum_shares.json` in the node's data directory
+for that network (override with `COINCYNC_STRATUM_TALLY_PATH`; written once a
+second and at shutdown), so it
 survives a miner's disconnect and a node restart. The node's JSON-RPC reads it:
 `get_stratum_stats` returns the pool totals, a hashrate estimate and one entry
 per connected worker (login, difficulty, shares, work, hashrate, seconds since
