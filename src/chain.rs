@@ -6494,6 +6494,101 @@ mod tests {
         }
     }
 
+    /// Regression lock for the aged-band decoy bug (0x4D-5A, PR #336 review):
+    /// the sampler must draw decoys uniformly across the WHOLE `tip-4096` window,
+    /// not just the oldest blocks that fill the pool first. If the decoys are an
+    /// aged band, a recently-created treasury is the one output outside their
+    /// height range — the opposite of unlinkable. The pre-fix "stop when full"
+    /// scan banded every decoy into the oldest ~`target_pool` outputs and could
+    /// never emit a recent one; this test fails against that behavior and passes
+    /// with the whole-window reservoir sampler.
+    #[test]
+    fn solvency_decoys_are_drawn_across_the_whole_window_not_an_aged_band() {
+        use crate::primitives::{Amount, Height, PublicKey};
+        use crate::transaction::{TxOutput, TxType};
+        use std::collections::HashMap;
+
+        let mk_out = |seed: u64| TxOutput {
+            stealth_address: PublicKey::from_bytes([3u8; 32]),
+            tx_public_key: PublicKey::from_bytes([4u8; 32]),
+            commitment: {
+                let mut c = [0u8; 32];
+                c[..8].copy_from_slice(&seed.to_le_bytes());
+                c
+            },
+            encrypted_amount: Vec::new(),
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: Vec::new(),
+        };
+        let mk_tx = |tag: u64, outs: Vec<TxOutput>| Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: Vec::new(),
+            outputs: outs,
+            fee: Amount::from_atomic(tag),
+            range_proof: Vec::new(),
+            extra: tag.to_le_bytes().to_vec(),
+        };
+        let mk_block = |height: u64, txs: Vec<Transaction>| {
+            let mut b = create_genesis_block();
+            b.header.height = Height::new(height);
+            b.header.nonce = height; // distinct hashes per height
+            b.transactions = txs;
+            b
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+
+        // 120 blocks x 2 indexed outputs = 240 anchorable outputs, well over the
+        // sampler's target_pool for count=16 (16*8=128). A "stop when full" scan
+        // would band into the oldest ~64 blocks and never reach the recent end.
+        let top: u64 = 120;
+        let mut tx_height: HashMap<Hash, u64> = HashMap::new();
+        {
+            let mut inner = chain.inner.write();
+            let mut last_hash = inner.tip.hash;
+            for h in 1..=top {
+                let tx = mk_tx(h, vec![mk_out(h * 10), mk_out(h * 10 + 1)]);
+                tx_height.insert(tx.hash(), h);
+                let b = mk_block(h, vec![tx]);
+                last_hash = b.hash();
+                inner.blocks.insert(b.hash(), b.clone());
+                inner.height_to_hash.insert(h, b.hash());
+            }
+            inner.tip.height = top;
+            inner.tip.hash = last_hash;
+        }
+        // Index every tx so get_tx_location resolves it (anchorable gate).
+        for (txh, h) in &tx_height {
+            db.index_tx(txh.as_bytes(), *h, 0).unwrap();
+        }
+
+        // Union decoy heights over repeated draws. Uniform sampling across the
+        // window makes reaching both ends essentially certain; the aged-band bug
+        // makes reaching the recent end impossible.
+        let mut min_h = u64::MAX;
+        let mut max_h = 0u64;
+        for _ in 0..24 {
+            let (decoys, _tip, _th) = collect_anchorable_solvency_decoys(&chain, 16, None);
+            assert!(decoys.len() >= 16, "sampler returned too few decoys: {}", decoys.len());
+            for d in &decoys {
+                // Genesis-coinbase decoys (not in this map) are irrelevant here.
+                if let Some(&h) = tx_height.get(&d.tx_hash) {
+                    min_h = min_h.min(h);
+                    max_h = max_h.max(h);
+                }
+            }
+        }
+        assert!(min_h <= top / 4, "decoys never reached the old end (min height {min_h})");
+        assert!(
+            max_h >= top - 10,
+            "decoys never reached the recent end (max height {max_h}); aged-band regression"
+        );
+    }
+
     #[test]
     fn load_from_database_rejects_missing_genesis_height_entry() {
         // Chain state present but the height index has no genesis (height-0)

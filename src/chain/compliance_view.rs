@@ -181,48 +181,65 @@ pub fn collect_anchorable_solvency_decoys(
     }
 
     let start = tip.saturating_sub(SOLVENCY_DECOY_WINDOW);
-    // The auditor's own resolver: a decoy is only kept if it anchors here, the
-    // same way verification will resolve it.
-    let view = NodeChainView::new(chain);
-    // Over-sample the anchorable pool so the shuffle has variety, then truncate.
+    // Over-sample the anchorable pool so the final shuffle has variety.
     let target_pool = count.saturating_mul(8).max(64);
+
+    // Draw the pool by RESERVOIR SAMPLING (Algorithm R) over EVERY anchorable
+    // output in [start, tip], so the sample is uniform across the WHOLE window
+    // rather than the oldest blocks that happen to fill it first. A "stop when
+    // full" scan yields an aged band of decoys, which leaves a recently-created
+    // treasury as the one output outside the decoys' height range — the exact
+    // opposite of unlinkable. One pass, bounded memory.
+    use rand::Rng;
+    let mut rng = rand::rngs::OsRng;
     let mut seen: std::collections::HashSet<(Hash, u8)> = std::collections::HashSet::new();
-    let mut candidates: Vec<SolvencyDecoy> = Vec::new();
+    let mut reservoir: Vec<SolvencyDecoy> = Vec::with_capacity(target_pool);
+    let mut n_eligible: u64 = 0; // eligible outputs seen so far (0-indexed stream)
 
     let mut h = start;
-    'scan: while h <= tip && candidates.len() < target_pool {
+    while h <= tip {
         if let Some(block) = chain.get_block_by_height(h) {
-            for tx in &block.transactions {
+            for (tx_pos, tx) in block.transactions.iter().enumerate() {
                 let txh = tx.hash();
+                // Anchorability gate — equivalent to NodeChainView::anchor, but
+                // without re-fetching the block per output: the location index
+                // must resolve this tx to THIS canonical position. A genesis
+                // coinbase that was never indexed, or a reorg-orphaned tx,
+                // resolves elsewhere or not at all and is filtered, so the
+                // sampler and the auditor's anchor path can never disagree. The
+                // commitment then matches by construction (same canonical output).
+                if chain.get_tx_location(txh.as_bytes()) != Some((h, tx_pos as u32)) {
+                    continue;
+                }
                 for (idx, o) in tx.outputs.iter().enumerate() {
                     // A DisclosureOutputRef indexes outputs with a `u8`; an
-                    // output beyond 255 is unrepresentable (and callers cast
-                    // `as u8`), so never offer it.
-                    if idx > u8::MAX as usize {
-                        break;
-                    }
-                    let oi = idx as u8;
+                    // output beyond 255 is unrepresentable, so never offer it.
+                    let oi = match u8::try_from(idx) {
+                        Ok(v) => v,
+                        Err(_) => break,
+                    };
                     if exclude == Some((txh, oi)) {
                         continue; // never return the prover's treasury
                     }
                     if !seen.insert((txh, oi)) {
                         continue; // de-duplicate (a tx can recur across blocks)
                     }
-                    // Anchorability gate: resolve exactly as the auditor will,
-                    // and require the resolved commitment to match this output.
-                    let dref = DisclosureOutputRef { tx_hash: txh, output_index: oi };
-                    if let Ok(Some(anchor)) = view.anchor(&dref) {
-                        if anchor.commitment == o.commitment {
-                            candidates.push(SolvencyDecoy {
-                                tx_hash: txh,
-                                output_index: oi,
-                                commitment: o.commitment,
-                            });
-                            if candidates.len() >= target_pool {
-                                break 'scan;
-                            }
+                    let decoy = SolvencyDecoy {
+                        tx_hash: txh,
+                        output_index: oi,
+                        commitment: o.commitment,
+                    };
+                    // Algorithm R: fill the reservoir, then replace a random
+                    // slot with probability target_pool / (n_eligible + 1).
+                    if reservoir.len() < target_pool {
+                        reservoir.push(decoy);
+                    } else {
+                        let j = rng.gen_range(0..=n_eligible as usize);
+                        if j < target_pool {
+                            reservoir[j] = decoy;
                         }
                     }
+                    n_eligible += 1;
                 }
             }
         }
@@ -231,8 +248,8 @@ pub fn collect_anchorable_solvency_decoys(
 
     {
         use rand::seq::SliceRandom;
-        candidates.shuffle(&mut rand::rngs::OsRng);
+        reservoir.shuffle(&mut rng);
     }
-    candidates.truncate(count);
-    (candidates, tip, tip_hash)
+    reservoir.truncate(count);
+    (reservoir, tip, tip_hash)
 }

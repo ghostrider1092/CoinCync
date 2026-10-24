@@ -501,8 +501,8 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             let count = arr
                 .first()
                 .and_then(|v| v.as_u64())
-                .ok_or_else(|| ErrorObjectOwned::owned(-32602, "params[0] (count) must be a u64", None::<()>))?
-                as usize;
+                .and_then(|c| usize::try_from(c).ok())
+                .ok_or_else(|| ErrorObjectOwned::owned(-32602, "params[0] (count) must be a u64", None::<()>))?;
             if count == 0 || count > 256 {
                 return Err(ErrorObjectOwned::owned(
                     -32602,
@@ -519,17 +519,17 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                     let tx_hash = Hash::from_hex(tx_hex).ok_or_else(|| {
                         ErrorObjectOwned::owned(-32602, "exclude.tx_hash: bad 32-byte hex", None::<()>)
                     })?;
-                    let oi = v.get("output_index").and_then(|x| x.as_u64()).ok_or_else(|| {
+                    let oi_u64 = v.get("output_index").and_then(|x| x.as_u64()).ok_or_else(|| {
                         ErrorObjectOwned::owned(-32602, "exclude.output_index must be a u64", None::<()>)
                     })?;
-                    if oi > u8::MAX as u64 {
-                        return Err(ErrorObjectOwned::owned(
+                    let oi = u8::try_from(oi_u64).map_err(|_| {
+                        ErrorObjectOwned::owned(
                             -32602,
                             "exclude.output_index out of range (0..=255)".to_string(),
                             None::<()>,
-                        ));
-                    }
-                    Some((tx_hash, oi as u8))
+                        )
+                    })?;
+                    Some((tx_hash, oi))
                 }
                 _ => None,
             };
