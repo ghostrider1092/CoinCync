@@ -124,7 +124,7 @@ CyncHub V1 does **not** reimplement either side of the swap. It uses the existin
 | `cync.rs` | CYNC-side lock construction + RPC. Used as-is. |
 | `btc.rs` | Bitcoin-side HTLC construction + RPC. Used as-is. |
 | `adaptor.rs` | Adaptor-signature primitives. Used as-is. |
-| `strict_dleq.rs` | Cross-curve DLEQ proof. Used as-is. |
+| `cross_curve_dleq.rs` | Cross-curve DLEQ proof (v2). Used as-is. |
 | `state.rs` | Swap state-file persistence with HMAC. Wallet-side; used as-is. |
 | `coordinator.rs` | Peer-to-peer orchestration. Replaced by CyncHub orderbook. |
 

@@ -20,7 +20,8 @@
 
 examine_globs = [
     # ─── cyncswap crypto perimeter (Priority 1-7 per cyncswap-audit-prep.md §5) ───
-    "crates/coincync-swap/src/strict_dleq.rs",  # Priority 1 + 2: CDLP scalar-order, soundness
+    "crates/coincync-swap/src/cross_curve_dleq.rs",    # Priority 1 + 2: cross-curve DLEQ soundness
+    "crates/coincync-swap/src/cross_curve_dleq/*.rs",  # joint bit OR proof, transcript, generators
     "crates/coincync-swap/src/adaptor.rs",      # Priority 3 + 6: BTC adaptor + BIP-340 parity
     "crates/coincync-swap/src/cync.rs",         # Priority 4 + 5: joint-key derivation
     "crates/coincync-swap/src/btc.rs",          # Priority 7: BIP-341 script-path
@@ -37,10 +38,8 @@ examine_globs = [
     "src/wallet/persistence.rs",
 ]
 
-# Tests in these files exercise the strict-DLEQ path; without the
-# feature flag, ~250 LOC of the audit perimeter is `#[cfg(...)]`-gated
-# out and mutants there would falsely report as MISSED.
-additional_cargo_test_args = ["--features", "strict-dleq"]
+# No feature flags: the v2 cross-curve DLEQ is always compiled, so the
+# whole perimeter is visible to the default test suite.
 
 # A few patterns we deliberately don't mutate — they would generate
 # noise without measuring real test coverage.

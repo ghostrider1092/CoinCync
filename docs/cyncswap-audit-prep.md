@@ -26,7 +26,7 @@ are.
 | BTC tx construction | [crates/coincync-swap/src/btc.rs](../crates/coincync-swap/src/btc.rs) | ~2,140 | covered in unit + e2e |
 | CYNC swap key-derivation | [crates/coincync-swap/src/cync.rs](../crates/coincync-swap/src/cync.rs) | ~1,080 | covered in unit |
 | Protocol state machine | [crates/coincync-swap/src/protocol.rs](../crates/coincync-swap/src/protocol.rs) | ~820 | covered in unit + integration |
-| Strict-binding cross-curve DLEQ (Noether 2018) | [crates/coincync-swap/src/strict_dleq.rs](../crates/coincync-swap/src/strict_dleq.rs) | ~2,180 | 58 unit tests (feature-gated) |
+| Cross-curve DLEQ v2 (joint bit decomposition) | [crates/coincync-swap/src/cross_curve_dleq.rs](../crates/coincync-swap/src/cross_curve_dleq.rs) + `cross_curve_dleq/` | _re-measure after the v2 change (2026-10-03)_ | unit + adversarial tests, always compiled |
 | Coordinator (handshake + transport) | [crates/coincync-swap/src/coordinator.rs](../crates/coincync-swap/src/coordinator.rs) | ~3,490 | 24 unit + 1 integration |
 | State persistence | [crates/coincync-swap/src/state.rs](../crates/coincync-swap/src/state.rs) | ~480 | covered in unit + integration |
 | CLI binary | [crates/coincync-swap/src/bin/cyncswap.rs](../crates/coincync-swap/src/bin/cyncswap.rs) | ~3,240 | manual smoke + operator script |
@@ -36,7 +36,7 @@ are.
 **Test totals:**
 
 - **Default features:** 288 tests across the workspace, 192 in `coincync-swap` alone (179 unit + 10 integration + 3 e2e).
-- **`--features strict-dleq`:** 350 tests (adds 58 strict_dleq unit tests + 4 strict_dleq_vectors golden-file tests).
+- **`--features strict-dleq`:** removed 2026-10-03 with the v1 proofs; there is one build mode. Counts in this document predating that date are stale.
 - **0 failures, 0 warnings in both modes.**
 
 **Explicitly out of scope** for this audit:
@@ -60,11 +60,11 @@ CoinCync is **MIT**. The COMIT `xmr-btc-swap` reference implementation is **GPL-
 | --- | --- | --- | --- |
 | BIP-340 Schnorr adaptor signature | `adaptor.rs` | `create_pre_sig_bip340`, `verify_pre_sig`, `decrypt_btc_adaptor`, `recover_secret_from_btc_sig` | secp256k1, BIP-340 parity-correct (the `create_pre_sig_bip340` variant handles the odd-parity retry loop) |
 | Ristretto255 Schnorr-style adaptor | `adaptor.rs` | `cync_create_pre_sig`, `cync_verify_pre_sig`, `cync_decrypt_adaptor`, `cync_recover_secret`, `cync_adaptor_point` | **See §6.1 — the CYNC-side functions exist as primitives but the design note's joint-key model is the correct conceptual frame; the audit should confirm the two views are equivalent under renaming** |
-| Cross-curve DLEQ (fast) | `adaptor.rs` | `prove_cross_curve`, `verify_cross_curve_proof` | Dual-response Schoenmakers (1999). Default. Operationally sound — the adaptors enforce same-secret cryptographically via the spend path |
-| Cross-curve DLEQ (strict) | `strict_dleq.rs` | `prove_cross_curve_strict`, `verify_cross_curve_strict` | Noether 2018 — bit-decomposition + per-bit Pedersen + Chaum-Pedersen OR-proof + linear-combination opening. Feature-gated `--features strict-dleq`. ~81 KB on the wire. **The cryptographic-level same-secret-cross-curve property is provided by this variant.** |
+| Cross-curve DLEQ (v2) | `cross_curve_dleq.rs` | `CrossCurveStatement::new`, `prove`, `verify`, `CrossCurveProof::{to_bytes, from_bytes}` | One Sigma protocol, one Fiat-Shamir challenge: per-bit OR of (BTC AND CYNC) branches sharing each challenge across curves, plus per-curve Chaum-Pedersen `log_G T = log_H U`. Independent nonces per curve. Statement binds a session context. Fixed 56,608-byte encoding. Replaces the v1 fast proof (leaked `t`) and v1 strict proof (no cross-curve binding) |
+| Joint bit OR proof | `cross_curve_dleq/joint_bit.rs` | `commit_bit`, `respond_bit`, `JointBitStatement::reconstruct` | Both branches computed identically and selected in constant time; secret × point on secp256k1 only via ECDH (`ecmult_const`) |
 | AdaptorSecret with byte-order tracking | `adaptor.rs` | `AdaptorSecret`, `SecretEncoding` | secp256k1 BE vs Ristretto LE encoding tracked + transparent conversion; constant-time `PartialEq` via `subtle::ConstantTimeEq` |
-| NUMS generators | `strict_dleq.rs` | `h_btc_generator`, `h_cync_generator` | Try-and-increment from a fixed domain-separation tag; dlog wrt G is provably unknown. Memoized |
-| Pedersen commitments on both curves | `strict_dleq.rs` | `pedersen_commit_btc`, `pedersen_commit_cync` | Standard `value·G + blinding·H`. Rejects zero blinding (which would leak the value) |
+| NUMS generators + bit weights | `cross_curve_dleq/generators.rs` | `generators()` | `H_btc` try-and-increment, `H_cync` uniform map of SHA-512, both from v2 domain strings; `W_i = 2^i·H`. Memoized; never taken from a proof |
+| Fiat-Shamir transcript | `cross_curve_dleq/transcript.rs` | `derive_challenge` | Fixed-width absorption of version, statement digest, generators, blinding sums, all commitments and announcements; secp identity encoded as 33 zero bytes |
 | BTC tx construction (lock) | `btc.rs` | `build_lock_tx` | P2TR with optional script-tree refund branch (`RefundBranch{bob_pubkey, csv_blocks}`). Computes the tweaked output key via `TaprootBuilder::finalize().output_key()` |
 | BTC tx construction (claim) | `btc.rs` | `claim_sighash`, `build_claim_tx` | BIP-341 key-path. `build_claim_tx` re-verifies the supplied 64-byte signature under BIP-340 against the reconstructed sighash before emitting the witness |
 | BTC tx construction (refund) | `btc.rs` | `refund_sighash`, `build_refund_tx`, `refund_script` | BIP-341 script-path with BIP-68 sequence engaging CSV. `build_refund_tx` re-verifies the signature under `refund_branch.bob_pubkey` |
@@ -94,7 +94,7 @@ Read these **before reading the code**:
 
 1. **[CIP-001 §Security Considerations](cip/CIP-001-atomic-swap.md)** — the top-level threat enumeration.
 2. **[atomic-swap-clsag-adaptor-design.md §7 Primary Review Targets](atomic-swap-clsag-adaptor-design.md)** — the highest-risk cryptographic surfaces, prioritized by the design author. **Start here for the cryptographic review.**
-3. **[CIP-001 §Pre-audit hardening: strict-binding cross-curve DLEQ (Noether 2018)](cip/CIP-001-atomic-swap.md)** — the strict-DLEQ design + wire format + soundness sketch.
+3. **[CIP-001 §Cross-curve discrete-log equality proof (v2)](cip/CIP-001-atomic-swap.md)** — construction, soundness and leakage argument, wire format, and why the v1 proofs were removed.
 4. **[docs/cyncswap-transport-setup.md](cyncswap-transport-setup.md)** — operator-facing transport setup with MitM mitigation requirements.
 
 ---
@@ -105,8 +105,8 @@ Re-stating the [design note's §7](atomic-swap-clsag-adaptor-design.md) review p
 
 | Priority | Target | File:line(s) | Property |
 | --- | --- | --- | --- |
-| **1 (highest)** | CDLP scalar-order bound — proof must constrain the shared scalar to a value that is a valid discrete log in BOTH secp256k1 and Ristretto255 | `strict_dleq.rs::STRICT_BIT_COUNT` (= 252, strictly < `min(log₂ n, log₂ ℓ)`) + `decompose_to_bits` (rejects high-bit-set secrets) | An off-by-one or missing range constraint here is a **fund-loss bug**. |
-| 2 | CDLP soundness over Ristretto255 (adapted, not copied, from the secp256k1↔Ed25519 original) | `strict_dleq.rs::prove_bit_pair` + `verify_bit_pair` + `verify_linear_combination_{btc,cync}` | Adaptation is **believed** to be a simplification (prime-order target) — independent proof required. |
+| **1 (highest)** | CDLP scalar-order bound — proof must constrain the shared scalar to a value that is a valid discrete log in BOTH secp256k1 and Ristretto255 | `cross_curve_dleq.rs::BIT_COUNT` (= 252, `2^252 < min(n, ℓ)`) + `validate_witness` (rejects `t = 0` and `t ≥ 2^252` on the integer, before any scalar parsing) | An off-by-one or missing range constraint here is a **fund-loss bug**. |
+| 2 | CDLP soundness and zero-knowledge over Ristretto255 (adapted from sigma_fun's secp256k1↔Ed25519 composition) | `cross_curve_dleq/joint_bit.rs` (OR-of-AND branch sharing), `cross_curve_dleq.rs::{prove, verify}` (link proof, `U = ΣC − R·G`), `transcript.rs` | Edwards→Ristretto adaptation and the constant-time branch selection need independent review. v1 failed exactly here: shared nonce (leak) and independent per-curve bits (no binding). |
 | 3 | Adaptor completeness + extractability on the Bitcoin side | `adaptor.rs::create_pre_sig_bip340`, `decrypt_btc_adaptor`, `recover_secret_from_btc_sig` | Standard primitives, but **integration** with the timelock structure must match the refund-safety argument in CIP-001 §"Timeout Safety". |
 | 4 | Joint-key sweep indistinguishability | `cync.rs::derive_swap_spender_secret` | A CLSAG signature produced with `s = s_a + s_b` must be in-distribution identical to any other CLSAG signature. Expected to hold trivially (sum of two uniform scalars is uniform) but should be stated + confirmed. |
 | 5 | The `mu_c` non-interaction claim | Cross-module: `cync.rs::derive_swap_recipient_spend_pub` + (by reference) `coincync::crypto::clsag.rs::compute_aggregate_coefficients` | Confirm the adaptor construction genuinely never touches the commitment-binding path of CLSAG. See design note §4.1 — adaptors are on **spend keys**, range proofs are on **amount commitments**, structurally separate. |
@@ -135,9 +135,9 @@ CYNC has no script layer; outputs cannot carry timelock conditions. The `SwapPar
 
 This was unclear in CIP-001 v1; the design note's §3.6 amendment makes it explicit. The audit should verify no code path treats `cync_timeout_blocks` as an enforceable on-chain constraint.
 
-### 6.3 Strict-DLEQ is opt-in
+### 6.3 The cross-curve proof is not optional
 
-The default fast cross-curve DLEQ (dual-response Schoenmakers) is operationally sound — the swap protocol's same-secret binding is enforced by the adaptors themselves (Alice's BTC claim reveals `t` to Bob; Bob's CYNC spend secret either works (correct `t`) or fails (wrong `t`)). The cryptographic-level same-secret-cross-curve property requires the Noether 2018 strict variant, available behind Cargo feature `strict-dleq`. **Whether to ship the strict variant in production is gated by the auditor's preference** — both variants are implemented and tested.
+Earlier revisions said the adaptors enforce same-secret binding "operationally", so a fast proof sufficed. That is wrong. If `t_btc ≠ t_cync`, Alice claims the BTC by revealing `t_btc`, and Bob's CYNC key `bob + t_btc` does not open the lock. Bob loses his BTC. The v1 fast proof also leaked `t` to anyone who saw it. The v2 proof (`cross_curve_dleq`) is the only cross-curve proof and is always compiled; there is no feature flag and no fallback.
 
 ---
 
@@ -147,7 +147,7 @@ Per [design note §8](atomic-swap-clsag-adaptor-design.md), test vectors require
 
 | Vector class | Status | Where |
 | --- | --- | --- |
-| CDLP vectors (known scalar → curve points → proof) | ✅ in-crate property tests + ✅ **external golden file shipped 2026-05-18** at [crates/coincync-swap/test-vectors/strict-dleq-vectors.json](../crates/coincync-swap/test-vectors/strict-dleq-vectors.json) (3 vectors covering small / middle-of-range / near-bit-251-boundary secrets, full fast-floor proof in hex + SHA-256 of the ~81 KB strict proof). Validated by [tests/strict_dleq_vectors.rs](../crates/coincync-swap/tests/strict_dleq_vectors.rs) golden-file test which fails on any wire-format drift | `strict_dleq.rs::tests` — round-trip + tamper-rejection on every layer + determinism property under fixed seed |
+| CDLP vectors (known scalar → curve points → proof) | ⏳ none for v2. The v1 golden file and v1 reproducibility vectors were removed with the v1 proofs. v2 draws randomness from a CSPRNG, so vectors would pin an RNG stream; a verify-only vector set (fixed proof bytes → accept) is the right follow-up | `cross_curve_dleq::tests` — completeness at boundary secrets, encoding round-trip, tamper of every region, substituted statement, per-curve-secret and mixed-bit forgeries, nonce-independence regression |
 | Bitcoin adaptor vectors (pre-sig → completion → recovery round-trip) | ✅ Schnorr-only (per Open Question 1 resolution) | `adaptor.rs::tests` |
 | Joint-key vectors (`s_a`, `s_b` → `S = S_a + S_b` → CLSAG sign/verify) | ⏳ deferred to wallet integration — `cync.rs::tests::swap_*` covers the byte-level joint-key derivation; the full CLSAG sign/verify under `s = s_a + s_b` requires the `coincync` crate's CLSAG impl and is the natural test to add at wallet-integration time | `cync.rs::tests::swap_recipient_spend_pub_equals_p_plus_t`, `swap_spender_secret_pubkey_matches_swap_recipient_pubkey` |
 | Full-protocol integration vectors (recorded happy-path + refund-path swaps, replayable deterministically) | ✅ via mock chains; ⏳ live regtest+testnet vectors pending live test environment | `tests/swap_happy_path_e2e.rs` (happy + refund-via-CSV-branch + Alice-tampers-redirect anti-property) |
@@ -164,9 +164,9 @@ Auditor should know:
 
 - **Live dual-testnet smoke** ([scripts/cyncswap-dual-testnet-smoke.sh](../scripts/cyncswap-dual-testnet-smoke.sh)) is operator-driven (operator pastes signed-tx hex per step). An automated dual-testnet harness would require a running bitcoind regtest + coincync-node testnet bound to the test runner; this is a deployment concern, not a coverage concern, but worth noting.
 - **Joint-key full-CLSAG round-trip** requires the parent `coincync` crate as a dev-dependency; deferred until wallet integration lands.
-- ~~**Performance benchmarks** for the strict-DLEQ prove/verify (~81 KB proof) exist only as test timing in CI~~. **Closed 2026-05-20.** Criterion benchmark at [crates/coincync-swap/benches/strict_dleq.rs](../crates/coincync-swap/benches/strict_dleq.rs). Measured on a modern x86 desktop: `prove` ≈ **133 ms** median, `verify` ≈ **172 ms** median (100-sample criterion runs, release mode). Re-run via `cargo bench -p coincync-swap --features strict-dleq`. Cost is comfortably below the swap protocol's coordination latency budget; not a DoS surface on the verify path.
+- **Performance benchmarks** for the v2 cross-curve DLEQ: criterion target at [crates/coincync-swap/benches/cross_curve_dleq.rs](../crates/coincync-swap/benches/cross_curve_dleq.rs) (`cargo bench -p coincync-swap --bench cross_curve_dleq`). _re-measure after the v2 change (2026-10-03)_; the v1 strict numbers (133 ms / 172 ms) do not carry over.
 - ~~**Fuzzing harnesses** for the protocol state machine + the wire-format JSON parser would be valuable but are not shipped.~~ **Partially closed 2026-05-19.** Per-commit CI fuzz on 5 attacker-reachable surfaces (`fuzz_p2p_message`, `fuzz_block`, `fuzz_transaction`, `fuzz_rpc_body`, `fuzz_wallet_persistence`) at [.github/workflows/fuzz.yml](../.github/workflows/fuzz.yml) — 60 s libFuzzer + ASAN per target, every PR + push to main. Overnight script [scripts/fuzz-overnight.sh](../scripts/fuzz-overnight.sh) walks all 27 targets for deep accumulation (10.2 hr overnight #1 found + fixed wallet kdf_m_cost validation gap, commit 91a19cd). Protocol state machine still uses property tests rather than libFuzzer; the state-machine surface is a constrained finite-state graph where proptest random transition sequences arguably outperform libFuzzer.
-- ~~**CDLP external test vectors**~~ **Shipped 2026-05-18** at [crates/coincync-swap/test-vectors/strict-dleq-vectors.json](../crates/coincync-swap/test-vectors/strict-dleq-vectors.json). 3 vectors with `(secret, seed) → (T_btc, T_cync, fast_proof_hex, strict_proof_sha256)` derivation. Validated by `vectors_match_checked_in_file` golden-file test — any wire-format drift fails the test, forcing explicit re-baseline review.
+- **CDLP external test vectors** — the v1 golden file (2026-05-18) was removed with the v1 proofs. Open for v2 (see §7).
 
 ---
 
@@ -178,7 +178,7 @@ The operator running the audit should provide:
 | --- | --- |
 | Specific commit SHA being audited | `git rev-parse HEAD` against `crates/coincync-swap/` |
 | List of any local patches not yet pushed to the public repo | `git log <upstream-base>..HEAD --oneline` |
-| Cargo lock-file hash for both feature modes | `sha256sum Cargo.lock` after `cargo update --workspace` (zero) and `cargo update --workspace --features coincync-swap/strict-dleq` |
+| Cargo lock-file hash | `sha256sum Cargo.lock` after `cargo update --workspace` (zero changes expected) |
 | Operator-managed Noise XX static-key fingerprints used in production | hex-encoded 32 bytes per party (Alice + each prospective Bob) |
 | Tor `.onion` hostname format the operator plans to publish | v3 only (62 char base32 + `.onion`); v2 is deprecated and not supported |
 | Threat model exclusions (any explicitly-out-of-scope attacker capabilities) | Free-text |
@@ -205,16 +205,12 @@ cargo test -p coincync-swap
 #     - tests/state_machine_invariants.rs       (6 properties: protocol state machine)
 #     - tests/external_vectors.rs               (replays JSON vectors under test-vectors/)
 
-cargo build -p coincync-swap --features strict-dleq
-cargo test -p coincync-swap --features strict-dleq
-# expect: 254 tests pass (237 unit + 10 integration + 3 e2e + 4 strict_dleq_vectors)
+# Cross-curve DLEQ v2 suite on its own
+cargo test -p coincync-swap --lib cross_curve_dleq
 
 # Workspace-wide sweep
 cargo test --workspace --exclude coincync
-# expect: 288 tests pass
-
-cargo test --workspace --exclude coincync --features coincync-swap/strict-dleq
-# expect: 350 tests pass
+# expected counts: re-measure after the v2 change (2026-10-03)
 ```
 
 ### Reproducibility vector regeneration
@@ -287,7 +283,7 @@ Measured via `cargo llvm-cov` on Linux (WSL), 2026-05-20:
 
 | File | Line coverage |
 | --- | --- |
-| `strict_dleq.rs` | **99.07%** (1182 lines, 11 missed) |
+| `strict_dleq.rs` | removed 2026-10-03 (v1); `cross_curve_dleq*` _re-measure after the v2 change (2026-10-03)_ |
 | `cync.rs` | **97.38%** (725 lines, 19 missed) |
 | `adaptor.rs` | **97.39%** (767 lines, 20 missed) |
 | `btc.rs` | **96.72%** (1433 lines, 47 missed) |
@@ -296,7 +292,7 @@ Audit-perimeter average: **~97% line coverage**. Full per-file report (including
 
 ```bash
 CARGO_TARGET_DIR=/tmp/coincync-cov \
-  cargo llvm-cov --package coincync-swap --features strict-dleq --summary-only
+  cargo llvm-cov --package coincync-swap --summary-only
 ```
 
 Coverage measures whether tests *execute* a line; mutation measures whether tests *catch a deliberate change* on that line. 97% coverage + 100% mutation means no large blocks of audit-critical code go un-exercised, AND every operator / constant / return / match-arm mutation in the executed code is caught by at least one test.
@@ -308,7 +304,7 @@ To preserve the §8 "knowingly missing" discipline:
 - The CDLP scalar-order bound (Priority 1 in §5) is unit-tested + property-tested in-crate, but **not** cross-implementation-verified. The §11.3 vendor vectors close this once imported.
 - Joint-key full-CLSAG round-trip (§8 bullet 2) is still deferred until wallet integration.
 - Live dual-testnet vectors are still operator-driven (§8 bullet 1).
-- Strict-DLEQ benchmark numbers (§8 bullet 3) are still test-timing only.
+- Cross-curve DLEQ v2 benchmark, coverage and mutation numbers are not yet measured.
 
 The §8 gap list above is the authoritative statement of what is missing. §11 is the statement of what was added — including the §11.4 mutation-score measurement of how thoroughly the tests exercise the code paths.
 
@@ -322,6 +318,7 @@ The §8 gap list above is the authoritative statement of what is missing. §11 i
 - **2026-05-19 (evening)** — Fuzz overnight #2 finished. 26/27 targets clean; **`fuzz_wallet_persistence` found a second crash** — the symmetric lower-bound case the #1 fix didn't cover (`kdf_m_cost < argon2::Params::MIN_M_COST` panics with `MemoryTooLittle`). Lower bounds added in [src/wallet/persistence.rs](../src/wallet/persistence.rs) `WalletHeader::validate()` for all three KDF params; 4 new regression tests including hardcoded `crash-c0a0e826...` bytes. Re-fuzzing the same crash file post-fix runs clean in 1 ms. §11.2 fuzz history table updated with the result + the lesson (symmetric bounds discipline).
 - **2026-05-20** — Mutation testing pre-engagement pass. Baseline measurement of the four audit-critical files (`strict_dleq.rs`, `adaptor.rs`, `cync.rs`, `btc.rs`) at 84.3% (285/338 caught) revealed missing coverage in RPC adapters and tx-construction arithmetic. **+24 new tests** added across five categories (parameterized network-string match arms in tx builders, dust-threshold boundary tests, mock-impl + sync-wrapper trait tests, wiremock-backed real-HTTP-server tests for `BitcoinCoreRpc` and `CyncNodeRpc`, explicit error-message-string assertions for the strict-DLEQ bit-0 arm). Score raised to **100.0% verified** (340 caught / 0 missed). `adaptor.rs` was 95/95 caught at baseline — no test additions needed there. New §11.4 captures the methodology + result.
 
+- **2026-10-03** — Cross-curve DLEQ v2 replaces both v1 proofs. The v1 fast proof leaked `t` from one proof (shared nonce across curves); the v1 strict proof never tied the curves' bits together and embedded the fast proof. `strict_dleq.rs`, the `strict-dleq` feature, the v1 golden file, the v1 reproducibility vectors and the v1 benchmark are removed. §0, §2, §5, §6.3, §7, §8, §10, §11.5 updated; test counts, coverage, mutation score and benchmark numbers for the new files need re-measurement.
 ---
 
 *This is a wayfinding document for the audit team. It does not change the code or the protocol. The source-of-truth for design decisions is [CIP-001](cip/CIP-001-atomic-swap.md) + its changelog + [atomic-swap-clsag-adaptor-design.md](atomic-swap-clsag-adaptor-design.md). Discrepancies between this document and the code should be resolved in favor of the code.*

@@ -8,7 +8,7 @@
 //!
 //! This iterates a fixed table of test inputs (signer key, adaptor
 //! secret, message, aux randomness), runs each one through the
-//! adapter-sig + DLEQ primitives in `coincync_swap::adaptor`, and
+//! adapter-sig primitives in `coincync_swap::adaptor`, and
 //! writes one JSON file per vector to
 //! `test-vectors/reproducibility/`.
 //!
@@ -17,6 +17,11 @@
 //! protection: any change to the primitives that alters output bytes
 //! fails the harness in `tests/external_vectors.rs` on the next CI
 //! run. See `test-vectors/reproducibility/README.md`.
+//!
+//! No cross-curve DLEQ vectors are emitted. The v1 vectors recorded the
+//! shared-nonce proof, which leaked the adaptor secret, and were removed
+//! with it. The v2 proof (`coincync_swap::cross_curve_dleq`) takes its
+//! randomness from a CSPRNG, so it has no caller-fixed nonce to vector.
 
 use std::fs;
 use std::path::PathBuf;
@@ -26,23 +31,23 @@ use serde_json::json;
 
 use coincync_swap::adaptor::{
     create_pre_sig_bip340, cync_adaptor_point, cync_create_pre_sig, cync_decrypt_adaptor,
-    cync_recover_secret, decrypt_btc_adaptor, prove_cross_curve, recover_secret_from_btc_sig,
-    verify_cross_curve_proof, verify_pre_sig, AdaptorSecret,
+    cync_recover_secret, decrypt_btc_adaptor, recover_secret_from_btc_sig, verify_pre_sig,
+    AdaptorSecret,
 };
 
 /// Table of deterministic test inputs. Each row produces a complete
-/// set of vectors (BTC adaptor + CYNC adaptor + DLEQ) for one swap.
+/// set of vectors (BTC adaptor + CYNC adaptor) for one swap.
 ///
-/// **Important constraint:** the `adaptor_secret` and `dleq_nonce_k`
-/// fields MUST be Ristretto-canonical (scalar < ℓ ≈ 2^252.39). Bytes
+/// **Important constraint:** the `adaptor_secret` field MUST be
+/// Ristretto-canonical (scalar < ℓ ≈ 2^252.39). Bytes
 /// in little-endian whose top byte (byte 31) is ≥ 0x10 land near or
 /// above ℓ and are rejected. Therefore the patterns below keep the
-/// top byte of those fields ≤ 0x0f. The `signer_seckey`, `message`,
+/// top byte of that field ≤ 0x0f. The `signer_seckey`, `message`,
 /// and `aux_rand` fields have no such constraint (signer_seckey needs
 /// secp256k1 validity only; the others are opaque bytes).
 #[allow(clippy::type_complexity)] // test-vector table; a named alias would obscure the byte layout
-const TEST_CASES: &[(&str, [u8; 32], [u8; 32], [u8; 32], [u8; 32], [u8; 32])] = &[
-    //  vector_id           signer_seckey      adaptor_secret(*)  message             aux_rand           dleq_nonce_k(*)
+const TEST_CASES: &[(&str, [u8; 32], [u8; 32], [u8; 32], [u8; 32])] = &[
+    //  vector_id           signer_seckey      adaptor_secret(*)  message             aux_rand
     //  (*) = top byte must be ≤ 0x0f for Ristretto-canonical
     (
         "vec-001-canonical",
@@ -50,7 +55,6 @@ const TEST_CASES: &[(&str, [u8; 32], [u8; 32], [u8; 32], [u8; 32], [u8; 32])] = 
         [0x02; 32],
         [0x03; 32],
         [0x04; 32],
-        [0x05; 32],
     ),
     (
         "vec-002-low-scalars",
@@ -58,7 +62,6 @@ const TEST_CASES: &[(&str, [u8; 32], [u8; 32], [u8; 32], [u8; 32], [u8; 32])] = 
         [0x01; 32],
         [0x13; 32],
         [0x14; 32],
-        [0x07; 32],
     ),
     (
         "vec-003-mid-scalars",
@@ -66,7 +69,6 @@ const TEST_CASES: &[(&str, [u8; 32], [u8; 32], [u8; 32], [u8; 32], [u8; 32])] = 
         [0x08; 32],
         [0x44; 32],
         [0x45; 32],
-        [0x09; 32],
     ),
     (
         "vec-004-alt-msg",
@@ -74,7 +76,6 @@ const TEST_CASES: &[(&str, [u8; 32], [u8; 32], [u8; 32], [u8; 32], [u8; 32])] = 
         [0x02; 32],
         [0xff; 32],
         [0x04; 32],
-        [0x05; 32],
     ),
     (
         "vec-005-alt-aux",
@@ -82,7 +83,6 @@ const TEST_CASES: &[(&str, [u8; 32], [u8; 32], [u8; 32], [u8; 32], [u8; 32])] = 
         [0x02; 32],
         [0x03; 32],
         [0xa0; 32],
-        [0x05; 32],
     ),
 ];
 
@@ -206,47 +206,6 @@ fn emit_cync_adaptor(
     println!("emitted {}", path.display());
 }
 
-fn emit_dleq(vec_id: &str, secret_bytes: &[u8; 32], nonce_k_bytes: &[u8; 32]) {
-    let secp = Secp256k1::new();
-    let secret = AdaptorSecret::from_ristretto_bytes(*secret_bytes).expect("Ristretto-canonical");
-    let t_sk = SecretKey::from_slice(&secret.secp256k1_bytes()).unwrap();
-    let t_btc_bytes = PublicKey::from_secret_key(&secp, &t_sk).serialize();
-    let t_cync_bytes = cync_adaptor_point(&secret).expect("cync pt");
-
-    let Ok(proof) = prove_cross_curve(&secret, &t_btc_bytes, &t_cync_bytes, nonce_k_bytes) else {
-        eprintln!("vec {vec_id}: prove_cross_curve failed; skipping");
-        return;
-    };
-    verify_cross_curve_proof(&proof, &t_btc_bytes, &t_cync_bytes).expect("verify");
-
-    let vec_json = json!({
-        "primitive": "dleq-cross-curve",
-        "operation": "prove_then_verify",
-        "source_file": "crates/coincync-swap/src/adaptor.rs",
-        "source_test": "examples/gen_reproducibility_vectors.rs",
-        "inputs": {
-            "adaptor_secret_ristretto": hex(secret_bytes),
-            "nonce_k_ristretto": hex(nonce_k_bytes),
-        },
-        "expected": {
-            "t_btc_compressed": hex(&t_btc_bytes),
-            "t_cync_ristretto": hex(&t_cync_bytes),
-            "proof_a_btc": hex(&proof.a_btc),
-            "proof_a_cync": hex(&proof.a_cync),
-            "proof_s_btc": hex(&proof.s_btc),
-            "proof_s_cync": hex(&proof.s_cync),
-        },
-        "notes": "Self-generated regression vector for Maxwell-Poelstra cross-curve DLEQ."
-    });
-
-    let path = out_dir()
-        .join("dleq-cross-curve")
-        .join(format!("{vec_id}.json"));
-    fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
-    fs::write(&path, serde_json::to_string_pretty(&vec_json).unwrap()).expect("write");
-    println!("emitted {}", path.display());
-}
-
 fn main() {
     println!(
         "Generating reproducibility vectors → {}",
@@ -254,10 +213,9 @@ fn main() {
     );
     println!();
 
-    for &(id, signer_sk, secret, msg, aux_rand, dleq_nonce) in TEST_CASES {
+    for &(id, signer_sk, secret, msg, aux_rand) in TEST_CASES {
         emit_btc_adaptor(id, &signer_sk, &secret, &msg, &aux_rand);
         emit_cync_adaptor(id, &signer_sk, &secret, &msg, &aux_rand); // reuse aux_rand as nonce
-        emit_dleq(id, &secret, &dleq_nonce);
     }
 
     println!();

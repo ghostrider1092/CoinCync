@@ -43,7 +43,7 @@ TARGETS=(
   fuzz_stealth        # stealth-address output scanning
   fuzz_bulletproofs   # range-proof byte parsing
   fuzz_orchard        # orchard shielded-pool key tree + note + nullifier
-  fuzz_dleq           # strict-binding DLEQ proof (cyncswap)
+  fuzz_dleq           # cross-curve DLEQ v2 decode + verify (cyncswap; target not yet in fuzz/)
   fuzz_adaptor_sig    # cyncswap adaptor-secret parsing
   fuzz_memo_decrypt   # encrypted memo decryption
   fuzz_view_key_scope # scoped view key derivation (privacy innov #3)

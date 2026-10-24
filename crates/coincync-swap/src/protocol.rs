@@ -24,7 +24,7 @@
 //!
 //! ## What's NOT in this module
 //!
-//! Cryptographic primitives live in `adaptor.rs` and `strict_dleq.rs`; the
+//! Cryptographic primitives live in `adaptor.rs` and `cross_curve_dleq.rs`; the
 //! Bitcoin-first contract and non-serializable verification capabilities live
 //! in `safety.rs`. CYNC transaction assembly remains in the root wallet because
 //! it depends on wallet state, decoy selection, and CLSAG signing.
@@ -425,7 +425,6 @@ impl Swap {
     /// Advance Alice from the observed Bitcoin lock to the CYNC lock state.
     /// The capability can only be obtained by verifying the exact two-path
     /// Bitcoin contract, strict share bindings, and both adaptor pre-signatures.
-    #[cfg(feature = "strict-dleq")]
     pub fn apply_pre_cync_lock(
         &mut self,
         verified: &crate::safety::VerifiedPreCyncLock,
@@ -446,7 +445,6 @@ impl Swap {
 
     /// Advance Bob only after Alice's final Bitcoin claim signature has been
     /// verified and shown to reveal Alice's committed CYNC share.
-    #[cfg(feature = "strict-dleq")]
     pub fn apply_verified_claim_reveal(
         &mut self,
         verified: &crate::safety::VerifiedShareReveal,
@@ -467,7 +465,6 @@ impl Swap {
 
     /// Advance Alice only after Bob's final Bitcoin refund signature has been
     /// verified and shown to reveal Bob's committed CYNC share.
-    #[cfg(feature = "strict-dleq")]
     pub fn apply_verified_refund_reveal(
         &mut self,
         verified: &crate::safety::VerifiedShareReveal,
