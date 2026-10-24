@@ -173,14 +173,13 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
 
     // ── get_transaction ───────────────────────────────────────
     //
-    // Lookup a transaction by hash. Currently NOT IMPLEMENTED —
-    // the chain does not maintain a txid → (block_height, index)
-    // index, so we cannot satisfy this query without scanning
-    // every block. The embedded explorer's search bar in
-    // `app/11-router.js` calls this; it will display a
-    // labelled "not yet wired" error rather than silently
-    // returning empty results, so the missing index is visible
-    // and tracked.
+    // Look up a transaction by hash. WIRED: the chain maintains a persistent
+    // `txid → (block_height, tx_index)` index (`db::index_tx`, populated
+    // atomically at block connect and removed at disconnect; see
+    // `chain::get_tx_location`), so this is an O(1) index read + one block
+    // fetch — no full-chain scan. The embedded explorer's search bar
+    // (`app/11-router.js`) consumes it. Returns the tx with its block height,
+    // block hash, fee, inputs and outputs; a miss is a clean "not found".
     module.register_method("get_transaction", |params, state, _ext| {
         let (tx_hash_hex,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
             ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
@@ -226,7 +225,12 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                     Some(block) => {
                         let tx = block.transactions.get(tx_idx as usize);
                         match tx {
-                            Some(tx) => {
+                            // Re-validate the fetched tx against the QUERIED hash.
+                            // A stale tx_index entry (a reorg replaced the block at
+                            // this height without the index being cleaned) would
+                            // otherwise silently return a DIFFERENT tx. On a
+                            // mismatch we fall through to the not-found arm.
+                            Some(tx) if tx.hash().as_bytes()[..] == tx_hash_bytes[..] => {
                                 let tx_bytes = borsh::to_vec(tx).unwrap_or_default();
                                 let ring_size = tx.inputs.first().map(|i| i.ring_members.len()).unwrap_or(0);
                                 let inputs_json: Vec<Value> = tx.inputs.iter().map(|inp| {
@@ -283,8 +287,14 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                                     },
                                 }))
                             }
-                            None => Err(ErrorObjectOwned::owned(
-                                -32000, "tx index points to invalid position".to_string(), None::<()>,
+                            // Covers an idx out of range AND a stale tx_index
+                            // entry whose tx hash no longer matches the query
+                            // (post-reorg): report not-found (-5 → HTTP 404)
+                            // instead of returning a wrong transaction.
+                            _ => Err(ErrorObjectOwned::owned(
+                                -5,
+                                "transaction not found (stale or invalid tx-index entry)".to_string(),
+                                None::<()>,
                             )),
                         }
                     }
