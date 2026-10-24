@@ -90,7 +90,9 @@ impl Blockchain {
             // explorer / any anchor over a genesis output. One index pass here
             // closes the gap for every lookup.
             for (idx, tx) in genesis.transactions.iter().enumerate() {
-                db.index_tx(tx.hash().as_bytes(), 0, idx as u32)?;
+                let idx = u32::try_from(idx)
+                    .map_err(|_| Error::InvalidState("genesis tx index exceeds u32".into()))?;
+                db.index_tx(tx.hash().as_bytes(), 0, idx)?;
             }
             db.state.set_genesis_hash(&hash)?;
             // Stamp which network created this data-dir (self-preflight marker).

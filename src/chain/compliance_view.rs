@@ -194,7 +194,7 @@ pub fn collect_anchorable_solvency_decoys(
     let mut rng = rand::rngs::OsRng;
     let mut seen: std::collections::HashSet<(Hash, u8)> = std::collections::HashSet::new();
     let mut reservoir: Vec<SolvencyDecoy> = Vec::with_capacity(target_pool);
-    let mut n_eligible: u64 = 0; // eligible outputs seen so far (0-indexed stream)
+    let mut n_eligible: usize = 0; // eligible outputs seen so far (0-indexed stream)
 
     let mut h = start;
     while h <= tip {
@@ -208,7 +208,8 @@ pub fn collect_anchorable_solvency_decoys(
                 // resolves elsewhere or not at all and is filtered, so the
                 // sampler and the auditor's anchor path can never disagree. The
                 // commitment then matches by construction (same canonical output).
-                if chain.get_tx_location(txh.as_bytes()) != Some((h, tx_pos as u32)) {
+                let Ok(tx_pos) = u32::try_from(tx_pos) else { continue };
+                if chain.get_tx_location(txh.as_bytes()) != Some((h, tx_pos)) {
                     continue;
                 }
                 for (idx, o) in tx.outputs.iter().enumerate() {
@@ -234,7 +235,7 @@ pub fn collect_anchorable_solvency_decoys(
                     if reservoir.len() < target_pool {
                         reservoir.push(decoy);
                     } else {
-                        let j = rng.gen_range(0..=n_eligible as usize);
+                        let j = rng.gen_range(0..=n_eligible);
                         if j < target_pool {
                             reservoir[j] = decoy;
                         }
