@@ -376,7 +376,9 @@ mod events;
 /// privacy use case. Read-only; resolves disclosure output refs + key-image
 /// spentness against real chain state so auditors can anchor-verify packages.
 mod compliance_view;
-pub use compliance_view::NodeChainView;
+pub use compliance_view::{
+    collect_anchorable_solvency_decoys, NodeChainView, SolvencyDecoy, MAX_SOLVENCY_DECOYS,
+};
 /// Block-application helpers (issue #108). First `add_block` decomposition
 /// slice: the pre-application classifier (`classify_incoming`). Pure reads +
 /// the orphan-event record; called under `apply_lock` by `add_block` exactly
@@ -6279,6 +6281,312 @@ mod tests {
                 .mark_key_image_spent(KeyImage::from_bytes(curve_ki.to_bytes()));
         }
         assert!(view.key_image_spent(&curve_ki).unwrap());
+    }
+
+    /// Regression guard for the intermittent unlinkable-solvency disclosure
+    /// failures: over many iterations, the live decoy draw → set assembly →
+    /// anchoring loop must succeed EVERY time (no "too few distinct decoys"
+    /// build error, no `anchored_valid:false`).
+    ///
+    /// This exercises the real [`collect_anchorable_solvency_decoys`] over a
+    /// chain that deliberately contains outputs the tx-location index cannot
+    /// resolve (a genesis-like coinbase that is enumerable via
+    /// `get_block_by_height` but never `index_tx`'d — exactly the production gap
+    /// in `init_genesis` — plus a reorg-stale-style unindexed tx). Previously
+    /// such an output could be drawn as a decoy and sink the whole package;
+    /// now the sampler only emits outputs that anchor through the same lookup
+    /// the auditor uses, so the treasury-exclusion + anchorability guarantees
+    /// make the result draw-independent.
+    ///
+    /// The prior 51-test suite was all in-process with hand-built anonymity
+    /// sets and never ran this live draw→build→anchor loop, which is why the
+    /// defect slipped.
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn unlinkable_solvency_live_decoy_draw_builds_and_anchors_every_time() {
+        use crate::compliance::{AuditPackage, UnlinkableSolvencyItem};
+        use crate::crypto::{
+            create_unlinkable_solvency_proof, BlindingFactor, DisclosureOutputRef,
+            PedersenCommitment,
+        };
+        use crate::primitives::{Amount, Height, PublicKey};
+        use crate::transaction::{TxOutput, TxType};
+        use rand::rngs::OsRng;
+        use rand::seq::SliceRandom;
+        use std::collections::HashSet;
+
+        // ── Builders (pure; no shared mutable capture) ──────────────────────
+        let mk_commit =
+            |seed: u64| PedersenCommitment::commit(seed, &BlindingFactor::random(&mut OsRng)).to_bytes();
+        let mk_out = |commitment: [u8; 32]| TxOutput {
+            stealth_address: PublicKey::from_bytes([3u8; 32]),
+            tx_public_key: PublicKey::from_bytes([4u8; 32]),
+            commitment,
+            encrypted_amount: Vec::new(),
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: Vec::new(),
+        };
+        // `tag` keeps each tx's hash distinct.
+        let mk_tx = |tag: u64, outs: Vec<TxOutput>| Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: Vec::new(),
+            outputs: outs,
+            fee: Amount::from_atomic(tag),
+            range_proof: Vec::new(),
+            extra: tag.to_le_bytes().to_vec(),
+        };
+        let mk_block = |height: u64, nonce: u64, txs: Vec<Transaction>| {
+            let mut b = create_genesis_block();
+            b.header.height = Height::new(height);
+            b.header.nonce = nonce;
+            b.transactions = txs;
+            b
+        };
+        // A decoy tx with `n` distinct outputs, seeded for distinct commitments.
+        let dec = |seed: u64, n: usize| -> Transaction {
+            let outs: Vec<TxOutput> =
+                (0..n).map(|i| mk_out(mk_commit(seed * 100 + i as u64))).collect();
+            mk_tx(seed, outs)
+        };
+
+        // ── A chain with a DB, like a real regtest node ─────────────────────
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+
+        // Treasury: known (value, blinding) whose commitment we place on-chain.
+        let value = 5_000_000u64;
+        let threshold = 1_000_000u64;
+        let treasury_blinding = BlindingFactor::random(&mut OsRng);
+        let treasury_commitment = PedersenCommitment::commit(value, &treasury_blinding).to_bytes();
+        let treasury_tx = mk_tx(1, vec![mk_out(treasury_commitment)]);
+        let treasury_ref = DisclosureOutputRef { tx_hash: treasury_tx.hash(), output_index: 0 };
+
+        // Outputs the auditor cannot anchor (must never be drawn as a decoy).
+        let mut unanchorable: HashSet<(Hash, u8)> = HashSet::new();
+
+        // h0: a genesis-like coinbase — enumerable, but (as in init_genesis)
+        // never indexed, so `get_tx_location` cannot resolve it.
+        let g_tx = mk_tx(2, vec![mk_out(mk_commit(10))]);
+        let g_block = mk_block(0, 100, vec![g_tx.clone()]);
+        unanchorable.insert((g_tx.hash(), 0));
+
+        // h1..=h5: indexed, anchorable decoy outputs (20 total) + the treasury
+        // at h1. h5 also carries an UNINDEXED tx (reorg-stale analogue).
+        let b1 = mk_block(1, 101, vec![treasury_tx.clone(), dec(11, 2), dec(12, 2)]);
+        let b2 = mk_block(2, 102, vec![dec(21, 2), dec(22, 2)]);
+        let b3 = mk_block(3, 103, vec![dec(31, 2), dec(32, 2)]);
+        let b4 = mk_block(4, 104, vec![dec(41, 2), dec(42, 2)]);
+        let t_h5k = dec(53, 2); // deliberately left out of the index below
+        let b5 = mk_block(5, 105, vec![dec(51, 2), dec(52, 2), t_h5k.clone()]);
+        unanchorable.insert((t_h5k.hash(), 0));
+        unanchorable.insert((t_h5k.hash(), 1));
+
+        {
+            let mut inner = chain.inner.write();
+            for (h, b) in [
+                (0u64, &g_block),
+                (1, &b1),
+                (2, &b2),
+                (3, &b3),
+                (4, &b4),
+                (5, &b5),
+            ] {
+                inner.blocks.insert(b.hash(), b.clone());
+                inner.height_to_hash.insert(h, b.hash());
+            }
+            inner.tip.height = 5;
+            inner.tip.hash = b5.hash();
+        }
+
+        // Index every tx EXCEPT the h0 genesis coinbase and the h5 stale tx.
+        // (`upto` = how many leading txs in the block get indexed.)
+        for (h, b, upto) in [
+            (1u64, &b1, 3usize),
+            (2, &b2, 2),
+            (3, &b3, 2),
+            (4, &b4, 2),
+            (5, &b5, 2),
+        ] {
+            for (i, tx) in b.transactions.iter().enumerate() {
+                if i < upto {
+                    db.index_tx(tx.hash().as_bytes(), h, i as u32).unwrap();
+                }
+            }
+        }
+
+        // ── Run the live draw→build→anchor loop K times ─────────────────────
+        let anon_size = 8usize;
+        let want = (anon_size - 1 + 8).min(256);
+        let k_iters = 24;
+        let now = 1_000_000u64;
+
+        for iter in 0..k_iters {
+            let (decoys, tip, tip_hash) = collect_anchorable_solvency_decoys(
+                &chain,
+                want,
+                Some((treasury_ref.tx_hash, treasury_ref.output_index)),
+            );
+            assert!(
+                decoys.len() >= anon_size - 1,
+                "iter {iter}: node returned too few distinct decoys ({})",
+                decoys.len()
+            );
+            // The treasury and the unanchorable outputs must never be drawn.
+            for d in &decoys {
+                let key = (d.tx_hash, d.output_index);
+                assert_ne!(key, (treasury_ref.tx_hash, treasury_ref.output_index),
+                    "iter {iter}: treasury returned as its own decoy");
+                assert!(!unanchorable.contains(&key),
+                    "iter {iter}: non-anchorable output returned as a decoy");
+            }
+
+            // Assemble the anonymity set: treasury + (anon_size - 1) decoys.
+            let mut commitments: Vec<[u8; 32]> = vec![treasury_commitment];
+            let mut refs: Vec<DisclosureOutputRef> = vec![treasury_ref.clone()];
+            let mut seen: HashSet<(Hash, u8)> = HashSet::new();
+            seen.insert((treasury_ref.tx_hash, treasury_ref.output_index));
+            for d in &decoys {
+                if commitments.len() == anon_size {
+                    break;
+                }
+                if !seen.insert((d.tx_hash, d.output_index)) {
+                    continue;
+                }
+                commitments.push(d.commitment);
+                refs.push(DisclosureOutputRef { tx_hash: d.tx_hash, output_index: d.output_index });
+            }
+            assert_eq!(commitments.len(), anon_size, "iter {iter}: set not filled");
+
+            // Shuffle so the treasury's position is hidden; track its index.
+            let mut order: Vec<usize> = (0..anon_size).collect();
+            order.shuffle(&mut OsRng);
+            let commitments: Vec<[u8; 32]> = order.iter().map(|&i| commitments[i]).collect();
+            let refs: Vec<DisclosureOutputRef> = order.iter().map(|&i| refs[i].clone()).collect();
+            let l = order.iter().position(|&i| i == 0).expect("treasury in set");
+
+            let proof = create_unlinkable_solvency_proof(
+                value,
+                &treasury_blinding,
+                &commitments,
+                l,
+                threshold,
+                tip,
+            )
+            .unwrap_or_else(|e| panic!("iter {iter}: build proof: {e}"));
+            let pin = tip_hash.map(|h| *h.as_bytes()).unwrap_or([0u8; 32]);
+            let item = UnlinkableSolvencyItem {
+                statement: "treasury solvency (regression e2e)".into(),
+                proof,
+                anonymity_refs: refs,
+                as_of_block_hash: pin,
+            };
+            let mut pkg = AuditPackage::new("Acme DAO", "2026-Q4", 1_000, Some(2_000_000_000));
+            pkg.attach_unlinkable_solvency(item);
+
+            let view = NodeChainView::new(&chain);
+            assert!(
+                pkg.verify_anchored(now, &view).unwrap(),
+                "iter {iter}: package must anchor + verify (accepted:true)"
+            );
+        }
+    }
+
+    /// Regression lock for the aged-band decoy bug (0x4D-5A, PR #336 review):
+    /// the sampler must draw decoys uniformly across the WHOLE `tip-4096` window,
+    /// not just the oldest blocks that fill the pool first. If the decoys are an
+    /// aged band, a recently-created treasury is the one output outside their
+    /// height range — the opposite of unlinkable. The pre-fix "stop when full"
+    /// scan banded every decoy into the oldest ~`target_pool` outputs and could
+    /// never emit a recent one; this test fails against that behavior and passes
+    /// with the whole-window reservoir sampler.
+    #[test]
+    fn solvency_decoys_are_drawn_across_the_whole_window_not_an_aged_band() {
+        use crate::primitives::{Amount, Height, PublicKey};
+        use crate::transaction::{TxOutput, TxType};
+        use std::collections::HashMap;
+
+        let mk_out = |seed: u64| TxOutput {
+            stealth_address: PublicKey::from_bytes([3u8; 32]),
+            tx_public_key: PublicKey::from_bytes([4u8; 32]),
+            commitment: {
+                let mut c = [0u8; 32];
+                c[..8].copy_from_slice(&seed.to_le_bytes());
+                c
+            },
+            encrypted_amount: Vec::new(),
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: Vec::new(),
+        };
+        let mk_tx = |tag: u64, outs: Vec<TxOutput>| Transaction {
+            version: 1,
+            tx_type: TxType::Transfer,
+            inputs: Vec::new(),
+            outputs: outs,
+            fee: Amount::from_atomic(tag),
+            range_proof: Vec::new(),
+            extra: tag.to_le_bytes().to_vec(),
+        };
+        let mk_block = |height: u64, txs: Vec<Transaction>| {
+            let mut b = create_genesis_block();
+            b.header.height = Height::new(height);
+            b.header.nonce = height; // distinct hashes per height
+            b.transactions = txs;
+            b
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+
+        // 120 blocks x 2 indexed outputs = 240 anchorable outputs, well over the
+        // sampler's target_pool for count=16 (16*8=128). A "stop when full" scan
+        // would band into the oldest ~64 blocks and never reach the recent end.
+        let top: u64 = 120;
+        let mut tx_height: HashMap<Hash, u64> = HashMap::new();
+        {
+            let mut inner = chain.inner.write();
+            let mut last_hash = inner.tip.hash;
+            for h in 1..=top {
+                let tx = mk_tx(h, vec![mk_out(h * 10), mk_out(h * 10 + 1)]);
+                tx_height.insert(tx.hash(), h);
+                let b = mk_block(h, vec![tx]);
+                last_hash = b.hash();
+                inner.blocks.insert(b.hash(), b.clone());
+                inner.height_to_hash.insert(h, b.hash());
+            }
+            inner.tip.height = top;
+            inner.tip.hash = last_hash;
+        }
+        // Index every tx so get_tx_location resolves it (anchorable gate).
+        for (txh, h) in &tx_height {
+            db.index_tx(txh.as_bytes(), *h, 0).unwrap();
+        }
+
+        // Union decoy heights over repeated draws. Uniform sampling across the
+        // window makes reaching both ends essentially certain; the aged-band bug
+        // makes reaching the recent end impossible.
+        let mut min_h = u64::MAX;
+        let mut max_h = 0u64;
+        for _ in 0..24 {
+            let (decoys, _tip, _th) = collect_anchorable_solvency_decoys(&chain, 16, None);
+            assert!(decoys.len() >= 16, "sampler returned too few decoys: {}", decoys.len());
+            for d in &decoys {
+                // Genesis-coinbase decoys (not in this map) are irrelevant here.
+                if let Some(&h) = tx_height.get(&d.tx_hash) {
+                    min_h = min_h.min(h);
+                    max_h = max_h.max(h);
+                }
+            }
+        }
+        assert!(min_h <= top / 4, "decoys never reached the old end (min height {min_h})");
+        assert!(
+            max_h >= top - 10,
+            "decoys never reached the recent end (max height {max_h}); aged-band regression"
+        );
     }
 
     #[test]

@@ -82,6 +82,16 @@ impl Blockchain {
         if let Some(ref db) = self.db {
             db.blocks.insert(&genesis)?;
             db.blocks.set_height_hash(0, &hash)?;
+            // Index the genesis transactions, same as the normal block-apply
+            // path does for every other block. Without this the genesis coinbase
+            // is enumerable via get_block_by_height but `get_tx_location` cannot
+            // resolve it, so it is unanchorable — which forced the disclosure
+            // decoy sampler to special-case it, and broke get_transaction / the
+            // explorer / any anchor over a genesis output. One index pass here
+            // closes the gap for every lookup.
+            for (idx, tx) in genesis.transactions.iter().enumerate() {
+                db.index_tx(tx.hash().as_bytes(), 0, idx as u32)?;
+            }
             db.state.set_genesis_hash(&hash)?;
             // Stamp which network created this data-dir (self-preflight marker).
             db.state.set_network(self.network)?;

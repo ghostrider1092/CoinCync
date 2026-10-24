@@ -16,6 +16,7 @@ use super::Blockchain;
 use crate::compliance::ChainView;
 use crate::crypto::{ChainAnchor, DisclosureOutputRef, KeyImage};
 use crate::error::Result;
+use crate::primitives::Hash;
 
 /// A [`ChainView`] that resolves disclosure output refs and key-image
 /// spentness against a live [`Blockchain`]. Cheap to construct (borrows the
@@ -127,4 +128,128 @@ impl ChainView for NodeChainView<'_> {
     fn block_hash_at(&self, height: u64) -> Result<Option<[u8; 32]>> {
         Ok(self.chain.get_block_hash(height).map(|h| *h.as_bytes()))
     }
+}
+
+/// Hard cap on decoys returned by [`collect_anchorable_solvency_decoys`] in one
+/// call (local DoS bound; mirrors the `get_solvency_decoys` RPC's param cap).
+pub const MAX_SOLVENCY_DECOYS: usize = 256;
+
+/// How far back (in blocks) the decoy sampler scans from the tip. Bounds the
+/// work per call on a long chain while still drawing from a wide recent window.
+const SOLVENCY_DECOY_WINDOW: u64 = 4096;
+
+/// A decoy output offered to hide a treasury among real on-chain outputs for an
+/// unlinkable-solvency proof: a ref the auditor can anchor, plus its commitment.
+#[derive(Clone, Debug)]
+pub struct SolvencyDecoy {
+    pub tx_hash: Hash,
+    pub output_index: u8,
+    pub commitment: [u8; 32],
+}
+
+/// Sample up to `count` DISTINCT, anchorable on-chain outputs to serve as
+/// unlinkable-solvency decoys, plus the chain tip the proof pins to
+/// (`(decoys, tip_height, tip_hash)`).
+///
+/// INVARIANT — the fix for the intermittent `anchored_valid:false`: every
+/// returned decoy is guaranteed to resolve through the SAME lookup
+/// [`NodeChainView::anchor`] uses during verification (`get_tx_location` →
+/// block → tx-hash match → output bounds), with a matching commitment. Block
+/// enumeration alone can surface an output the tx-location index cannot later
+/// resolve — a genesis coinbase (loaded outside the `add_block` indexing path),
+/// or a tx orphaned by a reorg — and handing such an output to a prover yields a
+/// package that fails anchoring on a draw-dependent basis. Those outputs are
+/// filtered out here so the decoy sampler and the auditor's anchor path can
+/// never disagree.
+///
+/// `exclude` (the prover's treasury ref) is never returned, so the treasury can
+/// never collide with its own decoys and shrink the caller's distinct set below
+/// the requested anonymity size. Candidates are de-duplicated, over-sampled,
+/// then shuffled and truncated to `count` (clamped to [`MAX_SOLVENCY_DECOYS`]).
+/// When the chain genuinely holds fewer than `count` distinct anchorable
+/// outputs, fewer are returned — the caller fails closed rather than padding.
+pub fn collect_anchorable_solvency_decoys(
+    chain: &Blockchain,
+    count: usize,
+    exclude: Option<(Hash, u8)>,
+) -> (Vec<SolvencyDecoy>, u64, Option<Hash>) {
+    let tip = chain.height();
+    let tip_hash = chain.get_block_hash(tip);
+    let count = count.min(MAX_SOLVENCY_DECOYS);
+    if count == 0 {
+        return (Vec::new(), tip, tip_hash);
+    }
+
+    let start = tip.saturating_sub(SOLVENCY_DECOY_WINDOW);
+    // Over-sample the anchorable pool so the final shuffle has variety.
+    let target_pool = count.saturating_mul(8).max(64);
+
+    // Draw the pool by RESERVOIR SAMPLING (Algorithm R) over EVERY anchorable
+    // output in [start, tip], so the sample is uniform across the WHOLE window
+    // rather than the oldest blocks that happen to fill it first. A "stop when
+    // full" scan yields an aged band of decoys, which leaves a recently-created
+    // treasury as the one output outside the decoys' height range — the exact
+    // opposite of unlinkable. One pass, bounded memory.
+    use rand::Rng;
+    let mut rng = rand::rngs::OsRng;
+    let mut seen: std::collections::HashSet<(Hash, u8)> = std::collections::HashSet::new();
+    let mut reservoir: Vec<SolvencyDecoy> = Vec::with_capacity(target_pool);
+    let mut n_eligible: u64 = 0; // eligible outputs seen so far (0-indexed stream)
+
+    let mut h = start;
+    while h <= tip {
+        if let Some(block) = chain.get_block_by_height(h) {
+            for (tx_pos, tx) in block.transactions.iter().enumerate() {
+                let txh = tx.hash();
+                // Anchorability gate — equivalent to NodeChainView::anchor, but
+                // without re-fetching the block per output: the location index
+                // must resolve this tx to THIS canonical position. A genesis
+                // coinbase that was never indexed, or a reorg-orphaned tx,
+                // resolves elsewhere or not at all and is filtered, so the
+                // sampler and the auditor's anchor path can never disagree. The
+                // commitment then matches by construction (same canonical output).
+                if chain.get_tx_location(txh.as_bytes()) != Some((h, tx_pos as u32)) {
+                    continue;
+                }
+                for (idx, o) in tx.outputs.iter().enumerate() {
+                    // A DisclosureOutputRef indexes outputs with a `u8`; an
+                    // output beyond 255 is unrepresentable, so never offer it.
+                    let oi = match u8::try_from(idx) {
+                        Ok(v) => v,
+                        Err(_) => break,
+                    };
+                    if exclude == Some((txh, oi)) {
+                        continue; // never return the prover's treasury
+                    }
+                    if !seen.insert((txh, oi)) {
+                        continue; // de-duplicate (a tx can recur across blocks)
+                    }
+                    let decoy = SolvencyDecoy {
+                        tx_hash: txh,
+                        output_index: oi,
+                        commitment: o.commitment,
+                    };
+                    // Algorithm R: fill the reservoir, then replace a random
+                    // slot with probability target_pool / (n_eligible + 1).
+                    if reservoir.len() < target_pool {
+                        reservoir.push(decoy);
+                    } else {
+                        let j = rng.gen_range(0..=n_eligible as usize);
+                        if j < target_pool {
+                            reservoir[j] = decoy;
+                        }
+                    }
+                    n_eligible += 1;
+                }
+            }
+        }
+        h += 1;
+    }
+
+    {
+        use rand::seq::SliceRandom;
+        reservoir.shuffle(&mut rng);
+    }
+    reservoir.truncate(count);
+    (reservoir, tip, tip_hash)
 }
