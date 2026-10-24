@@ -119,6 +119,79 @@ pub mod security; // chain-wide "security detail" pattern: guards + scan over at
 pub mod mainnet;
 pub mod testnet;
 
+// ── Resilience / safety connectors ──────────────────────────
+// The circuit-breaker suite + the universal fuse box + the Rung-2 state-root
+// connector. Every one is a fail-closed, default-OFF policy slot declared HERE
+// (never in the hash-locked consensus core), Observe-default, wired into the
+// node only through thin feature-gated seams. See
+// docs/design/cip-circuit-breakers.md + cip-fuse-box-resilience-standard.md.
+
+// Rung-2 UTXO state-root commitment connector (feature `state-root-commit`):
+// a fail-closed, default-OFF policy slot for committing/enforcing the UTXO state
+// root. Inert until a planned post-audit activation. See cip-rung2-state-root.md.
+#[cfg(feature = "state-root-commit")]
+pub mod state_root_connector;
+
+// Shielded-pool circuit breaker (feature `shielded-breaker`): isolates the Spark
+// shielded pool on a safety-invariant violation. CONSENSUS surface — detection
+// only until coordinated post-audit activation.
+#[cfg(feature = "shielded-breaker")]
+pub mod shielded_circuit_breaker;
+
+// Supply / emission circuit breaker (feature `supply-breaker`): the monetary
+// bulkhead against silent inflation. CONSENSUS surface — detection only.
+#[cfg(feature = "supply-breaker")]
+pub mod supply_breaker;
+
+// Mempool DoS / load-shedding circuit breaker (feature `mempool-breaker`).
+// Node-local policy (not consensus).
+#[cfg(feature = "mempool-breaker")]
+pub mod mempool_breaker;
+
+// P2P / IBD circuit breaker (feature `p2p-breaker`). Node-local policy.
+#[cfg(feature = "p2p-breaker")]
+pub mod p2p_breaker;
+
+// Reorg / finality circuit breaker (feature `reorg-breaker`). CONSENSUS surface —
+// coordinated, activation-gated arming (aligns with CIP-011).
+#[cfg(feature = "reorg-breaker")]
+pub mod reorg_breaker;
+
+// RPC DoS / service circuit breaker (feature `rpc-breaker`). Node-local policy.
+#[cfg(feature = "rpc-breaker")]
+pub mod rpc_breaker;
+
+// Block-connect / apply integrity breaker (feature `block-integrity-breaker`):
+// post-apply UTXO-set invariants. CONSENSUS surface — detection only.
+#[cfg(feature = "block-integrity-breaker")]
+pub mod block_integrity_breaker;
+
+// Shared breaker recovery state machine (feature `breaker-recovery`): the
+// three-state Closed/Open/Half-Open recovery with per-surface policy that
+// composes with any breaker's pure detect().
+#[cfg(feature = "breaker-recovery")]
+pub mod breaker_recovery;
+
+// The universal FUSE BOX: the one registry every breaker plugs into, keyed by
+// surface; feed via `fuse::observe(surface, &FaultReport)`, one `snapshot()` for
+// all compartments. Available whenever the recovery machine is; the `fuse`
+// convenience feature turns on every breaker at once. Observe-only, gated OFF.
+#[cfg(feature = "breaker-recovery")]
+pub mod fuse;
+
+// LIVE feed adapters — one thin feed point per surface at its real source, each
+// routing through the universal fuse box. All Observe-mode, node-local, gated OFF.
+#[cfg(all(feature = "mempool-breaker", feature = "breaker-recovery"))]
+pub mod mempool_live_breaker;
+#[cfg(all(feature = "p2p-breaker", feature = "breaker-recovery"))]
+pub mod p2p_live_breaker;
+#[cfg(all(feature = "block-integrity-breaker", feature = "breaker-recovery"))]
+pub mod block_integrity_live_breaker;
+#[cfg(all(feature = "reorg-breaker", feature = "breaker-recovery"))]
+pub mod reorg_live_breaker;
+#[cfg(all(feature = "rpc-breaker", feature = "breaker-recovery"))]
+pub mod rpc_live_breaker;
+
 // ── Re-exports ──────────────────────────────────────────────
 pub use config::{Network, NodeConfig};
 pub use error::{Error, Result};

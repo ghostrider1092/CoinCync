@@ -1675,7 +1675,27 @@ impl Blockchain {
 
     /// Process/add block to chain
     pub fn process_block(&self, block: Block) -> Result<BlockStatus> {
-        self.add_block(block)
+        let status = self.add_block(block)?;
+
+        // Block-integrity fuse feed (connector seam): on a block that connected to
+        // the main chain, observe the REAL post-apply UTXO-set counters through the
+        // universal fuse box. Observe-only (Latch), gated OFF, node-local — reads
+        // public accessors AFTER the lock-held apply returned, never edits it.
+        #[cfg(all(feature = "block-integrity-breaker", feature = "breaker-recovery"))]
+        {
+            if matches!(
+                status,
+                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+            ) {
+                let _ = crate::block_integrity_live_breaker::on_block_connected(
+                    self.total_outputs_ever(),
+                    self.reorg_disconnects_total(),
+                    self.utxo_count() as u64,
+                );
+            }
+        }
+
+        Ok(status)
     }
 
     /// TEST-ONLY: seed a linear main chain of `n_blocks` empty blocks on top of
@@ -2614,6 +2634,27 @@ impl Blockchain {
                     current_total_difficulty,
                     reorg_depth
                 );
+
+                // Reorg fuse feed (connector seam): a single side-effect-free line
+                // that observes this accepted reorg's REAL depth / finality floor /
+                // work ratio through the universal fuse box. Observe-only, gated
+                // OFF, node-local — mutates no chain state. `finalized` mirrors the
+                // chain's finality-floor rule (reject fork_point < floor) so the
+                // breaker's `<=` check agrees: floor-1.
+                #[cfg(all(feature = "reorg-breaker", feature = "breaker-recovery"))]
+                {
+                    let floor = self
+                        .height()
+                        .saturating_sub(crate::constants::CHECKPOINT_INTERVAL);
+                    let _ = crate::reorg_live_breaker::on_reorg(
+                        reorg_depth,
+                        net_max,
+                        fork_point,
+                        floor.saturating_sub(1),
+                        fork_cumulative,
+                        current_total_difficulty,
+                    );
+                }
 
                 // Save pre-reorg state for rollback on fork validation failure
                 let pre_reorg_tip = {

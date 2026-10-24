@@ -240,6 +240,35 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── get_fuse_status ────────────────────────────────────────
+    // Universal fuse-box telemetry: the live state of EVERY circuit-breaker
+    // compartment in the one shared box, in a single call. Observe-only readout
+    // (no consensus effect); present whenever the recovery machine is compiled
+    // (`breaker-recovery`). `isolating` is true for any non-Closed compartment.
+    // See docs/design/cip-fuse-box-resilience-standard.md.
+    #[cfg(feature = "breaker-recovery")]
+    module
+        .register_blocking_method("get_fuse_status", |_params, _state, _ext| {
+            use crate::breaker_recovery::BreakerState;
+            let surfaces: Vec<serde_json::Value> = crate::fuse::snapshot()
+                .into_iter()
+                .map(|(surface, st)| {
+                    serde_json::json!({
+                        "surface": format!("{surface:?}"),
+                        "state": format!("{st:?}"),
+                        "isolating": !matches!(st, BreakerState::Closed),
+                    })
+                })
+                .collect();
+            let isolating = surfaces.iter().filter(|s| s["isolating"] == true).count();
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "schema_version": 1,
+                "isolating_count": isolating,
+                "surfaces": surfaces,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── get_difficulty_health ──────────────────────────────────
     // Non-consensus difficulty/block-production telemetry: current difficulty,
     // an informational hashrate estimate, and inter-block interval statistics

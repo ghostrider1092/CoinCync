@@ -268,6 +268,20 @@ impl<B> ValidateRequest<B> for RpcBearerValidator {
         // exempt — it carries no auth and is harmless. Loopback IPs are
         // already whitelisted inside check_sync.
         if !matches!(*req.method(), Method::OPTIONS) {
+            // RPC fuse feed (connector seam): observe the request's declared body
+            // size + the rolling request rate through the universal fuse box.
+            // Observe-only, gated OFF, node-local — the IP limiter below is what
+            // actually enforces; this never changes request handling.
+            #[cfg(all(feature = "rpc-breaker", feature = "breaker-recovery"))]
+            {
+                let body_len = req
+                    .headers()
+                    .get(http::header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let _ = crate::rpc_live_breaker::on_request(body_len);
+            }
             if let Some(limiter) = &self.rate_limiter {
                 let ip = client_ip_from_request(req);
                 match limiter.check_sync(ip) {
