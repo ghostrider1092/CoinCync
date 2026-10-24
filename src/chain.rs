@@ -1470,6 +1470,18 @@ impl Blockchain {
                                 all_orphaned_txs.push(tx.clone());
                             }
                         }
+                        // Keep the tx_index consistent on disconnect: drop this
+                        // disconnected block's tx entries so a post-reorg
+                        // `get_transaction` can't resolve a stale `(height, idx)`
+                        // pointing at a block that is no longer canonical.
+                        // Non-consensus convenience index → best-effort direct
+                        // removal (the get_transaction handler also re-validates
+                        // the fetched tx hash as defense-in-depth).
+                        if let Some(ref db) = self.db {
+                            for tx in &txs {
+                                db.remove_tx_index(tx.hash().as_bytes());
+                            }
+                        }
                         // Subtract emission
                         let emission = calculate_block_reward(h);
                         // Burn accumulator moves in lockstep with supply: the
@@ -4123,6 +4135,77 @@ mod tests {
     const TEST_NET: crate::config::NetworkType = crate::config::NetworkType::Testnet;
     #[cfg(not(feature = "testnet"))]
     const TEST_NET: crate::config::NetworkType = crate::config::NetworkType::Mainnet;
+
+    /// LIVE end-to-end test of the transaction index wiring (the `get_transaction`
+    /// RPC's data path): mine a real block through the connect pipeline on a
+    /// DB-backed chain, then resolve the mined coinbase BY HASH via the same
+    /// `chain::get_tx_location` the RPC uses — proving block-connect populates the
+    /// `txid → (height, idx)` index, a lookup hits it, and a reorg removes it.
+    /// Needs `test-fast-pow` (nonce-0 blocks accepted).
+    #[cfg(feature = "test-fast-pow")]
+    #[test]
+    fn get_transaction_index_wired_end_to_end() {
+        use crate::chain::BlockStatus;
+        use crate::mining::block_builder::{build_candidate_block, submit_mined_block};
+        use crate::primitives::SecretKey;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let net = NetworkType::Testnet;
+        crate::consensus::bind_randomx_genesis_for_network(net);
+        let chain: crate::chain::SharedBlockchain =
+            Arc::new(Blockchain::with_database(Arc::clone(&db), net));
+        chain.init_genesis().unwrap();
+        let mempool = crate::mempool::SharedMempool::new();
+        let spend = SecretKey::from_bytes([7u8; 32]).public_key();
+        let view = SecretKey::from_bytes([9u8; 32]).public_key();
+
+        // Mine one real block through the connect pipeline.
+        let cand = build_candidate_block(
+            &chain,
+            &mempool,
+            &spend,
+            &view,
+            net,
+            crate::consensus::fork_signal::SignalBits(0),
+        )
+        .expect("candidate");
+        let blk = cand.into_block(0);
+        let coinbase_hash = blk.transactions[0].hash();
+        let status = submit_mined_block(&chain, &mempool, blk).expect("submit");
+        assert!(
+            matches!(status, BlockStatus::Accepted | BlockStatus::AcceptedFork),
+            "mined block must be accepted, got {status:?}"
+        );
+        assert_eq!(chain.height(), 1, "tip at height 1 after one block");
+
+        // THE WIRING: resolve the coinbase BY HASH via the tx index.
+        assert_eq!(
+            chain.get_tx_location(coinbase_hash.as_bytes()),
+            Some((1, 0)),
+            "get_tx_location must resolve the mined coinbase to (height 1, index 0) — the index was populated at connect"
+        );
+        // Fetch the block at that height and confirm the tx round-trips (the
+        // second half of the RPC's data path).
+        let fetched = chain.get_block_by_height(1).expect("block at height 1");
+        assert_eq!(
+            fetched.transactions[0].hash(),
+            coinbase_hash,
+            "the indexed location points at the right transaction"
+        );
+
+        // An unknown hash resolves to None (clean 'not found').
+        assert_eq!(chain.get_tx_location(&[0xABu8; 32]), None);
+
+        // Reorg-correctness: rolling back the block removes its index entries.
+        chain.rollback_to_height(0).expect("rollback");
+        assert_eq!(
+            chain.get_tx_location(coinbase_hash.as_bytes()),
+            None,
+            "rollback must remove the tx_index entry (no stale lookup after a reorg)"
+        );
+    }
 
     fn state_for_genesis(block: &Block) -> ChainStateData {
         ChainStateData {
