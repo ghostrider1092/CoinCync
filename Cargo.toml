@@ -133,6 +133,12 @@ reorg-breaker           = []
 rpc-breaker             = []
 block-integrity-breaker = []
 breaker-recovery        = []
+# REGTEST-ONLY chaos hooks for the live-user test harness: a fault-injection
+# entry point + an env-driven arm-height override, so a local regtest run can
+# trigger every breaker (incl. the consensus/money ones that never trip on a
+# correct node) and exercise fail-closed + recovery. OFF by default; NEVER
+# compiled into a production node. Needs `breaker-recovery`.
+regtest-chaos           = ["breaker-recovery"]
 state-root-commit       = []
 # The universal fuse box: the one registry every breaker plugs into (src/fuse.rs).
 # Needs only `breaker-recovery`; this convenience feature turns on EVERY breaker.

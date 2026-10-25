@@ -269,6 +269,72 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── chaos_inject_fault / chaos_rearm (REGTEST-ONLY) ─────────
+    // Live-user test-harness hooks: force-trip a breaker surface so the
+    // consensus/money breakers that never trip on a correct node CAN be
+    // exercised (then rearm to watch recovery). Feature `regtest-chaos` — NEVER
+    // compiled into a production node. See scripts/live-user-chaos.sh.
+    #[cfg(feature = "regtest-chaos")]
+    module
+        .register_blocking_method("chaos_inject_fault", |params, _state, _ext| {
+            let name: String = params
+                .one()
+                .map_err(|_| ErrorObjectOwned::owned(-32602, "expected [surface]", None::<()>))?;
+            let surface = match name.to_ascii_lowercase().as_str() {
+                "shielded" => crate::breaker_recovery::BreakerSurface::Shielded,
+                "supply" => crate::breaker_recovery::BreakerSurface::Supply,
+                "mempool" => crate::breaker_recovery::BreakerSurface::Mempool,
+                "p2p" => crate::breaker_recovery::BreakerSurface::P2p,
+                "rpc" => crate::breaker_recovery::BreakerSurface::Rpc,
+                "reorg" => crate::breaker_recovery::BreakerSurface::Reorg,
+                "blockintegrity" | "block-integrity" => {
+                    crate::breaker_recovery::BreakerSurface::BlockIntegrity
+                }
+                _ => {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        format!("unknown breaker surface {name:?}"),
+                        None::<()>,
+                    ))
+                }
+            };
+            let st = crate::fuse::inject_fault(surface, "chaos-injected");
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "surface": format!("{surface:?}"),
+                "state": format!("{st:?}"),
+                "injected": true,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+    #[cfg(feature = "regtest-chaos")]
+    module
+        .register_blocking_method("chaos_rearm", |params, _state, _ext| {
+            let name: String = params
+                .one()
+                .map_err(|_| ErrorObjectOwned::owned(-32602, "expected [surface]", None::<()>))?;
+            let surface = match name.to_ascii_lowercase().as_str() {
+                "shielded" => crate::breaker_recovery::BreakerSurface::Shielded,
+                "supply" => crate::breaker_recovery::BreakerSurface::Supply,
+                "mempool" => crate::breaker_recovery::BreakerSurface::Mempool,
+                "p2p" => crate::breaker_recovery::BreakerSurface::P2p,
+                "rpc" => crate::breaker_recovery::BreakerSurface::Rpc,
+                "reorg" => crate::breaker_recovery::BreakerSurface::Reorg,
+                "blockintegrity" | "block-integrity" => {
+                    crate::breaker_recovery::BreakerSurface::BlockIntegrity
+                }
+                _ => {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        format!("unknown breaker surface {name:?}"),
+                        None::<()>,
+                    ))
+                }
+            };
+            crate::fuse::rearm(surface);
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "surface": format!("{surface:?}"), "rearmed": true }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── get_difficulty_health ──────────────────────────────────
     // Non-consensus difficulty/block-production telemetry: current difficulty,
     // an informational hashrate estimate, and inter-block interval statistics

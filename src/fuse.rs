@@ -360,6 +360,38 @@ pub fn enforce_trips(surface: BreakerSurface, current_height: u64, arm_height: u
     fail_closed_due(current_height, arm_height, isolating(surface))
 }
 
+/// The EFFECTIVE consensus arm height the live seams use. Identical to
+/// [`default_arm_height`] in every normal build. Under the `regtest-chaos`
+/// feature only, a `COINCYNC_CHAOS_ARM=<height>` env var arms every Latch
+/// money/integrity surface at that height — so a LOCAL regtest run can exercise
+/// the fail-closed path without touching the mainnet policy slot. Never
+/// compiled with that behaviour into production (feature off by default).
+pub fn effective_arm_height(surface: BreakerSurface) -> u64 {
+    #[cfg(feature = "regtest-chaos")]
+    {
+        if matches!(
+            surface,
+            BreakerSurface::Shielded | BreakerSurface::Supply | BreakerSurface::BlockIntegrity
+        ) {
+            if let Some(h) =
+                std::env::var("COINCYNC_CHAOS_ARM").ok().and_then(|v| v.parse::<u64>().ok())
+            {
+                return h;
+            }
+        }
+    }
+    default_arm_height(surface)
+}
+
+/// REGTEST-ONLY (feature `regtest-chaos`): force a fault onto a surface so the
+/// live-user test harness can trigger a protection that a correct node would
+/// never trip (the consensus/money breakers), then exercise rearm/recovery.
+/// A no-op entry point that does not exist in a production build.
+#[cfg(feature = "regtest-chaos")]
+pub fn inject_fault(surface: BreakerSurface, label: &str) -> BreakerState {
+    observe(surface, &FaultReport::from_labels([label.to_string()]))
+}
+
 #[cfg(test)]
 mod arm_tests {
     use super::*;

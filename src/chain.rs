@@ -1725,7 +1725,7 @@ impl Blockchain {
                 if crate::fuse::enforce_trips(
                     surface,
                     connected_height,
-                    crate::fuse::default_arm_height(surface),
+                    crate::fuse::effective_arm_height(surface),
                 ) {
                     return Err(crate::error::Error::InvalidState(format!(
                         "block-integrity breaker armed and latched at height {connected_height}: \
@@ -1757,7 +1757,7 @@ impl Blockchain {
                 if crate::fuse::enforce_trips(
                     surface,
                     connected_height,
-                    crate::fuse::default_arm_height(surface),
+                    crate::fuse::effective_arm_height(surface),
                 ) {
                     return Err(crate::error::Error::InvalidState(format!(
                         "supply breaker armed and latched at height {connected_height}: a monetary \
@@ -1789,7 +1789,7 @@ impl Blockchain {
                 if crate::fuse::enforce_trips(
                     surface,
                     connected_height,
-                    crate::fuse::default_arm_height(surface),
+                    crate::fuse::effective_arm_height(surface),
                 ) {
                     return Err(crate::error::Error::InvalidState(format!(
                         "shielded breaker armed and latched at height {connected_height}: the \
