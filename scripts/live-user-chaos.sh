@@ -67,7 +67,9 @@ rpc_ok() { rpc "$@" | grep -q '"result"'; }
 fuse_status() { rpc get_fuse_status; }
 isolating_count() { fuse_status | sed -n 's/.*"isolating_count":\([0-9]*\).*/\1/p'; }
 surface_state() { # surface_state SURFACE -> Closed|Open|HalfOpen
-  fuse_status | tr ',' '\n' | grep -A2 "\"$1\"" | sed -n 's/.*"state":"\([A-Za-z]*\)".*/\1/p' | head -1
+  # get_fuse_status objects are {"isolating":B,"state":"S","surface":"NAME"} — the
+  # surface name is the LAST field, so the state line precedes it (-B1), not -A2.
+  fuse_status | tr ',' '\n' | grep -B1 "\"surface\":\"$1\"" | sed -n 's/.*"state":"\([A-Za-z]*\)".*/\1/p' | head -1
 }
 inject() { bump faults_injected; rpc chaos_inject_fault "[\"$1\"]"; }
 rearm()  { rpc chaos_rearm "[\"$1\"]"; }
@@ -81,12 +83,10 @@ kill_port() { # kill whatever LISTENs on a LOCAL port (our test node) — target
   [[ -n "$pid" ]] && { log "cleanup: killing stale node pid $pid on port $p"; taskkill //F //PID "$pid" >/dev/null 2>&1; sleep 1; }
   return 0
 }
-MINER_ADDR=""   # set in main() to wallet A's address before the first start
-start_node() { # built-in solo miner pays coinbase to $MINER_ADDR; regtest always mines
+start_node() { # NO background miner — blocks are produced on demand via chaos_generate
   kill_port "$RPC_PORT"   # clear any stale node holding our RPC port first
-  log "starting regtest node (data=$DATA_DIR rpc=$RPC_PORT mine->${MINER_ADDR:0:16}…)"
-  "$NODE" --network "$NET" --data-dir "$DATA_DIR" --mine "$MINER_ADDR" --mine-threads 0 \
-    start >>"$RUN_DIR/node.log" 2>&1 &
+  log "starting regtest node (data=$DATA_DIR rpc=$RPC_PORT, on-demand mining)"
+  "$NODE" --network "$NET" --data-dir "$DATA_DIR" start >>"$RUN_DIR/node.log" 2>&1 &
   NODE_PID=$!
   for _ in $(seq 1 90); do rpc_ok get_info && { log "node up (pid $NODE_PID)"; return 0; }; sleep 1; done
   log "FATAL: node did not come up (see $RUN_DIR/node.log)"; return 1
@@ -100,14 +100,13 @@ restart_node() { # state-survival test: stop, restart same data dir, verify tip 
   if [[ "${tip_after:-0}" -ge "${tip_before:-0}" ]]; then log "RESTART: tip survived ($tip_before -> $tip_after)";
   else log "RESTART: TIP REGRESSED ($tip_before -> $tip_after) — BUG"; bump panics; fi
 }
-mine_blocks() { # wait until the continuous miner advances height by N
-  local n="$1" start cur; start="$(cur_height)"; start="${start:-0}"
-  local tries=$(( 90 + n * 12 )); for _ in $(seq 1 "$tries"); do
-    cur="$(cur_height)"; cur="${cur:-0}"
-    if (( cur >= start + n )); then bump blocks_mined "$(( cur - start ))"; return 0; fi
-    sleep 2
-  done
-  log "mine_blocks: height did not advance +$n (start=$start now=$(cur_height))"; return 1
+mine_blocks() { # produce N blocks ON DEMAND (coinbase to wallet A) via chaos_generate.
+  # Returns non-zero if the node refuses to extend — e.g. an armed consensus
+  # breaker failing closed — which chaos_consensus reads as the fail-closed signal.
+  local n="$1" r
+  r="$(rpc chaos_generate "[$n, \"$(spend_of A)\", \"$(view_of A)\"]")"
+  if echo "$r" | grep -q '"generated"'; then bump blocks_mined "$n"; return 0; fi
+  return 1
 }
 
 # ── Wallets (multiple, real transfers, receipt-verified) ─────────────────────
@@ -208,11 +207,15 @@ chaos_consensus() { # inject -> expect isolating (+ fail-closed when armed) -> r
     log "CHAOS $s: did NOT trip after inject (BUG?) state=$tripped"
   fi
 }
-chaos_load() { # flood a load surface, expect it to trip, then AutoReset recovery
-  local s="$1"
+chaos_load() { # pressure a load surface, expect it to trip, then AutoReset recovery.
+  # BOUNDED concurrency (<=10 procs at a time) — an unbounded `&` fan-out fork-bombs
+  # the host. Batches keep the request RATE high without exhausting memory.
+  local s="$1" batch
   case "$s" in
-    rpc)     for _ in $(seq 1 500); do rpc get_info >/dev/null & done; wait ;;
-    mempool) for _ in $(seq 1 200); do act_send_tx & done; wait ;;
+    rpc)     for batch in $(seq 1 40); do
+               for _ in $(seq 1 10); do rpc get_info >/dev/null 2>&1 & done; wait
+             done ;;
+    mempool) for _ in $(seq 1 3); do act_send_tx; done ;;   # a few real sends (UTXO reservations limit rapid-fire)
   esac
   sleep 2
   local st; st="$(surface_state "$s")"
@@ -257,8 +260,7 @@ main() {
   # Wallets first — the node mines its coinbase to wallet A (sender); B receives.
   mkwallet A || exit 1
   mkwallet B || exit 1
-  MINER_ADDR="$(addr_of A)"
-  [[ -n "$MINER_ADDR" ]] || { log "FATAL: could not read wallet A address"; exit 1; }
+  [[ -n "$(spend_of A)" && -n "$(view_of A)" ]] || { log "FATAL: wallet A keys missing (needed for on-demand mining)"; exit 1; }
   start_node || exit 1
   trap 'report; kill "$NODE_PID" 2>/dev/null; kill_port "$RPC_PORT"' EXIT INT TERM
   log "seeding chain ($MATURE_BLOCKS blocks: coinbase maturity + decoy pool)…"

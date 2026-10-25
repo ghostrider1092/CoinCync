@@ -335,6 +335,43 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── chaos_generate (REGTEST-ONLY): on-demand block production ───────────
+    // params [n, spend_hex, view_hex]: build + submit n blocks paying coinbase to
+    // (spend,view), each with nonce 0 (accepted under `test-fast-pow`). This is
+    // the Bitcoin-regtest `generate` equivalent — no background miner, so there
+    // is no mempool-admission race with tx submission, and blocks come on demand
+    // (instant + deterministic) for the live-user harness. Feature `regtest-chaos`
+    // (+ `test-fast-pow` for the nonce-0 acceptance); NEVER in production.
+    #[cfg(feature = "regtest-chaos")]
+    module
+        .register_blocking_method("chaos_generate", |params, state, _ext| {
+            let (n, spend_hex, view_hex): (u64, String, String) =
+                params.parse().map_err(|e: ErrorObjectOwned| {
+                    ErrorObjectOwned::owned(-32602, format!("expected [n, spend_hex, view_hex]: {e}"), None::<()>)
+                })?;
+            let spend = crate::primitives::PublicKey::from_hex(&spend_hex)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, format!("bad spend key: {e}"), None::<()>))?;
+            let view = crate::primitives::PublicKey::from_hex(&view_hex)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, format!("bad view key: {e}"), None::<()>))?;
+            let mut made = 0u64;
+            for _ in 0..n {
+                let cand = crate::mining::block_builder::build_candidate_block(
+                    &state.chain,
+                    &state.mempool,
+                    &spend,
+                    &view,
+                    crate::config::NetworkType::Regtest,
+                    crate::consensus::fork_signal::SignalBits(0),
+                )
+                .map_err(|e| ErrorObjectOwned::owned(-32000, format!("build candidate at {made}: {e}"), None::<()>))?;
+                crate::mining::block_builder::submit_mined_block(&state.chain, &state.mempool, cand.into_block(0))
+                    .map_err(|e| ErrorObjectOwned::owned(-32000, format!("submit at {made}: {e}"), None::<()>))?;
+                made += 1;
+            }
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "generated": made }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── get_difficulty_health ──────────────────────────────────
     // Non-consensus difficulty/block-production telemetry: current difficulty,
     // an informational hashrate estimate, and inter-block interval statistics
