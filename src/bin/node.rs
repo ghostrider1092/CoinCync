@@ -1606,6 +1606,14 @@ async fn start_node(
                                     event_chain.network(),
                                     event_chain.height(),
                                 )
+                                // A pending shielded tx's validity can change under
+                                // a NEW BLOCK without a key-image collision (its tag
+                                // gets spent, or a confirmed tx is re-added by
+                                // Dandelion fluff and would re-mine), which the
+                                // #149 fast-path does not catch — so sweep every
+                                // block while one is pending. Self-heals within a
+                                // block instead of stalling/halting the miner.
+                                || event_mempool.has_shielded()
                             };
                             // Keep mempool aligned with chain state: remove mined txs and
                             // advance mempool height so activation-gated checks stay correct.
