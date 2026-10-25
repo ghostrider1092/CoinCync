@@ -2461,8 +2461,11 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
     // self-verify the bundle (standalone — the node re-verifies on submit).
     let spend = build_spend_to_address(seed, &cover_coins, spend_index, &chosen_ctx, amount, to.as_bytes())
         .ok_or("failed to build shielded spend (bad recipient address or output value)")?;
+    // Self-verify against the REAL node-resolved cover set (not an empty set,
+    // which would take the permissive stateless path and not actually check
+    // membership). This mirrors what the node's authoritative verify does.
     let tags = backend
-        .verify_spend(&[], &spend, fee, 0)
+        .verify_spend(&cover_coins, &spend, fee, fee as i64)
         .map_err(|e| format!("built spend failed self-verification: {e}"))?;
 
     println!("  Funding note:    value {chosen_value} atomic at cover index {spend_index}");
@@ -2472,12 +2475,17 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
     // #172 PR2: wrap the spend in a v2 SparkPayload + a TxType::Shielded tx and
     // submit it to the node via send_raw_transaction (replaces the old build-only
     // "not submitted" report).
+    // The fee (`chosen_value − amount`) is the value the bundle releases across
+    // the veil to the miner, so the public `value_balance` MUST equal it: the
+    // transparent value bridge needs `tx.fee == value_balance` (both = fee here,
+    // so it reduces to 0 with no transparent side), and consensus binds
+    // `value_balance == spend_fee(bundle)` as the cross-veil inflation guard.
     let payload = SparkPayload {
         version: SPARK_PAYLOAD_VERSION,
         mint: None,
         outputs: vec![],
         spend: Some(SpendBundle { cover_set_id: 0, anchor_height, bundle: spend.0 }),
-        value_balance: 0,
+        value_balance: fee as i64,
     };
     let tx = shielded_transaction(payload.encode(), fee);
     submit_shielded_tx(node, &tx, &format!("shielded spend of {amount} atomic to {to}")).await
@@ -2637,11 +2645,31 @@ async fn scan_live_cover_set(
     use spark_connector::{CoinBytes, SparkBackend};
 
     let (anchor_height, entries, cover_coins) = fetch_live_cover_set(node).await?;
-    // Scan the fetched set for coins this wallet owns (seed-based).
+    // Scan the fetched set for coins this wallet owns (seed-based), EXCLUDING
+    // already-spent notes. A spent coin's bytes remain in the cover set, so
+    // identifying it by view key is not enough — we derive each owned coin's
+    // linking tag and ask the node whether it is in the spent set. This keeps the
+    // balance from double-counting a spent note (e.g. a transfer's funding note
+    // after it is spent) and stops `shielded-send` from picking a spent one.
     let backend = LibsparkBackend;
     let mut owned: Vec<(usize, u64, Vec<u8>)> = Vec::new(); // (spend_index, value, ctx)
     for (pos, (_, coin, ctx)) in entries.iter().enumerate() {
         if let Ok(Some(id)) = backend.identify(seed, &CoinBytes(coin.clone()), ctx) {
+            // Exclude if this note's linking tag is already spent on-chain.
+            if let Some(tag) = spark_connector::ffi::coin_ltag(seed, &CoinBytes(coin.clone()), ctx) {
+                let spent = rpc_call(
+                    node,
+                    "is_spark_pool_tag_spent",
+                    serde_json::json!([hex::encode(&tag.0)]),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.get("spent").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+                if spent {
+                    continue;
+                }
+            }
             owned.push((pos, id.value, ctx.clone()));
         }
     }

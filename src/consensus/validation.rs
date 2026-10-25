@@ -1669,6 +1669,31 @@ pub(crate) fn require_pure_shielded_shape(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
+/// Test-only transparent↔shielded bridge gate (#314).
+///
+/// Returns `true` ONLY on a regtest build that carries the shielded test engine
+/// (`sketch-gk-proof` + `libspark-ffi`). It is the single switch that relaxes
+/// the pure-shielded shape + `value_balance == 0` rules so the local chaos
+/// harness can exercise shield-in / unshield; `verify_transparent_shielded_balance`
+/// still enforces cross-veil value conservation underneath it. In every
+/// production build (`sketch-gk-proof` absent) and on testnet/mainnet it is a
+/// compile-time `false`, so Option A (pure-shielded, #314) is unchanged and the
+/// production binaries stay byte-identical. Lives here (always-compiled) rather
+/// than in the feature-gated `spark_payload` module so the ungated call sites in
+/// this file and in `chain.rs` resolve under the default feature set too.
+#[inline]
+pub(crate) fn regtest_bridge_enabled(network: crate::config::NetworkType) -> bool {
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    {
+        matches!(network, crate::config::NetworkType::Regtest)
+    }
+    #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
+    {
+        let _ = network;
+        false
+    }
+}
+
 /// Validate a shielded (Lelantus-Spark) transaction — CIP-Shielded.
 ///
 /// FAIL-CLOSED SKELETON. The wire type (`TxType::Shielded`, borsh discriminant
@@ -1696,8 +1721,12 @@ fn check_shielded_tx(
 
     // Option A (#314): pure-shielded shape, before the v1/v2 split and un-gated,
     // so it covers both payload formats and the default (non-libspark) build.
-    // Single source of truth — see require_pure_shielded_shape.
-    require_pure_shielded_shape(tx)?;
+    // Single source of truth — see require_pure_shielded_shape. RELAXED only on
+    // the regtest test bridge (sketch-gk-proof + Regtest) so the harness can
+    // shield-in; production (no sketch-gk-proof) always enforces it.
+    if !regtest_bridge_enabled(network) {
+        require_pure_shielded_shape(tx)?;
+    }
 
     // v2 (SparkPayload — the canonical libspark-aligned format): STATELESS
     // structural routing only. The full verify is STATEFUL — cover set + pool
@@ -1713,7 +1742,7 @@ fn check_shielded_tx(
         // chain.rs::verify_block_spark_v2. Transparent I/O is already rejected
         // above (pure-shielded, all versions); here enforce the v2 payload's
         // `value_balance == 0` until the shield-in/unshield bridge is validated.
-        if payload.value_balance != 0 {
+        if payload.value_balance != 0 && !regtest_bridge_enabled(network) {
             return Err(Error::InvalidTransaction(
                 "shielded tx must have value_balance == 0 until the transparent \
                  shield-in/unshield bridge is validated (#314)"
@@ -1733,7 +1762,7 @@ fn check_shielded_tx(
     // until the transparent bridge is validated. Transparent I/O was already
     // rejected above; this forbids a v1 shield-in/unshield (value_balance != 0),
     // so Option A holds for every shielded tx regardless of payload version.
-    if payload.value_balance != 0 {
+    if payload.value_balance != 0 && !regtest_bridge_enabled(network) {
         return Err(Error::InvalidTransaction(
             "shielded tx must have value_balance == 0 until the transparent \
              shield-in/unshield bridge is validated (#314)"
@@ -3001,7 +3030,23 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         // too, so a feature-build node does NOT admit/relay a shielded tx the block
         // gate can never mine (mempool-vs-block drift / relay-DoS). Single source
         // of truth — see require_pure_shielded_shape.
-        require_pure_shielded_shape(tx)?;
+        //
+        // RELAXED for the regtest test bridge: this path is CONTEXTLESS (no
+        // `network`), so it cannot tell regtest from testnet. On a test build
+        // (`sketch-gk-proof` + `libspark-ffi` — never a production feature) we let a
+        // shield-in / unshield (transparent side present) pass this structural gate
+        // so the local chaos harness can admit it. Actual block inclusion is still
+        // governed by the NETWORKED, regtest-gated authoritative gate
+        // `chain::verify_block_spark_v2` (via `validation::regtest_bridge_enabled`),
+        // which rejects any transparent-side shielded tx on testnet/mainnet. The
+        // malformed-payload reject above (no mint and no spend) still runs. On a
+        // production build the whole `if is_shielded` arm is dead (`is_shielded` is
+        // `const false`), so this is byte-identical for production.
+        //
+        // NOTE (bounded, test-build only): a `sketch-gk-proof` build mispointed at
+        // testnet would admit/relay a shield-in its own block gate then refuses to
+        // mine. That is off-policy (the feature never ships) and cannot affect a
+        // production node; the block gate remains the consensus-authoritative stop.
     }
 
     // SECURITY (BUG-17): Reject transactions with empty inputs or outputs.
@@ -5166,10 +5211,14 @@ mod tests {
         use crate::constants::SHIELDED_REGTEST_ACTIVATION_HEIGHT as ACT;
 
         // A well-formed v2 SparkPayload shaped as a shield-in (mint, value_balance
-        // < 0) carrying a transparent side. Under the F4 pure-shielded gate (#314,
-        // Option A) a transparent-side shielded tx is REJECTED until the bridge is
-        // validated — so this verifies stateless routing + BOTH gates (activation
-        // then shape), not admission.
+        // < 0) carrying a transparent side. The regtest test bridge (#314,
+        // `regtest_bridge_enabled`) relaxes the Option-A pure-shielded shape gate on
+        // Regtest so the local chaos harness can route a shield-in through the
+        // stateless admit; the pure-shielded rule on testnet/mainnet and cross-veil
+        // value conservation stay authoritative at the stateful block gate
+        // (`chain::verify_block_spark_v2`). So this verifies stateless routing + the
+        // activation gate, and that the bridge ADMITS a well-formed shield-in on
+        // regtest.
         let (payload, _) =
             crate::consensus::spark_payload::build::build_mint_payload(b"regtest-act-seed", &[10_000u64, 20_000], &[])
                 .expect("build v2 mint payload");
@@ -5178,17 +5227,13 @@ mod tests {
         tx.extra = payload.encode();
         let utxos = UtxoSet::new();
 
-        // Regtest AT activation: the tx clears the activation gate and is routed
-        // statelessly to check_shielded_tx, where the F4 pure-shielded gate rejects
-        // its transparent side. The "pure-shielded" reason proves it got PAST
-        // activation to the shape check (not merely blocked as inactive).
-        let at_act = validate_transaction_for_network_ctx(&tx, &utxos, ACT, Regtest, false)
-            .expect_err("F4: a transparent-side shielded tx must be rejected until the bridge is validated")
-            .to_string();
-        assert!(
-            at_act.contains("pure-shielded"),
-            "at activation the F4 pure-shielded gate must reject the transparent side, got: {at_act}"
-        );
+        // Regtest AT activation WITH the bridge: the tx clears the activation gate
+        // and the relaxed shape gate, and is routed statelessly (Ok) to face the
+        // authoritative block-level verify. (Before the bridge this was rejected as
+        // "pure-shielded"; that enforcement now lives on testnet/mainnet + the block
+        // gate.)
+        validate_transaction_for_network_ctx(&tx, &utxos, ACT, Regtest, false)
+            .expect("regtest bridge: a well-formed shield-in must route statelessly past the shape gate");
         // Regtest BELOW activation: blocked at the activation gate, BEFORE the
         // shape check — a distinct rejection reason.
         let below = validate_transaction_for_network_ctx(&tx, &utxos, ACT - 1, Regtest, false)
@@ -5214,24 +5259,39 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-    fn basic_validation_rejects_transparent_side_shielded_tx() {
-        // F4/#314: validate_transaction_basic (the mempool's structural gate) must
-        // reject a shielded tx carrying a transparent input/output, matching
-        // check_shielded_tx and the block gate — otherwise a feature-build node
-        // would admit and relay a tx it can never mine (mempool-vs-block drift).
+    fn basic_validation_admits_transparent_side_shielded_tx_on_test_bridge() {
+        // #314 regtest bridge: validate_transaction_basic is CONTEXTLESS (no
+        // network), so on a test build (sketch-gk-proof + libspark-ffi) it no longer
+        // rejects a shielded tx carrying a transparent side as "pure-shielded" —
+        // that lets the local chaos harness admit a shield-in. The malformed-payload
+        // reject (no mint, no spend) still runs here, and the NETWORKED,
+        // regtest-gated block gate (chain::verify_block_spark_v2) remains the
+        // authoritative stop for testnet/mainnet. On a production build the whole
+        // shielded arm is dead (is_shielded is const false), so this is unchanged.
         let (payload, _) = crate::consensus::spark_payload::build::build_mint_payload(
             b"basic-f4-seed",
             &[10_000u64, 20_000],
             &[],
         )
         .expect("build v2 mint payload");
-        let mut tx = coinbase_tx(vec![a_valid_output()]); // stray transparent output
+        let mut tx = coinbase_tx(vec![a_valid_output()]); // transparent shield-in side
         tx.tx_type = TxType::Shielded;
         tx.extra = payload.encode();
-        let err = validate_transaction_basic(&tx).unwrap_err().to_string();
+        // Must NOT be rejected as pure-shielded any more (downstream structural
+        // checks may still apply, but the shape gate is relaxed on the test bridge).
+        if let Err(e) = validate_transaction_basic(&tx) {
+            assert!(
+                !e.to_string().contains("pure-shielded"),
+                "test bridge: basic must not reject the transparent side as pure-shielded, got: {e}"
+            );
+        }
+        // A malformed shielded payload (neither mint nor spend) is still rejected.
+        let mut bad = coinbase_tx(vec![a_valid_output()]);
+        bad.tx_type = TxType::Shielded;
+        bad.extra = vec![0xFFu8; 4];
         assert!(
-            err.contains("pure-shielded"),
-            "basic must reject a transparent-side shielded tx, got: {err}"
+            validate_transaction_basic(&bad).is_err(),
+            "a malformed shielded payload must still be rejected at the basic gate"
         );
     }
 

@@ -712,6 +712,14 @@ impl Blockchain {
             if !tx.is_shielded() {
                 continue;
             }
+            // v2 SparkPayload (libspark) txs are applied by `apply_spark_v2_txs`
+            // against the SparkPoolStore, not this v1 ShieldedStore path. Skip them
+            // here so the v1 decoder never sees a v2 payload. Default build has no
+            // v2 txs (feature off), so this is unchanged there.
+            #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+            if crate::consensus::spark_payload::SparkPayload::decode(&tx.extra).is_ok() {
+                continue;
+            }
             let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)
                 .unwrap_or_else(|e| {
                     panic!(
@@ -771,6 +779,19 @@ impl Blockchain {
             .as_ref()
             .map(|s| s.cover_entries_at(cover_set_id, anchor_height))
             .unwrap_or_default()
+    }
+
+    /// Whether a v2 (libspark) shielded linking tag is already spent on-chain.
+    /// A wallet derives each owned pool coin's tag (`coin_ltag`) and calls this to
+    /// exclude already-spent notes from its balance and spend selection — a spent
+    /// coin's bytes stay in the cover set, so view-key identification alone
+    /// over-counts. `false` when the pool store is absent.
+    #[cfg(feature = "sketch-gk-proof")]
+    pub fn spark_pool_tag_spent(&self, tag: &[u8]) -> bool {
+        self.spark_pool_store
+            .as_ref()
+            .map(|s| s.is_tag_spent(&spark_connector::Nullifier(tag.to_vec())))
+            .unwrap_or(false)
     }
 
     /// The unified operator security sweep: run every initialized detail —
@@ -873,6 +894,14 @@ impl Blockchain {
             if !tx.is_shielded() {
                 continue;
             }
+            // v2 SparkPayload (libspark) txs are spend-verified by
+            // `verify_block_spark_v2` against the SparkPoolStore, not this v1 GK
+            // path. Skip them here so the v1 decoder never sees a v2 payload.
+            // Default build has no v2 txs (feature off), so this is unchanged there.
+            #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+            if crate::consensus::spark_payload::SparkPayload::decode(&tx.extra).is_ok() {
+                continue;
+            }
             let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
             crate::consensus::shielded_pipeline::gk::verify_shielded_payload(
                 store,
@@ -893,7 +922,7 @@ impl Blockchain {
     /// real backend) — the only config where the libspark pool exists; inert and
     /// fail-closed otherwise. Returns `Err(reason)` to reject the block.
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-    fn verify_block_spark_v2(
+    pub(crate) fn verify_block_spark_v2(
         &self,
         transactions: &[Transaction],
     ) -> std::result::Result<(), String> {
@@ -924,13 +953,18 @@ impl Blockchain {
             // the single source of truth shared with check_shielded_tx and the
             // mempool gate (validation::require_pure_shielded_shape); value_balance
             // == 0 is enforced here for the v2 payload.
-            crate::consensus::validation::require_pure_shielded_shape(tx)
-                .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
-            if payload.value_balance != 0 {
-                return Err(format!(
-                    "spark v2 tx {idx}: value_balance must be 0 — transparent \
-                     shield-in/unshield is gated until the bridge is validated (#314)"
-                ));
+            // Pure-shielded Option-A gate — RELAXED only on the regtest test bridge
+            // (sketch-gk-proof + Regtest) so the harness can shield-in/unshield; the
+            // value bridge below still enforces conservation. Production always enforces.
+            if !crate::consensus::validation::regtest_bridge_enabled(self.network) {
+                crate::consensus::validation::require_pure_shielded_shape(tx)
+                    .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
+                if payload.value_balance != 0 {
+                    return Err(format!(
+                        "spark v2 tx {idx}: value_balance must be 0 — transparent \
+                         shield-in/unshield is gated until the bridge is validated (#314)"
+                    ));
+                }
             }
             // Transparent↔shielded value bridge: the tx's public value_balance
             // must be backed by its transparent commitments (no cross-veil
@@ -978,6 +1012,60 @@ impl Blockchain {
             if let Some(mint) = &payload.mint {
                 crate::consensus::spark_payload::verify_mint_shield_in(mint, payload.value_balance)
                     .map_err(|e| format!("spark v2 tx {idx}: mint: {e}"))?;
+                // Reject a mint whose coins are ALREADY in the pool — an
+                // already-confirmed shield-in re-added to the mempool (e.g. by
+                // Dandelion fluff) and re-proposed. Without this it passes verify
+                // and HALTS at apply on "duplicate mint coin outpoint". Rejecting
+                // here keeps the block gate fail-closed AND lets the mempool's
+                // `shielded_unminable` sweep evict the re-added tx (it reads this
+                // same verify). Mirror of apply's outpoint derivation.
+                let input_outpoints: Vec<Vec<u8>> = tx
+                    .inputs
+                    .iter()
+                    .map(|i| borsh::to_vec(&i.key_image).unwrap_or_default())
+                    .collect();
+                let (_total, coins) = spark_connector::ffi::verify_mint_bundle(mint)
+                    .ok_or_else(|| format!("spark v2 tx {idx}: mint bundle unparseable"))?;
+                for i in 0..coins.len() {
+                    let op = crate::consensus::spark_payload::derive_outpoint(&input_outpoints, i as u32);
+                    if store.index_of(&op).is_some() {
+                        return Err(format!(
+                            "spark v2 tx {idx}: mint coin outpoint already in the pool \
+                             (already-confirmed shield-in re-proposed)"
+                        ));
+                    }
+                }
+            }
+            // CROSS-VEIL INFLATION GUARD (shielded-send fee binding). A MINEABLE
+            // SPEND releases its bundle's internal fee (`input − Σ pool outputs`)
+            // across the veil to the miner; its public `value_balance` MUST equal
+            // that bundle fee, or a shielded tx could declare a different crossing
+            // than the bundle actually made (over-claim the miner fee / hide value
+            // in the pool). The value bridge above already tied `value_balance` to
+            // `tx.fee`; this ties it to the bundle. A paying spend's `value_balance`
+            // is `> 0` (fee leaving the pool). Fail-closed if the bundle's fee is
+            // unreadable. (A shield-in's value is proven by its mint bundle above,
+            // not this path.)
+            //
+            // Scoped to `value_balance != 0`: a `value_balance == 0` spend declares
+            // no crossing, so the value bridge forces `tx.fee == 0` — and the block
+            // fee floor (§8 + min-fee, no shielded exemption) then rejects it, so
+            // it is unmineable regardless. That lets the pool state-machine tests,
+            // which drive `verify_block_spark_v2` in isolation with a pool-internal
+            // fee (`value_balance == 0`), exercise the spend path without the floor.
+            if payload.value_balance != 0 && payload.mint.is_none() {
+                if let Some(sb) = &payload.spend {
+                    let bundle_fee = spark_connector::ffi::spend_fee(&sb.bundle).ok_or_else(|| {
+                        format!("spark v2 tx {idx}: unreadable spend bundle fee")
+                    })?;
+                    if payload.value_balance as i128 != bundle_fee as i128 {
+                        return Err(format!(
+                            "spark v2 tx {idx}: value_balance {} != spend bundle fee {} \
+                             (cross-veil inflation guard)",
+                            payload.value_balance, bundle_fee
+                        ));
+                    }
+                }
             }
             let tags = crate::consensus::spark_payload::verify_spark_payload(
                 store.as_ref(),
