@@ -1675,7 +1675,14 @@ impl Blockchain {
 
     /// Process/add block to chain
     pub fn process_block(&self, block: Block) -> Result<BlockStatus> {
-        #[cfg(all(feature = "block-integrity-breaker", feature = "breaker-recovery"))]
+        #[cfg(all(
+            feature = "breaker-recovery",
+            any(
+                feature = "block-integrity-breaker",
+                feature = "supply-breaker",
+                all(feature = "shielded-breaker", feature = "sketch-gk-proof")
+            )
+        ))]
         let connected_height = block.header.height.as_u64();
         let status = self.add_block(block)?;
 
@@ -1709,6 +1716,70 @@ impl Blockchain {
                     return Err(crate::error::Error::InvalidState(format!(
                         "block-integrity breaker armed and latched at height {connected_height}: \
                          refusing to advance on possibly-corrupted chain state — investigate and rearm"
+                    )));
+                }
+            }
+        }
+
+        // Supply breaker feed + arm gate (connector seam). Observe-only +
+        // default-OFF; reads post-apply supply stats, never edits the locked
+        // apply. See docs/design/breaker-arm-switch.md.
+        #[cfg(all(feature = "supply-breaker", feature = "breaker-recovery"))]
+        {
+            if matches!(
+                status,
+                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+            ) {
+                let (total_supply, total_burned) = {
+                    let inner = self.inner.read();
+                    (inner.stats.total_supply, inner.stats.total_burned)
+                };
+                let _ = crate::supply_live_breaker::on_block_connected(
+                    total_supply,
+                    total_burned,
+                    connected_height,
+                );
+                let surface = crate::breaker_recovery::BreakerSurface::Supply;
+                if crate::fuse::enforce_trips(
+                    surface,
+                    connected_height,
+                    crate::fuse::default_arm_height(surface),
+                ) {
+                    return Err(crate::error::Error::InvalidState(format!(
+                        "supply breaker armed and latched at height {connected_height}: a monetary \
+                         invariant (circulating supply / ceiling) broke — refusing to advance"
+                    )));
+                }
+            }
+        }
+
+        // Shielded-pool breaker feed + arm gate (connector seam). Observe-only +
+        // default-OFF; reads the post-apply pool value. Gated on sketch-gk-proof
+        // because that is where the shielded pool store exists; the pool is off
+        // (activation u64::MAX) until post-audit, so this watches value 0 at
+        // launch. See the adapter + docs/design/breaker-arm-switch.md.
+        #[cfg(all(
+            feature = "shielded-breaker",
+            feature = "breaker-recovery",
+            feature = "sketch-gk-proof"
+        ))]
+        {
+            if matches!(
+                status,
+                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+            ) {
+                let pool_value =
+                    self.spark_pool_store.as_ref().map(|s| s.pool_value()).unwrap_or(0);
+                let _ = crate::shielded_live_breaker::on_block_connected(pool_value);
+                let surface = crate::breaker_recovery::BreakerSurface::Shielded;
+                if crate::fuse::enforce_trips(
+                    surface,
+                    connected_height,
+                    crate::fuse::default_arm_height(surface),
+                ) {
+                    return Err(crate::error::Error::InvalidState(format!(
+                        "shielded breaker armed and latched at height {connected_height}: the \
+                         shielded pool broke an invariant (pool value) — refusing to advance"
                     )));
                 }
             }

@@ -191,6 +191,10 @@ pub mod block_integrity_live_breaker;
 pub mod reorg_live_breaker;
 #[cfg(all(feature = "rpc-breaker", feature = "breaker-recovery"))]
 pub mod rpc_live_breaker;
+#[cfg(all(feature = "supply-breaker", feature = "breaker-recovery"))]
+pub mod supply_live_breaker;
+#[cfg(all(feature = "shielded-breaker", feature = "breaker-recovery"))]
+pub mod shielded_live_breaker;
 
 // ── Re-exports ──────────────────────────────────────────────
 pub use config::{Network, NodeConfig};
