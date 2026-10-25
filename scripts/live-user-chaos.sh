@@ -25,8 +25,13 @@ WALLET="${WALLET:-$ROOT/target/debug/coincync-wallet.exe}"
 NET="regtest"
 RUN_DIR="${RUN_DIR:-/c/cync-chaos-run}"
 DATA_DIR="$RUN_DIR/data"
-RPC_PORT="${RPC_PORT:-29799}"       # non-standard port => clearly a local test
+RPC_PORT="${RPC_PORT:-18081}"       # regtest's default RPC port (the node binds this)
 RPC_URL="http://127.0.0.1:$RPC_PORT"
+SMOKE="${SMOKE:-0}"                  # SMOKE=1 => happy-path only (no chaos), then exit
+MATURE_BLOCKS="${MATURE_BLOCKS:-200}" # seed enough blocks for coinbase maturity (100)
+                                     # AND the ring-decoy pool (~126 outputs needed)
+# Needs a node built with `test-fast-pow` so regtest blocks are INSTANT (difficulty
+# 8192 + light RandomX is ~minutes/block otherwise — can't mature coinbase).
 DURATION="${DURATION:-28800}"       # 8h default; override for a smoke run
 SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-300}"   # fuse/metrics snapshot cadence (s)
 CHAOS_ARM_HEIGHT="${CHAOS_ARM_HEIGHT:-2}" # arm consensus breakers from height 2
@@ -68,38 +73,120 @@ inject() { bump faults_injected; rpc chaos_inject_fault "[\"$1\"]"; }
 rearm()  { rpc chaos_rearm "[\"$1\"]"; }
 
 # ── Node / wallet lifecycle ──────────────────────────────────────────────────
-# SMOKE: confirm node start flags + mining mechanism + wallet verbs.
-start_node() {
-  log "starting regtest node (data=$DATA_DIR rpc=$RPC_PORT)"
-  "$NODE" start --network "$NET" --data-dir "$DATA_DIR" --rpc-port "$RPC_PORT" \
-    >>"$RUN_DIR/node.log" 2>&1 &
+# SMOKE: confirm node start flags + mining mechanism against the built binary.
+kill_port() { # kill whatever LISTENs on a LOCAL port (our test node) — targeted by
+              # PID on 127.0.0.1:$port, so it can never blanket-kill a real node.
+  local p="$1" pid
+  pid="$(netstat -ano 2>/dev/null | grep -E "127\\.0\\.0\\.1:$p .*LISTENING" | awk '{print $NF}' | head -1)"
+  [[ -n "$pid" ]] && { log "cleanup: killing stale node pid $pid on port $p"; taskkill //F //PID "$pid" >/dev/null 2>&1; sleep 1; }
+  return 0
+}
+MINER_ADDR=""   # set in main() to wallet A's address before the first start
+start_node() { # built-in solo miner pays coinbase to $MINER_ADDR; regtest always mines
+  kill_port "$RPC_PORT"   # clear any stale node holding our RPC port first
+  log "starting regtest node (data=$DATA_DIR rpc=$RPC_PORT mine->${MINER_ADDR:0:16}…)"
+  "$NODE" --network "$NET" --data-dir "$DATA_DIR" --mine "$MINER_ADDR" --mine-threads 0 \
+    start >>"$RUN_DIR/node.log" 2>&1 &
   NODE_PID=$!
-  for _ in $(seq 1 60); do rpc_ok get_info && { log "node up (pid $NODE_PID)"; return 0; }; sleep 1; done
-  log "FATAL: node did not come up"; return 1
+  for _ in $(seq 1 90); do rpc_ok get_info && { log "node up (pid $NODE_PID)"; return 0; }; sleep 1; done
+  log "FATAL: node did not come up (see $RUN_DIR/node.log)"; return 1
 }
-mine_blocks() { # mine_blocks N  — SMOKE: wire to the real regtest mining path
-  local n="$1"
-  # Placeholder: resolved in the smoke-run (generate RPC, --mine flag, or rig).
-  "$NODE" --network "$NET" --data-dir "$DATA_DIR" generate "$n" >>"$RUN_DIR/mine.log" 2>&1 \
-    && bump blocks_mined "$n"
+cur_height() { rpc get_info | sed -n 's/.*"height":\([0-9]*\).*/\1/p' | head -1; }
+restart_node() { # state-survival test: stop, restart same data dir, verify tip survives
+  local tip_before; tip_before="$(rpc get_info | sed -n 's/.*"height":\([0-9]*\).*/\1/p')"
+  log "RESTART: stopping node (tip=$tip_before)"; kill "$NODE_PID" 2>/dev/null; wait "$NODE_PID" 2>/dev/null
+  start_node || { log "RESTART: node did not come back"; bump panics; return 1; }
+  local tip_after; tip_after="$(rpc get_info | sed -n 's/.*"height":\([0-9]*\).*/\1/p')"
+  if [[ "${tip_after:-0}" -ge "${tip_before:-0}" ]]; then log "RESTART: tip survived ($tip_before -> $tip_after)";
+  else log "RESTART: TIP REGRESSED ($tip_before -> $tip_after) — BUG"; bump panics; fi
 }
-wal() { "$WALLET" --network "$NET" --data-dir "$DATA_DIR" "$@"; }   # SMOKE: verbs
+mine_blocks() { # wait until the continuous miner advances height by N
+  local n="$1" start cur; start="$(cur_height)"; start="${start:-0}"
+  local tries=$(( 90 + n * 12 )); for _ in $(seq 1 "$tries"); do
+    cur="$(cur_height)"; cur="${cur:-0}"
+    if (( cur >= start + n )); then bump blocks_mined "$(( cur - start ))"; return 0; fi
+    sleep 2
+  done
+  log "mine_blocks: height did not advance +$n (start=$start now=$(cur_height))"; return 1
+}
+
+# ── Wallets (multiple, real transfers, receipt-verified) ─────────────────────
+PW="${PW:-chaostest}"                 # plaintext test password (regtest only)
+WDIR="$RUN_DIR/wallets"; mkdir -p "$WDIR"
+export COINCYNC_WALLET_PASSWORD="$PW"
+# w NAME VERB [args...] — run a wallet verb against the named wallet file.
+w() { local name="$1"; shift; "$WALLET" --wallet "$WDIR/$name.wallet" --network "$NET" --node "$RPC_URL" "$@"; }
+mkwallet() { # create a named wallet; capture its addresses to the run dir
+  local name="$1"
+  w "$name" create --no-encrypt --force >>"$RUN_DIR/wallet.log" 2>&1 || { log "mkwallet $name FAILED"; return 1; }
+  # Capture the full address block once: the encoded Address + the raw spend/view
+  # public keys. We send by raw keys (--to-spend/--to-view) to bypass the
+  # address-network fund-safety guard (a regtest wallet reports network "unknown",
+  # so the guard can't apply its regtest exception). Every send still produces a
+  # one-time STEALTH output, so ordinary sends exercise stealth addresses.
+  w "$name" address 2>/dev/null > "$WDIR/$name.addrinfo"
+  grep -E '^Address:'      "$WDIR/$name.addrinfo" | awk '{print $NF}' > "$WDIR/$name.addr"
+  grep -E '^Spend public:' "$WDIR/$name.addrinfo" | awk '{print $NF}' > "$WDIR/$name.spend"
+  grep -E '^View public:'  "$WDIR/$name.addrinfo" | awk '{print $NF}' > "$WDIR/$name.view"
+  # Shielded (Spark) bech32m address — best-effort (longest token on the line).
+  w "$name" shielded-address 2>/dev/null | grep -oiE '[a-z0-9]{24,}' | tail -1 > "$WDIR/$name.shaddr" 2>/dev/null || true
+  [[ -s "$WDIR/$name.spend" && -s "$WDIR/$name.view" ]] || { log "mkwallet $name: NO spend/view keys captured"; return 1; }
+  log "wallet '$name' created (addr=$(cut -c1-20 "$WDIR/$name.addr")…)"
+}
+# The `scan` command's summary reliably prints "UTXO count" / "Balance total"
+# (the `balance` command formats differently); parse scan output (2>&1). Scanning
+# also refreshes the wallet against the node, so one call both updates and reads.
+utxo_count() { w "$1" scan 2>&1 | grep -iE 'UTXO count' | grep -oE '[0-9]+' | tail -1; }
+bal()        { w "$1" scan 2>&1 | grep -iE 'Balance total' | grep -oE '[0-9]+\.?[0-9]*' | head -1; }
+shbal()      { w "$1" shielded-balance 2>&1 | grep -iE 'Balance|shielded' | grep -oE '[0-9]+\.?[0-9]*' | head -1; }
+addr_of()   { cat "$WDIR/$1.addr"    2>/dev/null; }
+spend_of()  { cat "$WDIR/$1.spend"   2>/dev/null; }
+view_of()   { cat "$WDIR/$1.view"    2>/dev/null; }
+shaddr_of() { cat "$WDIR/$1.shaddr"  2>/dev/null; }
+
+AMT_ATOMIC="${AMT_ATOMIC:-100000000}"   # 1 CYNC in atomic units (--amount is atomic)
+# send FROM TO AMOUNT(atomic) — transfer and VERIFY the recipient received (UTXO
+# count rose). Retries through the transient miner race ("chain state changed
+# during mempool admission … retry submission") that the continuous miner causes.
+send_verified() {
+  local from="$1" to="$2" amt="${3:-$AMT_ATOMIC}" tries=0 before after sent=0
+  w "$from" scan >>"$RUN_DIR/wallet.log" 2>&1 || true   # sender must scan to see its coinbase
+  before="$(utxo_count "$to")"; before="${before:-0}"
+  while (( tries < 6 )); do
+    if w "$from" send --to-spend "$(spend_of "$to")" --to-view "$(view_of "$to")" --amount "$amt" \
+         >>"$RUN_DIR/wallet.log" 2>&1; then sent=1; break; fi
+    tries=$((tries+1)); sleep 2   # transient admission race — retry
+  done
+  if (( sent == 0 )); then bump tx_failed; log "send $from->$to FAILED after $tries retries"; return 1; fi
+  bump tx_sent
+  # Poll for the receipt: a tx sits in the Dandelion++ stem embargo (~16s) before
+  # it can be mined, so confirm + recipient scan must wait past that, not ~4s.
+  after="$before"
+  for _ in $(seq 1 20); do
+    mine_blocks 1 >/dev/null 2>&1 || true
+    after="$(utxo_count "$to")"; after="${after:-0}"   # scans + reads
+    (( after > before )) && break
+    sleep 2
+  done
+  if (( after > before )); then log "RECEIPT ok $from->$to (utxos $before->$after, tries=$tries)";
+  else log "RECEIPT MISSING $from->$to (utxos $before->$after) — SILENT-LOSS BUG?"; bump tx_failed; fi
+}
 
 # ── Safety guard: regtest-only ───────────────────────────────────────────────
 guard() {
   [[ "$NET" == "regtest" ]] || { echo "REFUSING: not regtest"; exit 2; }
-  case "$DATA_DIR" in *regtest*|*chaos-run*) : ;; *) echo "REFUSING: data dir not a local test dir"; exit 2;; esac
-  # never a known live seed / mainnet port
-  [[ "$RPC_PORT" != "8081" && "$RPC_PORT" != "28081" ]] || { echo "REFUSING: live RPC port"; exit 2; }
+  case "$DATA_DIR" in *regtest*|*chaos*) : ;; *) echo "REFUSING: data dir not a local test dir"; exit 2;; esac
+  # never a known live seed / mainnet / default port
+  [[ "$RPC_PORT" != "8081" && "$RPC_PORT" != "28081" && "$RPC_PORT" != "19081" ]] || { echo "REFUSING: live/default RPC port"; exit 2; }
 }
 
 # ── User-action phases (one random action per cycle) ─────────────────────────
-act_mine()        { mine_blocks 1; }
-act_send_tx()     { if wal send --to "$(wal address | tail -1)" --amount 1 >>"$RUN_DIR/wallet.log" 2>&1; then bump tx_sent; else bump tx_failed; fi; }
-act_stealth()     { if wal send --to "$(wal subaddress 0 1 2>/dev/null | tail -1)" --amount 1 >>"$RUN_DIR/wallet.log" 2>&1; then bump stealth_sent; bump tx_sent; else bump tx_failed; fi; }
-act_shield_in()   { wal shielded-mint --amount 5 >>"$RUN_DIR/wallet.log" 2>&1 && bump shield_in; }
-act_shielded_send(){ wal shielded-send --to "$(wal shielded-address 2>/dev/null|tail -1)" --amount 1 >>"$RUN_DIR/wallet.log" 2>&1 && { bump shielded_sent; bump tx_sent; }; }
-act_unshield()    { wal shielded-unshield --amount 1 >>"$RUN_DIR/wallet.log" 2>&1 && bump unshield; }
+act_mine()         { mine_blocks 1; }
+act_send_tx()      { send_verified A B; }
+act_stealth()      { local sa; sa="$(w B subaddress create 2>/dev/null | grep -E '^Address:' | awk '{print $NF}' | tail -1)"; if [[ -n "$sa" ]] && w A send --address "$sa" --amount "$AMT_ATOMIC" >>"$RUN_DIR/wallet.log" 2>&1; then bump stealth_sent; bump tx_sent; else bump tx_failed; fi; }
+act_shield_in()    { w A shielded-mint --amount 5 >>"$RUN_DIR/wallet.log" 2>&1 && bump shield_in; }
+act_shielded_send(){ w A shielded-send --to "$(shaddr_of B)" --amount 1 >>"$RUN_DIR/wallet.log" 2>&1 && { bump shielded_sent; bump tx_sent; }; }
+act_unshield()     { w A shielded-unshield --amount 1 >>"$RUN_DIR/wallet.log" 2>&1 && bump unshield; }
 
 # ── Chaos: trip a protection, then verify fail-closed + recovery ─────────────
 chaos_consensus() { # inject -> expect isolating (+ fail-closed when armed) -> rearm -> recover
@@ -165,12 +252,26 @@ report() {
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
-  mkdir -p "$DATA_DIR"; : > "$LOG"
+  mkdir -p "$DATA_DIR" "$WDIR"; : > "$LOG"
   guard
+  # Wallets first — the node mines its coinbase to wallet A (sender); B receives.
+  mkwallet A || exit 1
+  mkwallet B || exit 1
+  MINER_ADDR="$(addr_of A)"
+  [[ -n "$MINER_ADDR" ]] || { log "FATAL: could not read wallet A address"; exit 1; }
   start_node || exit 1
-  trap 'report; kill $NODE_PID 2>/dev/null' EXIT INT TERM
-  wal create >>"$RUN_DIR/wallet.log" 2>&1 || true
-  mine_blocks 110   # mature a coinbase (100-block maturity) before spending
+  trap 'report; kill "$NODE_PID" 2>/dev/null; kill_port "$RPC_PORT"' EXIT INT TERM
+  log "seeding chain ($MATURE_BLOCKS blocks: coinbase maturity + decoy pool)…"
+  mine_blocks "$MATURE_BLOCKS" || { log "FATAL: miner did not advance the chain"; exit 1; }
+
+  if [[ "$SMOKE" == "1" ]]; then
+    log "SMOKE: happy-path only (mine + send A->B receipt-verified), no chaos"
+    send_verified A B
+    send_verified A B
+    snapshot
+    report
+    return 0
+  fi
 
   local end=$(( $(date +%s) + DURATION ))
   local last_snap=0 last_chaos=0
