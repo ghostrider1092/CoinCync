@@ -318,6 +318,79 @@ pub fn reset() {
     global().install_all();
 }
 
+// ── Arm switch (Observe → Enforcing) ────────────────────────────────────────
+//
+// The breakers above are Observe-only: they detect and record, never act. The
+// ARM SWITCH is the gate that turns a *consensus* breaker's detection into a
+// fail-closed rejection/halt. Per docs/design/breaker-arm-switch.md it is NOT a
+// runtime control: a surface's arm height is a network/governance constant
+// (default `u64::MAX` = off), so arming is a deliberate, reviewed code change,
+// uniform across nodes and undisarmable at runtime. Only the Latch money /
+// integrity surfaces are consensus-armable; load/local surfaces
+// (mempool/p2p/rpc/reorg) are armed by local config and never use this gate.
+
+/// Consensus arm height for a surface — the POLICY SLOT. `u64::MAX` = never
+/// armed (Observe only). Every surface defaults to OFF pending the activation
+/// decision and the external audit; arming a surface is a deliberate code change
+/// here (or wiring from the activation registry), never a runtime switch.
+pub const fn default_arm_height(surface: BreakerSurface) -> u64 {
+    match surface {
+        // Latch money/integrity surfaces are consensus-armable — all OFF today.
+        BreakerSurface::Shielded
+        | BreakerSurface::Supply
+        | BreakerSurface::BlockIntegrity => u64::MAX,
+        // Load/local surfaces are never consensus-armed (local config instead).
+        _ => u64::MAX,
+    }
+}
+
+/// Pure arm decision — no global state, so it is unit-testable in isolation and
+/// parallel-safe. A fail-closed action is due iff the surface is armed
+/// (`arm_height != u64::MAX` AND `current_height >= arm_height`) AND its breaker
+/// is currently `isolating`. Default-off: with `arm_height == u64::MAX` it is
+/// always `false`.
+pub fn fail_closed_due(current_height: u64, arm_height: u64, isolating: bool) -> bool {
+    arm_height != u64::MAX && current_height >= arm_height && isolating
+}
+
+/// Whether a fail-closed rejection/halt is due for `surface` at `current_height`,
+/// consulting the shared box's isolating state. Thin wrapper over
+/// [`fail_closed_due`] + [`isolating`]. Default-off until an arm height is set.
+pub fn enforce_trips(surface: BreakerSurface, current_height: u64, arm_height: u64) -> bool {
+    fail_closed_due(current_height, arm_height, isolating(surface))
+}
+
+#[cfg(test)]
+mod arm_tests {
+    use super::*;
+
+    #[test]
+    fn arm_heights_default_off_for_every_surface() {
+        for s in BreakerSurface::ALL {
+            assert_eq!(
+                default_arm_height(s),
+                u64::MAX,
+                "{s:?} must default to OFF (u64::MAX) pending the activation decision"
+            );
+        }
+    }
+
+    #[test]
+    fn fail_closed_is_off_by_default_even_when_isolating() {
+        // Isolating, but the arm height is the default OFF sentinel -> never fires.
+        assert!(!fail_closed_due(1_000_000, u64::MAX, true));
+    }
+
+    #[test]
+    fn fail_closed_only_when_armed_at_height_and_isolating() {
+        assert!(!fail_closed_due(49, 50, true), "below the arm height");
+        assert!(!fail_closed_due(100, 50, false), "at height but not isolating");
+        assert!(fail_closed_due(50, 50, true), "exactly at the arm height + isolating");
+        assert!(fail_closed_due(100, 50, true), "past the arm height + isolating -> fail closed");
+        assert!(!fail_closed_due(100, u64::MAX, true), "u64::MAX = off");
+    }
+}
+
 #[cfg(all(test, feature = "mempool-breaker", feature = "p2p-breaker"))]
 mod tests {
     use super::*;

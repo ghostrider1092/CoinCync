@@ -1675,6 +1675,8 @@ impl Blockchain {
 
     /// Process/add block to chain
     pub fn process_block(&self, block: Block) -> Result<BlockStatus> {
+        #[cfg(all(feature = "block-integrity-breaker", feature = "breaker-recovery"))]
+        let connected_height = block.header.height.as_u64();
         let status = self.add_block(block)?;
 
         // Block-integrity fuse feed (connector seam): on a block that connected to
@@ -1692,6 +1694,23 @@ impl Blockchain {
                     self.reorg_disconnects_total(),
                     self.utxo_count() as u64,
                 );
+                // ARM SWITCH (default OFF — arm height u64::MAX): once the
+                // BlockIntegrity breaker is armed at a height AND it has latched
+                // on a post-apply integrity breach, fail closed — refuse to
+                // advance on possibly-corrupted chain state rather than continue.
+                // No behaviour change until an arm height is set (reviewed code
+                // change, not a runtime switch). See docs/design/breaker-arm-switch.md.
+                let surface = crate::breaker_recovery::BreakerSurface::BlockIntegrity;
+                if crate::fuse::enforce_trips(
+                    surface,
+                    connected_height,
+                    crate::fuse::default_arm_height(surface),
+                ) {
+                    return Err(crate::error::Error::InvalidState(format!(
+                        "block-integrity breaker armed and latched at height {connected_height}: \
+                         refusing to advance on possibly-corrupted chain state — investigate and rearm"
+                    )));
+                }
             }
         }
 
