@@ -1118,6 +1118,17 @@ impl Mempool {
     /// For larger mempools this could matter; revisit with a
     /// dirty-set / changed-context optimization if it shows up in
     /// profiles.
+    /// Whether a shielded linking tag is already present on a PENDING mempool
+    /// spend. A wallet checks this (alongside the on-chain spent set) before
+    /// picking a note to spend: a note whose spend is already in the mempool but
+    /// not yet mined is NOT in the on-chain spent set, so without this check the
+    /// wallet re-picks it and the node rejects the resulting double-spend
+    /// ("duplicate shielded linking tag in mempool"). Always false in the default
+    /// (non-shielded) build (`linking_tags` stays empty).
+    pub fn contains_linking_tag(&self, tag: &[u8]) -> bool {
+        self.linking_tags.contains(tag)
+    }
+
     /// Whether any mempool tx is shielded. A shielded tx's consensus validity can
     /// change under a NEW BLOCK without a key-image collision (its tag gets spent,
     /// or its mint's coins land in the pool, e.g. after Dandelion fluff re-adds a
@@ -1799,6 +1810,12 @@ impl SharedMempool {
     /// sweep (see `Mempool::has_shielded`).
     pub fn has_shielded(&self) -> bool {
         self.read_lock().has_shielded()
+    }
+
+    /// Whether a shielded linking tag is on a pending mempool spend
+    /// (see `Mempool::contains_linking_tag`).
+    pub fn contains_linking_tag(&self, tag: &[u8]) -> bool {
+        self.read_lock().contains_linking_tag(tag)
     }
 
     pub fn set_height(&self, height: u64) {
