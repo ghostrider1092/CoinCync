@@ -515,6 +515,43 @@ mod tests {
             ) {
                 let _ = verify_transparent_shielded_balance(&pin, &pout, fee, vb);
             }
+
+            /// CONSERVATION — the audit's crux. The transparent↔shielded value
+            /// bridge must accept a tx EXACTLY when value is conserved across the
+            /// veil: `Σ transparent-in == Σ transparent-out + (fee − value_balance)`.
+            /// Any `perturb != 0` is the adversary over-/under-claiming what crossed
+            /// (cross-veil inflation or burn) and MUST be rejected; `perturb == 0`
+            /// is the unique conserving input and MUST be accepted. One in / one out
+            /// with equal blinding, so the blinding cancels and acceptance depends
+            /// solely on the value equation — i.e. no sequence of accepted shielded
+            /// txs can change the total money supply.
+            #[test]
+            fn value_bridge_accepts_exactly_the_conserving_tx(
+                to in 0u64..500_000_000,
+                fee in 0u64..2_000_000,
+                vb in -500_000_000i64..500_000_000,
+                perturb in -4i64..=4,
+            ) {
+                // The transparent input that exactly conserves: ti = to + fee − vb.
+                let target = to as i128 + fee as i128 - vb as i128;
+                prop_assume!((0..=1_000_000_000i128).contains(&target));
+                let ti_i = target + perturb as i128;
+                prop_assume!((0..=u64::MAX as i128).contains(&ti_i));
+                let ti = ti_i as u64;
+                let r = [7u8; 32]; // single in/out, equal blinding ⇒ blinding cancels
+                let res = verify_transparent_shielded_balance(
+                    &[commit_bytes(ti, r)],
+                    &[commit_bytes(to, r)],
+                    fee,
+                    vb,
+                );
+                prop_assert_eq!(
+                    res.is_ok(),
+                    perturb == 0,
+                    "bridge must accept IFF value is conserved (ti={}, to={}, fee={}, vb={}, perturb={})",
+                    ti, to, fee, vb, perturb
+                );
+            }
         }
     }
 

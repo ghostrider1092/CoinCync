@@ -163,8 +163,14 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         let bytes = hex::decode(&hex_t).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
         })?;
+        // "spent" means UNAVAILABLE to spend: already spent on-chain OR already
+        // on a PENDING mempool spend. The latter matters because a note whose
+        // spend is in the mempool but not yet mined is not in the on-chain spent
+        // set — without it the wallet re-picks the note and the node rejects the
+        // double-spend ("duplicate shielded linking tag in mempool").
         #[cfg(feature = "sketch-gk-proof")]
-        let spent = state.chain.spark_pool_tag_spent(&bytes);
+        let spent =
+            state.chain.spark_pool_tag_spent(&bytes) || state.mempool.contains_linking_tag(&bytes);
         #[cfg(not(feature = "sketch-gk-proof"))]
         let spent = {
             let _ = (&bytes, &state);

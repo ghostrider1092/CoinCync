@@ -2887,10 +2887,14 @@ async fn cmd_scan(
     let mut scanned_blocks = 0u64;
     let mut last_height = start;
 
-    // Pull blocks in batches of 100 (matches server's MAX_RANGE cap).
+    // Pull blocks in ADAPTIVE batches: start at 100 (the server's MAX_RANGE cap)
+    // but shrink on an oversized-response error so a run of full shielded blocks
+    // can't exceed the RPC byte cap and stall the scan; grow back toward 100 once
+    // blocks fit again.
     let mut cursor = start;
+    let mut batch_span: u64 = 100;
     while cursor <= end {
-        let batch_end = (cursor + 99).min(end);
+        let batch_end = (cursor + batch_span - 1).min(end);
         match rpc_get_block_range(node, cursor, batch_end).await {
             Ok(blocks_json) => {
                 if blocks_json.is_empty() {
@@ -3032,8 +3036,18 @@ async fn cmd_scan(
                 // Resume from the rewind target after a recovered reorg,
                 // else advance past the batch we just scanned.
                 cursor = reorg_resume.unwrap_or(batch_end + 1);
+                // Batch fit → grow back toward the cap for the next pull.
+                batch_span = (batch_span * 2).min(100);
             }
             Err(e) => {
+                // Oversized response (a run of full shielded blocks over the RPC
+                // byte cap): halve the batch and retry the SAME cursor rather than
+                // aborting the whole scan. Floored at 1 block.
+                let too_big = e.contains("too big") || e.contains("Exceeded max");
+                if too_big && batch_span > 1 {
+                    batch_span = (batch_span / 2).max(1);
+                    continue;
+                }
                 return Err(format!("rpc get_block_range: {}", e));
             }
         }
