@@ -163,6 +163,18 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         let bytes = hex::decode(&hex_t).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
         })?;
+        // Exact-length guard, like is_spark_serial_spent / is_nullifier_spent: the
+        // Spark linking tag `T` serializes to exactly 34 bytes. Without it a
+        // wrong-length tag silently misses the spent-set lookup and returns
+        // spent=false, so a wallet told "available" re-selects an already-spent
+        // note and then builds a spend the node rejects as a duplicate linking tag.
+        if bytes.len() != 34 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "tag must be 34 bytes".to_string(),
+                None::<()>,
+            ));
+        }
         // "spent" means UNAVAILABLE to spend: already spent on-chain OR already
         // on a PENDING mempool spend. The latter matters because a note whose
         // spend is in the mempool but not yet mined is not in the on-chain spent

@@ -2222,10 +2222,6 @@ async fn cmd_shielded_mint(
     wallet
         .unlock(&password)
         .map_err(|e| format!("unlock wallet: {e}"))?;
-    let keys: KeyEpoch = wallet
-        .current_keys()
-        .cloned()
-        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
     let balance_snapshot = wallet.balance();
 
     mole_notice(amount);
@@ -2244,16 +2240,23 @@ async fn cmd_shielded_mint(
     let min_decoy_age = coincync::constants::min_output_age_at_height(current_height);
 
     let mut rng = rand::rngs::OsRng;
-    let prepared = coincync::wallet::send::prepare_shield_in(
-        &balance_snapshot,
-        &seed,
-        amount,
-        &keys,
-        current_height,
-        ring_size,
-        &mut rng,
-    )
-    .map_err(|e| format!("prepare shield-in: {e}"))?;
+    // Derive each funding input under the epoch it was received at (Wallet-1): run
+    // prepare_shield_in with a borrow of the full key set under the wallet lock,
+    // rather than a single current-epoch clone.
+    let prepared = wallet
+        .with_wallet_keys(|wk| {
+            coincync::wallet::send::prepare_shield_in(
+                &balance_snapshot,
+                &seed,
+                amount,
+                &coincync::wallet::send::SpendKeys::PerEpoch(wk),
+                current_height,
+                ring_size,
+                &mut rng,
+            )
+        })
+        .ok_or_else(|| "wallet has no key set (locked?)".to_string())?
+        .map_err(|e| format!("prepare shield-in: {e}"))?;
 
     println!("Building shield-in mint:");
     println!("  Amount (to pool): {amount} atomic");
@@ -3155,11 +3158,6 @@ async fn cmd_send(
         .unlock(&password)
         .map_err(|e| format!("unlock wallet: {}", e))?;
 
-    let keys: KeyEpoch = wallet
-        .current_keys()
-        .cloned()
-        .ok_or_else(|| "wallet has no current key epoch".to_string())?;
-
     let snapshot: DecoyDistributionSnapshot = serde_json::from_value(
         rpc_call(node, "get_decoy_distribution", serde_json::json!([]))
             .await
@@ -3269,18 +3267,24 @@ async fn cmd_send(
     // clone is the structural cost of using SharedWallet.
     let balance_snapshot = wallet.balance();
     let mut rng = rand::rngs::OsRng;
-    let prepared = coincync::wallet::send::prepare_privacy_transaction_with_options(
-        &balance_snapshot,
-        &recipients,
-        &keys,
-        current_height,
-        ring_size,
-        fee_multiplier,
-        memo_bytes.as_deref(),
-        extra_bytes,
-        &mut rng,
-    )
-    .map_err(|e| format!("create_privacy_transaction: {}", e))?;
+    // Derive each input under the epoch it was received at (Wallet-1): borrow the
+    // full key set under the wallet lock rather than a single current-epoch clone.
+    let prepared = wallet
+        .with_wallet_keys(|wk| {
+            coincync::wallet::send::prepare_privacy_transaction_with_options(
+                &balance_snapshot,
+                &recipients,
+                &coincync::wallet::send::SpendKeys::PerEpoch(wk),
+                current_height,
+                ring_size,
+                fee_multiplier,
+                memo_bytes.as_deref(),
+                extra_bytes,
+                &mut rng,
+            )
+        })
+        .ok_or_else(|| "wallet has no key set (locked?)".to_string())?
+        .map_err(|e| format!("create_privacy_transaction: {}", e))?;
     let real_outputs = prepared.real_outputs();
     let real_locators: Vec<_> = real_outputs.iter().map(|output| output.locator()).collect();
     let requested = build_covered_request(

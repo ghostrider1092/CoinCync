@@ -656,6 +656,39 @@ impl Mempool {
         // unchanged (#172).
         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
         if tx.is_shielded() {
+            // A pure-shielded tx has no transparent side, but a bridge
+            // shield-in/unshield carries ring-signed transparent inputs and a
+            // transparent output. Its SHIELDED proofs + the value bridge are the
+            // block gate's job (`verify_block_spark_v2`), but the STATELESS
+            // transparent crypto — the change output's range proof and the
+            // transparent inputs' CLSAG ring signatures — must still be verified at
+            // admission, or an invalid bridge tx (unowned inputs / inflated change)
+            // can pollute the mempool until block verification rejects it. This
+            // mirrors the block-level transparent check added for the bridge in
+            // `validation::validate_transaction_for_network_ctx`. The transparent
+            // BALANCE proof is intentionally skipped — value legitimately crosses
+            // the veil and the bridge binding replaces it. Pure-shielded txs have
+            // empty inputs/outputs, so both loops below are no-ops (returns Ok, the
+            // prior behaviour for them).
+            // Only a bridge tx with TRANSPARENT OUTPUTS (shield-in change /
+            // unshield recipient) carries a Bulletproof in `tx.range_proof`; a
+            // PURE shielded spend (pool->pool) has empty transparent outputs and a
+            // legitimately empty `range_proof`, so range-proof it ONLY when it has
+            // transparent outputs (mirrors validate_transaction_basic).
+            if !tx.outputs.is_empty() && !verify_output_range_proofs(tx, chain_height) {
+                return Err(Error::InvalidTransaction(
+                    "Range proof verification failed (shielded tx transparent output) — rejected at mempool".into(),
+                ));
+            }
+            // Ring signatures over any transparent ring inputs (vacuous for a
+            // pure shielded spend, which has no transparent inputs).
+            for (idx, input) in tx.inputs.iter().enumerate() {
+                if !verify_ring_signature(tx, input, idx) {
+                    return Err(Error::InvalidTransaction(format!(
+                        "Ring signature verification failed (shielded tx transparent input {idx}) — rejected at mempool"
+                    )));
+                }
+            }
             return Ok(());
         }
         if !verify_output_range_proofs(tx, chain_height) {
@@ -794,8 +827,21 @@ impl Mempool {
         // miner from building a block that then fails `verify_block_spark_v2`'s
         // duplicate-linking-tag check. The authoritative stateful verify stays at
         // block level.
+        // RBF carve-out: a linking tag held ONLY by a tx we are about to replace
+        // (fee-bump via the transparent key-image RBF above) is not a real
+        // conflict — the replaced tx, and its tag, leave the pool together. Each
+        // tag is held by at most one resident tx (duplicate tags are rejected on
+        // admission), so excluding the to_replace txs' tags is exact. Without this,
+        // a fee-bump that carries BOTH a transparent ring input (RBF-eligible) and
+        // the same shielded linking tag as the tx it replaces is wrongly rejected
+        // as a duplicate tag, and the legit replacement never lands.
+        let replaced_tags: std::collections::HashSet<Vec<u8>> = to_replace
+            .iter()
+            .filter_map(|h| self.transactions.get(h))
+            .flat_map(|entry| Self::shielded_linking_tags(&entry.tx).unwrap_or_default())
+            .collect();
         for t in &shielded_tags {
-            if self.linking_tags.contains(t) {
+            if self.linking_tags.contains(t) && !replaced_tags.contains(t) {
                 let err = Error::InvalidTransaction(
                     "duplicate shielded linking tag in mempool (double-spend)".into(),
                 );
@@ -1370,6 +1416,13 @@ impl Mempool {
         self.transactions.clear();
         self.by_fee.clear();
         self.key_images.clear();
+        // Must also clear the shielded linking-tag set, or after a clear() the
+        // pool is empty yet `linking_tags` still holds every tag ever seen —
+        // the next shielded spend revealing one of those tags is falsely
+        // rejected as a duplicate (admit_after_checks) and shielded admission is
+        // wedged until restart. Keeps `linking_tags` consistent with
+        // `transactions` (both empty), mirroring `key_images` above.
+        self.linking_tags.clear();
         self.current_size = 0;
     }
 

@@ -349,6 +349,14 @@ int spark_ffi_build_spend(uint64_t output_value, unsigned char* out, int cap) {
 // Verify a bundle. On a valid spend, writes the linking tags (nullifiers) to
 // out_tags as [u32 count][34-byte tag]... and returns 1. Returns 0 on an invalid
 // spend or any error (fail-closed).
+// DoS bound on the attacker-controlled output_count that sizes a
+// SpendTransaction. Defined here so EVERY SpendTransaction(output_count)
+// construction below can guard on it (the sibling definition near
+// spark_ffi_spend_ltags predates these earlier call sites). #ifndef so the
+// later identical #define is a benign no-op.
+#ifndef SPARK_FFI_MAX_SPEND_OUTPUTS
+#define SPARK_FFI_MAX_SPEND_OUTPUTS 64
+#endif
 int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
                             const unsigned char* set_ptr, int set_len,
                             unsigned char* out_tags, int tags_cap, int* out_tags_len) {
@@ -367,6 +375,12 @@ int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
         ss >> cover_set;
         ss >> out_coins;
         ss >> output_count;
+        // DoS bound: output_count is attacker-controlled and sizes the
+        // SpendTransaction's internal vectors at construction, BEFORE `ss >> tx`
+        // can reject anything. On the live block-verify path an unbounded value
+        // (e.g. 2^63) forces an immediate multi-exabyte allocation on every full
+        // node. Bound it exactly like spark_ffi_spend_ltags/_fee. Fail-closed.
+        if (output_count > SPARK_FFI_MAX_SPEND_OUTPUTS) return 0;
 
         // #258: when the node supplies its own anchored cover set (set_len > 0),
         // it is AUTHORITATIVE — the cover set and representation from the
@@ -939,6 +953,10 @@ int spark_ffi_spend_outputs(const unsigned char* ptr, int len,
         ss >> cover_set;
         ss >> out_coins_v;
         ss >> output_count;
+        // DoS bound (same as spark_ffi_verify_bundle / _spend_ltags / _spend_fee):
+        // output_count is attacker-controlled and sizes the SpendTransaction before
+        // `ss >> tx` validates anything. Fail-closed on an oversized count.
+        if (output_count > SPARK_FFI_MAX_SPEND_OUTPUTS) return 0;
         spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2, (std::size_t)output_count);
         ss >> tx;
 

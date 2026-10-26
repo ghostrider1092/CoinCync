@@ -966,6 +966,21 @@ impl Blockchain {
                     ));
                 }
             }
+            // MINT-XOR-SPEND: a v2 payload is EITHER a shield-in (mint, no spend)
+            // OR a shielded spend (spend, no mint) — never both. A combined
+            // mint+spend would SKIP the `value_balance == spend_fee` binding below
+            // (which is scoped to `mint.is_none()`), while `verify_mint_shield_in`
+            // checks only the mint half and `verify_spark_payload` only the spend
+            // half — so the spend's cross-veil fee release would bind to nothing
+            // and the pool turnstile (`apply_value_balance`) would desync from the
+            // real pooled value by the bundle fee (attacker-chosen inflation). A
+            // shield-in and a spend must be separate txs; reject the combination.
+            if payload.mint.is_some() && payload.spend.is_some() {
+                return Err(format!(
+                    "spark v2 tx {idx}: a payload may carry a mint OR a spend, not both \
+                     (combined mint+spend bypasses the value_balance/spend-fee binding)"
+                ));
+            }
             // Transparent↔shielded value bridge: the tx's public value_balance
             // must be backed by its transparent commitments (no cross-veil
             // inflation). The shielded side's own conservation is proven by the
@@ -1506,6 +1521,9 @@ impl Blockchain {
         );
 
         let mut all_orphaned_txs = Vec::new();
+        // Every disconnected tx's hash (incl. coinbase), to drop from the
+        // tx-index below — mirrors the reorg path's `ti_removes`.
+        let mut ti_removes: Vec<[u8; 32]> = Vec::new();
         {
             let mut inner = self.inner.write();
 
@@ -1554,8 +1572,10 @@ impl Blockchain {
                         // order as the UTXO disconnect. Inert while stores
                         // are None.
                         self.rewind_phase2_stores(h);
-                        // Collect non-coinbase txs
+                        // Collect non-coinbase txs (returned for mempool re-add)
+                        // and EVERY tx's hash (incl. coinbase) for tx-index removal.
                         for tx in &txs {
+                            ti_removes.push(*tx.hash().as_bytes());
                             if !tx.is_coinbase() {
                                 all_orphaned_txs.push(tx.clone());
                             }
@@ -1731,6 +1751,16 @@ impl Blockchain {
             // Clean all stale height entries above target
             if let Err(e) = db.blocks.remove_heights_above(target_height) {
                 tracing::error!("Failed to clean heights during rollback: {}", e);
+            }
+            // Drop the tx-index entries for every disconnected tx. Without this,
+            // `remove_heights_above` clears height->hash and the UTXO rewind
+            // clears the output set, but `tx_index` still maps these hashes to
+            // their now-orphaned (height, idx); after a forward resync
+            // `get_tx_location` returns a STALE location, so `get_transaction` /
+            // explorer / wallet lookups return the wrong tx or None. The reorg
+            // path removes these atomically (`ti_removes`); match it here.
+            for h in &ti_removes {
+                db.remove_tx_index(h);
             }
             let inner = self.inner.read();
             let last_checkpoint = db
@@ -3286,6 +3316,57 @@ impl Blockchain {
                         }
                     }
 
+                    // STORE-AWARE shielded/spark verification for the reorg TIP.
+                    // The fork-block loop above runs these for every ANCESTOR, but
+                    // the triggering tip is excluded from collect_fork_chain and is
+                    // validated above ONLY by the stateless
+                    // validate_block_with_checkpoint_for_network — which does NOT
+                    // run the pool-aware spark/shielded gate. Without this, a reorg
+                    // whose tip is a shield-in/unshield bypasses the value bridge,
+                    // the pool-underflow guard, the tag-double-spend check and mint
+                    // authentication, while the tip's transparent outputs ARE still
+                    // created by apply_batch below = cross-veil inflation / shielded
+                    // double-spend. The store here holds all fork blocks (the tip's
+                    // parent state) and the tip is NOT yet applied, exactly as the
+                    // fork-block verify sees its own parent state. Mirror that loop
+                    // and route failures through reorg_error (→ full rollback).
+                    // Inert while the stores are None / features off.
+                    if reorg_error.is_none() {
+                        if let Some(ref sstore) = self.shielded_store {
+                            if let Err(e) =
+                                crate::consensus::shielded::check_block_shielded_double_spends(
+                                    &block.transactions,
+                                    |t| sstore.is_nullifier_spent(t),
+                                )
+                            {
+                                reorg_error = Some(format!(
+                                    "shielded double-spend in reorg tip block: {}",
+                                    e
+                                ));
+                            }
+                            #[cfg(feature = "sketch-gk-proof")]
+                            if reorg_error.is_none() {
+                                if let Err(e) =
+                                    Self::verify_block_shielded_spends(sstore, &block.transactions)
+                                {
+                                    reorg_error = Some(format!(
+                                        "shielded spend proof invalid in reorg tip block: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                    if reorg_error.is_none() {
+                        if let Err(reason) = self.verify_block_spark_v2(&block.transactions) {
+                            reorg_error = Some(format!(
+                                "spark v2 spend invalid in reorg tip block: {}",
+                                reason
+                            ));
+                        }
+                    }
+
                     // #supply-commitment: also validate the reorg TIP's
                     // commitment. All fork blocks are applied, so inner.stats is
                     // the tip's parent cumulative supply. On mismatch, set
@@ -3654,6 +3735,18 @@ impl Blockchain {
                         let tip_batch =
                             UtxoSet::batch_from_block(block.header.height.as_u64(), &block.transactions);
                         inner.utxos.apply_batch(tip_batch);
+                        // Shielded (Spark) pool apply for the reorg TIP block,
+                        // mirroring the fork-block loop and the clean-extend path.
+                        // The tip is excluded from collect_fork_chain, so without
+                        // these its shielded coins are never add_coin'd and its
+                        // spent tags never mark_tag_spent'd — pool_value and the
+                        // membership/double-spend sets would permanently diverge
+                        // from the chain. (The store-aware verify added at the
+                        // tip-validate above already rejected an unconserved tip, so
+                        // this only ever applies a verified one.) Inert while None.
+                        self.apply_shielded_txs(&block.transactions, block.header.height.as_u64());
+                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                        self.apply_spark_v2_txs(&block.transactions, block.header.height.as_u64());
 
                         // Add triggering block's emission to supply.
                         //

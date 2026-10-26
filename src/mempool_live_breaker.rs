@@ -20,15 +20,32 @@
 //! Caps are env-configurable for operability; defaults are production values.
 //! See `docs/design/cip-circuit-breakers.md`.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::breaker_recovery::{BreakerState, BreakerSurface};
 use crate::fuse::{self, FaultReport};
 use crate::mempool_breaker::{detect, MempoolObservation};
 
 /// Per-window arrival counter (feed-local; the breaker state itself is in the
-/// shared fuse box).
+/// shared fuse box). RESET at the start of each time window by `on_admission`
+/// (see `WINDOW_START_MS`) so it is a per-window RATE, not a lifetime total.
 static ARRIVALS: AtomicU32 = AtomicU32::new(0);
+
+/// Unix-millis start of the current arrival window. `arrivals_this_interval`
+/// must be a RATE over a bounded window: without rolling it, `ARRIVALS` grows
+/// monotonically for the life of the process, crosses `max_arrivals` exactly
+/// once, and then `detect` returns `ArrivalFlood` on EVERY subsequent admission
+/// forever (the fuse box's own `WindowTick` reset path is not driven on this
+/// live feed). 0 = uninitialized (first admission opens the window).
+static WINDOW_START_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -44,6 +61,21 @@ pub fn on_admission(pending_count: usize, pending_bytes: usize) -> BreakerState 
     let max_count = env_usize("COINCYNC_MEMPOOL_BREAKER_MAX_COUNT", 50_000);
     let max_bytes = env_usize("COINCYNC_MEMPOOL_BREAKER_MAX_BYTES", 300_000_000);
     let max_arrivals = env_u32("COINCYNC_MEMPOOL_BREAKER_MAX_ARRIVALS", 1_000_000);
+    let window_ms = env_u32("COINCYNC_MEMPOOL_BREAKER_WINDOW_MS", 1_000) as u64;
+
+    // Roll the arrival window: if the current window has elapsed (or none is
+    // open), start a fresh one and zero the counter, so `arrivals_this_interval`
+    // below is admissions-in-this-window — a true rate — rather than a lifetime
+    // total that would trip `ArrivalFlood` permanently after the first
+    // `max_arrivals` admissions. A benign race under concurrency (two threads
+    // may both roll) only resets the counter slightly early; it is monitoring
+    // telemetry, not consensus, so an approximate rate is acceptable.
+    let now = now_ms();
+    let start = WINDOW_START_MS.load(Ordering::Relaxed);
+    if start == 0 || now.saturating_sub(start) >= window_ms {
+        WINDOW_START_MS.store(now, Ordering::Relaxed);
+        ARRIVALS.store(0, Ordering::Relaxed);
+    }
 
     let arrivals = ARRIVALS.fetch_add(1, Ordering::Relaxed).saturating_add(1);
 
@@ -75,5 +107,6 @@ pub fn state() -> Option<BreakerState> {
 /// box (test isolation).
 pub fn reset() {
     ARRIVALS.store(0, Ordering::Relaxed);
+    WINDOW_START_MS.store(0, Ordering::Relaxed);
     fuse::reset_surface(BreakerSurface::Mempool);
 }

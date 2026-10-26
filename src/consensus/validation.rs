@@ -1600,7 +1600,51 @@ pub(crate) fn validate_transaction_for_network_ctx(
     // path is fail-closed and gated by SHIELDED_TX_ACTIVATION_HEIGHT — see
     // check_shielded_tx and docs/design/cip-shielded-txtype.md.
     if tx.is_shielded() {
-        return check_shielded_tx(tx, expected_network, current_height);
+        check_shielded_tx(tx, expected_network, current_height)?;
+        // F4 / transparent<->shielded bridge: `check_shielded_tx` and
+        // `verify_block_spark_v2` prove the SHIELDED payload and the value-bridge
+        // equation, but NEITHER verifies the tx's TRANSPARENT side. Under Option A
+        // that is safe — `require_pure_shielded_shape` (production) leaves no
+        // transparent side. Under the bridge (`regtest_bridge_enabled`) a shield-in
+        // carries ring-signed transparent inputs + a transparent change output (an
+        // unshield, a transparent recipient), and the value bridge TRUSTS each
+        // input's `pseudo_output_commitment`. Without the CLSAG ring signature,
+        // range proofs, ring-member resolution and no-double-spend checks, a
+        // shield-in could spend UNOWNED transparent inputs or feed forged
+        // commitments into the bridge and MINT VALUE ACROSS THE VEIL. Verify the
+        // inflation/theft-critical transparent checks here, identically to the
+        // transparent path below. We deliberately do NOT run the transparent
+        // BALANCE proof (value legitimately crosses the veil; the bridge binding
+        // `verify_transparent_shielded_balance` in `verify_block_spark_v2` is its
+        // replacement) nor the anti-fingerprinting SHAPE checks (uniform-shape /
+        // io-ratio / io-counts), which are transparent-privacy policy and do not
+        // describe a bridge tx's asymmetric transparent side.
+        //
+        // CONTEXTUAL-ONLY: like the transparent `if contextual` checks below, this
+        // runs on the AUTHORITATIVE paths — active-tip block apply and the reorg
+        // re-validation (both `contextual = true`) — not on stateless routing. A
+        // competing fork block validated pre-storage with `contextual = false` is
+        // re-validated `contextual = true` by the reorg loop before it can win, and
+        // mempool admission has its own crypto gate (`verify_crypto_for_admission`
+        // + `validate_transaction_basic`), so inflation-safety is fully enforced
+        // while stateless structural routing stays lenient (a well-formed bridge tx
+        // from the real builder carries these proofs; a stateless route need not
+        // re-prove them). In production this is unreachable anyway: the
+        // pure-shielded shape leaves the transparent side empty, so the guard is
+        // false.
+        if contextual
+            && regtest_bridge_enabled(expected_network)
+            && (!tx.inputs.is_empty() || !tx.outputs.is_empty())
+        {
+            check_output_curve_points(tx)?;
+            check_tx_no_double_spend(tx, utxos)?;
+            check_tx_ring_members(expected_network, tx, utxos, current_height, v1_0_12_active)?;
+            check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
+            check_tx_ring_size_cap(tx)?;
+            check_tx_ring_signatures(tx)?;
+            check_tx_range_proofs(tx, current_height)?;
+        }
+        return Ok(());
     }
 
     check_tx_v2_activation(tx, current_height)?;
@@ -1767,14 +1811,23 @@ fn check_shielded_tx(
     // ShieldedPayload. The stateful serial-tag double-spend + accumulator append
     // happen at block-apply against the ShieldedStore.
     let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
-    // Option A (#314): the v1 payload must also be value-neutral (pure-shielded)
-    // until the transparent bridge is validated. Transparent I/O was already
-    // rejected above; this forbids a v1 shield-in/unshield (value_balance != 0),
-    // so Option A holds for every shielded tx regardless of payload version.
-    if payload.value_balance != 0 && !regtest_bridge_enabled(network) {
+    // CROSS-VEIL CONSERVATION (v1): the transparent<->shielded bridge is
+    // implemented ONLY for v2 SparkPayload — `chain::verify_block_spark_v2`
+    // decodes SparkPayload and skips any tx whose `extra` is not v2, so a v1
+    // ShieldedPayload NEVER passes through the value bridge, the mint
+    // authentication, or the pool turnstile. The pure-shielded-shape relaxation
+    // above (gated on `regtest_bridge_enabled`) is therefore UNSAFE for v1: a v1
+    // tx with transparent outputs + `value_balance != 0` would have its
+    // transparent value created at apply (`batch_from_block`) with nothing backing
+    // it across the veil = inflation. So v1 MUST remain pure-shielded with
+    // `value_balance == 0` on EVERY network, bridge or not. (A v1 transparent
+    // bridge, if ever wanted, needs its own conservation layer; until then v1 is
+    // Option-A only.) Enforced unconditionally — NOT gated on the bridge.
+    require_pure_shielded_shape(tx)?;
+    if payload.value_balance != 0 {
         return Err(Error::InvalidTransaction(
-            "shielded tx must have value_balance == 0 until the transparent \
-             shield-in/unshield bridge is validated (#314)"
+            "v1 shielded tx must be pure-shielded with value_balance == 0 — the \
+             transparent shield-in/unshield bridge is v2-only (#314)"
                 .to_string(),
         ));
     }
@@ -3117,11 +3170,17 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
             }
         }
         // Range proof must exist (Bill of Rights I — Bulletproofs required).
-        // Relaxed for shielded (#172): a Spark tx's range proofs live inside the
-        // libspark bundle (verified at block level), not in `tx.range_proof` —
-        // its transparent output set is empty, so there is nothing to range-prove
-        // here. A mint's transparent *inputs* are still ring-checked above.
-        if tx.range_proof.is_empty() && !is_shielded {
+        // Relaxed for a PURE-shielded (#172) Spark tx: its range proofs live inside
+        // the libspark bundle (verified at block level), not in `tx.range_proof`,
+        // and it has NO transparent outputs, so there is nothing to range-prove
+        // here. But a transparent<->shielded BRIDGE tx (a shield-in's transparent
+        // CHANGE output, or an unshield's transparent RECIPIENT output) DOES carry
+        // transparent outputs, which the block-level gate range-proofs
+        // (validate_transaction's bridge arm → check_tx_range_proofs). Waiving it
+        // here for such a tx lets an unmineable tx with a junk/empty range proof
+        // relay through the mempool (F7 mempool-vs-block drift / relay DoS). So
+        // only waive the requirement for a shielded tx with NO transparent outputs.
+        if tx.range_proof.is_empty() && (!is_shielded || !tx.outputs.is_empty()) {
             crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_034, "missing range proof");
             return Err(Error::InvalidTransaction(
                 "UNCONSTITUTIONAL: missing range proof (Bill of Rights I — Bulletproofs required)"

@@ -1901,6 +1901,9 @@ pub fn decrypted_to_utxo(
         subaddress_account: decrypted.subaddress_index.map(|(a, _)| a),
         subaddress_index: decrypted.subaddress_index.map(|(_, i)| i),
         payment_id: decrypted.payment_id,
+        // Record the epoch this output was received under so the spend path can
+        // derive its one-time secret from the matching key set after a rotation.
+        key_epoch: decrypted.key_epoch,
     })
 }
 

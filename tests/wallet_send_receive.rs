@@ -76,6 +76,7 @@ fn epoch_from_seed(seed: u8) -> KeyEpoch {
 /// `prepare_input`'s one-time-secret derivation needs.
 fn mature_utxo(amount: u64, tag: u8, out_index: u8, loc_height: u64) -> UTXO {
     UTXO {
+        key_epoch: 0,
         tx_hash: Hash::from_bytes([tag; 32]),
         output_index: out_index,
         output_locator: Some(OutputLocator {
