@@ -43,6 +43,47 @@ use crate::constants::{
     UNIFORM_TX_SHAPE_HEIGHT,
 };
 use crate::error::{Error, Result};
+use super::super::{KeyEpoch, WalletKeys, UTXO};
+
+/// Which key material a spend derives its inputs and change under.
+///
+/// Each input's one-time secret is derived from the key set that RECEIVED that
+/// output; the change output is derived under the current key set.
+///
+/// - `Single` — one epoch covers everything: atomic-swap joint keys (not a wallet
+///   epoch at all), churn, or a wallet that never rotated.
+/// - `PerEpoch` — a wallet that rotated keys (`derive_epoch`): inputs may span
+///   epochs and MUST each be derived under their own, or a pre-rotation output
+///   gets a wrong one-time key and is unspendable (Wallet-1). Resolves per-output
+///   from the full key set; change uses the current epoch.
+pub enum SpendKeys<'a> {
+    Single(&'a KeyEpoch),
+    PerEpoch(&'a WalletKeys),
+}
+
+impl<'a> SpendKeys<'a> {
+    /// Keys for the change output (current epoch for `PerEpoch`).
+    pub(crate) fn change_keys(&self) -> Result<&KeyEpoch> {
+        match self {
+            SpendKeys::Single(k) => Ok(k),
+            SpendKeys::PerEpoch(wk) => wk.current().ok_or(Error::WalletLocked),
+        }
+    }
+
+    /// Keys to derive a specific input, under the epoch it was received at.
+    pub(crate) fn input_keys(&self, utxo: &UTXO) -> Result<&KeyEpoch> {
+        match self {
+            SpendKeys::Single(k) => Ok(k),
+            SpendKeys::PerEpoch(wk) => wk.get_epoch(utxo.key_epoch).ok_or_else(|| {
+                Error::InvalidState(format!(
+                    "wallet is missing key epoch {} for a selected output \
+                     (rescan or key import needed)",
+                    utxo.key_epoch
+                ))
+            }),
+        }
+    }
+}
 use crate::primitives::{Amount, Hash, PublicKey};
 use crate::transaction::SpendableInput;
 

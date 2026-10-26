@@ -1073,25 +1073,36 @@ pub mod ffi {
         }
 
         #[test]
-        fn verify_rejects_value_balance_the_spend_does_not_release() {
-            // #258 core break (2): the spend's public output (vout) must match the
-            // transaction's declared value_balance, or the tx could unshield value
-            // its spend never releases (the inflation hole). This fixture is a
-            // self-spend: vout 0, so value_balance must be 0. (The spend's internal
-            // libspark fee is pool-internal and conserved by its own balance proof,
-            // so it is intentionally NOT bound to the transparent tx fee here.)
+        fn verify_spend_ignores_value_balance_binding_is_consensus_layer() {
+            // Option-B value model: the connector's verify_spend checks ONLY the
+            // libspark spend proof (Grootle membership + linking-tag binding)
+            // against the cover set. It does NOT bind `fee`/`value_balance` — the
+            // spend keeps libspark `vout = 0` (its output re-enters the pool) and
+            // the value crossing the veil (the bundle's internal fee) is bound to
+            // the tx's public `value_balance` at the CONSENSUS layer
+            // (`chain::verify_block_spark_v2`: `value_balance == spend_fee(bundle)`;
+            // and the transparent value bridge:
+            // `spark_payload::verify_transparent_shielded_balance`), covered by the
+            // value-bridge conservation proptest — NOT here. This test documents
+            // that real contract: the `value_balance` arg does not change
+            // verify_spend's verdict.
+            //
+            // (A prior version of this test asserted `verify_spend(.., 0, 5)` is
+            // Err — a value_balance binding this layer never performed; since
+            // `_value_balance` is ignored it would in fact return the same verdict
+            // as `(.., 0, 0)`, so the old assertion was false and only "passed"
+            // because the ffi test build was not run in CI. Corrected to assert the
+            // real behaviour so the audit looks for the binding at the consensus
+            // layer, where it actually lives.)
             let b = LibsparkBackend;
             let (bundle, set, _fee) = build_strict_spend(b"strict-vb", 1_000, 2, 400);
-            // value_balance 0 matches the spend's vout 0 → verifies.
             assert!(
                 b.verify_spend(&set, &bundle, 0, 0).is_ok(),
-                "a self-spend with value_balance 0 verifies"
+                "a well-formed spend verifies against its real cover set"
             );
-            // Claiming a positive value_balance (unshield) the spend does not
-            // release (its vout is 0) → rejected.
             assert!(
-                b.verify_spend(&set, &bundle, 0, 5).is_err(),
-                "claiming an unshield the spend does not release must be rejected"
+                b.verify_spend(&set, &bundle, 0, 5).is_ok(),
+                "verify_spend ignores value_balance; the cross-veil binding is consensus-layer"
             );
         }
 

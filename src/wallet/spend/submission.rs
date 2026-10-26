@@ -194,6 +194,7 @@ mod tests {
 
     fn make_utxo(id: u8) -> UTXO {
         UTXO {
+            key_epoch: 0,
             tx_hash: Hash::from_bytes([id; 32]),
             output_index: id,
             output_locator: None,
