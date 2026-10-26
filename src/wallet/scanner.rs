@@ -948,7 +948,16 @@ impl WalletScanner {
     pub fn scan_transaction(&mut self, tx: &Transaction) -> Vec<DecryptedOutput> {
         let tx_hash = tx.hash();
         let mut found = Vec::new();
-        let is_coinbase = tx.tx_type == TxType::Coinbase;
+        // "Revealed" outputs carry a PUBLIC amount committed with ZERO blinding
+        // (plaintext LE amount; the scanner reconstructs Commit(amount, 0) and
+        // records blinding = 0). Two cases: a coinbase, and an UNSHIELD — a
+        // shielded tx with NO transparent inputs whose transparent output(s) pay
+        // pool value out to the transparent side (see build_revealed_output). A
+        // shield-in (shielded tx WITH transparent inputs) instead produces
+        // confidential ECDH-blinded change, so it must NOT take this path — hence
+        // the `inputs.is_empty()` guard, false for shield-in and true for unshield.
+        let is_revealed = tx.tx_type == TxType::Coinbase
+            || (tx.tx_type == TxType::Shielded && tx.inputs.is_empty());
 
         self.stats.transactions_scanned += 1;
 
@@ -966,7 +975,7 @@ impl WalletScanner {
             }
             self.stats.outputs_scanned += 1;
 
-            if let Some(decrypted) = self.scan_output(output, idx as u8, tx_hash, is_coinbase) {
+            if let Some(decrypted) = self.scan_output(output, idx as u8, tx_hash, is_revealed) {
                 self.stats.outputs_found += 1;
                 self.stats.total_amount += decrypted.amount as u128;
                 found.push(decrypted);
@@ -1201,14 +1210,18 @@ impl WalletScanner {
                 // Scan all transactions (coinbase is first tx)
                 for tx in &block.transactions {
                     let tx_hash = tx.hash();
-                    let is_coinbase = tx.tx_type == TxType::Coinbase;
+                    // Revealed = coinbase OR unshield (shielded tx, no transparent
+                    // inputs → zero-blinding public outputs). Same rule as the
+                    // non-keyed scan_transaction path above.
+                    let is_revealed = tx.tx_type == TxType::Coinbase
+                        || (tx.tx_type == TxType::Shielded && tx.inputs.is_empty());
                     for (idx, output) in tx.outputs.iter().enumerate() {
                         // SECURITY (A6-IDX-TRUNC): Skip outputs past index 255
                         if idx > 255 {
                             break;
                         }
                         if let Some(mut decrypted) =
-                            scan_output_with_keys(output, idx as u8, tx_hash, &keys, is_coinbase)
+                            scan_output_with_keys(output, idx as u8, tx_hash, &keys, is_revealed)
                         {
                             decrypted.output_locator = locators.get(&(tx_hash, idx as u8)).copied();
                             block_results.push(decrypted);

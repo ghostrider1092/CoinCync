@@ -1636,13 +1636,34 @@ pub(crate) fn validate_transaction_for_network_ctx(
             && regtest_bridge_enabled(expected_network)
             && (!tx.inputs.is_empty() || !tx.outputs.is_empty())
         {
+            // Curve/identity validity of every output applies to BOTH bridge
+            // directions (a non-curve commitment would break the value bridge).
             check_output_curve_points(tx)?;
-            check_tx_no_double_spend(tx, utxos)?;
-            check_tx_ring_members(expected_network, tx, utxos, current_height, v1_0_12_active)?;
-            check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
-            check_tx_ring_size_cap(tx)?;
-            check_tx_ring_signatures(tx)?;
-            check_tx_range_proofs(tx, current_height)?;
+            if !tx.inputs.is_empty() {
+                // SHIELD-IN: the tx spends TRANSPARENT inputs into the pool. Run
+                // the same transparent-input authentication a normal spend gets —
+                // ring sigs bind each pseudo-output to a real owned input, range
+                // proofs bound the confidential transparent CHANGE output — else
+                // value could be minted into the pool for free. The in==out+fee
+                // balance rule is replaced by the cross-veil value bridge in
+                // verify_block_spark_v2.
+                check_tx_no_double_spend(tx, utxos)?;
+                check_tx_ring_members(expected_network, tx, utxos, current_height, v1_0_12_active)?;
+                check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
+                check_tx_ring_size_cap(tx)?;
+                check_tx_ring_signatures(tx)?;
+                check_tx_range_proofs(tx, current_height)?;
+            }
+            // UNSHIELD (inputs empty, outputs non-empty): value leaves the pool as
+            // value-REVEALING transparent output(s) — public amount committed with
+            // ZERO blinding (coinbase-shaped). No ring signatures or range proofs
+            // apply: there are no transparent inputs to authenticate and no hidden
+            // output amount to prove in range (a revealed output carries no
+            // Bulletproof, exactly like a coinbase output). The output VALUE is
+            // bound to precisely what left the pool by verify_transparent_shielded_balance
+            // + the `value_balance == spend_fee` inflation guard in
+            // verify_block_spark_v2, which sum these exact output commitments; the
+            // curve-point check above is the only structural check it needs.
         }
         return Ok(());
     }
@@ -3173,14 +3194,20 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         // Relaxed for a PURE-shielded (#172) Spark tx: its range proofs live inside
         // the libspark bundle (verified at block level), not in `tx.range_proof`,
         // and it has NO transparent outputs, so there is nothing to range-prove
-        // here. But a transparent<->shielded BRIDGE tx (a shield-in's transparent
-        // CHANGE output, or an unshield's transparent RECIPIENT output) DOES carry
-        // transparent outputs, which the block-level gate range-proofs
-        // (validate_transaction's bridge arm → check_tx_range_proofs). Waiving it
-        // here for such a tx lets an unmineable tx with a junk/empty range proof
-        // relay through the mempool (F7 mempool-vs-block drift / relay DoS). So
-        // only waive the requirement for a shielded tx with NO transparent outputs.
-        if tx.range_proof.is_empty() && (!is_shielded || !tx.outputs.is_empty()) {
+        // here. A SHIELD-IN additionally carries a confidential (ECDH-blinded)
+        // transparent CHANGE output that the block-level gate range-proofs
+        // (validate_transaction's bridge arm → check_tx_range_proofs); a shield-in
+        // is identified by having transparent INPUTS (the funding UTXOs), so waive
+        // the requirement here only when it has BOTH transparent inputs and
+        // outputs. An UNSHIELD has NO transparent inputs; its transparent output is
+        // value-REVEALING (zero blinding, coinbase-shaped) and legitimately carries
+        // no Bulletproof, so it must be waived too — requiring one would reject
+        // every unshield. Waiving a junk/empty range proof for a tx that the block
+        // gate WOULD range-proof is the F7 mempool-vs-block drift / relay-DoS risk,
+        // so the predicate below matches the block arm exactly.
+        if tx.range_proof.is_empty()
+            && (!is_shielded || (!tx.inputs.is_empty() && !tx.outputs.is_empty()))
+        {
             crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_034, "missing range proof");
             return Err(Error::InvalidTransaction(
                 "UNCONSTITUTIONAL: missing range proof (Bill of Rights I — Bulletproofs required)"

@@ -670,12 +670,20 @@ impl Mempool {
             // the veil and the bridge binding replaces it. Pure-shielded txs have
             // empty inputs/outputs, so both loops below are no-ops (returns Ok, the
             // prior behaviour for them).
-            // Only a bridge tx with TRANSPARENT OUTPUTS (shield-in change /
-            // unshield recipient) carries a Bulletproof in `tx.range_proof`; a
-            // PURE shielded spend (pool->pool) has empty transparent outputs and a
-            // legitimately empty `range_proof`, so range-proof it ONLY when it has
-            // transparent outputs (mirrors validate_transaction_basic).
-            if !tx.outputs.is_empty() && !verify_output_range_proofs(tx, chain_height) {
+            // Only a SHIELD-IN carries a confidential (ECDH-blinded) transparent
+            // CHANGE output, so only it carries a Bulletproof in `tx.range_proof`.
+            // A shield-in is distinguished by having transparent INPUTS (the
+            // funding UTXOs). An UNSHIELD has NO transparent inputs; its
+            // transparent output is value-REVEALING (zero blinding, coinbase-
+            // shaped), so it legitimately has no Bulletproof — range-proofing it
+            // would reject every unshield. A PURE shielded spend (pool->pool) has
+            // no transparent outputs at all. So range-proof ONLY a tx with
+            // transparent inputs AND outputs (a shield-in with change) — mirrors
+            // validate_transaction_basic and validate_transaction's bridge arm.
+            if !tx.inputs.is_empty()
+                && !tx.outputs.is_empty()
+                && !verify_output_range_proofs(tx, chain_height)
+            {
                 return Err(Error::InvalidTransaction(
                     "Range proof verification failed (shielded tx transparent output) — rejected at mempool".into(),
                 ));
