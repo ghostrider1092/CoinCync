@@ -286,7 +286,7 @@ impl NetworkType {
     pub const fn supply_commitment_enforce_height(&self) -> u64 {
         match self {
             NetworkType::Mainnet => u64::MAX,
-            NetworkType::Testnet | NetworkType::Regtest => u64::MAX,
+            NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => u64::MAX,
         }
     }
 

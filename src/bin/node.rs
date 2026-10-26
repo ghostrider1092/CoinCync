@@ -606,6 +606,7 @@ async fn main() {
                 Network::Mainnet => "mainnet",
                 Network::Testnet => "testnet",
                 Network::Regtest => "regtest",
+                Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
 
