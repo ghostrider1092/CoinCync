@@ -859,6 +859,52 @@ fn encrypt_amount(
     encrypted
 }
 
+/// Build a value-REVEALING transparent output: a public amount committed with
+/// ZERO blinding, paid to `recipient_spend`/`recipient_view` via a one-time
+/// stealth address — coinbase-shaped, so the recipient's scanner recovers it on
+/// the zero-blinding path (reconstruct `Commit(amount, 0)`, record mask 0).
+///
+/// Used by the UNSHIELD assembly to materialize pool-exit value on the
+/// transparent side. The value is public by construction (a zero-blinding
+/// commitment reveals it), which is exactly the point of unshielding; the output
+/// VALUE is bound to what left the pool by the transparent value bridge +
+/// `value_balance == spend_fee` guard in `chain::verify_block_spark_v2`. No range
+/// proof applies (nothing is hidden), mirroring a coinbase output.
+#[cfg(feature = "libspark-ffi")]
+pub fn build_revealed_output<R: RngCore + CryptoRng>(
+    recipient_spend: &PublicKey,
+    recipient_view: &PublicKey,
+    value: Amount,
+    output_index: u8,
+    rng: &mut R,
+) -> Result<TxOutput> {
+    let (stealth, tx_secret) = generate_stealth_address_checked_ext(
+        recipient_spend,
+        recipient_view,
+        output_index,
+        false,
+        rng,
+    )?;
+    // ZERO blinding → public value (bridge requirement; identical form to a
+    // coinbase output so the scanner's zero-blinding path recovers it).
+    let commitment = PedersenCommitment::commit(value.as_atomic(), &BlindingFactor::zero());
+    // Public amount, stored as plaintext LE u64 — the SAME convention coinbase
+    // outputs use, so the recipient's scanner zero-blinding path reads it
+    // directly (it reconstructs Commit(amount, 0) and records blinding = 0). The
+    // value is public regardless (the zero-blinding commitment reveals it).
+    let encrypted_amount = value.as_atomic().to_le_bytes().to_vec();
+    let view_tag = compute_view_tag(&tx_secret, recipient_view, output_index);
+    Ok(TxOutput {
+        stealth_address: stealth.public_key,
+        tx_public_key: stealth.tx_public_key,
+        commitment: commitment.to_bytes(),
+        encrypted_amount,
+        view_tag,
+        lock_height: None,
+        encrypted_memo: vec![],
+    })
+}
+
 /// Compute view tag for fast output scanning (sender side)
 ///
 /// SECURITY: Uses proper ECDH (tx_secret * view_public_POINT).
