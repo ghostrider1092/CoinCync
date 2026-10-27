@@ -2,7 +2,7 @@
      script to refresh. Curated recipes live in docs/COMMANDS.md. -->
 # CoinCync CLI — generated command reference
 
-Generated 2026-10-27T05:39:17Z from the `--help` of the built
+Generated 2026-10-27T13:57:56Z from the `--help` of the built
 binaries plus the cargo surface (features, bins, and the CI gated feature set).
 This file is **auto-generated** — edit the code or the generator, not this file.
 For hand-written recipes see [`COMMANDS.md`](COMMANDS.md); for build/test/deploy

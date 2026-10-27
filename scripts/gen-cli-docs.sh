@@ -46,10 +46,19 @@ if [ "$DO_BUILD" = "1" ]; then
     cargo build --release --features "randomx $GATED_FEATURES" --bin coincync-node --bin coincync-wallet
 fi
 
-NODE="$BIN_DIR/coincync-node$EXE"
-WALLET="$BIN_DIR/coincync-wallet$EXE"
+# Resolve each binary to whichever of <name>.exe / <name> is actually on disk, so
+# the script works from Git Bash (uname=MINGW, EXE=.exe) AND WSL bash (uname=Linux,
+# EXE="" but the Windows .exe is what's present). -f (exists), not -x: the Windows
+# executable bit is unreliable under WSL bash.
+resolve_bin() {
+  if   [ -f "$BIN_DIR/$1.exe" ]; then echo "$BIN_DIR/$1.exe"
+  elif [ -f "$BIN_DIR/$1" ];     then echo "$BIN_DIR/$1"
+  else echo "$BIN_DIR/$1$EXE"; fi   # non-existent: keep a sensible name for the error
+}
+NODE="$(resolve_bin coincync-node)"
+WALLET="$(resolve_bin coincync-wallet)"
 for b in "$NODE" "$WALLET"; do
-  [ -x "$b" ] || fatal "missing binary: $b  (build it, or re-run with --build)"
+  [ -f "$b" ] || fatal "missing binary: $b  (build it, or re-run with --build)"
 done
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -61,11 +70,16 @@ help_of() { "$@" --help 2>&1 || true; }
 # spaces with a lowercase first token, stopping at the first blank line after the
 # header. Excludes the auto `help` subcommand.
 subcommands_of() {
+  # A command row is: two-space indent + name + two-or-more spaces (the description
+  # column), e.g. "  shielded-send   Build + verify ...". Wrapped description
+  # continuation lines are indented MUCH deeper, so `^  [name]  ` excludes them.
+  # The block ends at the first NON-indented line (the next section header, e.g.
+  # "Options:"); blank lines do not end it (clap may wrap long descriptions). This
+  # is robust across TTY/width/WSL differences in how clap lays out --help.
   awk '
     /^Commands:/ {inblk=1; next}
-    inblk && /^[A-Za-z]/ {exit}                 # next section header ends the block
-    inblk && /^$/ {blanks++; if (blanks>0 && seen) exit; next}
-    inblk && /^  [a-z]/ {seen=1; print $1}
+    inblk && /^[^ ]/ {exit}                                  # non-indented line ends the block
+    inblk && /^  [a-zA-Z0-9][a-zA-Z0-9_-]*([ ]{2,}|[ ]*$)/ { print $1 }
   ' <<<"$1" | grep -vx 'help' || true
 }
 
@@ -194,6 +208,15 @@ EOF
 | --- | --- |
 EOF
   features_table
-} > "$OUT"
+} > "$OUT.tmp"
 
-log "done → $OUT ($(wc -l < "$OUT") lines)"
+# Safety guard: a degraded run (e.g. a shell where clap --help parsing misfires)
+# must never clobber the good doc. Require a plausible number of command sections.
+SECTIONS="$(grep -cE '^### ' "$OUT.tmp" || true)"
+MIN_SECTIONS=30
+if [ "${SECTIONS:-0}" -lt "$MIN_SECTIONS" ]; then
+  rm -f "$OUT.tmp"
+  fatal "degraded output: only ${SECTIONS} command sections (< ${MIN_SECTIONS}). Kept existing ${OUT} unchanged. Re-run under Git Bash (e.g. \"C:\\Program Files\\Git\\bin\\bash.exe\" scripts/gen-cli-docs.sh)."
+fi
+mv -f "$OUT.tmp" "$OUT"
+log "done → $OUT ($(wc -l < "$OUT") lines, ${SECTIONS} command sections)"
