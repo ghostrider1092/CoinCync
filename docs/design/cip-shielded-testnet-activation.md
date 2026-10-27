@@ -83,6 +83,11 @@ mainnet, and the code is structured so it *cannot* (see §8).
 
 ## 4. Build the activation release
 
+Steps 1–4 are automated by **`scripts/cut-shielded-activation.sh <H>`** (the
+activation height is the only input — set it from the live tip + lead, §3). It
+sets the knob, regenerates the lock, and runs the gated suite; it does NOT
+commit/push/deploy. Equivalently, by hand:
+
 1. On the activation branch, set the knob:
    `src/constants.rs` → `SHIELDED_TESTNET_ACTIVATION_HEIGHT = <H>` (replace the
    `u64::MAX` placeholder). Leave `SHIELDED_TX_ACTIVATION_HEIGHT` at `u64::MAX`
@@ -102,14 +107,17 @@ mainnet, and the code is structured so it *cannot* (see §8).
    (see the audit sign-off doc). Merge only after sign-off.
 6. The **testnet activation feature set** is
    `randomx testnet sketch-gk-proof libspark-ffi` — the verifier is now MANDATORY
-   in the fleet build (this is the change from today's `randomx testnet`).
+   in the fleet build (this is the change from today's `randomx testnet`). Do
+   **not** run `cut-shielded-activation.sh` during a chaos soak (its gated build
+   would contend with / overwrite the soak binaries).
 
 ## 5. Distribute + verify (the part that prevents the fork)
 
-Run on **every** node in the inventory (seed → fleet → community), via
-`deploy/fleet/safe-deploy.sh` (lock + fingerprint preflight) or per-host
-`sudo CARGO_FEATURES="randomx testnet sketch-gk-proof libspark-ffi" bash
-deploy/ops/roll-fleet.sh` (preserves the chain DB):
+Run on **every** node in the inventory (seed → fleet → community) via
+**`sudo bash deploy/ops/activate-shielded-testnet.sh`** — it installs the
+libspark build deps (which `roll-fleet.sh` does not), then delegates to
+`roll-fleet.sh` with the activation feature set (preserves the chain DB). Under
+the hood that is:
 
 1. Stop node → `git pull --ff-only` the activation commit → rebuild with the
    activation feature set → install → restart → wait for RPC.
