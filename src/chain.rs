@@ -6673,6 +6673,34 @@ mod tests {
     }
 
     #[test]
+    fn load_from_database_indexes_genesis_transactions_when_missing() {
+        // Data dirs from before init_genesis indexed the genesis txs. The index
+        // is not empty, so the full rebuild does not run.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
+        chain.init_genesis().unwrap();
+        let genesis = chain.get_block_by_height(0).unwrap();
+        for tx in &genesis.transactions {
+            db.remove_tx_index(tx.hash().as_bytes());
+        }
+        db.index_tx(&[0xABu8; 32], 1, 0).unwrap();
+        assert_eq!(
+            chain.get_tx_location(genesis.transactions[0].hash().as_bytes()),
+            None
+        );
+
+        let reloaded = Blockchain::with_database(db, NetworkType::Testnet);
+        reloaded.load_from_database().unwrap();
+        for (idx, tx) in genesis.transactions.iter().enumerate() {
+            assert_eq!(
+                reloaded.get_tx_location(tx.hash().as_bytes()),
+                Some((0, u32::try_from(idx).unwrap()))
+            );
+        }
+    }
+
+    #[test]
     fn load_from_database_rejects_missing_genesis_height_entry() {
         // Chain state present but the height index has no genesis (height-0)
         // entry → Err("no genesis entry"), never a spurious Fresh.

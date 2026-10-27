@@ -355,6 +355,24 @@ impl Blockchain {
                                 );
                             }
                         }
+
+                        // Data dirs from before init_genesis indexed the genesis txs
+                        if let Some(genesis) = self.get_block_by_height(0) {
+                            for (idx, tx) in genesis.transactions.iter().enumerate() {
+                                let hash = tx.hash();
+                                if db.get_tx_location(hash.as_bytes()).is_none() {
+                                    let idx = u32::try_from(idx).map_err(|_| {
+                                        Error::InvalidState("genesis tx index exceeds u32".into())
+                                    })?;
+                                    db.index_tx(hash.as_bytes(), 0, idx)?;
+                                    tracing::info!(
+                                        "Indexed genesis tx {} at {}",
+                                        hash.to_hex(),
+                                        idx
+                                    );
+                                }
+                            }
+                        }
                     }
 
                     // Verify tip integrity after loading (catches poisoned lock corruption)
