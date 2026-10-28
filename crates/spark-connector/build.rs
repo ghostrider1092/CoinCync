@@ -80,6 +80,16 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor");
 
     let common = |b: &mut cc::Build| {
+        // Force the vendored C/C++ (secp256k1 + libspark) to compile OPTIMIZED
+        // regardless of the cargo profile. Without this the `cc` build inherits
+        // the profile's OPT_LEVEL, so our usual debug soaks/tests compiled the
+        // crypto at `/Od` — the Grootle/Pippenger multiexp over a large cover
+        // set is then dramatically slower than it should be (a big chunk of the
+        // observed ~100x-vs-Firo verify cost was simply unoptimized C++, not a
+        // missing batched multiexp — the Pippenger path is present). We set the
+        // opt level explicitly and KEEP asserts on (no NDEBUG) so the crypto's
+        // debug-time invariant checks still fire on the audit track.
+        b.opt_level(2);
         b.include(&shims) // shims FIRST: boost/optional, chainparams, primitives/mint_spend
             .include(&src)
             .include(&s256)

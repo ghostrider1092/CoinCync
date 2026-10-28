@@ -58,7 +58,7 @@ dormant item detailed in §8.
 | `RING_SIZE` | 16 | mature ring size |
 | `BOOTSTRAP_MIN_RING_SIZE` | 11 | ring size below height 10,000 |
 | `MAX_RING_SIZE` | 32 | |
-| `STRICT_RING_MEMBER_HEIGHT` | 100 | below it, an unknown ring member is warned-and-allowed |
+| `STRICT_RING_MEMBER_HEIGHT` | 100 | stealth-address strictness ramp (a non-existent ring member is rejected at every height since #219 — see §8.1) |
 | `MIN_OUTPUT_AGE` / `_POST_FORK` | 10 / 100 | coinbase maturity (blocks) |
 | `MIN_OUTPUT_AGE_HARDFORK_HEIGHT` | `u64::MAX` testnet / 0 mainnet | mainnet uses 100 from genesis |
 | `MIN_OUTPUT_AMOUNT` | 1,000,000 | dust floor (0.000001 CYNC) |
@@ -194,10 +194,9 @@ coinbase early-returns after the version check.
    present in the UTXO set.
 6. **Ring member existence + commitment** — each ring member's stealth address is
    found in the live UTXO set **or** the permanent `output_index`, and
-   `member.commitment` equals the on-chain commitment. **Below
-   `STRICT_RING_MEMBER_HEIGHT (100)`, a ring member not found on-chain is logged
-   and allowed** (bootstrap relaxation — see §8 and the genesis-bootstrap
-   runbook).
+   `member.commitment` equals the on-chain commitment. A ring member found in
+   neither is **rejected at every height** (#219 — the old below-
+   `STRICT_RING_MEMBER_HEIGHT` warn-and-allow relaxation was removed; see §8.1).
 7. **Ring member coinbase maturity** — a coinbase ring member must satisfy
    `current_height − output_height ≥ min_output_age_at_height(current_height)`
    (10 pre-fork / 100 post; mainnet 100 from genesis).
@@ -299,8 +298,8 @@ provably reverts on disconnect.
   and cross-tx-on-chain duplicate-stealth rejection; and the
   `total_outputs_ever − reorg_disconnects_total` ring-size availability metric.
   *On mainnet these apply from genesis, so early-block behavior matches the
-  mature chain — see the genesis-bootstrap runbook for the blocks 1–99
-  ring-member relaxation (§8).*
+  mature chain. (The former blocks 1–99 ring-member relaxation was removed in
+  code — see §8.1.)*
 - **Bulletproofs+ / uniform tx shape** (`= 0`): active from genesis.
 - **Tx version 2** (`V2_TX_ACTIVATION_HEIGHT = 50,000`).
 - **Coinbase maturity 10 → 100** (`MIN_OUTPUT_AGE_HARDFORK_HEIGHT`): mainnet uses
@@ -313,11 +312,17 @@ provably reverts on disconnect.
 Honest notes for auditors — none is a live consensus bug, but each is a place
 where the code differs from a naive reading:
 
-1. **Bootstrap ring-member relaxation.** Below `STRICT_RING_MEMBER_HEIGHT = 100`,
-   a ring member absent from the UTXO set and output-index is *warned and
-   allowed* with no commitment check — a mint-from-nothing window on blocks
-   1–99. Closed **operationally** by the genesis-bootstrap runbook (self-mine ≥
-   100 blocks with `--no-peers` before opening the network), not in code.
+1. **Bootstrap ring-member relaxation — CLOSED IN CODE (#219).** The old
+   behaviour (below `STRICT_RING_MEMBER_HEIGHT = 100`, a ring member absent from
+   both the UTXO set and the output-index was *warned and allowed* — a
+   mint-from-nothing window on blocks 1–99) has been removed. Such a fabricated
+   ring member is now **rejected at every height** (`validation.rs:2186-2213`).
+   This is a strict tightening, not a chain split: coinbase maturity is 100 from
+   genesis, so blocks 1–99 are coinbase-only (coinbase inputs carry no ring) and
+   a legitimate spend at any height references a real indexed output — only a
+   forgery reached the old escape hatch. The genesis-bootstrap runbook is no
+   longer load-bearing for this. `STRICT_RING_MEMBER_HEIGHT` is retained for the
+   separate stealth-address strictness ramp.
 2. **Height-parameterized reward.** The coinbase reward is
    `calculate_block_reward(height)` (an adaptive-step estimate of supply-at-
    height), not the exact per-block cumulative supply. Deterministic and
@@ -329,9 +334,17 @@ where the code differs from a naive reading:
    and `MAX_FUTURE_TIMESTAMP` (unused; the future-block check uses
    `MAX_TIMESTAMP_DRIFT`) were deleted from `constants.rs`, and `MTP_WINDOW` is
    now wired into the MTP walk (previously a hardcoded `11`).
-4. **`total_burned` is not accumulated** into a persisted chain counter; burns
-   are computed per-fee in `distribute_fee` but not summed into chain state.
-   `total_supply` therefore tracks *gross* emission.
+4. **`total_burned` IS accumulated** (this note previously said it was not — that
+   is stale). `ChainStats.total_burned` is a persisted `u128` running total moved
+   by `block_fee_burn()` at every connect / disconnect / fork-apply / fork-undo
+   site (`chain.rs:1508/2050/2659/2903/3069/3267/3358`), with `checked_add`/
+   `checked_sub` over/underflow panics, the consensus invariant
+   `total_burned ≤ total_supply`, and `circulating = total_supply −
+   total_burned`. It is symmetric across reorg (tests
+   `total_burned_apply_disconnect_is_symmetric_and_reorg_correct`,
+   `rollback_to_height_unwinds_total_burned_through_the_real_disconnect_site`) and
+   feeds the supply digest. `total_supply` still tracks *gross* emission by
+   design; circulating supply nets the burn.
 5. **`min_target()`** (`difficulty.rs`) is defined and re-exported but not read
    by block validation. Cosmetic.
 6. **Dormant / feature-gated (inert in production):** rolling-finality
