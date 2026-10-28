@@ -15,7 +15,8 @@ only — it is **not the audited path**. Companion to `cip-shielded-txtype.md`,
 > The audited shielded engine verifies each spend against a **node-authoritative
 > cover set** resolved from `SparkPoolStore::cover_set_at(cover_set_id,
 > anchor_height)`: the pool is bucketed into fixed groups of at most
-> **`N = n^m = 8^5 = 32768`** coins (libspark `get_default` Grootle params, #259),
+> **`N = n^m = 8^3 = 512`** coins (libspark `get_coincync` Grootle params —
+> CoinCync's RATIFIED production anon-set; see "Ratified parameters" below),
 > where group `g` is the coins at insertion positions `[g·N, (g+1)·N)` with
 > `height ≤ anchor_height`, in canonical order. The Groth-Kohlweiss one-of-many
 > proof is verified against *that* set, and the cover-set representation is
@@ -92,11 +93,11 @@ one-out-of-many over `N` elements; the pads simply cannot be the witness.
 
 1. **`N` (i.e. `m = GK_ANON_SET_LOG2`).** [v1 native only] Larger `N` = stronger
    anonymity but `O(N)` verify and slower bucket fill on a young chain.
-   Provisional `m = 8` (`N = 256`). **Resolved for the shipped v2 engine:**
-   `N = 32768` (libspark `get_default`, Grootle n=8/m=5), fixed by #259 — under
-   the #258 node-authoritative verify, test params (N=16) break every spend once
-   the pool exceeds N, so production params are mandatory, not a tunable. The
-   provisional v1 figure above applies only to the unshipped native path.
+   Provisional `m = 8` (`N = 256`). **RATIFIED for the shipped v2 engine:**
+   `N = 512` (libspark `get_coincync`, Grootle n=8/m=3 — a CoinCync delta to the
+   vendored tree; see `crates/spark-connector/vendor/NOTICE.md`). See "Ratified
+   parameters" below. The provisional v1 figure above applies only to the
+   unshipped native path.
 2. **Cross-bucket spends / bucket selection when a wallet owns coins in several
    buckets** (each input proves against its own bucket — confirm mempool/relay
    cost is acceptable).
@@ -104,6 +105,30 @@ one-out-of-many over `N` elements; the pads simply cannot be the witness.
    bucket state or only buckets sealed below the finalized tip (interacts with
    reorg-rewind of the `ShieldedStore`).
 4. **Interaction with `spark_set_root`** in the header (currently gated to zero).
+
+## Ratified parameters
+
+The shipped v2 engine is ratified at **`N = 512`** (`get_coincync`, Grootle
+n=8/m=3), chosen from a direct libspark verify-cost benchmark on CoinCync's
+secp256k1 build (not an extrapolation):
+
+| Params                         | `N`     | per-block base multiexp | IBD verdict          |
+| ------------------------------ | ------- | ----------------------- | -------------------- |
+| `get_test` (n=2/m=4)           | 16      | negligible              | anon set = CLSAG ring; breaks once pool > N |
+| **`get_coincync` (n=8/m=3)**   | **512** | **~60 ms** (meas. 63.8) | **viable — RATIFIED** |
+| Firo `get_default` (n=8/m=5)   | 32768   | ~2.7 s                  | not viable here      |
+
+Why not 32768 (Firo's audited param): at N=32768 a single-block verify is ~3.3 s
+(release ≈ debug), ~100× Firo's reported Spark verify. That gap is a *missing
+batched multiexp*, not an `N` problem — but even a fully batched 32768 cannot
+remove the intrinsic ~2.7 s/block **base** multiexp, so a chain where shielded
+spends are the norm would not stay in sync. 512 keeps the base ~60 ms; a
+10-spend block with batched verify is ~160 ms (a batched block verify amortizes
+the per-spend multiexp within a block, landed separately). m≥3 is required by
+the `Params` ctor, so 512 is the smallest valid n=8 set. The choice is
+consensus-relevant and network-wide: a coin built under one param set is not
+verifiable under another, so all nodes MUST agree. Ratification is backed by a
+24 h in-block consensus soak at N=512 (`scripts/soak-24h-shielded.sh`).
 
 ## Implementation status
 

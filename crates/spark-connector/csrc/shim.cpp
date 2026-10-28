@@ -24,21 +24,27 @@
 using secp_primitives::GroupElement;
 using secp_primitives::Scalar;
 
-// ── #259: the single Spark parameter accessor ───────────────────────────────
-// Every libspark call in the shim goes through this. It returns the PRODUCTION
-// parameters (`get_default()`: Grootle n=8, m=5 → cover-set capacity
-// N = n^m = 32768), NOT `get_test()` (n=2, m=4 → N = 16, which made the shielded
-// anonymity set the same 16 as a CLSAG ring and — once the node-authoritative
-// verify of #258 is in — broke every spend as soon as the pool passed 16 coins,
-// since libspark rejects a cover set larger than N). Routing through one accessor
-// keeps the prove and verify sides in lock-step on the same parameters.
+// ── anon-set: the single Spark parameter accessor ───────────────────────────
+// Every libspark call in the shim goes through this. It returns CoinCync's
+// RATIFIED production parameters (`get_coincync()`: Grootle n=8, m=3 → cover-set
+// capacity N = n^m = 512), a COINCYNC DELTA added to the vendored libspark
+// (see vendor/src/libspark/params.cpp). 512 was chosen from the verify-cost
+// benchmark (docs/design/cip-shielded-anonset.md): ~60 ms/block base multiexp,
+// IBD-viable — unlike Firo's get_default (n=8,m=5 → N=32768, ~2.7 s/block base,
+// non-viable on a chain where shielded spends are the norm) and unlike get_test
+// (n=2,m=4 → N=16, the same size as a CLSAG ring, which — once the
+// node-authoritative verify of #258 is in — broke every spend as soon as the
+// pool passed 16 coins, since libspark rejects a cover set larger than N). A coin
+// built under one param set is NOT verifiable under another, so the whole network
+// MUST agree — never mix. Routing through one accessor keeps the prove and verify
+// sides in lock-step on the same parameters.
 static const spark::Params* cc_params() {
-    return spark::Params::get_default();
+    return spark::Params::get_coincync();
 }
 
-// #259: the shim's internal FIXTURE builders (spend_verify_roundtrip,
+// The shim's internal FIXTURE builders (spend_verify_roundtrip,
 // make_verify_bundle, build_spend) used to mint a FULL cover set of N = n^m
-// coins. With production params that is 32768 coins — far too many for a build
+// coins. With production params that is 512 coins — far too many for a build
 // fixture. Grootle accepts and pads any partial cover set in [1, N], so these
 // fixtures use a small set instead. (The real wallet/node path supplies its own
 // cover set and is unaffected; `spark_ffi_cover_set_size` still reports the true

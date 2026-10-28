@@ -15,10 +15,21 @@ Bitcoin-core crypto/serialization it depends on (`src/crypto/`, `src/*.h`).
 
 ## Verbatim vs. modified
 
-- **Verbatim (unmodified) Firo:** everything under `src/libspark/`,
+- **Verbatim (unmodified) Firo:** everything under `src/libspark/` (EXCEPT the
+  single CoinCync consensus delta in `params.cpp`/`params.h`, documented below),
   `src/secp256k1/`, `src/crypto/`, `src/support/`, `src/compat/`, and the
   Bitcoin-core root headers (`serialize.h`, `streams.h`, `hash.h`, `uint256.*`,
-  etc.). **No cryptographic code is modified.**
+  etc.). **No cryptographic / proof code is modified.**
+- **CoinCync consensus delta — the ONLY change to Firo's `libspark` tree:**
+  `src/libspark/params.{cpp,h}` add a `Params::get_coincync()` factory
+  (n=8, m=3 => N=512), CoinCync's RATIFIED production Grootle anon-set. It adds a
+  new parameter set *alongside* Firo's `get_default()` / `get_test()`; it touches
+  no existing Firo code path and no proof/verify logic. The `Params` ctor is
+  unchanged, so the one-of-many (Grootle) math is byte-identical to upstream at
+  the chosen (n,m). N=512 was selected from the verify-cost benchmark
+  (`docs/design/cip-shielded-anonset.md`) for IBD viability vs. Firo's
+  `get_default` N=32768 (~2.7 s/block base multiexp). This factory is the one
+  line of the provenance pin that is NOT byte-identical to firo v0.14.18.1.
 - **Minimal shims (node *infrastructure*, NOT crypto):**
   - `src/util.h` and `src/sync.h` — replaced with minimal equivalents. The
     originals dragged in `boost::thread` / `boost::filesystem` / logging /
