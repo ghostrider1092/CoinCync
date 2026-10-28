@@ -447,6 +447,41 @@ impl SparkPoolStore {
         *self.max_coin_height.read()
     }
 
+    /// Wipe the pool to empty — in-memory AND persisted — so recovery can rebuild
+    /// it deterministically from the committed chain.
+    ///
+    /// The pool persists its coins / spent tags / pool value via IMMEDIATE writes
+    /// DURING block apply (`add_coin` / `mark_tag_spent` / `apply_value_balance`),
+    /// which happen OUTSIDE the block's atomic `commit_block_atomic`. A crash in
+    /// that window can therefore leave the persisted pool one block AHEAD of the
+    /// committed chain tip; on restart the node re-syncs the uncommitted block and
+    /// `verify_block_spark_v2` rejects it ("mint coin outpoint already in the
+    /// pool"), wedging the node. Recovery clears the pool and replays block apply
+    /// up to the committed tip (see `Blockchain::rebuild_spark_pool`, mirroring
+    /// `rebuild_utxo_set`), making the pool a deterministic function of the chain
+    /// and eliminating the divergence for any crash window.
+    pub fn clear(&self) -> Result<()> {
+        self.coins.write().clear();
+        self.by_outpoint.write().clear();
+        self.spent_tags.write().clear();
+        self.checkpoints.write().clear();
+        *self.max_coin_height.write() = None;
+        *self.max_spent_tag_height.write() = None;
+        *self.pool_value.write() = 0;
+        if let Some(ref p) = self.persistence {
+            p.coins
+                .clear()
+                .map_err(|e| Error::DatabaseError(format!("spark_pool coins clear: {e}")))?;
+            p.tags
+                .clear()
+                .map_err(|e| Error::DatabaseError(format!("spark_pool tags clear: {e}")))?;
+            p.meta
+                .clear()
+                .map_err(|e| Error::DatabaseError(format!("spark_pool meta clear: {e}")))?;
+        }
+        Ok(())
+    }
+
     /// The highest block height any tag was spent at (`None` if none spent).
     /// O(1) maintained field.
     pub fn max_spent_tag_height(&self) -> Option<u64> {

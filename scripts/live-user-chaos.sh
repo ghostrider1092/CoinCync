@@ -36,6 +36,7 @@ DURATION="${DURATION:-28800}"       # 8h default; override for a smoke run
 SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-300}"   # fuse/metrics snapshot cadence (s)
 CHAOS_EVERY="${CHAOS_EVERY:-120}"         # how often (s) to rotate a breaker trigger
 SHIELDED_EVERY="${SHIELDED_EVERY:-90}"    # how often (s) to run a full shielded round-trip
+UNSHIELD_EVERY="${UNSHIELD_EVERY:-150}"   # how often (s) to run a pool EXIT (shield-in -> unshield)
 CHAOS_ARM_HEIGHT="${CHAOS_ARM_HEIGHT:-2}" # arm consensus breakers from height 2
 LOG="$RUN_DIR/chaos-$(date +%Y%m%d-%H%M%S).log"
 RESULTS="$RUN_DIR/results.json"
@@ -96,7 +97,9 @@ start_node() { # NO background miner — blocks are produced on demand via chaos
   log "starting regtest node (data=$DATA_DIR rpc=$RPC_PORT, on-demand mining)"
   "$NODE" --network "$NET" --data-dir "$DATA_DIR" start >>"$RUN_DIR/node.log" 2>&1 &
   NODE_PID=$!
-  for _ in $(seq 1 90); do rpc_ok get_info && { log "node up (pid $NODE_PID)"; return 0; }; sleep 1; done
+  # RandomX dataset init on a fresh data dir is slow — much slower on a release
+  # build than debug — so the readiness window is configurable (NODE_WAIT polls).
+  for _ in $(seq 1 "${NODE_WAIT:-90}"); do rpc_ok get_info && { log "node up (pid $NODE_PID)"; return 0; }; sleep 1; done
   log "FATAL: node did not come up (see $RUN_DIR/node.log)"; return 1
 }
 cur_height() { rpc get_info | sed -n 's/.*"height":\([0-9]*\).*/\1/p' | head -1; }
@@ -197,7 +200,44 @@ guard() {
 # ── User-action phases (one random action per cycle) ─────────────────────────
 act_mine()         { mine_blocks 1; }
 act_send_tx()      { send_verified A B; }
-act_stealth()      { local sa; sa="$(w B subaddress create 2>/dev/null | grep -E '^Address:' | awk '{print $NF}' | tail -1)"; if [[ -n "$sa" ]] && w A send --address "$sa" --amount "$AMT_ATOMIC" >>"$RUN_DIR/wallet.log" 2>&1; then bump stealth_sent; bump tx_sent; else bump tx_failed; fi; }
+# STEALTH / SUBADDRESS RECEIVE: generate a fresh unlinkable subaddress on B and
+# pay it from A, then VERIFY B recovered it. Two things the old one-liner got
+# wrong (both made stealth_sent stick at 0 for the whole soak):
+#   1. it sent via `--address <encoded subaddr>`, which the wallet's recipient
+#      network guard REFUSES on a regtest wallet ("--address is a testnet
+#      address but this wallet is unknown; refusing to send") — every other send
+#      in this harness deliberately uses raw --to-spend/--to-view for this reason.
+#   2. a subaddress payment needs the `--subaddress` flag so the sender derives
+#      the one-time output against the subaddress view key; without it the
+#      recipient cannot detect/spend the output.
+# `subaddress create` prints the raw Spend/View public keys alongside the encoded
+# address — parse those and send by raw keys + --subaddress, mirroring the verified
+# transparent-send path so a silent non-receipt is caught, not counted as success.
+act_stealth() {
+  local out sp vp before after tries=0 sent=0
+  out="$(w B subaddress create 2>/dev/null)"
+  sp="$(echo "$out" | grep -E '^ *Spend public:' | awk '{print $NF}' | tail -1)"
+  vp="$(echo "$out" | grep -E '^ *View public:'  | awk '{print $NF}' | tail -1)"
+  if [[ -z "$sp" || -z "$vp" ]]; then bump tx_failed; log "stealth: subaddress create gave no keys"; return 1; fi
+  w A scan >>"$RUN_DIR/wallet.log" 2>&1 || true
+  before="$(utxo_count B)"; before="${before:-0}"
+  while (( tries < 6 )); do
+    if w A send --to-spend "$sp" --to-view "$vp" --subaddress --amount "$AMT_ATOMIC" \
+         >>"$RUN_DIR/wallet.log" 2>&1; then sent=1; break; fi
+    tries=$((tries+1)); sleep 2
+  done
+  if (( sent == 0 )); then bump tx_failed; log "stealth A->B(sub) FAILED after $tries retries"; return 1; fi
+  bump tx_sent
+  after="$before"
+  for _ in $(seq 1 20); do
+    mine_blocks 1 >/dev/null 2>&1 || true
+    after="$(utxo_count B)"; after="${after:-0}"
+    (( after > before )) && break
+    sleep 2
+  done
+  if (( after > before )); then bump stealth_sent; log "RECEIPT ok stealth A->B(sub) (utxos $before->$after, tries=$tries)";
+  else bump tx_failed; log "RECEIPT MISSING stealth A->B(sub) (utxos $before->$after) — subaddress not recovered?"; fi
+}
 # SHIELD-IN (transparent → Spark pool): VALIDATED end-to-end on the regtest test
 # bridge — the mint is admitted, mined, applied to the pool, and A recovers the
 # owned note. Each call shields a fresh note (needs mature transparent coinbase,
@@ -210,7 +250,6 @@ act_shield_in()    { if w A shielded-mint --amount "$SHIELD_NOTE_ATOMIC" >>"$RUN
 # exclusion (coin_ltag + is_spark_pool_tag_spent) keeps the sender from re-picking a
 # spent note, so this is safe to repeat. Self-contained so it reliably exercises the
 # whole shielded user-path each time it fires (rather than racing the random loop).
-# `unshield` has no wallet command on this branch, so it stays out.
 act_shielded_roundtrip(){
   local b0 b1
   b0="$(shbal B)"; b0="${b0:-0}"
@@ -229,6 +268,34 @@ act_shielded_roundtrip(){
   else
     bump tx_failed
   fi
+}
+
+# UNSHIELD (shielded pool -> transparent EXIT): mint a fresh pool note for A,
+# then unshield part of it back to A's OWN transparent balance via the
+# `shielded-unshield` command and VERIFY the pool shrank. The command returns OK
+# only if the node ACCEPTED the unshield tx — the key proof that consensus
+# validates the outward veil crossing (value-revealing transparent output, no
+# transparent inputs, value_balance = amount + miner_fee). Receipt is checked by
+# A's shielded balance DROPPING (not transparent UTXO count, which A — the miner —
+# inflates every block via coinbase, so it would false-positive).
+act_unshield(){
+  local s0 s1 tries=0 sent=0
+  w A scan >>"$RUN_DIR/wallet.log" 2>&1 || true
+  # ensure A owns a fresh pool note strictly larger than amount + fee
+  if ! w A shielded-mint --amount "$SHIELD_NOTE_ATOMIC" >>"$RUN_DIR/wallet.log" 2>&1; then bump tx_failed; return 1; fi
+  bump shield_in
+  sleep "$EMBARGO_WAIT"; mine_blocks 2 >/dev/null
+  s0="$(shbal A)"; s0="${s0:-0}"
+  while (( tries < 4 )); do
+    if w A shielded-unshield --amount "$AMT_ATOMIC" >>"$RUN_DIR/wallet.log" 2>&1; then sent=1; break; fi
+    tries=$((tries+1)); sleep 2
+  done
+  if (( sent == 0 )); then bump tx_failed; log "unshield A FAILED after $tries retries"; return 1; fi
+  bump tx_sent
+  sleep "$EMBARGO_WAIT"; mine_blocks 2 >/dev/null
+  w A scan >>"$RUN_DIR/wallet.log" 2>&1 || true
+  s1="$(shbal A)"; s1="${s1:-0}"
+  if (( ${s1:-0} < ${s0:-0} )); then bump unshield; log "RECEIPT ok unshield A->A(transparent) (pool shbal $s0 -> $s1)"; else bump tx_failed; log "WARN unshield A pool did not shrink ($s0 -> $s1)"; fi
 }
 
 # ── Chaos: trip a protection, then verify fail-closed + recovery ─────────────
@@ -335,16 +402,22 @@ main() {
     log "SMOKE: happy-path only (mine + transparent send + full shielded round-trip), no chaos"
     send_verified A B
     send_verified A B
+    # Subaddress (stealth) receive: pay a fresh unlinkable subaddress of B and
+    # verify B recovers it (receipt-checked inside act_stealth).
+    act_stealth
     # Exercise the full validated shielded user-path: shield-in -> shielded-send ->
     # verify B received (receipt-checked inside act_shielded_roundtrip).
     act_shielded_roundtrip
+    # Pool EXIT: shield-in -> unshield back to transparent -> verify the pool
+    # shrank (receipt-checked inside act_unshield). Completes the shielded triad.
+    act_unshield
     log "SMOKE: B shielded-balance after round-trip:"; w B shielded-balance 2>&1 | grep -iE 'Balance:|Owned|Note values' | tee -a "$LOG"
     snapshot
     return 0   # the EXIT trap runs report() once — don't double-report here
   fi
 
   local end=$(( $(date +%s) + DURATION ))
-  local last_snap=0 last_chaos=0 last_shielded=0
+  local last_snap=0 last_chaos=0 last_shielded=0 last_unshield=0
   # inject-tested surfaces (trip -> [fail-closed if consensus-armed] -> rearm ->
   # recover): all 5 Latch/consensus + P2p/Reorg. load=flood-tested. Covers all 7.
   local consensus=(Supply Shielded BlockIntegrity P2p Reorg) load=(Mempool Rpc) ci=0 li=0
@@ -365,6 +438,8 @@ main() {
     now=$(date +%s)
     # full shielded round-trip (shield-in -> send -> verify B) on its cadence
     if (( now - last_shielded >= SHIELDED_EVERY )); then act_shielded_roundtrip; last_shielded=$now; fi
+    # pool EXIT (shield-in -> unshield back to transparent -> verify pool shrank)
+    if (( now - last_unshield >= UNSHIELD_EVERY )); then act_unshield; last_unshield=$now; fi
     # rotate through chaos triggers on its cadence
     if (( now - last_chaos >= CHAOS_EVERY )); then
       chaos_consensus "${consensus[$(( ci % ${#consensus[@]} ))]}"; ci=$((ci+1))

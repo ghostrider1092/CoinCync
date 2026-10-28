@@ -349,6 +349,14 @@ int spark_ffi_build_spend(uint64_t output_value, unsigned char* out, int cap) {
 // Verify a bundle. On a valid spend, writes the linking tags (nullifiers) to
 // out_tags as [u32 count][34-byte tag]... and returns 1. Returns 0 on an invalid
 // spend or any error (fail-closed).
+// DoS bound on the attacker-controlled output_count that sizes a
+// SpendTransaction. Defined here so EVERY SpendTransaction(output_count)
+// construction below can guard on it (the sibling definition near
+// spark_ffi_spend_ltags predates these earlier call sites). #ifndef so the
+// later identical #define is a benign no-op.
+#ifndef SPARK_FFI_MAX_SPEND_OUTPUTS
+#define SPARK_FFI_MAX_SPEND_OUTPUTS 64
+#endif
 int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
                             const unsigned char* set_ptr, int set_len,
                             unsigned char* out_tags, int tags_cap, int* out_tags_len) {
@@ -367,6 +375,12 @@ int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
         ss >> cover_set;
         ss >> out_coins;
         ss >> output_count;
+        // DoS bound: output_count is attacker-controlled and sizes the
+        // SpendTransaction's internal vectors at construction, BEFORE `ss >> tx`
+        // can reject anything. On the live block-verify path an unbounded value
+        // (e.g. 2^63) forces an immediate multi-exabyte allocation on every full
+        // node. Bound it exactly like spark_ffi_spend_ltags/_fee. Fail-closed.
+        if (output_count > SPARK_FFI_MAX_SPEND_OUTPUTS) return 0;
 
         // #258: when the node supplies its own anchored cover set (set_len > 0),
         // it is AUTHORITATIVE — the cover set and representation from the
@@ -939,6 +953,10 @@ int spark_ffi_spend_outputs(const unsigned char* ptr, int len,
         ss >> cover_set;
         ss >> out_coins_v;
         ss >> output_count;
+        // DoS bound (same as spark_ffi_verify_bundle / _spend_ltags / _spend_fee):
+        // output_count is attacker-controlled and sizes the SpendTransaction before
+        // `ss >> tx` validates anything. Fail-closed on an oversized count.
+        if (output_count > SPARK_FFI_MAX_SPEND_OUTPUTS) return 0;
         spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2, (std::size_t)output_count);
         ss >> tx;
 
@@ -1055,6 +1073,41 @@ int spark_ffi_spend_fee(const unsigned char* ptr, int len, uint64_t* out_fee) {
         spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2, (std::size_t)output_count);
         ss >> tx;
         *out_fee = tx.getFee();
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+// Read a spend bundle's libspark `vout` — the transparent output value baked
+// into libspark's OWN balance equation (`input = Σ outputs + f + vout`,
+// spend_transaction.cpp). The Option-B value model ALWAYS keeps `vout = 0`: all
+// value crossing the veil is carried by the bundle fee `f` (bound to the tx's
+// public `value_balance`). A bundle with `vout > 0` still satisfies libspark's
+// balance proof, so without an explicit consensus check it would verify while
+// the node's pool accounting (which credits only `f`) drifts above the real
+// pooled value — a silent burn. Consensus rejects `vout != 0` using this.
+// Deserializes exactly as spark_ffi_spend_fee. Writes `vout` to `*out_vout`;
+// returns 1 on success, 0 on any malformed/decode error (fail-closed).
+int spark_ffi_spend_vout(const unsigned char* ptr, int len, uint64_t* out_vout) {
+    try {
+        const spark::Params* params = cc_params();
+        CDataStream ss((const char*)ptr, (const char*)ptr + len, SER_NETWORK, PROTOCOL_VERSION);
+        uint64_t cover_set_id;
+        std::vector<unsigned char> rep;
+        uint256 block_hash;
+        std::vector<spark::Coin> cover_set, out_coins;
+        uint64_t output_count;
+        ss >> cover_set_id;
+        ss >> rep;
+        ss >> block_hash;
+        ss >> cover_set;
+        ss >> out_coins;
+        ss >> output_count;
+        if (output_count > SPARK_FFI_MAX_SPEND_OUTPUTS) return 0;
+        spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2, (std::size_t)output_count);
+        ss >> tx;
+        *out_vout = tx.getVout();
         return 1;
     } catch (...) {
         return 0;

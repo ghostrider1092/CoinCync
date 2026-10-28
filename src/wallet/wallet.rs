@@ -1218,6 +1218,14 @@ impl Wallet {
                 .unwrap_or(0),
         }
     }
+
+    /// Run a closure with a borrow of the FULL key set (all epochs), under the
+    /// read lock. `None` if the wallet is locked / has no keys. Spend paths use
+    /// this to derive each input under the epoch it was received at (Wallet-1)
+    /// WITHOUT cloning the seed-bearing `WalletKeys` (deliberately not `Clone`).
+    pub fn with_wallet_keys<T>(&self, f: impl FnOnce(&WalletKeys) -> T) -> Option<T> {
+        self.keys.as_ref().map(f)
+    }
 }
 
 /// Thread-safe wallet wrapper
@@ -1273,6 +1281,15 @@ impl SharedWallet {
     /// Get current key epoch (cloned, since we can't hold a reference through RwLock)
     pub fn current_keys(&self) -> Option<KeyEpoch> {
         self.read_lock().current_keys().cloned()
+    }
+
+    /// Run a closure with a borrow of the FULL key set (all epochs), under the
+    /// read lock. `None` if the wallet is locked / has no keys. Spend paths use
+    /// this to derive each input under the epoch it was received at (Wallet-1)
+    /// WITHOUT cloning the seed-bearing `WalletKeys` (which is deliberately not
+    /// `Clone`). The closure must not block.
+    pub fn with_wallet_keys<T>(&self, f: impl FnOnce(&WalletKeys) -> T) -> Option<T> {
+        self.read_lock().keys.as_ref().map(f)
     }
 
     /// Get the wallet's network name
@@ -1535,13 +1552,10 @@ impl SharedWallet {
             return Err(Error::WalletLocked);
         }
 
-        // Get keys
-        let keys = wallet
-            .keys
-            .as_ref()
-            .ok_or(Error::WalletLocked)?
-            .current()
-            .ok_or(Error::WalletLocked)?;
+        // Get the full key set (not just the current epoch): each selected input
+        // is derived under the epoch it was RECEIVED at (Wallet-1), while change
+        // uses the current epoch — both resolved inside the builder.
+        let wallet_keys = wallet.keys.as_ref().ok_or(Error::WalletLocked)?;
 
         let snapshot = super::decoy_selection::ValidatedDecoySnapshot::try_from(
             chain.decoy_distribution_snapshot(),
@@ -1575,7 +1589,7 @@ impl SharedWallet {
         let prepared = super::send::prepare_privacy_transaction_with_options(
             &wallet.balance,
             &privacy_recipients,
-            keys,
+            &super::send::SpendKeys::PerEpoch(wallet_keys),
             current_height,
             ring_size,
             1.0,
@@ -1625,12 +1639,9 @@ impl SharedWallet {
             return Err(Error::WalletLocked);
         }
 
-        let keys = wallet
-            .keys
-            .as_ref()
-            .ok_or(Error::WalletLocked)?
-            .current()
-            .ok_or(Error::WalletLocked)?;
+        // Full key set: inputs derive under their received epoch, change under
+        // current (resolved in the builder) — Wallet-1.
+        let wallet_keys = wallet.keys.as_ref().ok_or(Error::WalletLocked)?;
 
         let snapshot = super::decoy_selection::ValidatedDecoySnapshot::try_from(
             chain.decoy_distribution_snapshot(),
@@ -1643,9 +1654,10 @@ impl SharedWallet {
             &wallet.balance,
             recipient.spend_public_key,
             recipient.view_public_key,
+            recipient.address_type == crate::primitives::AddressType::Subaddress,
             amount,
             unlock_height,
-            keys,
+            &super::send::SpendKeys::PerEpoch(wallet_keys),
             current_height,
             ring_size,
             &mut rng,
@@ -1755,6 +1767,7 @@ mod tests {
         let (mut wallet, _) = Wallet::create(path.clone(), Some("test123"), "testnet").unwrap();
 
         wallet.balance.add_utxo(UTXO {
+            key_epoch: 0,
             tx_hash: Hash::from_bytes([1u8; 32]),
             output_index: 0,
             output_locator: None,
@@ -2112,6 +2125,7 @@ mod tests {
         // Seed a detected UTXO (as the scanner would after view-key detection).
         let real_ki = KeyImage::from_bytes([0x5au8; 32]);
         wo.add_utxo(UTXO {
+            key_epoch: 0,
             tx_hash: Hash::from_bytes([1u8; 32]),
             output_index: 0,
             output_locator: None,
@@ -2222,6 +2236,7 @@ mod tests {
 
         let ki = KeyImage::from_bytes([9u8; 32]);
         w.add_utxo(UTXO {
+            key_epoch: 0,
             tx_hash: Hash::from_bytes([1u8; 32]),
             output_index: 0,
             output_locator: None,
@@ -2255,6 +2270,7 @@ mod tests {
         let (mut w, _m) = Wallet::create(path.clone(), Some("pw"), "testnet").unwrap();
 
         w.add_utxo(UTXO {
+            key_epoch: 0,
             tx_hash: Hash::from_bytes([3u8; 32]),
             output_index: 1,
             output_locator: None,
