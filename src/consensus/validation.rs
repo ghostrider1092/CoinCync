@@ -1662,8 +1662,14 @@ pub(crate) fn validate_transaction_for_network_ctx(
             // Bulletproof, exactly like a coinbase output). The output VALUE is
             // bound to precisely what left the pool by verify_transparent_shielded_balance
             // + the `value_balance == spend_fee` inflation guard in
-            // verify_block_spark_v2, which sum these exact output commitments; the
-            // curve-point check above is the only structural check it needs.
+            // verify_block_spark_v2, which sum these exact output commitments.
+            //
+            // SECURITY: those bind only the SUM, so each revealed output MUST also
+            // be pinned to its declared public amount with ZERO blinding — else
+            // non-zero blindings that cancel in the sum mint a spendable UTXO worth
+            // more than left the pool (the coinbase C19 trick). Inert for shield-in
+            // (self-guards on the unshield shape).
+            check_unshield_outputs_revealed(tx)?;
         }
         return Ok(());
     }
@@ -3061,6 +3067,70 @@ fn check_output_curve_points(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
+/// SECURITY (unshield cross-veil inflation guard — the UNSHIELD counterpart of
+/// the coinbase C19-FIX in `validate_block`'s coinbase loop). Every transparent
+/// output of an UNSHIELD is value-REVEALING, so its commitment MUST equal
+/// `commit(declared_amount, 0)`, where `declared_amount` is the plaintext LE-u64
+/// `encrypted_amount` that `transaction::builder::build_revealed_output` emits
+/// (the same coinbase convention).
+///
+/// Why it is mandatory: an unshield (a bridge shielded tx with NO transparent
+/// inputs) legitimately carries no Bulletproof range proof — a revealed output
+/// needs none — and `verify_transparent_shielded_balance` checks only the SUM of
+/// the output commitments. So without a per-output binding, two outputs with
+/// blindings `x` and `−x` cancel in that sum while committing to arbitrary
+/// per-output values the attacker controls, minting a spendable UTXO worth more
+/// than left the pool. That is exactly the coinbase blinding trick
+/// (`b1 + b2 = 0`) the C19-FIX closed, reopened in the unshield path.
+///
+/// Scoped to the unshield SHAPE (`inputs empty, outputs non-empty`) so it is
+/// inert for the other shapes and safe to call at every shielded gate: a
+/// SHIELD-IN has transparent inputs and its confidential CHANGE output is bound
+/// by `check_tx_range_proofs` on the ring path; a POOL-TO-POOL send has no
+/// transparent outputs. Called at ALL THREE shielded gates
+/// (`validate_transaction_basic`, the contextual bridge arm in
+/// `validate_transaction`, and `chain::verify_block_spark_v2`) so the rule cannot
+/// drift between them — that drift is what opened F4/F7. Fail-closed.
+pub(crate) fn check_unshield_outputs_revealed(tx: &Transaction) -> Result<()> {
+    // UNSHIELD direction only (see the shape rationale above).
+    if !tx.inputs.is_empty() || tx.outputs.is_empty() {
+        return Ok(());
+    }
+    for (idx, output) in tx.outputs.iter().enumerate() {
+        // Public amount, plaintext LE-u64 (coinbase convention). Exactly 8 bytes.
+        if output.encrypted_amount.len() != 8 {
+            crate::flight_recorder::record(
+                crate::diagnostics::CYNC_CONS_040,
+                "unshield output not coinbase-shaped",
+            );
+            return Err(Error::InvalidTransaction(format!(
+                "unshield output {idx}: a value-revealing output must carry an 8-byte plaintext \
+                 LE amount (coinbase-shaped), got {} bytes",
+                output.encrypted_amount.len()
+            )));
+        }
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&output.encrypted_amount[..8]);
+        let declared = u64::from_le_bytes(bytes);
+        let expected = crate::crypto::PedersenCommitment::commit(
+            declared,
+            &crate::crypto::BlindingFactor::zero(),
+        );
+        if output.commitment != *expected.as_point().as_bytes() {
+            crate::flight_recorder::record(
+                crate::diagnostics::CYNC_CONS_040,
+                "unshield output non-zero blinding",
+            );
+            return Err(Error::InvalidTransaction(format!(
+                "unshield output {idx}: commitment != commit(declared {declared}, 0) — a \
+                 value-revealing output must use ZERO blinding (cross-veil inflation via \
+                 non-zero blindings that cancel in the balance sum)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Quick contextless validation (for mempool)
 pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
     // FIX #39: accept any version in 1..=MAX_TX_VERSION.
@@ -3130,6 +3200,16 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         // testnet would admit/relay a shield-in its own block gate then refuses to
         // mine. That is off-policy (the feature never ships) and cannot affect a
         // production node; the block gate remains the consensus-authoritative stop.
+
+        // SECURITY (unshield inflation guard, mempool gate): an unshield's
+        // value-revealing outputs must each use ZERO blinding (commitment ==
+        // commit(declared, 0)), or non-zero blindings that cancel in the balance
+        // SUM mint a spendable UTXO worth more than left the pool (coinbase C19
+        // trick). Enforced here so a feature-build node does not admit/relay a
+        // crafted unshield its own block gate would reject (mempool-vs-block drift
+        // / relay-DoS). Self-guards on the unshield shape; inert for shield-in and
+        // pure-shielded. The authoritative stop is chain::verify_block_spark_v2.
+        check_unshield_outputs_revealed(tx)?;
     }
 
     // SECURITY (BUG-17): Reject transactions with empty inputs or outputs.
@@ -3807,6 +3887,100 @@ mod tests {
                 .any(|e| e.contains("commitment mismatch") && e.contains("inflation")),
             "per-output blinding-cancellation must be rejected by the C19 per-output check, got: {:?}",
             result.errors
+        );
+    }
+
+    #[test]
+    fn unshield_per_output_blinding_cancellation_rejected() {
+        // Review of #342: the UNSHIELD counterpart of the coinbase C19 hole. An
+        // unshield's value-revealing outputs are range-proof-waived, and
+        // verify_transparent_shielded_balance checks only the SUM of the output
+        // commitments. Two outputs with blindings b and −b cancel in that sum (so
+        // the balance equation is blind to the trick) while each output hides an
+        // attacker-chosen value behind a non-zero blinding — minting a spendable
+        // UTXO worth more than left the pool. check_unshield_outputs_revealed must
+        // reject it per-output; honest unshields and non-unshield shapes stay
+        // unaffected.
+        let out = |declared: u64, commitment: [u8; 32]| TxOutput {
+            stealth_address: PublicKey::from_bytes(point_bytes(61)),
+            tx_public_key: PublicKey::from_bytes(point_bytes(62)),
+            commitment,
+            encrypted_amount: declared.to_le_bytes().to_vec(),
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let unshield = |outputs: Vec<TxOutput>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![], // unshield has NO transparent inputs
+            outputs,
+            fee: Amount::from_atomic(1_000),
+            range_proof: vec![], // and carries NO range proof (the waiver the hole relied on)
+            extra: vec![],
+        };
+
+        // Honest: each output commits to its DECLARED amount with ZERO blinding.
+        let honest = unshield(vec![
+            out(5_000, zero_blinding_commitment(5_000)),
+            out(3_000, zero_blinding_commitment(3_000)),
+        ]);
+        assert!(
+            check_unshield_outputs_revealed(&honest).is_ok(),
+            "honest zero-blinding unshield must pass"
+        );
+
+        // Attack: blindings b and −b; c0 hides 1_000_000 while DECLARING 5_000.
+        let b = BlindingFactor::from_bytes([7u8; 32]);
+        let neg_b = BlindingFactor::zero().sub(&b);
+        let c0 = PedersenCommitment::commit(1_000_000, &b).to_bytes();
+        let c1 = PedersenCommitment::commit(3_000, &neg_b).to_bytes();
+
+        // The SUM is blind to the trick: Σ(attack) == Σ of an honest pair declaring
+        // (1_000_000, 3_000) with zero blinding — the b/−b cancel — so
+        // verify_transparent_shielded_balance cannot tell the two apart. The
+        // per-output zero-blinding check is the only thing that can.
+        {
+            use curve25519_dalek::ristretto::CompressedRistretto;
+            let sum_attack = CompressedRistretto(c0).decompress().unwrap()
+                + CompressedRistretto(c1).decompress().unwrap();
+            let sum_honest = CompressedRistretto(zero_blinding_commitment(1_000_000))
+                .decompress()
+                .unwrap()
+                + CompressedRistretto(zero_blinding_commitment(3_000))
+                    .decompress()
+                    .unwrap();
+            assert_eq!(
+                sum_attack, sum_honest,
+                "cancelling blindings leave the commitment sum unchanged — the sum-only gate is blind to the attack"
+            );
+        }
+
+        let attack = unshield(vec![out(5_000, c0), out(3_000, c1)]);
+        assert!(
+            check_unshield_outputs_revealed(&attack).is_err(),
+            "per-output non-zero blinding on an unshield output must be rejected"
+        );
+
+        // Shape guard: a SHIELD-IN (transparent inputs present) is NOT subject to
+        // the zero-blinding rule — its confidential change output is range-proofed
+        // on the ring path. The same non-zero-blinding output must be inert here.
+        let mut shield_in = unshield(vec![out(5_000, c0)]);
+        shield_in.inputs = vec![input_with_ki(
+            9,
+            ring_of(crate::constants::BOOTSTRAP_MIN_RING_SIZE, 70),
+        )];
+        assert!(
+            check_unshield_outputs_revealed(&shield_in).is_ok(),
+            "shield-in shape must be inert (the zero-blinding rule is unshield-only)"
+        );
+
+        // Malformed: a value-revealing output must carry an 8-byte plaintext amount.
+        let mut bad_enc = unshield(vec![out(5_000, zero_blinding_commitment(5_000))]);
+        bad_enc.outputs[0].encrypted_amount = vec![0u8; 4];
+        assert!(
+            check_unshield_outputs_revealed(&bad_enc).is_err(),
+            "non-8-byte encrypted_amount on an unshield output must be rejected"
         );
     }
 

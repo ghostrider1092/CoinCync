@@ -287,6 +287,7 @@ pub mod ffi {
             out_tags_len: *mut c_int,
         ) -> c_int;
         fn spark_ffi_spend_fee(ptr: *const u8, len: c_int, out_fee: *mut u64) -> c_int;
+        fn spark_ffi_spend_vout(ptr: *const u8, len: c_int, out_vout: *mut u64) -> c_int;
         fn spark_ffi_coin_ltag(
             seed: *const u8,
             seed_len: c_int,
@@ -696,6 +697,24 @@ pub mod ffi {
             return None;
         }
         Some(fee)
+    }
+
+    /// Read a spend bundle's libspark `vout` — the transparent output value in
+    /// libspark's own balance equation (`input = Σ outputs + f + vout`). The
+    /// Option-B value model ALWAYS keeps `vout = 0` (value crosses the veil via
+    /// the bundle fee `f`, bound to the tx's public `value_balance`); a bundle
+    /// with `vout > 0` still satisfies the libspark balance proof but would make
+    /// the node's pool accounting drift above the real pooled value (a silent
+    /// burn), so consensus rejects `vout != 0`. `None` on a malformed bundle
+    /// (fail-closed). Call on a bundle whose structure already verified.
+    pub fn spend_vout(bundle: &[u8]) -> Option<u64> {
+        let mut vout: u64 = 0;
+        // Safety: the shim reads `bundle` and writes a single u64 to `vout`.
+        let rc = unsafe { spark_ffi_spend_vout(bundle.as_ptr(), bundle.len() as c_int, &mut vout) };
+        if rc != 1 {
+            return None;
+        }
+        Some(vout)
     }
 
     /// Derive the linking tag (`Nullifier`) of an owned `coin` (minted with
