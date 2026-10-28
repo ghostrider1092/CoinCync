@@ -129,6 +129,13 @@ pub const MAINNET_P2P_PORT: u16 = DEFAULT_P2P_PORT;
 /// Default RPC port for mainnet (alias)
 pub const MAINNET_RPC_PORT: u16 = DEFAULT_RPC_PORT;
 
+/// Default P2P port for the beta channel (distinct so a beta node co-located
+/// with a testnet node doesn't collide).
+pub const BETA_P2P_PORT: u16 = 38080;
+
+/// Default RPC port for the beta channel.
+pub const BETA_RPC_PORT: u16 = 38081;
+
 /// Default P2P port for regtest
 pub const REGTEST_P2P_PORT: u16 = 18080;
 
@@ -330,6 +337,11 @@ pub const TESTNET_MAGIC: [u8; 4] = [0x74, 0x43, 0x59, 0x4E]; // "tCYN"
 /// Regtest magic bytes
 pub const REGTEST_MAGIC: [u8; 4] = [0x72, 0x43, 0x59, 0x4E]; // "rCYN"
 
+/// Beta-channel magic bytes ("bCYN") — isolates the opt-in beta network from
+/// testnet/mainnet on the wire, so a beta node can never peer with, or split,
+/// the audited networks.
+pub const BETA_MAGIC: [u8; 4] = [0x62, 0x43, 0x59, 0x4E]; // "bCYN"
+
 // =============================================================================
 // Address
 // =============================================================================
@@ -426,6 +438,19 @@ pub const SHIELDED_TX_ACTIVATION_HEIGHT: u64 = u64::MAX;
 /// and is the only way to soak the shielded consensus path before audit.
 pub const SHIELDED_REGTEST_ACTIVATION_HEIGHT: u64 = 100;
 
+/// Shielded activation height on the **beta channel** — finite (only in a
+/// `sketch-gk-proof` build) so opt-in beta users exercise the full shielded
+/// verify/apply path end-to-end on a disposable, isolated network. NEVER affects
+/// testnet/mainnet (see [`shielded_activation_height`], which returns `u64::MAX`
+/// for every non-regtest, non-beta network). The beta network has no economic
+/// value, so activating unaudited shielded consensus there is contained.
+pub const SHIELDED_BETA_ACTIVATION_HEIGHT: u64 = 5;
+
+/// Beta initial mining difficulty — deliberately LOW so the disposable beta test
+/// network mines near-instantly and opt-in users watch shielded activate (height
+/// 5) within seconds. Beta-only; testnet/mainnet keep their own initial difficulty.
+pub const BETA_INITIAL_DIFFICULTY: u64 = 256;
+
 /// Network-scoped shielded activation height. **Regtest** activates at
 /// [`SHIELDED_REGTEST_ACTIVATION_HEIGHT`]; **testnet and mainnet stay
 /// `u64::MAX`** (permanently disabled) until the shielded path is externally
@@ -440,6 +465,18 @@ pub const fn shielded_activation_height(network: crate::config::NetworkType) -> 
             #[cfg(feature = "sketch-gk-proof")]
             {
                 SHIELDED_REGTEST_ACTIVATION_HEIGHT
+            }
+            #[cfg(not(feature = "sketch-gk-proof"))]
+            {
+                SHIELDED_TX_ACTIVATION_HEIGHT
+            }
+        }
+        // Beta channel: activates ONLY in a shielded-feature build (same safety
+        // model as regtest); a default/production build keeps it at u64::MAX.
+        crate::config::NetworkType::Beta => {
+            #[cfg(feature = "sketch-gk-proof")]
+            {
+                SHIELDED_BETA_ACTIVATION_HEIGHT
             }
             #[cfg(not(feature = "sketch-gk-proof"))]
             {
@@ -954,7 +991,7 @@ fn activation_height(network: crate::config::NetworkType, name: &str) -> Option<
     ];
     let entries = match network {
         NetworkType::Mainnet => mainnet_entries,
-        NetworkType::Testnet | NetworkType::Regtest => testnet_entries,
+        NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => testnet_entries,
     };
     entries.iter().find(|(n, _)| *n == name).map(|(_, h)| *h)
 }

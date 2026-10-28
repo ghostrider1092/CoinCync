@@ -106,6 +106,7 @@ impl Blockchain {
     fn expected_genesis_hash(&self) -> Hash {
         match self.network {
             NetworkType::Testnet | NetworkType::Regtest => crate::testnet::expected_genesis_hash(),
+            NetworkType::Beta => crate::beta::expected_genesis_hash(),
             NetworkType::Mainnet => crate::mainnet::expected_genesis_hash(),
         }
     }

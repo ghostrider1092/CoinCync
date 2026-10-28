@@ -25,8 +25,10 @@ struct Cli {
     #[arg(long, default_value = "~/.coincync/wallets/default.wallet")]
     wallet: PathBuf,
 
-    /// Network.
-    #[arg(long, default_value = "testnet", value_parser = ["mainnet", "testnet", "regtest"])]
+    /// Network. `beta` is the public disposable test net where gated, unaudited
+    /// features (e.g. the shielded pool) activate early; it mirrors testnet's
+    /// address format, so beta wallets and testnet wallets are interchangeable.
+    #[arg(long, default_value = "testnet", value_parser = ["mainnet", "testnet", "regtest", "beta"])]
     network: String,
 
     /// Node RPC URL.
@@ -863,6 +865,7 @@ async fn main() {
         "mainnet" => Network::Mainnet,
         "testnet" => Network::Testnet,
         "regtest" => Network::Regtest,
+        "beta" => Network::Beta,
         _ => Network::Testnet,
     };
 
@@ -1711,6 +1714,7 @@ fn network_label(n: Network) -> &'static str {
         Network::Mainnet => "mainnet",
         Network::Testnet => "testnet",
         Network::Regtest => "regtest",
+        Network::Beta => "beta",
     }
 }
 
@@ -1893,7 +1897,7 @@ async fn cmd_address(
 
     let prim_network = match network {
         Network::Mainnet => coincync::primitives::Network::Mainnet,
-        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
+        Network::Testnet | Network::Regtest | Network::Beta => coincync::primitives::Network::Testnet,
     };
     let addr =
         coincync::primitives::Address::new(prim_network, epoch.spend_public, epoch.view_public);
@@ -1997,13 +2001,14 @@ async fn cmd_integrated_address(
     // visible rather than silently ignored.
     let prim_network = match data.network.as_str() {
         "mainnet" => coincync::primitives::Network::Mainnet,
-        "testnet" | "regtest" => coincync::primitives::Network::Testnet,
+        "testnet" | "regtest" | "beta" => coincync::primitives::Network::Testnet,
         other => return Err(format!("wallet has unknown network '{other}'")),
     };
     let flag_network = match network {
         Network::Mainnet => "mainnet",
         Network::Testnet => "testnet",
         Network::Regtest => "regtest",
+        Network::Beta => "beta",
     };
     if data.network != flag_network {
         eprintln!(
@@ -3534,7 +3539,7 @@ async fn cmd_multisig_gen(
     // Build group address
     let prim_network = match network {
         Network::Mainnet => coincync::primitives::Network::Mainnet,
-        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
+        Network::Testnet | Network::Regtest | Network::Beta => coincync::primitives::Network::Testnet,
     };
     let group_addr = coincync::primitives::Address::new(
         prim_network,
@@ -4065,7 +4070,7 @@ async fn cmd_subaddress_list(
 
     let prim_network = match network {
         Network::Mainnet => coincync::primitives::Network::Mainnet,
-        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
+        Network::Testnet | Network::Regtest | Network::Beta => coincync::primitives::Network::Testnet,
     };
 
     println!("Subaddresses for wallet {:?}:", path);
@@ -4134,7 +4139,7 @@ async fn cmd_subaddress_create(
 
     let prim_network = match network {
         Network::Mainnet => coincync::primitives::Network::Mainnet,
-        Network::Testnet | Network::Regtest => coincync::primitives::Network::Testnet,
+        Network::Testnet | Network::Regtest | Network::Beta => coincync::primitives::Network::Testnet,
     };
 
     // Persist the updated subaddress set back into the wallet file.

@@ -115,6 +115,18 @@ pub enum NetworkType {
     Mainnet,
     Testnet,
     Regtest,
+    /// **Beta channel** — an isolated PUBLIC network where *gated, unaudited*
+    /// consensus features are turned on for opt-in user testing (the blockchain
+    /// analogue of a phone OS beta program). Mirrors testnet's consensus schedule
+    /// but has its OWN magic bytes, so it can never peer with, or split,
+    /// testnet/mainnet. Each gated feature activates here at a finite height —
+    /// but ONLY in the build that enables that feature (e.g. shielded under
+    /// `sketch-gk-proof`; see `constants::shielded_activation_height`); a
+    /// production build keeps every such height at `u64::MAX`, byte-identical-off.
+    /// Nodes print a loud EXPERIMENTAL/UNAUDITED warning on startup. This lets
+    /// external users live-test unaudited features on a disposable network with
+    /// zero exposure to the audited testnet/mainnet.
+    Beta,
 }
 
 /// Canonical per-network runtime parameters.
@@ -177,6 +189,17 @@ impl NetworkType {
                 address_hrp: R_ADDRESS_HRP,
                 address_prefix: TESTNET_ADDRESS_PREFIX,
             },
+            NetworkType::Beta => ChainParams {
+                network: NetworkType::Beta,
+                magic: crate::constants::BETA_MAGIC,
+                p2p_port: crate::constants::BETA_P2P_PORT,
+                rpc_port: crate::constants::BETA_RPC_PORT,
+                data_dir_name: "beta",
+                name: "beta",
+                // Beta mirrors testnet's address format (testnet wallets work on beta).
+                address_hrp: T_ADDRESS_HRP,
+                address_prefix: TESTNET_ADDRESS_PREFIX,
+            },
         }
     }
 
@@ -215,7 +238,7 @@ impl NetworkType {
     pub const fn fee_distribution_height(&self) -> u64 {
         match self {
             NetworkType::Mainnet => 0,
-            NetworkType::Testnet | NetworkType::Regtest => 525,
+            NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => 525,
         }
     }
 
@@ -225,7 +248,7 @@ impl NetworkType {
     pub const fn min_output_age_hardfork_height(&self) -> u64 {
         match self {
             NetworkType::Mainnet => 0,
-            NetworkType::Testnet | NetworkType::Regtest => u64::MAX,
+            NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => u64::MAX,
         }
     }
 
@@ -234,7 +257,7 @@ impl NetworkType {
     pub const fn rolling_finality_enable_height(&self) -> u64 {
         match self {
             NetworkType::Mainnet => 25_000,
-            NetworkType::Testnet | NetworkType::Regtest => 50_000,
+            NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => 50_000,
         }
     }
 
@@ -243,7 +266,7 @@ impl NetworkType {
     pub const fn rolling_finality_enforce_height(&self) -> u64 {
         match self {
             NetworkType::Mainnet => 50_000,
-            NetworkType::Testnet | NetworkType::Regtest => 75_000,
+            NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => 75_000,
         }
     }
 
@@ -263,7 +286,7 @@ impl NetworkType {
     pub const fn supply_commitment_enforce_height(&self) -> u64 {
         match self {
             NetworkType::Mainnet => u64::MAX,
-            NetworkType::Testnet | NetworkType::Regtest => u64::MAX,
+            NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => u64::MAX,
         }
     }
 
@@ -302,10 +325,13 @@ impl NetworkType {
                 .into_iter()
                 .map(|c| (c.height, *c.hash.as_bytes()))
                 .collect(),
-            NetworkType::Testnet | NetworkType::Regtest => crate::testnet::testnet_checkpoints()
-                .into_iter()
-                .map(|c| (c.height, *c.hash.as_bytes()))
-                .collect(),
+            // Beta reuses testnet's checkpoints (isolated net, same checkpoint set).
+            NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => {
+                crate::testnet::testnet_checkpoints()
+                    .into_iter()
+                    .map(|c| (c.height, *c.hash.as_bytes()))
+                    .collect()
+            }
         }
     }
 
@@ -331,6 +357,7 @@ impl NetworkType {
             NetworkType::Mainnet => "Cynstra",
             NetworkType::Testnet => "CoinCync Testnet",
             NetworkType::Regtest => "CoinCync Regtest",
+            NetworkType::Beta => "CoinCync Beta (EXPERIMENTAL — UNAUDITED)",
         }
     }
 
@@ -349,6 +376,9 @@ impl NetworkType {
         }
         if bytes == crate::constants::REGTEST_MAGIC {
             return Some(NetworkType::Regtest);
+        }
+        if bytes == crate::constants::BETA_MAGIC {
+            return Some(NetworkType::Beta);
         }
         None
     }

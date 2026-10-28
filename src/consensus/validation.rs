@@ -260,7 +260,9 @@ impl BlockValidation {
 pub const fn v1_0_12_rules_active(network: crate::config::NetworkType, height: u64) -> bool {
     match network {
         crate::config::NetworkType::Mainnet | crate::config::NetworkType::Regtest => true,
-        crate::config::NetworkType::Testnet => height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT,
+        crate::config::NetworkType::Testnet | crate::config::NetworkType::Beta => {
+            height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT
+        }
     }
 }
 
@@ -1685,7 +1687,14 @@ pub(crate) fn require_pure_shielded_shape(tx: &Transaction) -> Result<()> {
 pub(crate) fn regtest_bridge_enabled(network: crate::config::NetworkType) -> bool {
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
     {
-        matches!(network, crate::config::NetworkType::Regtest)
+        // The test bridge is enabled on the ISOLATED test networks only — Regtest
+        // (single-node harness) and Beta (the isolated multi-node staging net).
+        // Both are feature-gated (`sketch-gk-proof`, never production) and carry
+        // their own genesis/magic, so this never touches testnet/mainnet.
+        matches!(
+            network,
+            crate::config::NetworkType::Regtest | crate::config::NetworkType::Beta
+        )
     }
     #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
     {
