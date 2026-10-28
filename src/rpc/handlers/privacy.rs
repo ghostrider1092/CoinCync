@@ -144,6 +144,44 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── is_spark_pool_tag_spent ───────────────────────────────
+    // v2 (libspark) shielded linking tag. A wallet calls this per owned pool
+    // coin (tag derived via coin_ltag) to exclude ALREADY-SPENT notes from its
+    // shielded balance and spend selection: a spent coin's bytes remain in the
+    // cover set, so view-key identification alone over-counts. The tag (Spark
+    // `T`) serializes to 34 bytes (68 hex).
+    module.register_method("is_spark_pool_tag_spent", |params, state, _ext| {
+        let (hex_t,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
+            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
+        })?;
+        // Pre-decode length cap (DoS), as in is_nullifier_spent.
+        if hex_t.len() > 128 {
+            return Err(ErrorObjectOwned::owned(
+                -32602, "tag hex too long (max 128 chars)".to_string(), None::<()>,
+            ));
+        }
+        let bytes = hex::decode(&hex_t).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
+        })?;
+        // "spent" means UNAVAILABLE to spend: already spent on-chain OR already
+        // on a PENDING mempool spend. The latter matters because a note whose
+        // spend is in the mempool but not yet mined is not in the on-chain spent
+        // set — without it the wallet re-picks the note and the node rejects the
+        // double-spend ("duplicate shielded linking tag in mempool").
+        #[cfg(feature = "sketch-gk-proof")]
+        let spent =
+            state.chain.spark_pool_tag_spent(&bytes) || state.mempool.contains_linking_tag(&bytes);
+        #[cfg(not(feature = "sketch-gk-proof"))]
+        let spent = {
+            let _ = (&bytes, &state);
+            false
+        };
+        Ok::<_, ErrorObjectOwned>(json!({
+            "tag": hex::encode(&bytes),
+            "spent": spent,
+        }))
+    }).map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── is_spark_serial_spent ─────────────────────────────────
     module.register_method("is_spark_serial_spent", |params, state, _ext| {
         let (hex_s,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {

@@ -23,11 +23,44 @@ use std::sync::Arc;
 /// `Blockchain` below.
 pub trait ShadowEvictChain {
     fn validate_transaction(&self, tx: &Transaction) -> Result<()>;
+
+    /// True if `tx` is a shielded tx that can no longer be mined against the
+    /// CURRENT pool state — its linking tag is already spent on-chain (a
+    /// confirmed spend re-added by Dandelion fluff), OR its shield-in mint's
+    /// coins are already in the pool (a confirmed mint re-added the same way).
+    /// `validate_transaction` is only a STRUCTURAL check for shielded txs (the
+    /// stateful cover-set/spent-tag/duplicate-coin verification is block-level),
+    /// so without this a confirmed shielded tx re-added to the mempool would
+    /// never be evicted, and the miner would re-propose it into every template —
+    /// stalling on "tag already spent" (spend) or HALTING on "duplicate mint coin
+    /// outpoint" (mint) at block apply. Non-shielded txs and builds without the
+    /// shielded engine: always false.
+    fn shielded_unminable(&self, tx: &Transaction) -> bool;
 }
 
 impl ShadowEvictChain for crate::chain::Blockchain {
     fn validate_transaction(&self, tx: &Transaction) -> Result<()> {
         crate::chain::Blockchain::validate_transaction(self, tx)
+    }
+
+    fn shielded_unminable(&self, tx: &Transaction) -> bool {
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        {
+            if tx.is_shielded() {
+                // The store-aware v2 verify returns Err when a revealed linking
+                // tag is already spent OR a shield-in mint's coins are already in
+                // the pool (the duplicate-mint-coin reject) — exactly the "no
+                // longer minable" conditions. Read-only; no state mutation. Inert
+                // (Ok) when the pool store is uninitialized.
+                return crate::chain::Blockchain::verify_block_spark_v2(
+                    self,
+                    std::slice::from_ref(tx),
+                )
+                .is_err();
+            }
+        }
+        let _ = tx;
+        false
     }
 }
 
@@ -1085,6 +1118,27 @@ impl Mempool {
     /// For larger mempools this could matter; revisit with a
     /// dirty-set / changed-context optimization if it shows up in
     /// profiles.
+    /// Whether a shielded linking tag is already present on a PENDING mempool
+    /// spend. A wallet checks this (alongside the on-chain spent set) before
+    /// picking a note to spend: a note whose spend is already in the mempool but
+    /// not yet mined is NOT in the on-chain spent set, so without this check the
+    /// wallet re-picks it and the node rejects the resulting double-spend
+    /// ("duplicate shielded linking tag in mempool"). Always false in the default
+    /// (non-shielded) build (`linking_tags` stays empty).
+    pub fn contains_linking_tag(&self, tag: &[u8]) -> bool {
+        self.linking_tags.contains(tag)
+    }
+
+    /// Whether any mempool tx is shielded. A shielded tx's consensus validity can
+    /// change under a NEW BLOCK without a key-image collision (its tag gets spent,
+    /// or its mint's coins land in the pool, e.g. after Dandelion fluff re-adds a
+    /// confirmed tx), which `remove_confirmed` + the `#149` reorg fast-path do NOT
+    /// catch — so the full `shadow_evict_invalid` sweep must run every block while
+    /// one is pending. Always false in the default (non-shielded) build.
+    pub fn has_shielded(&self) -> bool {
+        self.transactions.values().any(|e| e.tx.is_shielded())
+    }
+
     pub fn shadow_evict_invalid<C>(&mut self, chain: &C)
     where
         C: ShadowEvictChain,
@@ -1095,6 +1149,14 @@ impl Mempool {
         for (hash, entry) in &self.transactions {
             if let Err(e) = chain.validate_transaction(&entry.tx) {
                 invalid_hashes.push((*hash, format!("{}", e)));
+            } else if chain.shielded_unminable(&entry.tx) {
+                // A shielded tx that can no longer be mined against the current
+                // pool — a confirmed spend (tag now spent) or a confirmed
+                // shield-in mint (coins already in the pool) re-added by Dandelion
+                // fluff. Structurally valid, so validate_transaction passed, but
+                // re-proposing it stalls the miner (spend) or HALTS block apply on
+                // a duplicate mint coin (mint). Evict before it poisons templates.
+                invalid_hashes.push((*hash, "shielded tx no longer minable (re-added after confirm)".into()));
             }
         }
 
@@ -1742,6 +1804,18 @@ impl SharedMempool {
         C: ShadowEvictChain,
     {
         self.write_lock().shadow_evict_invalid(chain)
+    }
+
+    /// Whether any mempool tx is shielded — gates the per-block shadow-evict
+    /// sweep (see `Mempool::has_shielded`).
+    pub fn has_shielded(&self) -> bool {
+        self.read_lock().has_shielded()
+    }
+
+    /// Whether a shielded linking tag is on a pending mempool spend
+    /// (see `Mempool::contains_linking_tag`).
+    pub fn contains_linking_tag(&self, tag: &[u8]) -> bool {
+        self.read_lock().contains_linking_tag(tag)
     }
 
     pub fn set_height(&self, height: u64) {

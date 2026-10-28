@@ -2461,8 +2461,11 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
     // self-verify the bundle (standalone — the node re-verifies on submit).
     let spend = build_spend_to_address(seed, &cover_coins, spend_index, &chosen_ctx, amount, to.as_bytes())
         .ok_or("failed to build shielded spend (bad recipient address or output value)")?;
+    // Self-verify against the REAL node-resolved cover set (not an empty set,
+    // which would take the permissive stateless path and not actually check
+    // membership). This mirrors what the node's authoritative verify does.
     let tags = backend
-        .verify_spend(&[], &spend, fee, 0)
+        .verify_spend(&cover_coins, &spend, fee, fee as i64)
         .map_err(|e| format!("built spend failed self-verification: {e}"))?;
 
     println!("  Funding note:    value {chosen_value} atomic at cover index {spend_index}");
@@ -2472,12 +2475,17 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
     // #172 PR2: wrap the spend in a v2 SparkPayload + a TxType::Shielded tx and
     // submit it to the node via send_raw_transaction (replaces the old build-only
     // "not submitted" report).
+    // The fee (`chosen_value − amount`) is the value the bundle releases across
+    // the veil to the miner, so the public `value_balance` MUST equal it: the
+    // transparent value bridge needs `tx.fee == value_balance` (both = fee here,
+    // so it reduces to 0 with no transparent side), and consensus binds
+    // `value_balance == spend_fee(bundle)` as the cross-veil inflation guard.
     let payload = SparkPayload {
         version: SPARK_PAYLOAD_VERSION,
         mint: None,
         outputs: vec![],
         spend: Some(SpendBundle { cover_set_id: 0, anchor_height, bundle: spend.0 }),
-        value_balance: 0,
+        value_balance: fee as i64,
     };
     let tx = shielded_transaction(payload.encode(), fee);
     submit_shielded_tx(node, &tx, &format!("shielded spend of {amount} atomic to {to}")).await
@@ -2637,11 +2645,31 @@ async fn scan_live_cover_set(
     use spark_connector::{CoinBytes, SparkBackend};
 
     let (anchor_height, entries, cover_coins) = fetch_live_cover_set(node).await?;
-    // Scan the fetched set for coins this wallet owns (seed-based).
+    // Scan the fetched set for coins this wallet owns (seed-based), EXCLUDING
+    // already-spent notes. A spent coin's bytes remain in the cover set, so
+    // identifying it by view key is not enough — we derive each owned coin's
+    // linking tag and ask the node whether it is in the spent set. This keeps the
+    // balance from double-counting a spent note (e.g. a transfer's funding note
+    // after it is spent) and stops `shielded-send` from picking a spent one.
     let backend = LibsparkBackend;
     let mut owned: Vec<(usize, u64, Vec<u8>)> = Vec::new(); // (spend_index, value, ctx)
     for (pos, (_, coin, ctx)) in entries.iter().enumerate() {
         if let Ok(Some(id)) = backend.identify(seed, &CoinBytes(coin.clone()), ctx) {
+            // Exclude if this note's linking tag is already spent on-chain.
+            if let Some(tag) = spark_connector::ffi::coin_ltag(seed, &CoinBytes(coin.clone()), ctx) {
+                let spent = rpc_call(
+                    node,
+                    "is_spark_pool_tag_spent",
+                    serde_json::json!([hex::encode(&tag.0)]),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.get("spent").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+                if spent {
+                    continue;
+                }
+            }
             owned.push((pos, id.value, ctx.clone()));
         }
     }
@@ -2859,10 +2887,14 @@ async fn cmd_scan(
     let mut scanned_blocks = 0u64;
     let mut last_height = start;
 
-    // Pull blocks in batches of 100 (matches server's MAX_RANGE cap).
+    // Pull blocks in ADAPTIVE batches: start at 100 (the server's MAX_RANGE cap)
+    // but shrink on an oversized-response error so a run of full shielded blocks
+    // can't exceed the RPC byte cap and stall the scan; grow back toward 100 once
+    // blocks fit again.
     let mut cursor = start;
+    let mut batch_span: u64 = 100;
     while cursor <= end {
-        let batch_end = (cursor + 99).min(end);
+        let batch_end = (cursor + batch_span - 1).min(end);
         match rpc_get_block_range(node, cursor, batch_end).await {
             Ok(blocks_json) => {
                 if blocks_json.is_empty() {
@@ -3004,8 +3036,18 @@ async fn cmd_scan(
                 // Resume from the rewind target after a recovered reorg,
                 // else advance past the batch we just scanned.
                 cursor = reorg_resume.unwrap_or(batch_end + 1);
+                // Batch fit → grow back toward the cap for the next pull.
+                batch_span = (batch_span * 2).min(100);
             }
             Err(e) => {
+                // Oversized response (a run of full shielded blocks over the RPC
+                // byte cap): halve the batch and retry the SAME cursor rather than
+                // aborting the whole scan. Floored at 1 block.
+                let too_big = e.contains("too big") || e.contains("Exceeded max");
+                if too_big && batch_span > 1 {
+                    batch_span = (batch_span / 2).max(1);
+                    continue;
+                }
                 return Err(format!("rpc get_block_range: {}", e));
             }
         }

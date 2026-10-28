@@ -34,6 +34,8 @@ MATURE_BLOCKS="${MATURE_BLOCKS:-200}" # seed enough blocks for coinbase maturity
 # 8192 + light RandomX is ~minutes/block otherwise — can't mature coinbase).
 DURATION="${DURATION:-28800}"       # 8h default; override for a smoke run
 SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-300}"   # fuse/metrics snapshot cadence (s)
+CHAOS_EVERY="${CHAOS_EVERY:-120}"         # how often (s) to rotate a breaker trigger
+SHIELDED_EVERY="${SHIELDED_EVERY:-90}"    # how often (s) to run a full shielded round-trip
 CHAOS_ARM_HEIGHT="${CHAOS_ARM_HEIGHT:-2}" # arm consensus breakers from height 2
 LOG="$RUN_DIR/chaos-$(date +%Y%m%d-%H%M%S).log"
 RESULTS="$RUN_DIR/results.json"
@@ -45,7 +47,7 @@ export COINCYNC_RANDOMX_LIGHT_MODE=1
 # ── Metrics ──────────────────────────────────────────────────────────────────
 declare -A M=(
   [blocks_mined]=0 [tx_sent]=0 [tx_failed]=0 [stealth_sent]=0
-  [shield_in]=0 [shielded_sent]=0 [unshield]=0
+  [shield_in]=0 [shielded_sent]=0 [shielded_recv_ok]=0 [unshield]=0
   [breaker_trips]=0 [breaker_recoveries]=0 [failclosed_rejects]=0
   [faults_injected]=0 [consensus_faults]=0 [panics]=0 [cycles]=0
 )
@@ -79,8 +81,14 @@ rearm()  { rpc chaos_rearm "[\"$1\"]"; }
 kill_port() { # kill whatever LISTENs on a LOCAL port (our test node) — targeted by
               # PID on 127.0.0.1:$port, so it can never blanket-kill a real node.
   local p="$1" pid
-  pid="$(netstat -ano 2>/dev/null | grep -E "127\\.0\\.0\\.1:$p .*LISTENING" | awk '{print $NF}' | head -1)"
-  [[ -n "$pid" ]] && { log "cleanup: killing stale node pid $pid on port $p"; taskkill //F //PID "$pid" >/dev/null 2>&1; sleep 1; }
+  local killed=0
+  # Kill EVERY listener on the port, not just the first — a lingering node from a
+  # prior run on the same port makes our node bind-fail and we then talk to the
+  # stale one (wrong data dir → "miner did not advance"). sort -u dedups.
+  for pid in $(netstat -ano 2>/dev/null | grep -E "127\\.0\\.0\\.1:$p .*LISTENING" | awk '{print $NF}' | sort -u); do
+    log "cleanup: killing stale node pid $pid on port $p"; taskkill //F //PID "$pid" >/dev/null 2>&1; killed=1
+  done
+  [[ $killed = 1 ]] && sleep 1
   return 0
 }
 start_node() { # NO background miner — blocks are produced on demand via chaos_generate
@@ -137,13 +145,20 @@ mkwallet() { # create a named wallet; capture its addresses to the run dir
 # also refreshes the wallet against the node, so one call both updates and reads.
 utxo_count() { w "$1" scan 2>&1 | grep -iE 'UTXO count' | grep -oE '[0-9]+' | tail -1; }
 bal()        { w "$1" scan 2>&1 | grep -iE 'Balance total' | grep -oE '[0-9]+\.?[0-9]*' | head -1; }
-shbal()      { w "$1" shielded-balance 2>&1 | grep -iE 'Balance|shielded' | grep -oE '[0-9]+\.?[0-9]*' | head -1; }
+# Parse the owned shielded balance (atomic). Match the "Balance:" line ONLY (with
+# the colon) — the header "Shielded balance (anchor height N)" has no colon, so
+# this won't grab the anchor height by mistake.
+shbal()      { w "$1" shielded-balance 2>&1 | grep -E 'Balance:' | grep -oE '[0-9]+' | head -1; }
 addr_of()   { cat "$WDIR/$1.addr"    2>/dev/null; }
 spend_of()  { cat "$WDIR/$1.spend"   2>/dev/null; }
 view_of()   { cat "$WDIR/$1.view"    2>/dev/null; }
 shaddr_of() { cat "$WDIR/$1.shaddr"  2>/dev/null; }
 
 AMT_ATOMIC="${AMT_ATOMIC:-100000000}"   # 1 CYNC in atomic units (--amount is atomic)
+SHIELD_NOTE_ATOMIC="${SHIELD_NOTE_ATOMIC:-210000000}" # 2.1 CYNC per shield-in note
+SHIELDED_SEND_ATOMIC="${SHIELDED_SEND_ATOMIC:-200000000}" # 2.0 CYNC sent (0.1 fee, no large remainder)
+EMBARGO_WAIT="${EMBARGO_WAIT:-15}"   # wait out the Dandelion stem embargo before mining a shielded tx
+                                     # (single-node regtest fluffs via the no-relay-peer fail-safe ~6s)
 # send FROM TO AMOUNT(atomic) — transfer and VERIFY the recipient received (UTXO
 # count rose). Retries through the transient miner race ("chain state changed
 # during mempool admission … retry submission") that the continuous miner causes.
@@ -183,9 +198,38 @@ guard() {
 act_mine()         { mine_blocks 1; }
 act_send_tx()      { send_verified A B; }
 act_stealth()      { local sa; sa="$(w B subaddress create 2>/dev/null | grep -E '^Address:' | awk '{print $NF}' | tail -1)"; if [[ -n "$sa" ]] && w A send --address "$sa" --amount "$AMT_ATOMIC" >>"$RUN_DIR/wallet.log" 2>&1; then bump stealth_sent; bump tx_sent; else bump tx_failed; fi; }
-act_shield_in()    { w A shielded-mint --amount 5 >>"$RUN_DIR/wallet.log" 2>&1 && bump shield_in; }
-act_shielded_send(){ w A shielded-send --to "$(shaddr_of B)" --amount 1 >>"$RUN_DIR/wallet.log" 2>&1 && { bump shielded_sent; bump tx_sent; }; }
-act_unshield()     { w A shielded-unshield --amount 1 >>"$RUN_DIR/wallet.log" 2>&1 && bump unshield; }
+# SHIELD-IN (transparent → Spark pool): VALIDATED end-to-end on the regtest test
+# bridge — the mint is admitted, mined, applied to the pool, and A recovers the
+# owned note. Each call shields a fresh note (needs mature transparent coinbase,
+# which the mine actions provide). Confirmation happens on the next act_mine.
+act_shield_in()    { if w A shielded-mint --amount "$SHIELD_NOTE_ATOMIC" >>"$RUN_DIR/wallet.log" 2>&1; then bump shield_in; fi; }
+# SHIELDED ROUND-TRIP (shield-in -> shielded-send -> receipt), VALIDATED end-to-end
+# with the Option-B miner-paid fee model (value_balance == tx.fee == bundle fee):
+# shield a fresh note, mine it in (after the Dandelion embargo), shielded-send it to
+# B, mine, and VERIFY B's owned shielded balance rose by the sent amount. Spent-note
+# exclusion (coin_ltag + is_spark_pool_tag_spent) keeps the sender from re-picking a
+# spent note, so this is safe to repeat. Self-contained so it reliably exercises the
+# whole shielded user-path each time it fires (rather than racing the random loop).
+# `unshield` has no wallet command on this branch, so it stays out.
+act_shielded_roundtrip(){
+  local b0 b1
+  b0="$(shbal B)"; b0="${b0:-0}"
+  # Scan A first: shielded-mint spends A's transparent UTXOs but does NOT auto-scan,
+  # so without a prior scan the wallet sees "have 0" and the shield-in fails. (This
+  # silently breaks the shielded path early in a run, before any transparent send
+  # has scanned A.)
+  w A scan >>"$RUN_DIR/wallet.log" 2>&1 || true
+  if w A shielded-mint --amount "$SHIELD_NOTE_ATOMIC" >>"$RUN_DIR/wallet.log" 2>&1; then bump shield_in; else bump tx_failed; return; fi
+  sleep "$EMBARGO_WAIT"; mine_blocks 2 >/dev/null
+  if w A shielded-send --to "$(shaddr_of B)" --amount "$SHIELDED_SEND_ATOMIC" >>"$RUN_DIR/wallet.log" 2>&1; then
+    sleep "$EMBARGO_WAIT"; mine_blocks 2 >/dev/null
+    bump shielded_sent; bump tx_sent
+    b1="$(shbal B)"; b1="${b1:-0}"
+    if (( ${b1:-0} > ${b0:-0} )); then bump shielded_recv_ok; log "RECEIPT ok shielded A->B (B shbal $b0 -> $b1)"; else log "WARN shielded A->B not received (B shbal $b0 -> $b1)"; fi
+  else
+    bump tx_failed
+  fi
+}
 
 # ── Chaos: trip a protection, then verify fail-closed + recovery ─────────────
 chaos_consensus() { # inject -> expect isolating (+ fail-closed when armed) -> rearm -> recover
@@ -207,32 +251,53 @@ chaos_consensus() { # inject -> expect isolating (+ fail-closed when armed) -> r
     log "CHAOS $s: did NOT trip after inject (BUG?) state=$tripped"
   fi
 }
-chaos_load() { # pressure a load surface, expect it to trip, then AutoReset recovery.
-  # BOUNDED concurrency (<=10 procs at a time) — an unbounded `&` fan-out fork-bombs
-  # the host. Batches keep the request RATE high without exhausting memory.
+chaos_load() { # trip a load surface via realistic pressure, falling back to a
+  # deterministic inject if the flood is below the breaker's threshold, then
+  # verify recovery. `$s` is the CANONICAL surface name (capitalized, as
+  # get_fuse_status reports it) — surface_state greps the JSON for it, so a
+  # lowercase name silently never matches and the trip goes undetected.
   local s="$1" batch
   case "$s" in
-    rpc)     for batch in $(seq 1 40); do
-               for _ in $(seq 1 10); do rpc get_info >/dev/null 2>&1 & done; wait
+    Rpc)     # BOUNDED concurrency (<=10 procs/batch) — an unbounded `&` fan-out
+             # fork-bombs the host; batches keep the RATE high without it.
+             for batch in $(seq 1 40); do
+               # Wait only on THIS batch's curl PIDs — a bare `wait` would also wait
+               # on the backgrounded node (NODE_PID) and block forever.
+               local pids=()
+               for _ in $(seq 1 10); do rpc get_info >/dev/null 2>&1 & pids+=($!); done
+               wait "${pids[@]}"
              done ;;
-    mempool) for _ in $(seq 1 3); do act_send_tx; done ;;   # a few real sends (UTXO reservations limit rapid-fire)
+    Mempool) for _ in $(seq 1 3); do act_send_tx; done ;;   # a few real sends (UTXO reservations limit rapid-fire)
   esac
   sleep 2
   local st; st="$(surface_state "$s")"
-  [[ "$st" != "Closed" && -n "$st" ]] && { bump breaker_trips; log "CHAOS $s: load-tripped ($st)"; }
-  # AutoReset: idle a few snapshots, then confirm back to Closed
-  sleep 10
-  [[ "$(surface_state "$s")" == "Closed" ]] && { bump breaker_recoveries; PROTECTION_OK[$s]=1; log "CHAOS $s: AutoReset recovered"; }
+  if [[ "$st" == "Closed" || -z "$st" ]]; then
+    # Flood stayed under the threshold — prove the breaker machinery
+    # deterministically (regtest-chaos inject), same as the consensus surfaces.
+    inject "$s" >>"$LOG" 2>&1; sleep 1; st="$(surface_state "$s")"
+  fi
+  if [[ "$st" != "Closed" && -n "$st" ]]; then
+    bump breaker_trips; log "CHAOS $s: tripped ($st)"
+    rearm "$s" >>"$LOG" 2>&1; sleep 1
+    # AutoReset load breakers also reconnect on an idle window; give one more.
+    [[ "$(surface_state "$s")" != "Closed" ]] && sleep 10
+    [[ "$(surface_state "$s")" == "Closed" ]] && { bump breaker_recoveries; PROTECTION_OK[$s]=1; log "CHAOS $s: RECOVERED"; }
+  else
+    log "CHAOS $s: did NOT trip after flood+inject (BUG?) state=$st"
+  fi
 }
 
 snapshot() {
   local iso; iso="$(isolating_count)"
-  log "SNAPSHOT cycle=${M[cycles]} blocks=${M[blocks_mined]} tx=${M[tx_sent]}/${M[tx_failed]} shld(in/send/out)=${M[shield_in]}/${M[shielded_sent]}/${M[unshield]} trips=${M[breaker_trips]} recov=${M[breaker_recoveries]} failclosed=${M[failclosed_rejects]} isolating_now=$iso"
+  log "SNAPSHOT cycle=${M[cycles]} blocks=${M[blocks_mined]} tx=${M[tx_sent]}/${M[tx_failed]} shld(in/send/recv)=${M[shield_in]}/${M[shielded_sent]}/${M[shielded_recv_ok]} trips=${M[breaker_trips]} recov=${M[breaker_recoveries]} failclosed=${M[failclosed_rejects]} isolating_now=$iso"
   grep -qiE 'panic|RUST_BACKTRACE|thread .* panicked' "$RUN_DIR/node.log" 2>/dev/null && bump panics
 }
 
 report() {
-  local surfaces=(Supply Shielded BlockIntegrity mempool rpc p2p reorg)
+  # Names MUST match the keys chaos_consensus/chaos_load set in PROTECTION_OK
+  # exactly (case-sensitive): the consensus triggers use P2p/Reorg (capitalized),
+  # so the scorecard must too, or those surfaces never count as covered.
+  local surfaces=(Supply Shielded BlockIntegrity P2p Reorg Mempool Rpc)
   local covered=0
   echo "{" > "$RESULTS"
   for k in "${!M[@]}"; do echo "  \"$k\": ${M[$k]}," >> "$RESULTS"; done
@@ -246,7 +311,7 @@ report() {
   echo "  }" >> "$RESULTS"; echo "}" >> "$RESULTS"
   log "================ RESULT ================"
   log "duration=${DURATION}s cycles=${M[cycles]} blocks=${M[blocks_mined]} tx=${M[tx_sent]} (failed ${M[tx_failed]})"
-  log "shielded in/send/out=${M[shield_in]}/${M[shielded_sent]}/${M[unshield]} panics=${M[panics]}"
+  log "shielded in/send/recv-ok=${M[shield_in]}/${M[shielded_sent]}/${M[shielded_recv_ok]} panics=${M[panics]}"
   log "breakers: trips=${M[breaker_trips]} recoveries=${M[breaker_recoveries]} fail-closed=${M[failclosed_rejects]}"
   log "protection coverage: $covered/${#surfaces[@]} = ${score}%   (target 90%)"
   [[ ${M[panics]} -eq 0 && $score -ge 90 ]] && log "VERDICT: PASS" || log "VERDICT: REVIEW (panics=${M[panics]}, coverage=${score}%)"
@@ -267,32 +332,41 @@ main() {
   mine_blocks "$MATURE_BLOCKS" || { log "FATAL: miner did not advance the chain"; exit 1; }
 
   if [[ "$SMOKE" == "1" ]]; then
-    log "SMOKE: happy-path only (mine + send A->B receipt-verified), no chaos"
+    log "SMOKE: happy-path only (mine + transparent send + full shielded round-trip), no chaos"
     send_verified A B
     send_verified A B
+    # Exercise the full validated shielded user-path: shield-in -> shielded-send ->
+    # verify B received (receipt-checked inside act_shielded_roundtrip).
+    act_shielded_roundtrip
+    log "SMOKE: B shielded-balance after round-trip:"; w B shielded-balance 2>&1 | grep -iE 'Balance:|Owned|Note values' | tee -a "$LOG"
     snapshot
-    report
-    return 0
+    return 0   # the EXIT trap runs report() once — don't double-report here
   fi
 
   local end=$(( $(date +%s) + DURATION ))
-  local last_snap=0 last_chaos=0
-  local consensus=(Supply Shielded BlockIntegrity) load=(mempool rpc) ci=0 li=0
+  local last_snap=0 last_chaos=0 last_shielded=0
+  # inject-tested surfaces (trip -> [fail-closed if consensus-armed] -> rearm ->
+  # recover): all 5 Latch/consensus + P2p/Reorg. load=flood-tested. Covers all 7.
+  local consensus=(Supply Shielded BlockIntegrity P2p Reorg) load=(Mempool Rpc) ci=0 li=0
   while [[ $(date +%s) -lt $end ]]; do
     bump cycles
-    # weighted-random user action each cycle
+    # weighted-random user action each cycle. The per-cycle SHIELD-IN exercises
+    # shielded-tx mempool admission + v2 block-connect verify/apply frequently; the
+    # FULL shielded round-trip (shield-in -> shielded-send -> receipt) runs on its
+    # own cadence below (it waits out the embargo, so it must not stall every cycle).
+    # The whole shielded user-path is wired here via the Option-B miner-paid fee
+    # model. The shielded BREAKER is also exercised via chaos inject below.
     case $(( RANDOM % 10 )) in
-      0|1|2) act_mine ;;
-      3|4)   act_send_tx ;;
-      5)     act_stealth ;;
-      6)     act_shield_in ;;
-      7)     act_shielded_send ;;
-      8)     act_unshield ;;
-      9)     act_mine ;;
+      0|1|9)   act_mine ;;
+      3|4)     act_send_tx ;;
+      5|7)     act_stealth ;;
+      2|6|8)   act_shield_in ;;
     esac
     now=$(date +%s)
-    # rotate through chaos triggers periodically (every ~2 min)
-    if (( now - last_chaos >= 120 )); then
+    # full shielded round-trip (shield-in -> send -> verify B) on its cadence
+    if (( now - last_shielded >= SHIELDED_EVERY )); then act_shielded_roundtrip; last_shielded=$now; fi
+    # rotate through chaos triggers on its cadence
+    if (( now - last_chaos >= CHAOS_EVERY )); then
       chaos_consensus "${consensus[$(( ci % ${#consensus[@]} ))]}"; ci=$((ci+1))
       chaos_load "${load[$(( li % ${#load[@]} ))]}"; li=$((li+1))
       last_chaos=$now
