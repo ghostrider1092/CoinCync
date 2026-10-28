@@ -45,7 +45,7 @@ use coincync::wallet::decoy_selection::{
 use coincync::wallet::scanner::decrypted_to_utxo;
 use coincync::wallet::send::{
     build_prepared_privacy_transaction, estimate_fee_with_multiplier, prepare_privacy_transaction,
-    Payment, SendRequest, SpendContext,
+    Payment, SendRequest, SpendContext, SpendKeys,
 };
 use coincync::wallet::{generate_view_tag, Balance, KeyEpoch, WalletScanner, UTXO};
 
@@ -183,7 +183,12 @@ fn send_transfer(
     balance.add_utxo(mature_utxo(UTXO_AMOUNT, 0xB0, 1, 110));
 
     let prepared =
-        prepare_privacy_transaction(&balance, SendRequest::new(vec![payment], context), sender, rng)
+        prepare_privacy_transaction(
+            &balance,
+            SendRequest::new(vec![payment], context),
+            &SpendKeys::Single(sender),
+            rng,
+        )
             .expect("prepare");
     let rings = rings_for(&prepared.real_outputs(), context.ring_size(), rng);
     build_prepared_privacy_transaction(prepared, rings, rng).expect("build")
