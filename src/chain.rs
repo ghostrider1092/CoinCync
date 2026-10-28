@@ -994,6 +994,19 @@ impl Blockchain {
                 payload.value_balance,
             )
             .map_err(|e| format!("spark v2 tx {idx}: value bridge: {e}"))?;
+            // SECURITY (unshield inflation guard — authoritative gate): the value
+            // bridge above binds only the SUM of the transparent output
+            // commitments. Each UNSHIELD output is value-REVEALING and carries no
+            // range proof, so without a per-output binding two outputs with
+            // blindings x and −x cancel in that sum while committing to arbitrary
+            // values the attacker knows, minting a spendable UTXO worth more than
+            // left the pool (the coinbase C19 trick, unshield path). Require every
+            // unshield output == commit(declared, 0). Self-guards on the unshield
+            // shape (inputs empty, outputs non-empty); inert for shield-in and
+            // pure-shielded. Shared with the mempool + contextual gates so it
+            // cannot drift (F4/F7).
+            crate::consensus::validation::check_unshield_outputs_revealed(tx)
+                .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
             // Cumulative pool-value check (prevention): reject before apply if
             // this tx would unshield more than the pool holds.
             simulated_pool -= payload.value_balance as i128;
@@ -1047,6 +1060,27 @@ impl Blockchain {
                              (already-confirmed shield-in re-proposed)"
                         ));
                     }
+                }
+            }
+            // OPTION-B VOUT BINDING. A spend bundle's libspark `vout` (the
+            // transparent output value in libspark's own balance equation
+            // `input = Σ outputs + f + vout`) MUST be 0: all value crossing the
+            // veil is carried by the bundle fee `f`, which is bound to the tx's
+            // public `value_balance` / `tx.fee` by the guard below. A bundle with
+            // `vout > 0` still satisfies the libspark balance proof, so without
+            // this check it verifies while the pool turnstile (which credits only
+            // `f`) drifts ABOVE the real pooled value — a silent burn. Reject any
+            // non-zero vout; fail-closed if it is unreadable. Applies to EVERY
+            // spend, independent of value_balance (a value_balance == 0 pool send
+            // carries a spend too).
+            if let Some(sb) = &payload.spend {
+                let vout = spark_connector::ffi::spend_vout(&sb.bundle)
+                    .ok_or_else(|| format!("spark v2 tx {idx}: unreadable spend bundle vout"))?;
+                if vout != 0 {
+                    return Err(format!(
+                        "spark v2 tx {idx}: spend bundle vout {vout} != 0 — Option-B carries all \
+                         cross-veil value in the bundle fee (non-zero vout drifts pool accounting)"
+                    ));
                 }
             }
             // CROSS-VEIL INFLATION GUARD (shielded-send fee binding). A MINEABLE

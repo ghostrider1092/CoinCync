@@ -1079,6 +1079,41 @@ int spark_ffi_spend_fee(const unsigned char* ptr, int len, uint64_t* out_fee) {
     }
 }
 
+// Read a spend bundle's libspark `vout` — the transparent output value baked
+// into libspark's OWN balance equation (`input = Σ outputs + f + vout`,
+// spend_transaction.cpp). The Option-B value model ALWAYS keeps `vout = 0`: all
+// value crossing the veil is carried by the bundle fee `f` (bound to the tx's
+// public `value_balance`). A bundle with `vout > 0` still satisfies libspark's
+// balance proof, so without an explicit consensus check it would verify while
+// the node's pool accounting (which credits only `f`) drifts above the real
+// pooled value — a silent burn. Consensus rejects `vout != 0` using this.
+// Deserializes exactly as spark_ffi_spend_fee. Writes `vout` to `*out_vout`;
+// returns 1 on success, 0 on any malformed/decode error (fail-closed).
+int spark_ffi_spend_vout(const unsigned char* ptr, int len, uint64_t* out_vout) {
+    try {
+        const spark::Params* params = cc_params();
+        CDataStream ss((const char*)ptr, (const char*)ptr + len, SER_NETWORK, PROTOCOL_VERSION);
+        uint64_t cover_set_id;
+        std::vector<unsigned char> rep;
+        uint256 block_hash;
+        std::vector<spark::Coin> cover_set, out_coins;
+        uint64_t output_count;
+        ss >> cover_set_id;
+        ss >> rep;
+        ss >> block_hash;
+        ss >> cover_set;
+        ss >> out_coins;
+        ss >> output_count;
+        if (output_count > SPARK_FFI_MAX_SPEND_OUTPUTS) return 0;
+        spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2, (std::size_t)output_count);
+        ss >> tx;
+        *out_vout = tx.getVout();
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
 // Derive the linking tag (nullifier) of an OWNED coin — the tag it reveals when
 // spent. A wallet derives this for each coin it owns and checks it against the
 // pool's spent-set (`is_spark_pool_tag_spent`) to exclude already-spent notes
