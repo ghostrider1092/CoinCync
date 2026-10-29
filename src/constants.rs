@@ -426,6 +426,36 @@ pub const V2_TX_ACTIVATION_HEIGHT: u64 = 50_000; // ~69 days at 120s blocks
 /// complete, verified, and coordinated. See docs/design/cip-shielded-txtype.md.
 pub const SHIELDED_TX_ACTIVATION_HEIGHT: u64 = u64::MAX;
 
+/// Shielded activation height on the **public testnet** — the ROLLOUT KNOB for
+/// taking the Option-B shielded bridge live on testnet (the pre-audit milestone:
+/// bridge live on public testnet with real activity). Dedicated to testnet and
+/// DECOUPLED from [`SHIELDED_TX_ACTIVATION_HEIGHT`] so that setting it can NEVER
+/// arm mainnet — mainnet stays `u64::MAX` (see [`shielded_activation_height`]).
+///
+/// PLACEHOLDER = `u64::MAX` (shielded OFF on testnet): with this value, testnet
+/// behaviour is byte-identical to before this knob existed, so shipping it is
+/// safe and forks nothing. Setting it to a FINITE height is a COORDINATED,
+/// consensus-breaking hard fork on the live testnet. DO NOT set a finite value
+/// until ALL of the following hold, or non-upgraded nodes fork at the activation
+/// block:
+///   1. `libspark-ffi` (+ the shielded verify/apply path) is compiled into EVERY
+///      testnet binary — i.e. libspark becomes a MANDATORY testnet dependency,
+///      NOT a `sketch-gk-proof`-gated extra. A node without the verifier
+///      fail-closes on the first shielded tx and splits off. (Today the fleet
+///      builds `--features "randomx testnet"`, which has NO verifier — that MUST
+///      change first.)
+///   2. The whole seed fleet AND community nodes have redeployed that build.
+///   3. The chosen height = the live testnet tip at rollout time + a generous
+///      upgrade-window lead (enough blocks for stragglers to upgrade; at 120s
+///      blocks, e.g. ~1 week ≈ 5040 blocks). The live tip is NOT in-repo (the
+///      testnet was relaunched from genesis 2026-10-06; checkpoint list empty),
+///      so read it from the seed at rollout time.
+/// Unlike the regtest/beta knobs below, this is UNCONDITIONAL (not
+/// `#[cfg]`-gated): a persistent public network must activate by HEIGHT for every
+/// node, never by build flag (that would split the net by binary). That is
+/// precisely why precondition (1) — verifier in every binary — is mandatory.
+pub const SHIELDED_TESTNET_ACTIVATION_HEIGHT: u64 = u64::MAX;
+
 /// Shielded activation height on **regtest only** — a finite height so the full
 /// shielded verify/apply path (SparkPayload v2 → `verify_block_spark_v2` →
 /// `apply_spark_v2_txs`) can be exercised end-to-end through the real `add_block`
@@ -483,10 +513,15 @@ pub const fn shielded_activation_height(network: crate::config::NetworkType) -> 
                 SHIELDED_TX_ACTIVATION_HEIGHT
             }
         }
-        // Testnet + mainnet: permanently disabled until audit.
-        crate::config::NetworkType::Testnet | crate::config::NetworkType::Mainnet => {
-            SHIELDED_TX_ACTIVATION_HEIGHT
-        }
+        // Testnet: the dedicated ROLLOUT KNOB (unconditional by height — a public
+        // network must activate for every node, not by build flag). Placeholder
+        // is `u64::MAX` (off); a finite value is the coordinated testnet hard fork
+        // and REQUIRES the verifier in every testnet binary first. See
+        // [`SHIELDED_TESTNET_ACTIVATION_HEIGHT`] for the rollout preconditions.
+        crate::config::NetworkType::Testnet => SHIELDED_TESTNET_ACTIVATION_HEIGHT,
+        // Mainnet: permanently disabled until externally audited + governance.
+        // NEVER coupled to the testnet knob above — stays `u64::MAX`.
+        crate::config::NetworkType::Mainnet => SHIELDED_TX_ACTIVATION_HEIGHT,
     }
 }
 
@@ -1395,14 +1430,27 @@ mod tests {
     }
 
     #[test]
-    fn shielded_activation_is_network_scoped_production_permanently_off() {
+    fn shielded_activation_mainnet_permanently_off_testnet_is_dedicated_knob() {
         use crate::config::NetworkType::{Mainnet, Regtest, Testnet};
-        // SAFETY INVARIANT: testnet + mainnet are permanently disabled — the
-        // activation height is u64::MAX and NO height activates shielded there.
-        assert_eq!(shielded_activation_height(Testnet), u64::MAX);
+        // HARD SAFETY INVARIANT: mainnet shielded activation is permanently
+        // disabled (u64::MAX), unconditionally, and DECOUPLED from every other
+        // network's knob — setting the testnet rollout knob must NEVER arm
+        // mainnet. This assertion is the regression guard for that coupling.
         assert_eq!(shielded_activation_height(Mainnet), u64::MAX);
-        assert!(!shielded_tx_active_at_height(Testnet, u64::MAX - 1));
+        assert_eq!(shielded_activation_height(Mainnet), SHIELDED_TX_ACTIVATION_HEIGHT);
         assert!(!shielded_tx_active_at_height(Mainnet, 1_000_000_000));
+        assert!(!shielded_tx_active_at_height(Mainnet, u64::MAX - 1));
+
+        // Testnet activates at its DEDICATED knob (SHIELDED_TESTNET_ACTIVATION_HEIGHT,
+        // the rollout height). Placeholder is u64::MAX (off, byte-identical to
+        // before the knob existed); a finite value is the coordinated testnet hard
+        // fork. The test tracks the knob (not a hardcoded u64::MAX) so it stays
+        // correct across the rollout; below the knob shielded is always inactive.
+        assert_eq!(shielded_activation_height(Testnet), SHIELDED_TESTNET_ACTIVATION_HEIGHT);
+        assert!(!shielded_tx_active_at_height(
+            Testnet,
+            SHIELDED_TESTNET_ACTIVATION_HEIGHT.saturating_sub(1)
+        ));
 
         // Regtest activates ONLY in a shielded-feature build (the soak build);
         // a default build keeps it disabled too.

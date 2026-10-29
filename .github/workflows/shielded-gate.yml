@@ -1,0 +1,117 @@
+name: Shielded gate (gated features)
+
+# WHY THIS EXISTS
+# The other CI (integration-tests.yml, lint.yml, ...) builds and tests with
+# `--features "randomx testnet"`. That leaves the ENTIRE gated surface — the
+# Option-B transparent<->shielded bridge (shield-in / shielded-send / unshield),
+# the Lelantus-Spark pool, and the 7 safety breakers — built and tested ONLY on
+# a maintainer's laptop. That surface is the newest and highest-churn in the
+# tree (the 2026-10-26 audit sweep found 16 bugs in it), so a "green" PR could
+# still regress the bridge or a breaker with no CI signal. This workflow closes
+# that gap: it runs the gated unit suite that validates the bridge on every PR.
+#
+# IMPORTANT (feature set): the gated unit suite is run WITHOUT `test-fast-pow`.
+# `test-fast-pow` skips real PoW (nonce-0 accept) and makes the checkpoint test
+# `below_checkpoint_block_still_pow_verified_without_fast_sync_feature` fail
+# falsely. `test-fast-pow` is for the live chaos NODE only (instant regtest
+# blocks), never for the correctness suite. See the project's chaos-harness docs.
+#
+# OpenSSL for libspark-ffi: spark-connector's build.rs locates OpenSSL via
+# SPARK_OPENSSL_DIR or the system package. On ubuntu-22.04 the system OpenSSL
+# (installed below as libssl-dev) works with SPARK_OPENSSL_DIR=/usr — verified
+# on Linux clang in docs/design/cip-shielded-libspark-portability.md.
+#
+# NOTE: this workflow is inert until the branch is pushed to GitHub and Actions
+# is enabled for the repo. First run on GitHub is itself the validation that the
+# gated libspark build works on the hosted runner; if the runner's OpenSSL
+# layout differs, the only fix needed is the SPARK_OPENSSL_DIR / apt step here
+# (never the Firo crypto, which is pinned).
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: 1
+  # RandomX light mode keeps the dataset small enough for a hosted runner.
+  COINCYNC_RANDOMX_LIGHT_MODE: 1
+  # spark-connector build.rs: use the runner's system OpenSSL.
+  SPARK_OPENSSL_DIR: /usr
+  # The gated correctness feature set. Deliberately NO test-fast-pow (see header).
+  GATED_FEATURES: "testnet fuse block-integrity-breaker supply-breaker shielded-breaker regtest-chaos sketch-gk-proof libspark-ffi"
+
+concurrency:
+  group: shielded-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gated-unit-suite:
+    name: gated unit suite (no test-fast-pow)
+    runs-on: ubuntu-22.04
+    # The gated build compiles the vendored libspark C++ (sketch-gk-proof +
+    # libspark-ffi) on top of the full lib, so first-run (cold cache) is slow.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: shielded-gate-v1
+
+      - name: Install build dependencies (clang + system OpenSSL for libspark)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libssl-dev pkg-config
+
+      # The gated unit suite that validates the bridge / shielded / breakers.
+      # This is the same suite the maintainer runs locally at 2400/0.
+      - name: cargo test --release --lib (gated features, no test-fast-pow)
+        run: cargo test --release --lib --features "${GATED_FEATURES}"
+
+      # The real-crypto subaddress spend + shielded e2e integration tests (these
+      # live in tests/, so they are NOT in the --lib suite above).
+      - name: cargo test --release gated integration (subaddress + pipeline)
+        run: cargo test --release --features "${GATED_FEATURES}" --test full_pipeline_real_crypto
+
+  gated-build-check:
+    name: gated build + critical-lock integrity
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: shielded-gate-build-v1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libssl-dev pkg-config
+
+      # `cargo check --all-targets` on the gated features type-checks EVERY
+      # target — lib, bins, AND the tests/ integration targets that the test job
+      # above only partially builds (it runs --lib + a single --test). That
+      # closes the gap where a tests/ target left stale by an API change compiles
+      # NOWHERE in CI and only breaks a full local `cargo test`. It also runs
+      # build.rs, which enforces critical_files.lock integrity for the
+      # consensus-critical files — so a locked-file change that forgot to
+      # regenerate the lock fails here too, under the SAME feature set the bridge
+      # actually compiles with.
+      - name: cargo check --all-targets (gated; compiles tests + enforces critical_files.lock)
+        run: cargo check --release --all-targets --features "${GATED_FEATURES}"
