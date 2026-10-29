@@ -769,3 +769,82 @@ fn transfer_with_no_inputs_rejected() {
     let result = pool.add_skip_crypto(tx);
     assert!(result.is_err(), "transfer with no inputs must be rejected");
 }
+
+// -----------------------------------------------------------------------------
+// 7. Crafted UNSHIELD with cancelling blindings (cross-veil inflation, #342)
+// -----------------------------------------------------------------------------
+
+/// Review of PR #342 found that an unshield's value-revealing transparent
+/// outputs were range-proof-waived and never pinned to zero blinding, while
+/// `verify_transparent_shielded_balance` checks only the SUM of the output
+/// commitments. Two outputs with blindings `b` and `−b` then cancel in that sum
+/// (the balance equation cannot see the trick) while each output hides an
+/// attacker-chosen value — minting a spendable UTXO worth more than left the
+/// pool (the coinbase C19 trick, unshield path).
+///
+/// This drives a crafted unshield through the PUBLIC mempool admission gate
+/// (`validate_transaction_basic` — i.e. "inject the tx") and asserts it is
+/// rejected. Gated: the shielded admission path only exists in a
+/// `sketch-gk-proof + libspark-ffi` build.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+#[test]
+fn crafted_unshield_cancelling_blindings_rejected_at_mempool_gate() {
+    use coincync::consensus::spark_payload::{SpendBundle, SparkPayload, SPARK_PAYLOAD_VERSION};
+    use coincync::consensus::validation::validate_transaction_basic;
+    use coincync::crypto::{BlindingFactor, PedersenCommitment};
+
+    let mk = |declared: u64, commitment: [u8; 32]| TxOutput {
+        stealth_address: PublicKey::from_bytes([2u8; 32]),
+        tx_public_key: PublicKey::from_bytes([3u8; 32]),
+        commitment,
+        encrypted_amount: declared.to_le_bytes().to_vec(),
+        view_tag: 0,
+        lock_height: None,
+        encrypted_memo: Vec::new(),
+    };
+
+    // Cancelling blindings: c0 hides 1_000_000 while DECLARING 5_000; c1 offsets.
+    let b = BlindingFactor::from_bytes([7u8; 32]);
+    let neg_b = BlindingFactor::zero().sub(&b);
+    let c0 = PedersenCommitment::commit(1_000_000, &b).to_bytes();
+    let c1 = PedersenCommitment::commit(3, &neg_b).to_bytes();
+
+    // A decodable v2 payload shaped as an unshield (a spend, value leaving the
+    // pool). The dummy bundle is never libspark-verified at the mempool gate.
+    let payload = SparkPayload {
+        version: SPARK_PAYLOAD_VERSION,
+        mint: None,
+        outputs: vec![],
+        spend: Some(SpendBundle {
+            cover_set_id: 0,
+            anchor_height: 0,
+            bundle: vec![0u8; 32],
+        }),
+        value_balance: 5_003,
+    };
+
+    let tx = Transaction {
+        version: 1,
+        tx_type: TxType::Shielded,
+        inputs: vec![], // unshield has NO transparent inputs
+        outputs: vec![mk(5_000, c0), mk(3, c1)],
+        fee: Amount::from_atomic(1_000),
+        range_proof: vec![], // unshield carries no range proof (the waiver)
+        extra: payload.encode(),
+    };
+
+    let res = validate_transaction_basic(&tx);
+    assert!(
+        res.is_err(),
+        "crafted unshield with cancelling blindings must be rejected at the mempool gate"
+    );
+    let msg = res.unwrap_err().to_string();
+    assert!(
+        msg.contains("ZERO blinding") || msg.contains("inflation"),
+        "rejection must name the zero-blinding / inflation cause, got: {msg}"
+    );
+    // (Honest-unshield acceptance is covered by the `--lib` unit test
+    // `unshield_per_output_blinding_cancellation_rejected` and by the full gated
+    // suite's end-to-end bridge tests; this integration test is scoped to proving
+    // the mempool admission gate REJECTS the crafted injection.)
+}

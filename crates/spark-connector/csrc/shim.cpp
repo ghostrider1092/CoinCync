@@ -349,9 +349,16 @@ int spark_ffi_build_spend(uint64_t output_value, unsigned char* out, int cap) {
 // Verify a bundle. On a valid spend, writes the linking tags (nullifiers) to
 // out_tags as [u32 count][34-byte tag]... and returns 1. Returns 0 on an invalid
 // spend or any error (fail-closed).
+// DoS bound on the attacker-controlled output_count that sizes a
+// SpendTransaction. Defined here so EVERY SpendTransaction(output_count)
+// construction below can guard on it (the sibling definition near
+// spark_ffi_spend_ltags predates these earlier call sites). #ifndef so the
+// later identical #define is a benign no-op.
+#ifndef SPARK_FFI_MAX_SPEND_OUTPUTS
+#define SPARK_FFI_MAX_SPEND_OUTPUTS 64
+#endif
 int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
                             const unsigned char* set_ptr, int set_len,
-                            uint64_t vout,
                             unsigned char* out_tags, int tags_cap, int* out_tags_len) {
     try {
         const spark::Params* params = cc_params();
@@ -368,6 +375,12 @@ int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
         ss >> cover_set;
         ss >> out_coins;
         ss >> output_count;
+        // DoS bound: output_count is attacker-controlled and sizes the
+        // SpendTransaction's internal vectors at construction, BEFORE `ss >> tx`
+        // can reject anything. On the live block-verify path an unbounded value
+        // (e.g. 2^63) forces an immediate multi-exabyte allocation on every full
+        // node. Bound it exactly like spark_ffi_spend_ltags/_fee. Fail-closed.
+        if (output_count > SPARK_FFI_MAX_SPEND_OUTPUTS) return 0;
 
         // #258: when the node supplies its own anchored cover set (set_len > 0),
         // it is AUTHORITATIVE — the cover set and representation from the
@@ -401,18 +414,16 @@ int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
 
         if (!spark::SpendTransaction::verify(tx, cover_sets)) return 0;
 
-        // #258: in STRICT mode (the node supplied its authoritative cover set),
-        // bind the spend's public output `vout` to the transaction's declared
-        // value_balance. The balance proof commits to `vout`, so this rejects a
-        // tx that claims to unshield value_balance its spend never releases
-        // (vout == 0) — the inflation break in the issue. The spend's internal
-        // libspark fee `f` is POOL-INTERNAL (it is the input/output coin-value
-        // difference, conserved by the spend's own balance proof and realised as
-        // pool shrinkage — NOT the transparent `tx.fee`, which is 0 for a pure
-        // shielded tx), so it is intentionally not bound here. In the permissive
-        // STATELESS admit (set_len == 0) even the vout binding is deferred to the
-        // authoritative store-aware verify, exactly like the membership check.
-        if (set_len > 0 && tx.getVout() != vout) return 0;
+        // Option-B value model: the spend ALWAYS keeps libspark `vout = 0` (its
+        // output coin re-enters the pool), and the value crossing the veil is the
+        // bundle's internal fee (`input − Σ pool outputs`), which the miner claims
+        // via `tx.fee`. The tx's public `value_balance` is bound to that fee at the
+        // consensus layer (`verify_block_spark_v2`: `value_balance == spend_fee`),
+        // and the transparent value bridge ties `tx.fee == value_balance`. So the
+        // old `getVout() == value_balance` binding is intentionally NOT applied
+        // here — it would force `value_balance == 0` and make a fee-paying transfer
+        // unmineable (the fee floor rejects `tx.fee == 0`). The bundle's own
+        // balance proof (verified above) already conserves input == outputs + fee.
 
         // Emit the linking tags (nullifiers).
         const std::vector<GroupElement>& tags = tx.getUsedLTags();
@@ -942,6 +953,10 @@ int spark_ffi_spend_outputs(const unsigned char* ptr, int len,
         ss >> cover_set;
         ss >> out_coins_v;
         ss >> output_count;
+        // DoS bound (same as spark_ffi_verify_bundle / _spend_ltags / _spend_fee):
+        // output_count is attacker-controlled and sizes the SpendTransaction before
+        // `ss >> tx` validates anything. Fail-closed on an oversized count.
+        if (output_count > SPARK_FFI_MAX_SPEND_OUTPUTS) return 0;
         spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2, (std::size_t)output_count);
         ss >> tx;
 
@@ -1029,6 +1044,110 @@ int spark_ffi_spend_ltags(const unsigned char* ptr, int len,
         return 1;
     } catch (...) {
         return 0;
+    }
+}
+
+// Read a spend bundle's PUBLIC internal fee (= input value − Σ output values).
+// The fee is a plaintext scalar in the bundle (the amounts stay hidden).
+// Consensus binds this to the tx's public `value_balance` so a shielded spend
+// cannot claim a different fee to the miner than the bundle actually released
+// across the veil (cross-veil inflation guard). Deserializes exactly as
+// spark_ffi_spend_ltags. Writes the fee to `*out_fee`; returns 1 on success, 0
+// on any malformed/decode error (fail-closed).
+int spark_ffi_spend_fee(const unsigned char* ptr, int len, uint64_t* out_fee) {
+    try {
+        const spark::Params* params = cc_params();
+        CDataStream ss((const char*)ptr, (const char*)ptr + len, SER_NETWORK, PROTOCOL_VERSION);
+        uint64_t cover_set_id;
+        std::vector<unsigned char> rep;
+        uint256 block_hash;
+        std::vector<spark::Coin> cover_set, out_coins;
+        uint64_t output_count;
+        ss >> cover_set_id;
+        ss >> rep;
+        ss >> block_hash;
+        ss >> cover_set;
+        ss >> out_coins;
+        ss >> output_count;
+        if (output_count > SPARK_FFI_MAX_SPEND_OUTPUTS) return 0;
+        spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2, (std::size_t)output_count);
+        ss >> tx;
+        *out_fee = tx.getFee();
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+// Read a spend bundle's libspark `vout` — the transparent output value baked
+// into libspark's OWN balance equation (`input = Σ outputs + f + vout`,
+// spend_transaction.cpp). The Option-B value model ALWAYS keeps `vout = 0`: all
+// value crossing the veil is carried by the bundle fee `f` (bound to the tx's
+// public `value_balance`). A bundle with `vout > 0` still satisfies libspark's
+// balance proof, so without an explicit consensus check it would verify while
+// the node's pool accounting (which credits only `f`) drifts above the real
+// pooled value — a silent burn. Consensus rejects `vout != 0` using this.
+// Deserializes exactly as spark_ffi_spend_fee. Writes `vout` to `*out_vout`;
+// returns 1 on success, 0 on any malformed/decode error (fail-closed).
+int spark_ffi_spend_vout(const unsigned char* ptr, int len, uint64_t* out_vout) {
+    try {
+        const spark::Params* params = cc_params();
+        CDataStream ss((const char*)ptr, (const char*)ptr + len, SER_NETWORK, PROTOCOL_VERSION);
+        uint64_t cover_set_id;
+        std::vector<unsigned char> rep;
+        uint256 block_hash;
+        std::vector<spark::Coin> cover_set, out_coins;
+        uint64_t output_count;
+        ss >> cover_set_id;
+        ss >> rep;
+        ss >> block_hash;
+        ss >> cover_set;
+        ss >> out_coins;
+        ss >> output_count;
+        if (output_count > SPARK_FFI_MAX_SPEND_OUTPUTS) return 0;
+        spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2, (std::size_t)output_count);
+        ss >> tx;
+        *out_vout = tx.getVout();
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+// Derive the linking tag (nullifier) of an OWNED coin — the tag it reveals when
+// spent. A wallet derives this for each coin it owns and checks it against the
+// pool's spent-set (`is_spark_pool_tag_spent`) to exclude already-spent notes
+// from its balance AND from spend selection (so it never tries to re-spend a
+// note already spent on-chain). `out` must hold GroupElement::serialize_size
+// bytes. Returns the written length, or -1 if the coin is not owned by `seed`
+// (identify throws) or on FFI failure (fail-closed).
+int spark_ffi_coin_ltag(const unsigned char* seed, int seed_len,
+                        const unsigned char* coin_ptr, int coin_len,
+                        const unsigned char* ctx_ptr, int ctx_len,
+                        unsigned char* out, int cap) {
+    try {
+        const spark::Params* params = cc_params();
+        spark::SpendKey spend_key(params, seed_to_r(seed, seed_len));
+        spark::FullViewKey full_view_key(spend_key);
+        spark::IncomingViewKey incoming_view_key(full_view_key);
+
+        spark::Coin coin(params);
+        CDataStream in((const char*)coin_ptr, (const char*)coin_ptr + coin_len,
+                       SER_NETWORK, PROTOCOL_VERSION);
+        in >> coin;
+        coin.setParams(params);
+        std::vector<unsigned char> ctx(ctx_ptr, ctx_ptr + ctx_len);
+        coin.setSerialContext(ctx);
+
+        spark::IdentifiedCoinData id = coin.identify(incoming_view_key);
+        spark::RecoveredCoinData rec = coin.recover(full_view_key, id);
+
+        const int enc = (int)GroupElement::serialize_size;
+        if (enc > cap) return -1;
+        rec.T.serialize(out);
+        return enc;
+    } catch (...) {
+        return -1;
     }
 }
 

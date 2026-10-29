@@ -250,6 +250,8 @@ pub fn bind_randomx_genesis_for_network(network: crate::config::NetworkType) {
             crate::config::NetworkType::Testnet | crate::config::NetworkType::Regtest => {
                 crate::testnet::TESTNET_GENESIS_HASH
             }
+            // Beta binds RandomX to ITS genesis (distinct from testnet's).
+            crate::config::NetworkType::Beta => crate::beta::BETA_GENESIS_HASH,
         };
         if let Err(attempted) = RANDOMX_GENESIS_BYTES.set(genesis) {
             if let Some(existing) = RANDOMX_GENESIS_BYTES.get() {

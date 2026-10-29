@@ -49,7 +49,7 @@ struct Cli {
     data_dir: PathBuf,
 
     /// Network.
-    #[arg(long, default_value = "testnet", value_parser = ["mainnet", "testnet", "regtest"])]
+    #[arg(long, default_value = "testnet", value_parser = ["mainnet", "testnet", "regtest", "beta"])]
     network: String,
 
     /// Log level.
@@ -322,6 +322,7 @@ async fn main() {
         "mainnet" => Network::Mainnet,
         "testnet" => Network::Testnet,
         "regtest" => Network::Regtest,
+        "beta" => Network::Beta,
         _ => Network::Testnet,
     };
 
@@ -351,6 +352,7 @@ async fn main() {
                 Network::Mainnet => "mainnet",
                 Network::Testnet => "testnet",
                 Network::Regtest => "regtest",
+                Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
             let expected_genesis = match network {
@@ -392,6 +394,7 @@ async fn main() {
                 Network::Mainnet => "mainnet",
                 Network::Testnet => "testnet",
                 Network::Regtest => "regtest",
+                Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
 
@@ -520,6 +523,7 @@ async fn main() {
                 Network::Mainnet => "mainnet",
                 Network::Testnet => "testnet",
                 Network::Regtest => "regtest",
+                Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
             let genesis = match network {
@@ -602,6 +606,7 @@ async fn main() {
                 Network::Mainnet => "mainnet",
                 Network::Testnet => "testnet",
                 Network::Regtest => "regtest",
+                Network::Beta => "beta",
             };
             let chaindata_path = data_dir.join(network_subdir);
 
@@ -729,6 +734,7 @@ fn print_genesis_hash(network: Network) {
             Network::Mainnet => "mainnet",
             Network::Testnet => "testnet",
             Network::Regtest => "testnet",
+            Network::Beta => "testnet",
         }
     );
 }
@@ -1091,6 +1097,7 @@ async fn show_status(network: Network, data_dir: &PathBuf) {
         Network::Mainnet => "mainnet",
         Network::Testnet => "testnet",
         Network::Regtest => "regtest",
+        Network::Beta => "beta",
     });
 
     match Database::open(&db_path) {
@@ -1146,6 +1153,14 @@ async fn start_node(
 ) -> coincync::Result<()> {
     info!("CoinCync 1.0 node starting");
     info!("Network:  {:?}", network);
+    if matches!(network, Network::Beta) {
+        tracing::warn!("╔════════════════════════════════════════════════════════════════╗");
+        tracing::warn!("║  BETA CHANNEL — EXPERIMENTAL, UNAUDITED consensus features are    ║");
+        tracing::warn!("║  ACTIVE on this network. Coins have NO value. It is isolated by   ║");
+        tracing::warn!("║  its own magic bytes and CANNOT affect testnet or mainnet.        ║");
+        tracing::warn!("║  Opt-in testing only — do NOT use for anything real.             ║");
+        tracing::warn!("╚════════════════════════════════════════════════════════════════╝");
+    }
     info!("Data dir: {:?}", data_dir);
 
     // #132/#186: pick the RandomX mode default before any validation/PoW. EVERY
@@ -1381,6 +1396,7 @@ async fn start_node(
         Network::Mainnet => "mainnet",
         Network::Testnet => "testnet",
         Network::Regtest => "regtest",
+        Network::Beta => "beta",
     });
     // Crash-recovery: if a prior snapshot import was interrupted (crash after
     // the operator's chaindata was moved to a .pre-snapshot-* backup but before
@@ -1606,6 +1622,14 @@ async fn start_node(
                                     event_chain.network(),
                                     event_chain.height(),
                                 )
+                                // A pending shielded tx's validity can change under
+                                // a NEW BLOCK without a key-image collision (its tag
+                                // gets spent, or a confirmed tx is re-added by
+                                // Dandelion fluff and would re-mine), which the
+                                // #149 fast-path does not catch — so sweep every
+                                // block while one is pending. Self-heals within a
+                                // block instead of stalling/halting the miner.
+                                || event_mempool.has_shielded()
                             };
                             // Keep mempool aligned with chain state: remove mined txs and
                             // advance mempool height so activation-gated checks stay correct.

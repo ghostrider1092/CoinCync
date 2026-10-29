@@ -313,6 +313,8 @@ pub const CYNC_CONS_037: &str = "CYNC-CONS-037";
 pub const CYNC_CONS_038: &str = "CYNC-CONS-038";
 /// Input key image not a valid point.
 pub const CYNC_CONS_039: &str = "CYNC-CONS-039";
+/// Unshield output not value-revealing with zero blinding (cross-veil inflation).
+pub const CYNC_CONS_040: &str = "CYNC-CONS-040";
 /// RandomX anchor mismatch.
 pub const CYNC_POW_002: &str = "CYNC-POW-002";
 /// PoW algorithm mismatch.
@@ -773,6 +775,16 @@ pub const CATALOG: &[Diagnostic] = &[
         location: "src/consensus/validation.rs",
         spec: "docs/design (CLSAG / key images)",
         help: "the key image was not a valid curve point.",
+    },
+    Diagnostic {
+        code: CYNC_CONS_040,
+        domain: Domain::Consensus,
+        severity: Severity::Error,
+        title: "unshield output not zero-blinding",
+        invariant: "every unshield output commits to its declared public amount with zero blinding",
+        location: "src/consensus/validation.rs::check_unshield_outputs_revealed",
+        spec: "docs/design/cip-shielded-txtype.md (Option-B unshield)",
+        help: "a value-revealing unshield output used a non-zero blinding; non-zero blindings that cancel in the balance sum mint value across the veil.",
     },
     Diagnostic {
         code: CYNC_POW_002,

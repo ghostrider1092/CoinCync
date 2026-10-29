@@ -33,12 +33,12 @@
 //!   TESTS: `vesting_output_lock_height_gates_spendability_at_unlock_boundary`.
 
 use super::super::decoy_selection::AllocatedRings;
-use super::super::{Balance, KeyEpoch, UTXO};
+use super::super::{Balance, UTXO};
 use super::fee::estimate_tx_size;
 use super::inputs::{add_prepared_inputs, prepare_input};
 use super::selection::{ensure_spendable, select_utxos};
 use super::types::{
-    CoinSelection, Payment, PreparedVestingTransaction, SpendContext, VestingRequest,
+    CoinSelection, Payment, PreparedVestingTransaction, SpendContext, SpendKeys, VestingRequest,
 };
 use crate::constants::{MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT};
 use crate::error::Result;
@@ -53,29 +53,35 @@ pub fn prepare_vesting_transaction<R: RngCore + CryptoRng>(
     balance: &Balance,
     recipient_spend: PublicKey,
     recipient_view: PublicKey,
+    is_subaddress: bool,
     amount: Amount,
     unlock_height: u64,
-    keys: &KeyEpoch,
+    spend_keys: &SpendKeys,
     current_height: u64,
     ring_size: usize,
     rng: &mut R,
 ) -> Result<PreparedVestingTransaction> {
     let context = SpendContext::with_ring_size(current_height, ring_size)?;
     let request = VestingRequest::new(
-        Payment::new(recipient_spend, recipient_view, amount),
+        // Carry the destination's subaddress flag so the builder uses R = r*D_i
+        // for a subaddress recipient (else the vested output is unspendable).
+        Payment::new(recipient_spend, recipient_view, amount).with_subaddress(is_subaddress),
         unlock_height,
         context,
     );
-    prepare_vesting(balance, request, keys, rng)
+    prepare_vesting(balance, request, spend_keys, rng)
 }
 
 pub fn prepare_vesting<R: RngCore + CryptoRng>(
     balance: &Balance,
     request: VestingRequest,
-    keys: &KeyEpoch,
+    spend_keys: &SpendKeys,
     rng: &mut R,
 ) -> Result<PreparedVestingTransaction> {
     let context = request.context;
+    // Change output uses the current-epoch keys; each input is derived under ITS
+    // OWN epoch below (Wallet-1 / Monero-style per-output key context).
+    let change = spend_keys.change_keys()?;
     let mut required = request.payment.amount.saturating_add(Amount::from_atomic(
         estimate_tx_size(1, VESTING_ESTIMATED_OUTPUT_COUNT, context.ring_size()) as u64
             * MIN_FEE_PER_BYTE,
@@ -120,13 +126,13 @@ pub fn prepare_vesting<R: RngCore + CryptoRng>(
     Ok(PreparedVestingTransaction {
         inputs: selected
             .into_iter()
-            .map(|utxo| prepare_input(utxo, keys))
+            .map(|utxo| prepare_input(utxo, spend_keys.input_keys(utxo)?))
             .collect::<Result<_>>()?,
         request,
         change_amount: input_sum.as_atomic().saturating_sub(output_total),
         estimated_fee,
-        spend_public: keys.spend_public,
-        view_public: keys.view_public,
+        spend_public: change.spend_public,
+        view_public: change.view_public,
     })
 }
 
@@ -148,7 +154,12 @@ pub fn build_prepared_vesting_transaction<R: RngCore + CryptoRng>(
     let mut builder =
         TransactionBuilder::transfer().with_target_height(context.target_height());
     add_prepared_inputs(&mut builder, inputs, rings, context.ring_size())?;
-    builder.add_output(
+    // Subaddress-aware, exactly like the normal transfer path (assembly.rs): a
+    // subaddress recipient needs R = r*D_i (not r*G), or the recipient's
+    // C_i = a*D_i view check never matches and the vested output is undetectable
+    // and unspendable (silent fund loss). `is_subaddress` is threaded from the
+    // destination Address through prepare_vesting_transaction.
+    builder.add_output_ext(
         &Recipient {
             spend_public: request.payment.spend_public,
             view_public: request.payment.view_public,
@@ -156,6 +167,7 @@ pub fn build_prepared_vesting_transaction<R: RngCore + CryptoRng>(
             lock_height: Some(request.unlock_height),
         },
         0,
+        request.payment.is_subaddress,
         rng,
     )?;
 

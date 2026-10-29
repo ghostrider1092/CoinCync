@@ -118,6 +118,7 @@ impl Blockchain {
     fn expected_genesis_hash(&self) -> Hash {
         match self.network {
             NetworkType::Testnet | NetworkType::Regtest => crate::testnet::expected_genesis_hash(),
+            NetworkType::Beta => crate::beta::expected_genesis_hash(),
             NetworkType::Mainnet => crate::mainnet::expected_genesis_hash(),
         }
     }
@@ -310,6 +311,19 @@ impl Blockchain {
                     // checks and decoy selection work immediately after restart.
                     self.rebuild_utxo_set(state.height)?;
 
+                    // Rebuild the shielded (Spark) pool from the committed chain
+                    // too. The pool persists its coins/tags/pool_value via
+                    // immediate writes during apply, OUTSIDE the block's atomic
+                    // commit, so a crash in that window can leave it one block
+                    // AHEAD of the committed chain tip — on restart the node
+                    // re-syncs the uncommitted block and verify_block_spark_v2
+                    // rejects it ("mint coin outpoint already in the pool"),
+                    // wedging the node. Clearing + replaying up to the committed
+                    // tip makes the pool a deterministic function of the chain,
+                    // exactly like rebuild_utxo_set above. No-op without the
+                    // shielded features / when the pool store is absent.
+                    self.rebuild_spark_pool(state.height)?;
+
                     // Rebuild tx index if empty (migration for existing chains)
                     if let Some(ref db) = self.db {
                         if db.tx_index_is_empty() && state.height > 0 {
@@ -395,6 +409,34 @@ impl Blockchain {
     /// (key images, outputs, height index) is fully populated. Without this,
     /// `validate_transaction()` would miss pre-restart key images, allowing
     /// double-spends during the window before re-sync completes.
+    /// Rebuild the shielded (Spark) pool deterministically from the committed
+    /// chain, mirroring [`Self::rebuild_utxo_set`]. See [`SparkPoolStore::clear`]
+    /// for the crash-window divergence this repairs: the pool persists outside the
+    /// block's atomic commit, so after an ill-timed crash it can be AHEAD of the
+    /// committed chain tip. Clear it, then replay block apply up to `tip_height`
+    /// so every coin/tag/pool-value re-derives from committed blocks only. Inert
+    /// unless both shielded features are on AND the pool store is initialized.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    fn rebuild_spark_pool(&self, tip_height: u64) -> Result<()> {
+        match &self.spark_pool_store {
+            Some(store) => store.clear()?,
+            None => return Ok(()),
+        }
+        for h in 0..=tip_height {
+            if let Some(block) = self.get_block_by_height(h) {
+                self.apply_spark_v2_txs(&block.transactions, h);
+            }
+        }
+        Ok(())
+    }
+
+    /// Default-build no-op: the Spark pool does not exist without the shielded
+    /// features, so there is nothing to rebuild.
+    #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
+    fn rebuild_spark_pool(&self, _tip_height: u64) -> Result<()> {
+        Ok(())
+    }
+
     fn rebuild_utxo_set(&self, tip_height: u64) -> Result<()> {
         let db = match self.db.as_ref() {
             Some(db) => db,

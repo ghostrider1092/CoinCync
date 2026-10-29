@@ -24,7 +24,7 @@ pub use prepare::{prepare_privacy_transaction, prepare_privacy_transaction_with_
 pub use shield_in::{build_shield_in_transaction, prepare_shield_in, PreparedShieldIn};
 pub use types::{
     CoinSelection, Payment, PreparedPrivacyTransaction, PreparedVestingTransaction, SendRequest,
-    SpendContext, VestingRequest,
+    SpendContext, SpendKeys, VestingRequest,
 };
 pub use vesting::{
     build_prepared_vesting_transaction, prepare_vesting, prepare_vesting_transaction,

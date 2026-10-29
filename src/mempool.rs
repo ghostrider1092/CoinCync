@@ -23,11 +23,44 @@ use std::sync::Arc;
 /// `Blockchain` below.
 pub trait ShadowEvictChain {
     fn validate_transaction(&self, tx: &Transaction) -> Result<()>;
+
+    /// True if `tx` is a shielded tx that can no longer be mined against the
+    /// CURRENT pool state — its linking tag is already spent on-chain (a
+    /// confirmed spend re-added by Dandelion fluff), OR its shield-in mint's
+    /// coins are already in the pool (a confirmed mint re-added the same way).
+    /// `validate_transaction` is only a STRUCTURAL check for shielded txs (the
+    /// stateful cover-set/spent-tag/duplicate-coin verification is block-level),
+    /// so without this a confirmed shielded tx re-added to the mempool would
+    /// never be evicted, and the miner would re-propose it into every template —
+    /// stalling on "tag already spent" (spend) or HALTING on "duplicate mint coin
+    /// outpoint" (mint) at block apply. Non-shielded txs and builds without the
+    /// shielded engine: always false.
+    fn shielded_unminable(&self, tx: &Transaction) -> bool;
 }
 
 impl ShadowEvictChain for crate::chain::Blockchain {
     fn validate_transaction(&self, tx: &Transaction) -> Result<()> {
         crate::chain::Blockchain::validate_transaction(self, tx)
+    }
+
+    fn shielded_unminable(&self, tx: &Transaction) -> bool {
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        {
+            if tx.is_shielded() {
+                // The store-aware v2 verify returns Err when a revealed linking
+                // tag is already spent OR a shield-in mint's coins are already in
+                // the pool (the duplicate-mint-coin reject) — exactly the "no
+                // longer minable" conditions. Read-only; no state mutation. Inert
+                // (Ok) when the pool store is uninitialized.
+                return crate::chain::Blockchain::verify_block_spark_v2(
+                    self,
+                    std::slice::from_ref(tx),
+                )
+                .is_err();
+            }
+        }
+        let _ = tx;
+        false
     }
 }
 
@@ -623,6 +656,47 @@ impl Mempool {
         // unchanged (#172).
         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
         if tx.is_shielded() {
+            // A pure-shielded tx has no transparent side, but a bridge
+            // shield-in/unshield carries ring-signed transparent inputs and a
+            // transparent output. Its SHIELDED proofs + the value bridge are the
+            // block gate's job (`verify_block_spark_v2`), but the STATELESS
+            // transparent crypto — the change output's range proof and the
+            // transparent inputs' CLSAG ring signatures — must still be verified at
+            // admission, or an invalid bridge tx (unowned inputs / inflated change)
+            // can pollute the mempool until block verification rejects it. This
+            // mirrors the block-level transparent check added for the bridge in
+            // `validation::validate_transaction_for_network_ctx`. The transparent
+            // BALANCE proof is intentionally skipped — value legitimately crosses
+            // the veil and the bridge binding replaces it. Pure-shielded txs have
+            // empty inputs/outputs, so both loops below are no-ops (returns Ok, the
+            // prior behaviour for them).
+            // Only a SHIELD-IN carries a confidential (ECDH-blinded) transparent
+            // CHANGE output, so only it carries a Bulletproof in `tx.range_proof`.
+            // A shield-in is distinguished by having transparent INPUTS (the
+            // funding UTXOs). An UNSHIELD has NO transparent inputs; its
+            // transparent output is value-REVEALING (zero blinding, coinbase-
+            // shaped), so it legitimately has no Bulletproof — range-proofing it
+            // would reject every unshield. A PURE shielded spend (pool->pool) has
+            // no transparent outputs at all. So range-proof ONLY a tx with
+            // transparent inputs AND outputs (a shield-in with change) — mirrors
+            // validate_transaction_basic and validate_transaction's bridge arm.
+            if !tx.inputs.is_empty()
+                && !tx.outputs.is_empty()
+                && !verify_output_range_proofs(tx, chain_height)
+            {
+                return Err(Error::InvalidTransaction(
+                    "Range proof verification failed (shielded tx transparent output) — rejected at mempool".into(),
+                ));
+            }
+            // Ring signatures over any transparent ring inputs (vacuous for a
+            // pure shielded spend, which has no transparent inputs).
+            for (idx, input) in tx.inputs.iter().enumerate() {
+                if !verify_ring_signature(tx, input, idx) {
+                    return Err(Error::InvalidTransaction(format!(
+                        "Ring signature verification failed (shielded tx transparent input {idx}) — rejected at mempool"
+                    )));
+                }
+            }
             return Ok(());
         }
         if !verify_output_range_proofs(tx, chain_height) {
@@ -761,8 +835,21 @@ impl Mempool {
         // miner from building a block that then fails `verify_block_spark_v2`'s
         // duplicate-linking-tag check. The authoritative stateful verify stays at
         // block level.
+        // RBF carve-out: a linking tag held ONLY by a tx we are about to replace
+        // (fee-bump via the transparent key-image RBF above) is not a real
+        // conflict — the replaced tx, and its tag, leave the pool together. Each
+        // tag is held by at most one resident tx (duplicate tags are rejected on
+        // admission), so excluding the to_replace txs' tags is exact. Without this,
+        // a fee-bump that carries BOTH a transparent ring input (RBF-eligible) and
+        // the same shielded linking tag as the tx it replaces is wrongly rejected
+        // as a duplicate tag, and the legit replacement never lands.
+        let replaced_tags: std::collections::HashSet<Vec<u8>> = to_replace
+            .iter()
+            .filter_map(|h| self.transactions.get(h))
+            .flat_map(|entry| Self::shielded_linking_tags(&entry.tx).unwrap_or_default())
+            .collect();
         for t in &shielded_tags {
-            if self.linking_tags.contains(t) {
+            if self.linking_tags.contains(t) && !replaced_tags.contains(t) {
                 let err = Error::InvalidTransaction(
                     "duplicate shielded linking tag in mempool (double-spend)".into(),
                 );
@@ -916,6 +1003,18 @@ impl Mempool {
         self.by_fee.insert((entry.fee_per_byte, tx_hash), tx_hash);
         self.current_size += entry.size;
         self.transactions.insert(tx_hash, entry);
+
+        // Mempool fuse feed (connector seam): observe the REAL post-admit mempool
+        // count + byte footprint through the universal fuse box. Observe-only
+        // (it logs, never throttles — admission already returned Ok), node-local,
+        // no consensus effect; gated OFF by default.
+        #[cfg(all(feature = "mempool-breaker", feature = "breaker-recovery"))]
+        {
+            let _ = crate::mempool_live_breaker::on_admission(
+                self.transactions.len(),
+                self.current_size,
+            );
+        }
 
         Ok(tx_hash)
     }
@@ -1073,6 +1172,27 @@ impl Mempool {
     /// For larger mempools this could matter; revisit with a
     /// dirty-set / changed-context optimization if it shows up in
     /// profiles.
+    /// Whether a shielded linking tag is already present on a PENDING mempool
+    /// spend. A wallet checks this (alongside the on-chain spent set) before
+    /// picking a note to spend: a note whose spend is already in the mempool but
+    /// not yet mined is NOT in the on-chain spent set, so without this check the
+    /// wallet re-picks it and the node rejects the resulting double-spend
+    /// ("duplicate shielded linking tag in mempool"). Always false in the default
+    /// (non-shielded) build (`linking_tags` stays empty).
+    pub fn contains_linking_tag(&self, tag: &[u8]) -> bool {
+        self.linking_tags.contains(tag)
+    }
+
+    /// Whether any mempool tx is shielded. A shielded tx's consensus validity can
+    /// change under a NEW BLOCK without a key-image collision (its tag gets spent,
+    /// or its mint's coins land in the pool, e.g. after Dandelion fluff re-adds a
+    /// confirmed tx), which `remove_confirmed` + the `#149` reorg fast-path do NOT
+    /// catch — so the full `shadow_evict_invalid` sweep must run every block while
+    /// one is pending. Always false in the default (non-shielded) build.
+    pub fn has_shielded(&self) -> bool {
+        self.transactions.values().any(|e| e.tx.is_shielded())
+    }
+
     pub fn shadow_evict_invalid<C>(&mut self, chain: &C)
     where
         C: ShadowEvictChain,
@@ -1083,6 +1203,14 @@ impl Mempool {
         for (hash, entry) in &self.transactions {
             if let Err(e) = chain.validate_transaction(&entry.tx) {
                 invalid_hashes.push((*hash, format!("{}", e)));
+            } else if chain.shielded_unminable(&entry.tx) {
+                // A shielded tx that can no longer be mined against the current
+                // pool — a confirmed spend (tag now spent) or a confirmed
+                // shield-in mint (coins already in the pool) re-added by Dandelion
+                // fluff. Structurally valid, so validate_transaction passed, but
+                // re-proposing it stalls the miner (spend) or HALTS block apply on
+                // a duplicate mint coin (mint). Evict before it poisons templates.
+                invalid_hashes.push((*hash, "shielded tx no longer minable (re-added after confirm)".into()));
             }
         }
 
@@ -1296,6 +1424,13 @@ impl Mempool {
         self.transactions.clear();
         self.by_fee.clear();
         self.key_images.clear();
+        // Must also clear the shielded linking-tag set, or after a clear() the
+        // pool is empty yet `linking_tags` still holds every tag ever seen —
+        // the next shielded spend revealing one of those tags is falsely
+        // rejected as a duplicate (admit_after_checks) and shielded admission is
+        // wedged until restart. Keeps `linking_tags` consistent with
+        // `transactions` (both empty), mirroring `key_images` above.
+        self.linking_tags.clear();
         self.current_size = 0;
     }
 
@@ -1730,6 +1865,18 @@ impl SharedMempool {
         C: ShadowEvictChain,
     {
         self.write_lock().shadow_evict_invalid(chain)
+    }
+
+    /// Whether any mempool tx is shielded — gates the per-block shadow-evict
+    /// sweep (see `Mempool::has_shielded`).
+    pub fn has_shielded(&self) -> bool {
+        self.read_lock().has_shielded()
+    }
+
+    /// Whether a shielded linking tag is on a pending mempool spend
+    /// (see `Mempool::contains_linking_tag`).
+    pub fn contains_linking_tag(&self, tag: &[u8]) -> bool {
+        self.read_lock().contains_linking_tag(tag)
     }
 
     pub fn set_height(&self, height: u64) {

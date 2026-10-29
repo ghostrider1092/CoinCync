@@ -2,6 +2,7 @@ use super::assembly::build_prepared_privacy_transaction;
 use super::fee::{calculate_fee, estimate_fee_with_multiplier, estimate_tx_size, scaled_fee, FeeMultiplier};
 use super::inputs::add_prepared_inputs;
 use super::prepare::prepare_privacy_transaction;
+use super::SpendKeys;
 use super::selection::{select_utxos, select_utxos_uniform};
 use super::types::{
     CoinSelection, Payment, PreparedInput, PreparedPrivacyTransaction, SendRequest, SpendContext,
@@ -52,6 +53,7 @@ fn coin_selection_rejects_empty_pool() {
 
 fn make_utxo(amount: u64, index: u8) -> UTXO {
     UTXO {
+        key_epoch: 0,
         tx_hash: crate::primitives::Hash::from_bytes([index; 32]),
         output_index: index,
         output_locator: None,
@@ -192,6 +194,7 @@ fn epoch_from_seed(seed: u8) -> KeyEpoch {
 /// `prepare_input`'s one-time-secret derivation needs.
 fn utxo_with_locator(amount: u64, tx_tag: u8, out_index: u8, height: u64, loc_height: u64) -> UTXO {
     UTXO {
+        key_epoch: 0,
         tx_hash: Hash::from_bytes([tx_tag; 32]),
         output_index: out_index,
         output_locator: Some(OutputLocator {
@@ -335,7 +338,7 @@ fn prepare_uniform_standard_satisfies_inputs_equal_payments_plus_change_plus_fee
     balance.add_utxo(utxo_with_locator(40_000_000, 0xB0, 1, 10, 110));
 
     let prepared =
-        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &keys, &mut rng)
+        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &SpendKeys::Single(&keys), &mut rng)
             .expect("prepare");
     assert_eq!(prepared.shape, TransferShape::UniformStandard);
 
@@ -380,7 +383,7 @@ fn prepare_change_below_min_still_balances_inputs_equal_payments_plus_change_plu
     );
 
     let prepared =
-        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &keys, &mut rng)
+        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &SpendKeys::Single(&keys), &mut rng)
             .expect("prepare");
     assert_eq!(prepared.change_amount, change);
     assert!(prepared.change_amount < MIN_OUTPUT_AMOUNT);
@@ -416,7 +419,7 @@ fn prepare_insufficient_funds_errors_without_reserving() {
     balance.add_utxo(utxo_with_locator(1_000_000, 0xB0, 1, 10, 110));
 
     let result =
-        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &keys, &mut rng);
+        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &SpendKeys::Single(&keys), &mut rng);
     assert!(result.is_err(), "insufficient balance must error");
     assert!(
         balance.all_reservations().is_empty(),
@@ -443,7 +446,7 @@ fn prepare_saturating_total_plus_fee_does_not_wrap_into_satisfiable_required() {
     balance.add_utxo(utxo_with_locator(1_000_000, 0xB0, 1, 10, 110));
 
     let result =
-        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &keys, &mut rng);
+        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &SpendKeys::Single(&keys), &mut rng);
     assert!(
         result.is_err(),
         "a saturated required must fail closed, not wrap to a satisfiable target"
@@ -524,7 +527,7 @@ fn build_prepared_uniform_drip_pair_emits_two_outputs_no_change() {
         Amount::from_atomic(per_output),
     );
     let request = SendRequest::new(vec![pay, pay], context);
-    let prepared = prepare_privacy_transaction(&balance, request, &keys, &mut rng).expect("prepare");
+    let prepared = prepare_privacy_transaction(&balance, request, &SpendKeys::Single(&keys), &mut rng).expect("prepare");
     assert_eq!(prepared.shape, TransferShape::UniformDripPair);
     assert_eq!(prepared.change_amount, excess);
 
@@ -562,7 +565,7 @@ fn build_prepared_uniform_standard_change_below_min_adds_dummy_and_folds_to_fee(
         Amount::from_atomic(total_send),
     );
     let prepared =
-        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &keys, &mut rng)
+        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &SpendKeys::Single(&keys), &mut rng)
             .expect("prepare");
     assert_eq!(prepared.shape, TransferShape::UniformStandard);
     assert!(prepared.change_amount < MIN_OUTPUT_AMOUNT);
@@ -796,7 +799,7 @@ fn prepare_vesting_stamps_unlock_height_onto_output_lock_height() {
         unlock_height,
         context,
     );
-    let prepared = prepare_vesting(&balance, request, &keys, &mut rng).expect("prepare vesting");
+    let prepared = prepare_vesting(&balance, request, &SpendKeys::Single(&keys), &mut rng).expect("prepare vesting");
     let rings = rings_for(&prepared.real_outputs(), ring_size, &mut rng);
     let tx = build_prepared_vesting_transaction(prepared, rings, &mut rng).expect("build vesting");
 
@@ -840,7 +843,7 @@ fn prepare_vesting_fee_growth_loop_reselects_until_inputs_cover_fee() {
         5_000,
         context,
     );
-    let prepared = prepare_vesting(&balance, request, &keys, &mut rng).expect("prepare vesting");
+    let prepared = prepare_vesting(&balance, request, &SpendKeys::Single(&keys), &mut rng).expect("prepare vesting");
     let input_sum: u64 = prepared
         .inputs
         .iter()

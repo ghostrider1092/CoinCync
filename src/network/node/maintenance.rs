@@ -675,6 +675,19 @@ fn emit_heartbeat(peers: &DashMap<PeerId, PeerInfo>, tick: u64) {
         peers.len(),
         outbound
     );
+
+    // P2P fuse feed (connector seam): observe the live connected-peer set each
+    // heartbeat (peer count + netgroup diversity + per-IP concentration) through
+    // the universal fuse box. Observe-only, node-local, gated OFF by default.
+    #[cfg(all(feature = "p2p-breaker", feature = "breaker-recovery"))]
+    {
+        let connected: Vec<std::net::SocketAddr> = peers
+            .iter()
+            .filter(|peer| peer.state == PeerState::Connected)
+            .map(|peer| peer.addr)
+            .collect();
+        let _ = crate::p2p_live_breaker::observe_from_addrs(&connected);
+    }
 }
 
 fn rotate_outbound_peer(

@@ -161,6 +161,7 @@ fn network_str(n: NetworkType) -> &'static str {
         NetworkType::Mainnet => "mainnet",
         NetworkType::Testnet => "testnet",
         NetworkType::Regtest => "regtest",
+        NetworkType::Beta => "beta",
     }
 }
 

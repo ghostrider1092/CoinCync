@@ -28,6 +28,7 @@ use coincync::wallet::scanner::{BlockApplyDiff, WalletScanner};
 /// path can find + drop the UTXO via `Balance::remove_outputs`.
 fn make_utxo(seed: u8, height: u64, amount: u64) -> UTXO {
     UTXO {
+        key_epoch: 0,
         tx_hash: Hash::from_bytes([seed; 32]),
         output_index: 0,
         output_locator: None,

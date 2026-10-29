@@ -260,7 +260,9 @@ impl BlockValidation {
 pub const fn v1_0_12_rules_active(network: crate::config::NetworkType, height: u64) -> bool {
     match network {
         crate::config::NetworkType::Mainnet | crate::config::NetworkType::Regtest => true,
-        crate::config::NetworkType::Testnet => height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT,
+        crate::config::NetworkType::Testnet | crate::config::NetworkType::Beta => {
+            height >= crate::constants::HARD_FORK_V1_0_12_HEIGHT
+        }
     }
 }
 
@@ -1598,7 +1600,78 @@ pub(crate) fn validate_transaction_for_network_ctx(
     // path is fail-closed and gated by SHIELDED_TX_ACTIVATION_HEIGHT — see
     // check_shielded_tx and docs/design/cip-shielded-txtype.md.
     if tx.is_shielded() {
-        return check_shielded_tx(tx, expected_network, current_height);
+        check_shielded_tx(tx, expected_network, current_height)?;
+        // F4 / transparent<->shielded bridge: `check_shielded_tx` and
+        // `verify_block_spark_v2` prove the SHIELDED payload and the value-bridge
+        // equation, but NEITHER verifies the tx's TRANSPARENT side. Under Option A
+        // that is safe — `require_pure_shielded_shape` (production) leaves no
+        // transparent side. Under the bridge (`regtest_bridge_enabled`) a shield-in
+        // carries ring-signed transparent inputs + a transparent change output (an
+        // unshield, a transparent recipient), and the value bridge TRUSTS each
+        // input's `pseudo_output_commitment`. Without the CLSAG ring signature,
+        // range proofs, ring-member resolution and no-double-spend checks, a
+        // shield-in could spend UNOWNED transparent inputs or feed forged
+        // commitments into the bridge and MINT VALUE ACROSS THE VEIL. Verify the
+        // inflation/theft-critical transparent checks here, identically to the
+        // transparent path below. We deliberately do NOT run the transparent
+        // BALANCE proof (value legitimately crosses the veil; the bridge binding
+        // `verify_transparent_shielded_balance` in `verify_block_spark_v2` is its
+        // replacement) nor the anti-fingerprinting SHAPE checks (uniform-shape /
+        // io-ratio / io-counts), which are transparent-privacy policy and do not
+        // describe a bridge tx's asymmetric transparent side.
+        //
+        // CONTEXTUAL-ONLY: like the transparent `if contextual` checks below, this
+        // runs on the AUTHORITATIVE paths — active-tip block apply and the reorg
+        // re-validation (both `contextual = true`) — not on stateless routing. A
+        // competing fork block validated pre-storage with `contextual = false` is
+        // re-validated `contextual = true` by the reorg loop before it can win, and
+        // mempool admission has its own crypto gate (`verify_crypto_for_admission`
+        // + `validate_transaction_basic`), so inflation-safety is fully enforced
+        // while stateless structural routing stays lenient (a well-formed bridge tx
+        // from the real builder carries these proofs; a stateless route need not
+        // re-prove them). In production this is unreachable anyway: the
+        // pure-shielded shape leaves the transparent side empty, so the guard is
+        // false.
+        if contextual
+            && regtest_bridge_enabled(expected_network)
+            && (!tx.inputs.is_empty() || !tx.outputs.is_empty())
+        {
+            // Curve/identity validity of every output applies to BOTH bridge
+            // directions (a non-curve commitment would break the value bridge).
+            check_output_curve_points(tx)?;
+            if !tx.inputs.is_empty() {
+                // SHIELD-IN: the tx spends TRANSPARENT inputs into the pool. Run
+                // the same transparent-input authentication a normal spend gets —
+                // ring sigs bind each pseudo-output to a real owned input, range
+                // proofs bound the confidential transparent CHANGE output — else
+                // value could be minted into the pool for free. The in==out+fee
+                // balance rule is replaced by the cross-veil value bridge in
+                // verify_block_spark_v2.
+                check_tx_no_double_spend(tx, utxos)?;
+                check_tx_ring_members(expected_network, tx, utxos, current_height, v1_0_12_active)?;
+                check_tx_ring_size_and_unique_members(tx, utxos, current_height, v1_0_12_active)?;
+                check_tx_ring_size_cap(tx)?;
+                check_tx_ring_signatures(tx)?;
+                check_tx_range_proofs(tx, current_height)?;
+            }
+            // UNSHIELD (inputs empty, outputs non-empty): value leaves the pool as
+            // value-REVEALING transparent output(s) — public amount committed with
+            // ZERO blinding (coinbase-shaped). No ring signatures or range proofs
+            // apply: there are no transparent inputs to authenticate and no hidden
+            // output amount to prove in range (a revealed output carries no
+            // Bulletproof, exactly like a coinbase output). The output VALUE is
+            // bound to precisely what left the pool by verify_transparent_shielded_balance
+            // + the `value_balance == spend_fee` inflation guard in
+            // verify_block_spark_v2, which sum these exact output commitments.
+            //
+            // SECURITY: those bind only the SUM, so each revealed output MUST also
+            // be pinned to its declared public amount with ZERO blinding — else
+            // non-zero blindings that cancel in the sum mint a spendable UTXO worth
+            // more than left the pool (the coinbase C19 trick). Inert for shield-in
+            // (self-guards on the unshield shape).
+            check_unshield_outputs_revealed(tx)?;
+        }
+        return Ok(());
     }
 
     check_tx_v2_activation(tx, current_height)?;
@@ -1669,6 +1742,38 @@ pub(crate) fn require_pure_shielded_shape(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
+/// Test-only transparent↔shielded bridge gate (#314).
+///
+/// Returns `true` ONLY on a regtest build that carries the shielded test engine
+/// (`sketch-gk-proof` + `libspark-ffi`). It is the single switch that relaxes
+/// the pure-shielded shape + `value_balance == 0` rules so the local chaos
+/// harness can exercise shield-in / unshield; `verify_transparent_shielded_balance`
+/// still enforces cross-veil value conservation underneath it. In every
+/// production build (`sketch-gk-proof` absent) and on testnet/mainnet it is a
+/// compile-time `false`, so Option A (pure-shielded, #314) is unchanged and the
+/// production binaries stay byte-identical. Lives here (always-compiled) rather
+/// than in the feature-gated `spark_payload` module so the ungated call sites in
+/// this file and in `chain.rs` resolve under the default feature set too.
+#[inline]
+pub(crate) fn regtest_bridge_enabled(network: crate::config::NetworkType) -> bool {
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    {
+        // The test bridge is enabled on the ISOLATED test networks only — Regtest
+        // (single-node harness) and Beta (the isolated multi-node staging net).
+        // Both are feature-gated (`sketch-gk-proof`, never production) and carry
+        // their own genesis/magic, so this never touches testnet/mainnet.
+        matches!(
+            network,
+            crate::config::NetworkType::Regtest | crate::config::NetworkType::Beta
+        )
+    }
+    #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
+    {
+        let _ = network;
+        false
+    }
+}
+
 /// Validate a shielded (Lelantus-Spark) transaction — CIP-Shielded.
 ///
 /// FAIL-CLOSED SKELETON. The wire type (`TxType::Shielded`, borsh discriminant
@@ -1696,8 +1801,12 @@ fn check_shielded_tx(
 
     // Option A (#314): pure-shielded shape, before the v1/v2 split and un-gated,
     // so it covers both payload formats and the default (non-libspark) build.
-    // Single source of truth — see require_pure_shielded_shape.
-    require_pure_shielded_shape(tx)?;
+    // Single source of truth — see require_pure_shielded_shape. RELAXED only on
+    // the regtest test bridge (sketch-gk-proof + Regtest) so the harness can
+    // shield-in; production (no sketch-gk-proof) always enforces it.
+    if !regtest_bridge_enabled(network) {
+        require_pure_shielded_shape(tx)?;
+    }
 
     // v2 (SparkPayload — the canonical libspark-aligned format): STATELESS
     // structural routing only. The full verify is STATEFUL — cover set + pool
@@ -1713,7 +1822,7 @@ fn check_shielded_tx(
         // chain.rs::verify_block_spark_v2. Transparent I/O is already rejected
         // above (pure-shielded, all versions); here enforce the v2 payload's
         // `value_balance == 0` until the shield-in/unshield bridge is validated.
-        if payload.value_balance != 0 {
+        if payload.value_balance != 0 && !regtest_bridge_enabled(network) {
             return Err(Error::InvalidTransaction(
                 "shielded tx must have value_balance == 0 until the transparent \
                  shield-in/unshield bridge is validated (#314)"
@@ -1729,14 +1838,23 @@ fn check_shielded_tx(
     // ShieldedPayload. The stateful serial-tag double-spend + accumulator append
     // happen at block-apply against the ShieldedStore.
     let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
-    // Option A (#314): the v1 payload must also be value-neutral (pure-shielded)
-    // until the transparent bridge is validated. Transparent I/O was already
-    // rejected above; this forbids a v1 shield-in/unshield (value_balance != 0),
-    // so Option A holds for every shielded tx regardless of payload version.
+    // CROSS-VEIL CONSERVATION (v1): the transparent<->shielded bridge is
+    // implemented ONLY for v2 SparkPayload — `chain::verify_block_spark_v2`
+    // decodes SparkPayload and skips any tx whose `extra` is not v2, so a v1
+    // ShieldedPayload NEVER passes through the value bridge, the mint
+    // authentication, or the pool turnstile. The pure-shielded-shape relaxation
+    // above (gated on `regtest_bridge_enabled`) is therefore UNSAFE for v1: a v1
+    // tx with transparent outputs + `value_balance != 0` would have its
+    // transparent value created at apply (`batch_from_block`) with nothing backing
+    // it across the veil = inflation. So v1 MUST remain pure-shielded with
+    // `value_balance == 0` on EVERY network, bridge or not. (A v1 transparent
+    // bridge, if ever wanted, needs its own conservation layer; until then v1 is
+    // Option-A only.) Enforced unconditionally — NOT gated on the bridge.
+    require_pure_shielded_shape(tx)?;
     if payload.value_balance != 0 {
         return Err(Error::InvalidTransaction(
-            "shielded tx must have value_balance == 0 until the transparent \
-             shield-in/unshield bridge is validated (#314)"
+            "v1 shielded tx must be pure-shielded with value_balance == 0 — the \
+             transparent shield-in/unshield bridge is v2-only (#314)"
                 .to_string(),
         ));
     }
@@ -2949,6 +3067,70 @@ fn check_output_curve_points(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
+/// SECURITY (unshield cross-veil inflation guard — the UNSHIELD counterpart of
+/// the coinbase C19-FIX in `validate_block`'s coinbase loop). Every transparent
+/// output of an UNSHIELD is value-REVEALING, so its commitment MUST equal
+/// `commit(declared_amount, 0)`, where `declared_amount` is the plaintext LE-u64
+/// `encrypted_amount` that `transaction::builder::build_revealed_output` emits
+/// (the same coinbase convention).
+///
+/// Why it is mandatory: an unshield (a bridge shielded tx with NO transparent
+/// inputs) legitimately carries no Bulletproof range proof — a revealed output
+/// needs none — and `verify_transparent_shielded_balance` checks only the SUM of
+/// the output commitments. So without a per-output binding, two outputs with
+/// blindings `x` and `−x` cancel in that sum while committing to arbitrary
+/// per-output values the attacker controls, minting a spendable UTXO worth more
+/// than left the pool. That is exactly the coinbase blinding trick
+/// (`b1 + b2 = 0`) the C19-FIX closed, reopened in the unshield path.
+///
+/// Scoped to the unshield SHAPE (`inputs empty, outputs non-empty`) so it is
+/// inert for the other shapes and safe to call at every shielded gate: a
+/// SHIELD-IN has transparent inputs and its confidential CHANGE output is bound
+/// by `check_tx_range_proofs` on the ring path; a POOL-TO-POOL send has no
+/// transparent outputs. Called at ALL THREE shielded gates
+/// (`validate_transaction_basic`, the contextual bridge arm in
+/// `validate_transaction`, and `chain::verify_block_spark_v2`) so the rule cannot
+/// drift between them — that drift is what opened F4/F7. Fail-closed.
+pub(crate) fn check_unshield_outputs_revealed(tx: &Transaction) -> Result<()> {
+    // UNSHIELD direction only (see the shape rationale above).
+    if !tx.inputs.is_empty() || tx.outputs.is_empty() {
+        return Ok(());
+    }
+    for (idx, output) in tx.outputs.iter().enumerate() {
+        // Public amount, plaintext LE-u64 (coinbase convention). Exactly 8 bytes.
+        if output.encrypted_amount.len() != 8 {
+            crate::flight_recorder::record(
+                crate::diagnostics::CYNC_CONS_040,
+                "unshield output not coinbase-shaped",
+            );
+            return Err(Error::InvalidTransaction(format!(
+                "unshield output {idx}: a value-revealing output must carry an 8-byte plaintext \
+                 LE amount (coinbase-shaped), got {} bytes",
+                output.encrypted_amount.len()
+            )));
+        }
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&output.encrypted_amount[..8]);
+        let declared = u64::from_le_bytes(bytes);
+        let expected = crate::crypto::PedersenCommitment::commit(
+            declared,
+            &crate::crypto::BlindingFactor::zero(),
+        );
+        if output.commitment != *expected.as_point().as_bytes() {
+            crate::flight_recorder::record(
+                crate::diagnostics::CYNC_CONS_040,
+                "unshield output non-zero blinding",
+            );
+            return Err(Error::InvalidTransaction(format!(
+                "unshield output {idx}: commitment != commit(declared {declared}, 0) — a \
+                 value-revealing output must use ZERO blinding (cross-veil inflation via \
+                 non-zero blindings that cancel in the balance sum)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Quick contextless validation (for mempool)
 pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
     // FIX #39: accept any version in 1..=MAX_TX_VERSION.
@@ -3001,7 +3183,33 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
         // too, so a feature-build node does NOT admit/relay a shielded tx the block
         // gate can never mine (mempool-vs-block drift / relay-DoS). Single source
         // of truth — see require_pure_shielded_shape.
-        require_pure_shielded_shape(tx)?;
+        //
+        // RELAXED for the regtest test bridge: this path is CONTEXTLESS (no
+        // `network`), so it cannot tell regtest from testnet. On a test build
+        // (`sketch-gk-proof` + `libspark-ffi` — never a production feature) we let a
+        // shield-in / unshield (transparent side present) pass this structural gate
+        // so the local chaos harness can admit it. Actual block inclusion is still
+        // governed by the NETWORKED, regtest-gated authoritative gate
+        // `chain::verify_block_spark_v2` (via `validation::regtest_bridge_enabled`),
+        // which rejects any transparent-side shielded tx on testnet/mainnet. The
+        // malformed-payload reject above (no mint and no spend) still runs. On a
+        // production build the whole `if is_shielded` arm is dead (`is_shielded` is
+        // `const false`), so this is byte-identical for production.
+        //
+        // NOTE (bounded, test-build only): a `sketch-gk-proof` build mispointed at
+        // testnet would admit/relay a shield-in its own block gate then refuses to
+        // mine. That is off-policy (the feature never ships) and cannot affect a
+        // production node; the block gate remains the consensus-authoritative stop.
+
+        // SECURITY (unshield inflation guard, mempool gate): an unshield's
+        // value-revealing outputs must each use ZERO blinding (commitment ==
+        // commit(declared, 0)), or non-zero blindings that cancel in the balance
+        // SUM mint a spendable UTXO worth more than left the pool (coinbase C19
+        // trick). Enforced here so a feature-build node does not admit/relay a
+        // crafted unshield its own block gate would reject (mempool-vs-block drift
+        // / relay-DoS). Self-guards on the unshield shape; inert for shield-in and
+        // pure-shielded. The authoritative stop is chain::verify_block_spark_v2.
+        check_unshield_outputs_revealed(tx)?;
     }
 
     // SECURITY (BUG-17): Reject transactions with empty inputs or outputs.
@@ -3063,11 +3271,23 @@ pub fn validate_transaction_basic(tx: &Transaction) -> Result<()> {
             }
         }
         // Range proof must exist (Bill of Rights I — Bulletproofs required).
-        // Relaxed for shielded (#172): a Spark tx's range proofs live inside the
-        // libspark bundle (verified at block level), not in `tx.range_proof` —
-        // its transparent output set is empty, so there is nothing to range-prove
-        // here. A mint's transparent *inputs* are still ring-checked above.
-        if tx.range_proof.is_empty() && !is_shielded {
+        // Relaxed for a PURE-shielded (#172) Spark tx: its range proofs live inside
+        // the libspark bundle (verified at block level), not in `tx.range_proof`,
+        // and it has NO transparent outputs, so there is nothing to range-prove
+        // here. A SHIELD-IN additionally carries a confidential (ECDH-blinded)
+        // transparent CHANGE output that the block-level gate range-proofs
+        // (validate_transaction's bridge arm → check_tx_range_proofs); a shield-in
+        // is identified by having transparent INPUTS (the funding UTXOs), so waive
+        // the requirement here only when it has BOTH transparent inputs and
+        // outputs. An UNSHIELD has NO transparent inputs; its transparent output is
+        // value-REVEALING (zero blinding, coinbase-shaped) and legitimately carries
+        // no Bulletproof, so it must be waived too — requiring one would reject
+        // every unshield. Waiving a junk/empty range proof for a tx that the block
+        // gate WOULD range-proof is the F7 mempool-vs-block drift / relay-DoS risk,
+        // so the predicate below matches the block arm exactly.
+        if tx.range_proof.is_empty()
+            && (!is_shielded || (!tx.inputs.is_empty() && !tx.outputs.is_empty()))
+        {
             crate::flight_recorder::record(crate::diagnostics::CYNC_CONS_034, "missing range proof");
             return Err(Error::InvalidTransaction(
                 "UNCONSTITUTIONAL: missing range proof (Bill of Rights I — Bulletproofs required)"
@@ -3667,6 +3887,100 @@ mod tests {
                 .any(|e| e.contains("commitment mismatch") && e.contains("inflation")),
             "per-output blinding-cancellation must be rejected by the C19 per-output check, got: {:?}",
             result.errors
+        );
+    }
+
+    #[test]
+    fn unshield_per_output_blinding_cancellation_rejected() {
+        // Review of #342: the UNSHIELD counterpart of the coinbase C19 hole. An
+        // unshield's value-revealing outputs are range-proof-waived, and
+        // verify_transparent_shielded_balance checks only the SUM of the output
+        // commitments. Two outputs with blindings b and −b cancel in that sum (so
+        // the balance equation is blind to the trick) while each output hides an
+        // attacker-chosen value behind a non-zero blinding — minting a spendable
+        // UTXO worth more than left the pool. check_unshield_outputs_revealed must
+        // reject it per-output; honest unshields and non-unshield shapes stay
+        // unaffected.
+        let out = |declared: u64, commitment: [u8; 32]| TxOutput {
+            stealth_address: PublicKey::from_bytes(point_bytes(61)),
+            tx_public_key: PublicKey::from_bytes(point_bytes(62)),
+            commitment,
+            encrypted_amount: declared.to_le_bytes().to_vec(),
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let unshield = |outputs: Vec<TxOutput>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![], // unshield has NO transparent inputs
+            outputs,
+            fee: Amount::from_atomic(1_000),
+            range_proof: vec![], // and carries NO range proof (the waiver the hole relied on)
+            extra: vec![],
+        };
+
+        // Honest: each output commits to its DECLARED amount with ZERO blinding.
+        let honest = unshield(vec![
+            out(5_000, zero_blinding_commitment(5_000)),
+            out(3_000, zero_blinding_commitment(3_000)),
+        ]);
+        assert!(
+            check_unshield_outputs_revealed(&honest).is_ok(),
+            "honest zero-blinding unshield must pass"
+        );
+
+        // Attack: blindings b and −b; c0 hides 1_000_000 while DECLARING 5_000.
+        let b = BlindingFactor::from_bytes([7u8; 32]);
+        let neg_b = BlindingFactor::zero().sub(&b);
+        let c0 = PedersenCommitment::commit(1_000_000, &b).to_bytes();
+        let c1 = PedersenCommitment::commit(3_000, &neg_b).to_bytes();
+
+        // The SUM is blind to the trick: Σ(attack) == Σ of an honest pair declaring
+        // (1_000_000, 3_000) with zero blinding — the b/−b cancel — so
+        // verify_transparent_shielded_balance cannot tell the two apart. The
+        // per-output zero-blinding check is the only thing that can.
+        {
+            use curve25519_dalek::ristretto::CompressedRistretto;
+            let sum_attack = CompressedRistretto(c0).decompress().unwrap()
+                + CompressedRistretto(c1).decompress().unwrap();
+            let sum_honest = CompressedRistretto(zero_blinding_commitment(1_000_000))
+                .decompress()
+                .unwrap()
+                + CompressedRistretto(zero_blinding_commitment(3_000))
+                    .decompress()
+                    .unwrap();
+            assert_eq!(
+                sum_attack, sum_honest,
+                "cancelling blindings leave the commitment sum unchanged — the sum-only gate is blind to the attack"
+            );
+        }
+
+        let attack = unshield(vec![out(5_000, c0), out(3_000, c1)]);
+        assert!(
+            check_unshield_outputs_revealed(&attack).is_err(),
+            "per-output non-zero blinding on an unshield output must be rejected"
+        );
+
+        // Shape guard: a SHIELD-IN (transparent inputs present) is NOT subject to
+        // the zero-blinding rule — its confidential change output is range-proofed
+        // on the ring path. The same non-zero-blinding output must be inert here.
+        let mut shield_in = unshield(vec![out(5_000, c0)]);
+        shield_in.inputs = vec![input_with_ki(
+            9,
+            ring_of(crate::constants::BOOTSTRAP_MIN_RING_SIZE, 70),
+        )];
+        assert!(
+            check_unshield_outputs_revealed(&shield_in).is_ok(),
+            "shield-in shape must be inert (the zero-blinding rule is unshield-only)"
+        );
+
+        // Malformed: a value-revealing output must carry an 8-byte plaintext amount.
+        let mut bad_enc = unshield(vec![out(5_000, zero_blinding_commitment(5_000))]);
+        bad_enc.outputs[0].encrypted_amount = vec![0u8; 4];
+        assert!(
+            check_unshield_outputs_revealed(&bad_enc).is_err(),
+            "non-8-byte encrypted_amount on an unshield output must be rejected"
         );
     }
 
@@ -5166,10 +5480,14 @@ mod tests {
         use crate::constants::SHIELDED_REGTEST_ACTIVATION_HEIGHT as ACT;
 
         // A well-formed v2 SparkPayload shaped as a shield-in (mint, value_balance
-        // < 0) carrying a transparent side. Under the F4 pure-shielded gate (#314,
-        // Option A) a transparent-side shielded tx is REJECTED until the bridge is
-        // validated — so this verifies stateless routing + BOTH gates (activation
-        // then shape), not admission.
+        // < 0) carrying a transparent side. The regtest test bridge (#314,
+        // `regtest_bridge_enabled`) relaxes the Option-A pure-shielded shape gate on
+        // Regtest so the local chaos harness can route a shield-in through the
+        // stateless admit; the pure-shielded rule on testnet/mainnet and cross-veil
+        // value conservation stay authoritative at the stateful block gate
+        // (`chain::verify_block_spark_v2`). So this verifies stateless routing + the
+        // activation gate, and that the bridge ADMITS a well-formed shield-in on
+        // regtest.
         let (payload, _) =
             crate::consensus::spark_payload::build::build_mint_payload(b"regtest-act-seed", &[10_000u64, 20_000], &[])
                 .expect("build v2 mint payload");
@@ -5178,17 +5496,13 @@ mod tests {
         tx.extra = payload.encode();
         let utxos = UtxoSet::new();
 
-        // Regtest AT activation: the tx clears the activation gate and is routed
-        // statelessly to check_shielded_tx, where the F4 pure-shielded gate rejects
-        // its transparent side. The "pure-shielded" reason proves it got PAST
-        // activation to the shape check (not merely blocked as inactive).
-        let at_act = validate_transaction_for_network_ctx(&tx, &utxos, ACT, Regtest, false)
-            .expect_err("F4: a transparent-side shielded tx must be rejected until the bridge is validated")
-            .to_string();
-        assert!(
-            at_act.contains("pure-shielded"),
-            "at activation the F4 pure-shielded gate must reject the transparent side, got: {at_act}"
-        );
+        // Regtest AT activation WITH the bridge: the tx clears the activation gate
+        // and the relaxed shape gate, and is routed statelessly (Ok) to face the
+        // authoritative block-level verify. (Before the bridge this was rejected as
+        // "pure-shielded"; that enforcement now lives on testnet/mainnet + the block
+        // gate.)
+        validate_transaction_for_network_ctx(&tx, &utxos, ACT, Regtest, false)
+            .expect("regtest bridge: a well-formed shield-in must route statelessly past the shape gate");
         // Regtest BELOW activation: blocked at the activation gate, BEFORE the
         // shape check — a distinct rejection reason.
         let below = validate_transaction_for_network_ctx(&tx, &utxos, ACT - 1, Regtest, false)
@@ -5214,24 +5528,39 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-    fn basic_validation_rejects_transparent_side_shielded_tx() {
-        // F4/#314: validate_transaction_basic (the mempool's structural gate) must
-        // reject a shielded tx carrying a transparent input/output, matching
-        // check_shielded_tx and the block gate — otherwise a feature-build node
-        // would admit and relay a tx it can never mine (mempool-vs-block drift).
+    fn basic_validation_admits_transparent_side_shielded_tx_on_test_bridge() {
+        // #314 regtest bridge: validate_transaction_basic is CONTEXTLESS (no
+        // network), so on a test build (sketch-gk-proof + libspark-ffi) it no longer
+        // rejects a shielded tx carrying a transparent side as "pure-shielded" —
+        // that lets the local chaos harness admit a shield-in. The malformed-payload
+        // reject (no mint, no spend) still runs here, and the NETWORKED,
+        // regtest-gated block gate (chain::verify_block_spark_v2) remains the
+        // authoritative stop for testnet/mainnet. On a production build the whole
+        // shielded arm is dead (is_shielded is const false), so this is unchanged.
         let (payload, _) = crate::consensus::spark_payload::build::build_mint_payload(
             b"basic-f4-seed",
             &[10_000u64, 20_000],
             &[],
         )
         .expect("build v2 mint payload");
-        let mut tx = coinbase_tx(vec![a_valid_output()]); // stray transparent output
+        let mut tx = coinbase_tx(vec![a_valid_output()]); // transparent shield-in side
         tx.tx_type = TxType::Shielded;
         tx.extra = payload.encode();
-        let err = validate_transaction_basic(&tx).unwrap_err().to_string();
+        // Must NOT be rejected as pure-shielded any more (downstream structural
+        // checks may still apply, but the shape gate is relaxed on the test bridge).
+        if let Err(e) = validate_transaction_basic(&tx) {
+            assert!(
+                !e.to_string().contains("pure-shielded"),
+                "test bridge: basic must not reject the transparent side as pure-shielded, got: {e}"
+            );
+        }
+        // A malformed shielded payload (neither mint nor spend) is still rejected.
+        let mut bad = coinbase_tx(vec![a_valid_output()]);
+        bad.tx_type = TxType::Shielded;
+        bad.extra = vec![0xFFu8; 4];
         assert!(
-            err.contains("pure-shielded"),
-            "basic must reject a transparent-side shielded tx, got: {err}"
+            validate_transaction_basic(&bad).is_err(),
+            "a malformed shielded payload must still be rejected at the basic gate"
         );
     }
 

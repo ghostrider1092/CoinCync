@@ -26,6 +26,22 @@ impl Blockchain {
         self.inner.read().utxos.output_count()
     }
 
+    /// Monotonic count of transparent outputs ever created on the active chain
+    /// (never decremented by spends; see `UtxoSet::total_outputs_ever`). With
+    /// [`reorg_disconnects_total`](Self::reorg_disconnects_total) this gives the
+    /// availability metric (`ever − disconnects`) the block-integrity breaker
+    /// checks for underflow. Read-only getter.
+    pub fn total_outputs_ever(&self) -> u64 {
+        self.inner.read().utxos.total_outputs_ever()
+    }
+
+    /// Cumulative count of live outputs disconnected by reorgs. Pairs with
+    /// [`total_outputs_ever`](Self::total_outputs_ever) for the availability
+    /// invariant. Read-only getter.
+    pub fn reorg_disconnects_total(&self) -> u64 {
+        self.inner.read().utxos.reorg_disconnects_total()
+    }
+
     /// Look up a transaction's block height and index via the tx_index.
     pub fn get_tx_location(&self, tx_hash: &[u8]) -> Option<(u64, u32)> {
         self.db.as_ref().and_then(|db| db.get_tx_location(tx_hash))
@@ -137,7 +153,17 @@ impl Blockchain {
     /// `calculate_difficulty` directly and diverged from this regtest branch,
     /// rejecting every peer header so regtest nodes could not sync. Hence `pub`.)
     pub fn expected_next_target(&self, blocks: &[DifficultyBlock], height: u64) -> Hash {
-        if self.network == crate::config::NetworkType::Regtest {
+        // Beta shares regtest's fast-chain retarget: it eases to / pins at its low
+        // genesis difficulty and never climbs toward the 120s block spacing, so
+        // opt-in testers reliably reach the shielded activation height (5) in
+        // seconds. Without this the low *initial* difficulty only buys the first
+        // few blocks before ASERT retargets upward (observed 256 → 907 by height 9
+        // on 2026-10-01) and mining slows to the normal spacing. Beta is a
+        // disposable test network, so the same overshoot-free easing regtest uses
+        // is exactly what it wants.
+        if self.network == crate::config::NetworkType::Regtest
+            || self.network == crate::config::NetworkType::Beta
+        {
             // Ease difficulty DOWN toward the MIN_DIFFICULTY floor at <=3x per
             // block (safely inside the ±4x/step sanity layer), then pin there
             // and never retarget. Applies from the very first block (parent =

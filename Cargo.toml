@@ -120,6 +120,39 @@ shielded-soak-stub        = []   # CIP-Shielded: inert prover/verifier for the a
 # env SPARK_OPENSSL_DIR). Off by default; consensus stays activation-gated (u64::MAX).
 libspark-ffi              = ["spark-connector/libspark-ffi"]
 
+# ── Resilience / safety connectors (fail-closed, default-OFF, no core edits) ──
+# Circuit-breaker suite + the universal fuse box + the Rung-2 state-root
+# connector. Each is a gated, Observe-default policy slot declared from lib.rs
+# (never the hash-locked core). See docs/design/cip-circuit-breakers.md +
+# cip-fuse-box-resilience-standard.md + cip-rung2-state-root.md.
+shielded-breaker        = []
+supply-breaker          = []
+mempool-breaker         = []
+p2p-breaker             = []
+reorg-breaker           = []
+rpc-breaker             = []
+block-integrity-breaker = []
+breaker-recovery        = []
+# REGTEST-ONLY chaos hooks for the live-user test harness: a fault-injection
+# entry point + an env-driven arm-height override, so a local regtest run can
+# trigger every breaker (incl. the consensus/money ones that never trip on a
+# correct node) and exercise fail-closed + recovery. OFF by default; NEVER
+# compiled into a production node. Needs `breaker-recovery`.
+regtest-chaos           = ["breaker-recovery"]
+state-root-commit       = []
+# The universal fuse box: the one registry every breaker plugs into (src/fuse.rs).
+# Needs only `breaker-recovery`; this convenience feature turns on EVERY breaker.
+fuse = [
+    "breaker-recovery",
+    "mempool-breaker",
+    "p2p-breaker",
+    "supply-breaker",
+    "reorg-breaker",
+    "rpc-breaker",
+    "shielded-breaker",
+    "block-integrity-breaker",
+]
+
 [dependencies]
 # Shielded engine's own section — a clean Rust API; secp256k1/OpenSSL/C++ stay
 # behind its default-off `libspark-ffi` feature (see crates/spark-connector).

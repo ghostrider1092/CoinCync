@@ -712,6 +712,14 @@ impl Blockchain {
             if !tx.is_shielded() {
                 continue;
             }
+            // v2 SparkPayload (libspark) txs are applied by `apply_spark_v2_txs`
+            // against the SparkPoolStore, not this v1 ShieldedStore path. Skip them
+            // here so the v1 decoder never sees a v2 payload. Default build has no
+            // v2 txs (feature off), so this is unchanged there.
+            #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+            if crate::consensus::spark_payload::SparkPayload::decode(&tx.extra).is_ok() {
+                continue;
+            }
             let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)
                 .unwrap_or_else(|e| {
                     panic!(
@@ -771,6 +779,19 @@ impl Blockchain {
             .as_ref()
             .map(|s| s.cover_entries_at(cover_set_id, anchor_height))
             .unwrap_or_default()
+    }
+
+    /// Whether a v2 (libspark) shielded linking tag is already spent on-chain.
+    /// A wallet derives each owned pool coin's tag (`coin_ltag`) and calls this to
+    /// exclude already-spent notes from its balance and spend selection — a spent
+    /// coin's bytes stay in the cover set, so view-key identification alone
+    /// over-counts. `false` when the pool store is absent.
+    #[cfg(feature = "sketch-gk-proof")]
+    pub fn spark_pool_tag_spent(&self, tag: &[u8]) -> bool {
+        self.spark_pool_store
+            .as_ref()
+            .map(|s| s.is_tag_spent(&spark_connector::Nullifier(tag.to_vec())))
+            .unwrap_or(false)
     }
 
     /// The unified operator security sweep: run every initialized detail —
@@ -873,6 +894,14 @@ impl Blockchain {
             if !tx.is_shielded() {
                 continue;
             }
+            // v2 SparkPayload (libspark) txs are spend-verified by
+            // `verify_block_spark_v2` against the SparkPoolStore, not this v1 GK
+            // path. Skip them here so the v1 decoder never sees a v2 payload.
+            // Default build has no v2 txs (feature off), so this is unchanged there.
+            #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+            if crate::consensus::spark_payload::SparkPayload::decode(&tx.extra).is_ok() {
+                continue;
+            }
             let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
             crate::consensus::shielded_pipeline::gk::verify_shielded_payload(
                 store,
@@ -893,7 +922,7 @@ impl Blockchain {
     /// real backend) — the only config where the libspark pool exists; inert and
     /// fail-closed otherwise. Returns `Err(reason)` to reject the block.
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-    fn verify_block_spark_v2(
+    pub(crate) fn verify_block_spark_v2(
         &self,
         transactions: &[Transaction],
     ) -> std::result::Result<(), String> {
@@ -924,12 +953,32 @@ impl Blockchain {
             // the single source of truth shared with check_shielded_tx and the
             // mempool gate (validation::require_pure_shielded_shape); value_balance
             // == 0 is enforced here for the v2 payload.
-            crate::consensus::validation::require_pure_shielded_shape(tx)
-                .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
-            if payload.value_balance != 0 {
+            // Pure-shielded Option-A gate — RELAXED only on the regtest test bridge
+            // (sketch-gk-proof + Regtest) so the harness can shield-in/unshield; the
+            // value bridge below still enforces conservation. Production always enforces.
+            if !crate::consensus::validation::regtest_bridge_enabled(self.network) {
+                crate::consensus::validation::require_pure_shielded_shape(tx)
+                    .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
+                if payload.value_balance != 0 {
+                    return Err(format!(
+                        "spark v2 tx {idx}: value_balance must be 0 — transparent \
+                         shield-in/unshield is gated until the bridge is validated (#314)"
+                    ));
+                }
+            }
+            // MINT-XOR-SPEND: a v2 payload is EITHER a shield-in (mint, no spend)
+            // OR a shielded spend (spend, no mint) — never both. A combined
+            // mint+spend would SKIP the `value_balance == spend_fee` binding below
+            // (which is scoped to `mint.is_none()`), while `verify_mint_shield_in`
+            // checks only the mint half and `verify_spark_payload` only the spend
+            // half — so the spend's cross-veil fee release would bind to nothing
+            // and the pool turnstile (`apply_value_balance`) would desync from the
+            // real pooled value by the bundle fee (attacker-chosen inflation). A
+            // shield-in and a spend must be separate txs; reject the combination.
+            if payload.mint.is_some() && payload.spend.is_some() {
                 return Err(format!(
-                    "spark v2 tx {idx}: value_balance must be 0 — transparent \
-                     shield-in/unshield is gated until the bridge is validated (#314)"
+                    "spark v2 tx {idx}: a payload may carry a mint OR a spend, not both \
+                     (combined mint+spend bypasses the value_balance/spend-fee binding)"
                 ));
             }
             // Transparent↔shielded value bridge: the tx's public value_balance
@@ -947,6 +996,19 @@ impl Blockchain {
                 payload.value_balance,
             )
             .map_err(|e| format!("spark v2 tx {idx}: value bridge: {e}"))?;
+            // SECURITY (unshield inflation guard — authoritative gate): the value
+            // bridge above binds only the SUM of the transparent output
+            // commitments. Each UNSHIELD output is value-REVEALING and carries no
+            // range proof, so without a per-output binding two outputs with
+            // blindings x and −x cancel in that sum while committing to arbitrary
+            // values the attacker knows, minting a spendable UTXO worth more than
+            // left the pool (the coinbase C19 trick, unshield path). Require every
+            // unshield output == commit(declared, 0). Self-guards on the unshield
+            // shape (inputs empty, outputs non-empty); inert for shield-in and
+            // pure-shielded. Shared with the mempool + contextual gates so it
+            // cannot drift (F4/F7).
+            crate::consensus::validation::check_unshield_outputs_revealed(tx)
+                .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
             // Cumulative pool-value check (prevention): reject before apply if
             // this tx would unshield more than the pool holds.
             simulated_pool -= payload.value_balance as i128;
@@ -978,6 +1040,81 @@ impl Blockchain {
             if let Some(mint) = &payload.mint {
                 crate::consensus::spark_payload::verify_mint_shield_in(mint, payload.value_balance)
                     .map_err(|e| format!("spark v2 tx {idx}: mint: {e}"))?;
+                // Reject a mint whose coins are ALREADY in the pool — an
+                // already-confirmed shield-in re-added to the mempool (e.g. by
+                // Dandelion fluff) and re-proposed. Without this it passes verify
+                // and HALTS at apply on "duplicate mint coin outpoint". Rejecting
+                // here keeps the block gate fail-closed AND lets the mempool's
+                // `shielded_unminable` sweep evict the re-added tx (it reads this
+                // same verify). Mirror of apply's outpoint derivation.
+                let input_outpoints: Vec<Vec<u8>> = tx
+                    .inputs
+                    .iter()
+                    .map(|i| borsh::to_vec(&i.key_image).unwrap_or_default())
+                    .collect();
+                let (_total, coins) = spark_connector::ffi::verify_mint_bundle(mint)
+                    .ok_or_else(|| format!("spark v2 tx {idx}: mint bundle unparseable"))?;
+                for i in 0..coins.len() {
+                    let op = crate::consensus::spark_payload::derive_outpoint(&input_outpoints, i as u32);
+                    if store.index_of(&op).is_some() {
+                        return Err(format!(
+                            "spark v2 tx {idx}: mint coin outpoint already in the pool \
+                             (already-confirmed shield-in re-proposed)"
+                        ));
+                    }
+                }
+            }
+            // OPTION-B VOUT BINDING. A spend bundle's libspark `vout` (the
+            // transparent output value in libspark's own balance equation
+            // `input = Σ outputs + f + vout`) MUST be 0: all value crossing the
+            // veil is carried by the bundle fee `f`, which is bound to the tx's
+            // public `value_balance` / `tx.fee` by the guard below. A bundle with
+            // `vout > 0` still satisfies the libspark balance proof, so without
+            // this check it verifies while the pool turnstile (which credits only
+            // `f`) drifts ABOVE the real pooled value — a silent burn. Reject any
+            // non-zero vout; fail-closed if it is unreadable. Applies to EVERY
+            // spend, independent of value_balance (a value_balance == 0 pool send
+            // carries a spend too).
+            if let Some(sb) = &payload.spend {
+                let vout = spark_connector::ffi::spend_vout(&sb.bundle)
+                    .ok_or_else(|| format!("spark v2 tx {idx}: unreadable spend bundle vout"))?;
+                if vout != 0 {
+                    return Err(format!(
+                        "spark v2 tx {idx}: spend bundle vout {vout} != 0 — Option-B carries all \
+                         cross-veil value in the bundle fee (non-zero vout drifts pool accounting)"
+                    ));
+                }
+            }
+            // CROSS-VEIL INFLATION GUARD (shielded-send fee binding). A MINEABLE
+            // SPEND releases its bundle's internal fee (`input − Σ pool outputs`)
+            // across the veil to the miner; its public `value_balance` MUST equal
+            // that bundle fee, or a shielded tx could declare a different crossing
+            // than the bundle actually made (over-claim the miner fee / hide value
+            // in the pool). The value bridge above already tied `value_balance` to
+            // `tx.fee`; this ties it to the bundle. A paying spend's `value_balance`
+            // is `> 0` (fee leaving the pool). Fail-closed if the bundle's fee is
+            // unreadable. (A shield-in's value is proven by its mint bundle above,
+            // not this path.)
+            //
+            // Scoped to `value_balance != 0`: a `value_balance == 0` spend declares
+            // no crossing, so the value bridge forces `tx.fee == 0` — and the block
+            // fee floor (§8 + min-fee, no shielded exemption) then rejects it, so
+            // it is unmineable regardless. That lets the pool state-machine tests,
+            // which drive `verify_block_spark_v2` in isolation with a pool-internal
+            // fee (`value_balance == 0`), exercise the spend path without the floor.
+            if payload.value_balance != 0 && payload.mint.is_none() {
+                if let Some(sb) = &payload.spend {
+                    let bundle_fee = spark_connector::ffi::spend_fee(&sb.bundle).ok_or_else(|| {
+                        format!("spark v2 tx {idx}: unreadable spend bundle fee")
+                    })?;
+                    if payload.value_balance as i128 != bundle_fee as i128 {
+                        return Err(format!(
+                            "spark v2 tx {idx}: value_balance {} != spend bundle fee {} \
+                             (cross-veil inflation guard)",
+                            payload.value_balance, bundle_fee
+                        ));
+                    }
+                }
             }
             let tags = crate::consensus::spark_payload::verify_spark_payload(
                 store.as_ref(),
@@ -1418,6 +1555,9 @@ impl Blockchain {
         );
 
         let mut all_orphaned_txs = Vec::new();
+        // Every disconnected tx's hash (incl. coinbase), to drop from the
+        // tx-index below — mirrors the reorg path's `ti_removes`.
+        let mut ti_removes: Vec<[u8; 32]> = Vec::new();
         {
             let mut inner = self.inner.write();
 
@@ -1466,8 +1606,10 @@ impl Blockchain {
                         // order as the UTXO disconnect. Inert while stores
                         // are None.
                         self.rewind_phase2_stores(h);
-                        // Collect non-coinbase txs
+                        // Collect non-coinbase txs (returned for mempool re-add)
+                        // and EVERY tx's hash (incl. coinbase) for tx-index removal.
                         for tx in &txs {
+                            ti_removes.push(*tx.hash().as_bytes());
                             if !tx.is_coinbase() {
                                 all_orphaned_txs.push(tx.clone());
                             }
@@ -1644,6 +1786,16 @@ impl Blockchain {
             if let Err(e) = db.blocks.remove_heights_above(target_height) {
                 tracing::error!("Failed to clean heights during rollback: {}", e);
             }
+            // Drop the tx-index entries for every disconnected tx. Without this,
+            // `remove_heights_above` clears height->hash and the UTXO rewind
+            // clears the output set, but `tx_index` still maps these hashes to
+            // their now-orphaned (height, idx); after a forward resync
+            // `get_tx_location` returns a STALE location, so `get_transaction` /
+            // explorer / wallet lookups return the wrong tx or None. The reorg
+            // path removes these atomically (`ti_removes`); match it here.
+            for h in &ti_removes {
+                db.remove_tx_index(h);
+            }
             let inner = self.inner.read();
             let last_checkpoint = db
                 .state
@@ -1689,7 +1841,117 @@ impl Blockchain {
 
     /// Process/add block to chain
     pub fn process_block(&self, block: Block) -> Result<BlockStatus> {
-        self.add_block(block)
+        #[cfg(all(
+            feature = "breaker-recovery",
+            any(
+                feature = "block-integrity-breaker",
+                feature = "supply-breaker",
+                all(feature = "shielded-breaker", feature = "sketch-gk-proof")
+            )
+        ))]
+        let connected_height = block.header.height.as_u64();
+        let status = self.add_block(block)?;
+
+        // Block-integrity fuse feed (connector seam): on a block that connected to
+        // the main chain, observe the REAL post-apply UTXO-set counters through the
+        // universal fuse box. Observe-only (Latch), gated OFF, node-local — reads
+        // public accessors AFTER the lock-held apply returned, never edits it.
+        #[cfg(all(feature = "block-integrity-breaker", feature = "breaker-recovery"))]
+        {
+            if matches!(
+                status,
+                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+            ) {
+                let _ = crate::block_integrity_live_breaker::on_block_connected(
+                    self.total_outputs_ever(),
+                    self.reorg_disconnects_total(),
+                    self.utxo_count() as u64,
+                );
+                // ARM SWITCH (default OFF — arm height u64::MAX): once the
+                // BlockIntegrity breaker is armed at a height AND it has latched
+                // on a post-apply integrity breach, fail closed — refuse to
+                // advance on possibly-corrupted chain state rather than continue.
+                // No behaviour change until an arm height is set (reviewed code
+                // change, not a runtime switch). See docs/design/breaker-arm-switch.md.
+                let surface = crate::breaker_recovery::BreakerSurface::BlockIntegrity;
+                if crate::fuse::enforce_trips(
+                    surface,
+                    connected_height,
+                    crate::fuse::effective_arm_height(surface),
+                ) {
+                    return Err(crate::error::Error::InvalidState(format!(
+                        "block-integrity breaker armed and latched at height {connected_height}: \
+                         refusing to advance on possibly-corrupted chain state — investigate and rearm"
+                    )));
+                }
+            }
+        }
+
+        // Supply breaker feed + arm gate (connector seam). Observe-only +
+        // default-OFF; reads post-apply supply stats, never edits the locked
+        // apply. See docs/design/breaker-arm-switch.md.
+        #[cfg(all(feature = "supply-breaker", feature = "breaker-recovery"))]
+        {
+            if matches!(
+                status,
+                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+            ) {
+                let (total_supply, total_burned) = {
+                    let inner = self.inner.read();
+                    (inner.stats.total_supply, inner.stats.total_burned)
+                };
+                let _ = crate::supply_live_breaker::on_block_connected(
+                    total_supply,
+                    total_burned,
+                    connected_height,
+                );
+                let surface = crate::breaker_recovery::BreakerSurface::Supply;
+                if crate::fuse::enforce_trips(
+                    surface,
+                    connected_height,
+                    crate::fuse::effective_arm_height(surface),
+                ) {
+                    return Err(crate::error::Error::InvalidState(format!(
+                        "supply breaker armed and latched at height {connected_height}: a monetary \
+                         invariant (circulating supply / ceiling) broke — refusing to advance"
+                    )));
+                }
+            }
+        }
+
+        // Shielded-pool breaker feed + arm gate (connector seam). Observe-only +
+        // default-OFF; reads the post-apply pool value. Gated on sketch-gk-proof
+        // because that is where the shielded pool store exists; the pool is off
+        // (activation u64::MAX) until post-audit, so this watches value 0 at
+        // launch. See the adapter + docs/design/breaker-arm-switch.md.
+        #[cfg(all(
+            feature = "shielded-breaker",
+            feature = "breaker-recovery",
+            feature = "sketch-gk-proof"
+        ))]
+        {
+            if matches!(
+                status,
+                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+            ) {
+                let pool_value =
+                    self.spark_pool_store.as_ref().map(|s| s.pool_value()).unwrap_or(0);
+                let _ = crate::shielded_live_breaker::on_block_connected(pool_value);
+                let surface = crate::breaker_recovery::BreakerSurface::Shielded;
+                if crate::fuse::enforce_trips(
+                    surface,
+                    connected_height,
+                    crate::fuse::effective_arm_height(surface),
+                ) {
+                    return Err(crate::error::Error::InvalidState(format!(
+                        "shielded breaker armed and latched at height {connected_height}: the \
+                         shielded pool broke an invariant (pool value) — refusing to advance"
+                    )));
+                }
+            }
+        }
+
+        Ok(status)
     }
 
     /// TEST-ONLY: seed a linear main chain of `n_blocks` empty blocks on top of
@@ -1837,7 +2099,9 @@ impl Blockchain {
             crate::config::NetworkType::Mainnet => {
                 crate::mainnet::verify_checkpoint(block.header.height.as_u64(), &hash)
             }
-            crate::config::NetworkType::Testnet | crate::config::NetworkType::Regtest => {
+            crate::config::NetworkType::Testnet
+            | crate::config::NetworkType::Regtest
+            | crate::config::NetworkType::Beta => {
                 crate::testnet::verify_checkpoint(block.header.height.as_u64(), &hash)
             }
         };
@@ -2629,6 +2893,27 @@ impl Blockchain {
                     reorg_depth
                 );
 
+                // Reorg fuse feed (connector seam): a single side-effect-free line
+                // that observes this accepted reorg's REAL depth / finality floor /
+                // work ratio through the universal fuse box. Observe-only, gated
+                // OFF, node-local — mutates no chain state. `finalized` mirrors the
+                // chain's finality-floor rule (reject fork_point < floor) so the
+                // breaker's `<=` check agrees: floor-1.
+                #[cfg(all(feature = "reorg-breaker", feature = "breaker-recovery"))]
+                {
+                    let floor = self
+                        .height()
+                        .saturating_sub(crate::constants::CHECKPOINT_INTERVAL);
+                    let _ = crate::reorg_live_breaker::on_reorg(
+                        reorg_depth,
+                        net_max,
+                        fork_point,
+                        floor.saturating_sub(1),
+                        fork_cumulative,
+                        current_total_difficulty,
+                    );
+                }
+
                 // Save pre-reorg state for rollback on fork validation failure
                 let pre_reorg_tip = {
                     let inner = self.inner.read();
@@ -3065,6 +3350,57 @@ impl Blockchain {
                         }
                     }
 
+                    // STORE-AWARE shielded/spark verification for the reorg TIP.
+                    // The fork-block loop above runs these for every ANCESTOR, but
+                    // the triggering tip is excluded from collect_fork_chain and is
+                    // validated above ONLY by the stateless
+                    // validate_block_with_checkpoint_for_network — which does NOT
+                    // run the pool-aware spark/shielded gate. Without this, a reorg
+                    // whose tip is a shield-in/unshield bypasses the value bridge,
+                    // the pool-underflow guard, the tag-double-spend check and mint
+                    // authentication, while the tip's transparent outputs ARE still
+                    // created by apply_batch below = cross-veil inflation / shielded
+                    // double-spend. The store here holds all fork blocks (the tip's
+                    // parent state) and the tip is NOT yet applied, exactly as the
+                    // fork-block verify sees its own parent state. Mirror that loop
+                    // and route failures through reorg_error (→ full rollback).
+                    // Inert while the stores are None / features off.
+                    if reorg_error.is_none() {
+                        if let Some(ref sstore) = self.shielded_store {
+                            if let Err(e) =
+                                crate::consensus::shielded::check_block_shielded_double_spends(
+                                    &block.transactions,
+                                    |t| sstore.is_nullifier_spent(t),
+                                )
+                            {
+                                reorg_error = Some(format!(
+                                    "shielded double-spend in reorg tip block: {}",
+                                    e
+                                ));
+                            }
+                            #[cfg(feature = "sketch-gk-proof")]
+                            if reorg_error.is_none() {
+                                if let Err(e) =
+                                    Self::verify_block_shielded_spends(sstore, &block.transactions)
+                                {
+                                    reorg_error = Some(format!(
+                                        "shielded spend proof invalid in reorg tip block: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                    if reorg_error.is_none() {
+                        if let Err(reason) = self.verify_block_spark_v2(&block.transactions) {
+                            reorg_error = Some(format!(
+                                "spark v2 spend invalid in reorg tip block: {}",
+                                reason
+                            ));
+                        }
+                    }
+
                     // #supply-commitment: also validate the reorg TIP's
                     // commitment. All fork blocks are applied, so inner.stats is
                     // the tip's parent cumulative supply. On mismatch, set
@@ -3433,6 +3769,18 @@ impl Blockchain {
                         let tip_batch =
                             UtxoSet::batch_from_block(block.header.height.as_u64(), &block.transactions);
                         inner.utxos.apply_batch(tip_batch);
+                        // Shielded (Spark) pool apply for the reorg TIP block,
+                        // mirroring the fork-block loop and the clean-extend path.
+                        // The tip is excluded from collect_fork_chain, so without
+                        // these its shielded coins are never add_coin'd and its
+                        // spent tags never mark_tag_spent'd — pool_value and the
+                        // membership/double-spend sets would permanently diverge
+                        // from the chain. (The store-aware verify added at the
+                        // tip-validate above already rejected an unconserved tip, so
+                        // this only ever applies a verified one.) Inert while None.
+                        self.apply_shielded_txs(&block.transactions, block.header.height.as_u64());
+                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                        self.apply_spark_v2_txs(&block.transactions, block.header.height.as_u64());
 
                         // Add triggering block's emission to supply.
                         //
@@ -4113,6 +4461,8 @@ mod generation_tests {
 pub fn create_genesis_block_for(network: NetworkType) -> Block {
     match network {
         NetworkType::Testnet | NetworkType::Regtest => crate::testnet::testnet_genesis(),
+        // Beta: testnet genesis with BETA_MAGIC swapped in → distinct hash.
+        NetworkType::Beta => crate::beta::beta_genesis(),
         NetworkType::Mainnet => crate::mainnet::mainnet_genesis(),
     }
 }

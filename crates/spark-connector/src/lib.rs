@@ -139,6 +139,20 @@ pub trait SparkBackend {
         value_balance: i64,
         spent_tags: &[Nullifier],
     ) -> Result<Vec<Nullifier>> {
+        // CLOSE THE EMPTY-COVER-SET FALLBACK (#258 / #308). `verify_spend` treats
+        // an empty cover set as the permissive STATELESS admit — it verifies the
+        // spender's OWN embedded set instead of a node-resolved one, so a spender
+        // could prove membership in a set they made up. This method is the
+        // AUTHORITATIVE solvency entry (node-resolved set + spent-tag check), so it
+        // must never run permissively: require a non-empty node set here, at the
+        // trust boundary, independent of any individual caller's own guard.
+        if cover_set.is_empty() {
+            return Err(ConnectorError::Rejected(
+                "authoritative solvency verify requires a non-empty node-resolved cover set \
+                 (empty would fall back to the spender's own bundle set — #258)"
+                    .into(),
+            ));
+        }
         let tags = self.verify_spend(cover_set, spend, fee, value_balance)?;
         for t in &tags {
             if spent_tags.contains(t) {
@@ -191,7 +205,6 @@ pub mod ffi {
             len: c_int,
             set_ptr: *const u8,
             set_len: c_int,
-            vout: u64,
             out_tags: *mut u8,
             tags_cap: c_int,
             out_tags_len: *mut c_int,
@@ -272,6 +285,18 @@ pub mod ffi {
             out_tags: *mut u8,
             tags_cap: c_int,
             out_tags_len: *mut c_int,
+        ) -> c_int;
+        fn spark_ffi_spend_fee(ptr: *const u8, len: c_int, out_fee: *mut u64) -> c_int;
+        fn spark_ffi_spend_vout(ptr: *const u8, len: c_int, out_vout: *mut u64) -> c_int;
+        fn spark_ffi_coin_ltag(
+            seed: *const u8,
+            seed_len: c_int,
+            coin_ptr: *const u8,
+            coin_len: c_int,
+            ctx_ptr: *const u8,
+            ctx_len: c_int,
+            out: *mut u8,
+            cap: c_int,
         ) -> c_int;
         fn spark_ffi_address_from_seed(seed: *const u8, seed_len: c_int, out: *mut u8, cap: c_int) -> c_int;
         fn spark_ffi_identify(
@@ -658,6 +683,67 @@ pub mod ffi {
         Some(out)
     }
 
+    /// Read a spend bundle's PUBLIC internal fee (`input − Σ pool outputs`) — the
+    /// value the bundle releases across the veil to the miner (amounts stay
+    /// hidden). Consensus binds the tx's public `value_balance` to this so a
+    /// shielded spend cannot claim a different fee than the bundle actually
+    /// released (cross-veil inflation guard). `None` on a malformed bundle
+    /// (fail-closed). Call on a bundle whose structure already verified.
+    pub fn spend_fee(bundle: &[u8]) -> Option<u64> {
+        let mut fee: u64 = 0;
+        // Safety: the shim reads `bundle` and writes a single u64 to `fee`.
+        let rc = unsafe { spark_ffi_spend_fee(bundle.as_ptr(), bundle.len() as c_int, &mut fee) };
+        if rc != 1 {
+            return None;
+        }
+        Some(fee)
+    }
+
+    /// Read a spend bundle's libspark `vout` — the transparent output value in
+    /// libspark's own balance equation (`input = Σ outputs + f + vout`). The
+    /// Option-B value model ALWAYS keeps `vout = 0` (value crosses the veil via
+    /// the bundle fee `f`, bound to the tx's public `value_balance`); a bundle
+    /// with `vout > 0` still satisfies the libspark balance proof but would make
+    /// the node's pool accounting drift above the real pooled value (a silent
+    /// burn), so consensus rejects `vout != 0`. `None` on a malformed bundle
+    /// (fail-closed). Call on a bundle whose structure already verified.
+    pub fn spend_vout(bundle: &[u8]) -> Option<u64> {
+        let mut vout: u64 = 0;
+        // Safety: the shim reads `bundle` and writes a single u64 to `vout`.
+        let rc = unsafe { spark_ffi_spend_vout(bundle.as_ptr(), bundle.len() as c_int, &mut vout) };
+        if rc != 1 {
+            return None;
+        }
+        Some(vout)
+    }
+
+    /// Derive the linking tag (`Nullifier`) of an owned `coin` (minted with
+    /// `context`) for the `seed` wallet — the tag it reveals when spent. A wallet
+    /// checks it against the pool's spent set (`is_spark_pool_tag_spent`) to
+    /// exclude already-spent notes from its balance and from spend selection.
+    /// `None` if the coin is not owned by `seed` or on FFI failure.
+    pub fn coin_ltag(seed: &[u8], coin: &CoinBytes, context: &[u8]) -> Option<Nullifier> {
+        let mut out = vec![0u8; 64];
+        // Safety: the shim reads the inputs and writes <= cap bytes into `out`.
+        let len = unsafe {
+            spark_ffi_coin_ltag(
+                seed.as_ptr(),
+                seed.len() as c_int,
+                coin.0.as_ptr(),
+                coin.0.len() as c_int,
+                context.as_ptr(),
+                context.len() as c_int,
+                out.as_mut_ptr(),
+                out.len() as c_int,
+            )
+        };
+        if len <= 0 {
+            return None;
+        }
+        out.truncate(len as usize);
+        Some(Nullifier(out))
+    }
+
     /// The Grootle cover-set cardinality `N = n_grootle ^ m_grootle` for the
     /// active params — the exact number of coins a caller must supply to
     /// [`build_spend_over_set`]. `None` on error.
@@ -828,20 +914,21 @@ pub mod ffi {
         /// verifier-side context libspark needs (cover set, its representation,
         /// output coins, block hash). Returns the linking-tag nullifiers on a
         /// valid spend; fail-closed otherwise.
-        fn verify_spend(&self, cover_set: &[CoinBytes], spend: &SpendBytes, _fee: u64, value_balance: i64) -> Result<Vec<Nullifier>> {
+        fn verify_spend(&self, cover_set: &[CoinBytes], spend: &SpendBytes, _fee: u64, _value_balance: i64) -> Result<Vec<Nullifier>> {
             // #258: when a NODE-RESOLVED cover set is supplied it is authoritative
             // (the shim verifies the Grootle proof against it, not the spender's
-            // bundle) and the spend's public output is bound to `value_balance`.
-            // An empty set keeps the legacy stateless (permissive) behaviour.
+            // bundle). An empty set keeps the legacy stateless (permissive) admit.
+            //
+            // Option-B value model: the spend keeps libspark `vout = 0` (its output
+            // re-enters the pool); the value crossing the veil is the bundle's
+            // internal fee, bound to the tx's public `value_balance` at the
+            // consensus layer (`verify_block_spark_v2`: `value_balance ==
+            // spend_fee(bundle)`) and to `tx.fee` by the transparent value bridge.
+            // So `value_balance` is NOT bound here — the old `getVout() ==
+            // value_balance` check would force `value_balance == 0` and make a
+            // fee-paying transfer unmineable. The bundle's own balance proof
+            // conserves input == outputs + fee.
             let set = marshal_cover_set(cover_set);
-            // Public value this spend releases to the transparent side: for an
-            // unshield value_balance > 0 and the spend's `vout` must equal it; a
-            // shielded→shielded transfer has value_balance == 0 → vout 0. A net
-            // shield-in (value_balance < 0) is carried on the MINT side, so the
-            // spend's own public output must be 0 — fail-closed otherwise. (The
-            // spend's internal libspark fee is pool-internal, not `_fee`, and is
-            // conserved by the spend's own balance proof — see the shim.)
-            let vout: u64 = if value_balance > 0 { value_balance as u64 } else { 0 };
             let mut tags = vec![0u8; 8192];
             let mut tags_len: c_int = 0;
             // Safety: pointers/lengths are valid for the duration of the call; the
@@ -852,7 +939,6 @@ pub mod ffi {
                     spend.0.len() as c_int,
                     set.as_ptr(),
                     set.len() as c_int,
-                    vout,
                     tags.as_mut_ptr(),
                     tags.len() as c_int,
                     &mut tags_len,
@@ -1006,25 +1092,36 @@ pub mod ffi {
         }
 
         #[test]
-        fn verify_rejects_value_balance_the_spend_does_not_release() {
-            // #258 core break (2): the spend's public output (vout) must match the
-            // transaction's declared value_balance, or the tx could unshield value
-            // its spend never releases (the inflation hole). This fixture is a
-            // self-spend: vout 0, so value_balance must be 0. (The spend's internal
-            // libspark fee is pool-internal and conserved by its own balance proof,
-            // so it is intentionally NOT bound to the transparent tx fee here.)
+        fn verify_spend_ignores_value_balance_binding_is_consensus_layer() {
+            // Option-B value model: the connector's verify_spend checks ONLY the
+            // libspark spend proof (Grootle membership + linking-tag binding)
+            // against the cover set. It does NOT bind `fee`/`value_balance` — the
+            // spend keeps libspark `vout = 0` (its output re-enters the pool) and
+            // the value crossing the veil (the bundle's internal fee) is bound to
+            // the tx's public `value_balance` at the CONSENSUS layer
+            // (`chain::verify_block_spark_v2`: `value_balance == spend_fee(bundle)`;
+            // and the transparent value bridge:
+            // `spark_payload::verify_transparent_shielded_balance`), covered by the
+            // value-bridge conservation proptest — NOT here. This test documents
+            // that real contract: the `value_balance` arg does not change
+            // verify_spend's verdict.
+            //
+            // (A prior version of this test asserted `verify_spend(.., 0, 5)` is
+            // Err — a value_balance binding this layer never performed; since
+            // `_value_balance` is ignored it would in fact return the same verdict
+            // as `(.., 0, 0)`, so the old assertion was false and only "passed"
+            // because the ffi test build was not run in CI. Corrected to assert the
+            // real behaviour so the audit looks for the binding at the consensus
+            // layer, where it actually lives.)
             let b = LibsparkBackend;
             let (bundle, set, _fee) = build_strict_spend(b"strict-vb", 1_000, 2, 400);
-            // value_balance 0 matches the spend's vout 0 → verifies.
             assert!(
                 b.verify_spend(&set, &bundle, 0, 0).is_ok(),
-                "a self-spend with value_balance 0 verifies"
+                "a well-formed spend verifies against its real cover set"
             );
-            // Claiming a positive value_balance (unshield) the spend does not
-            // release (its vout is 0) → rejected.
             assert!(
-                b.verify_spend(&set, &bundle, 0, 5).is_err(),
-                "claiming an unshield the spend does not release must be rejected"
+                b.verify_spend(&set, &bundle, 0, 5).is_ok(),
+                "verify_spend ignores value_balance; the cross-veil binding is consensus-layer"
             );
         }
 

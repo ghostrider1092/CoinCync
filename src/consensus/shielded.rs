@@ -191,6 +191,15 @@ pub fn check_block_shielded_double_spends(
         if !tx.is_shielded() {
             continue;
         }
+        // v2 SparkPayload (libspark) txs carry their double-spend guard in
+        // `chain::verify_block_spark_v2` via the pool linking-tag spent-set, NOT
+        // this v1 nullifier set. Skip them here so the v1 decoder never sees a v2
+        // payload (which would fail to decode and wrongly reject the block). The
+        // default build has no v2 txs (feature off), so this is unchanged there.
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        if crate::consensus::spark_payload::SparkPayload::decode(&tx.extra).is_ok() {
+            continue;
+        }
         let payload = ShieldedPayload::decode(&tx.extra)?;
         for input in &payload.inputs {
             if is_spent(&input.nullifier) {
