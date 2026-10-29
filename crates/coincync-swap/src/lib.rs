@@ -7,8 +7,9 @@
 //! This crate is NO LONGER a skeleton — the protocol is substantially
 //! complete (~16.5k LOC: adaptor signatures on both curves, cross-curve
 //! DLEQ binding, the BTC HTLC/CSV path, the Noise/Tor transport, and the
-//! full state machine), with ~350 passing tests (`--features strict-dleq`)
-//! and ~97% coverage. It is nonetheless **deliberately gated OFF** for this
+//! full state machine). The cross-curve proof was replaced in v2 (see
+//! [`cross_curve_dleq`]); coverage and test counts predating that change
+//! are stale. It is nonetheless **deliberately gated OFF** for this
 //! release: `is_implemented()` returns `false`. Swap is reachable only via this
 //! crate's own standalone `cyncswap` binary — the main `coincync` wallet has
 //! **no `coincync-swap` dependency and no swap subcommand**, so there is no
@@ -45,12 +46,16 @@
 //! ## Module layout
 //!
 //! - [`protocol`] — state machine + role types + transition rules
-//! - [`adaptor`] — adaptor-signature primitives shared by both sides
-//! - [`strict_dleq`] — mandatory same-secret cross-curve proof
-//! - [`safety`]   — BTC-first two-path contract and verification capabilities
-//! - [`btc`]      — Bitcoin RPC plus legacy diagnostic construction helpers
-//! - [`cync`]     — CoinCync RPC and joint-key derivation
-//! - [`coordinator`] — authenticated peer-to-peer negotiation transport
+//! - [`adaptor`] — adaptor-signature primitives shared by both sides.
+//!                 **BTC-side primitives (BIP-340 Schnorr adaptors)
+//!                 are real as of the 2026-05-17 slice — see the
+//!                 module docs.**
+//! - [`cross_curve_dleq`] — proof that the BTC and CYNC adaptor points
+//!                 share one secret (v2 joint bit-decomposition proof).
+//! - [`safety`]   — BTC-first two-path contract and the pre-CYNC-lock gate
+//! - [`btc`]      — Bitcoin-side: HTLC construction, broadcasting, watching (stub)
+//! - [`cync`]     — CoinCync-side: tx construction with adaptor binding (stub)
+//! - [`coordinator`] — peer-to-peer messaging skeleton between Alice / Bob (stub)
 //! - [`error`]    — typed errors for the swap state machine
 //!
 //! Wallet-entangled CYNC construction lives behind the root crate's
@@ -62,18 +67,12 @@
 pub mod adaptor;
 pub mod btc;
 pub mod coordinator;
+pub mod cross_curve_dleq;
 pub mod cync;
 pub mod error;
 pub mod protocol;
-#[cfg(feature = "strict-dleq")]
 pub mod safety;
 pub mod state;
-
-/// Strict-binding cross-curve DLEQ (Noether 2018). Enabled by default because
-/// the pre-CYNC-lock safety gate must prove that each Bitcoin adaptor point
-/// and CYNC spend share encode the same scalar.
-#[cfg(feature = "strict-dleq")]
-pub mod strict_dleq;
 
 pub use error::Error;
 pub use state::{StateError, SwapStore, STATE_VERSION};

@@ -2,7 +2,7 @@
 # scripts/mutants-overnight.sh
 #
 # Mutation-testing pass across the four crypto-critical cyncswap files
-# (strict_dleq, adaptor, cync, btc — per docs/cyncswap-audit-prep.md §5).
+# (cross_curve_dleq, adaptor, cync, btc — per docs/cyncswap-audit-prep.md §5).
 #
 # cargo-mutants flips operators / constants / returns / match arms and
 # re-runs the test suite per mutation; MISSED = tests still pass (bad,
@@ -56,8 +56,8 @@ echo "════════════════════════�
 # and with cleaner error output.
 
 echo
-echo "[1/2] Verifying baseline: cargo test -p coincync-swap --features strict-dleq"
-if ! cargo test -p coincync-swap --features strict-dleq --quiet 2>&1 | tail -5; then
+echo "[1/2] Verifying baseline: cargo test -p coincync-swap"
+if ! cargo test -p coincync-swap --quiet 2>&1 | tail -5; then
     echo "fatal: baseline tests failed; not running mutants" >&2
     exit 3
 fi

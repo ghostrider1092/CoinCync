@@ -27,8 +27,8 @@ The audit-prep doc (line 1) points at this submission packet; this packet points
 
 **Highest-risk surfaces** (start here for the cryptographic review):
 
-1. **CDLP scalar-order bound** — `strict_dleq.rs::STRICT_BIT_COUNT` + `decompose_to_bits`. An off-by-one or missing range constraint is a fund-loss bug.
-2. **CDLP soundness over Ristretto255** — `strict_dleq.rs::prove_bit_pair` + `verify_bit_pair` + `verify_linear_combination_{btc,cync}`. Adapted (not copied) from the original secp256k1↔Ed25519 construction — independent proof required.
+1. **CDLP scalar-order bound** — `cross_curve_dleq.rs::BIT_COUNT` + `validate_witness`. An off-by-one or missing range constraint is a fund-loss bug.
+2. **CDLP soundness and zero-knowledge over Ristretto255** — `cross_curve_dleq/joint_bit.rs` (per-bit OR of BTC-AND-CYNC branches), `cross_curve_dleq.rs::{prove, verify}` (link proof), `transcript.rs`. Adapted (not copied) from sigma_fun's secp256k1↔Ed25519 composition — independent proof required. Replaces v1 proofs that leaked `t` and did not bind the curves.
 3. **BIP-340 adaptor completeness + extractability** — `adaptor.rs::create_pre_sig_bip340`, `decrypt_btc_adaptor`, `recover_secret_from_btc_sig`.
 
 Full nine-item priority table at [§5 of the audit-prep doc](cyncswap-audit-prep.md#5-primary-review-targets-prioritized).
@@ -54,13 +54,11 @@ git checkout <commit-sha>   # from §9 out-of-band materials
 cargo build -p coincync-swap
 cargo test  -p coincync-swap                       # expect: 192+ tests pass
 
-# Strict-DLEQ (Noether 2018 cryptographic-level same-secret-cross-curve).
-cargo build -p coincync-swap --features strict-dleq
-cargo test  -p coincync-swap --features strict-dleq # expect: 254+ tests pass
+# Cross-curve DLEQ v2 suite (always compiled; no feature flag).
+cargo test  -p coincync-swap --lib cross_curve_dleq
 
 # Workspace-wide sweep.
-cargo test --workspace --exclude coincync                                 # 288+
-cargo test --workspace --exclude coincync --features coincync-swap/strict-dleq  # 350+
+cargo test --workspace --exclude coincync   # counts: re-measure after 2026-10-03
 ```
 
 If any of these counts differ from this document, the audit baseline has shifted — re-derive the commit + the counts before proceeding. The audit-prep doc [§10](cyncswap-audit-prep.md#10-build--test-reproducibility) carries the up-to-date expected counts plus the reproducibility-vector regeneration recipe.
@@ -78,7 +76,7 @@ The four legs of the test stool:
 | **Property tests** | Random valid inputs satisfy declared invariants | [tests/property_invariants.rs](../crates/coincync-swap/tests/property_invariants.rs), [property_invariants_cync.rs](../crates/coincync-swap/tests/property_invariants_cync.rs), [state_machine_invariants.rs](../crates/coincync-swap/tests/state_machine_invariants.rs) |
 | **Fuzz** | No random adversarial input crashes the parser | [fuzz/](../fuzz/) — 27 targets, per-commit CI on 5 attacker-reachable surfaces, manual overnight runner covers all 27 |
 | **External vectors** | Outputs reproduce byte-for-byte against published expected values | [tests/external_vectors.rs](../crates/coincync-swap/tests/external_vectors.rs) walks [test-vectors/{reproducibility,comit,farcaster}/](../crates/coincync-swap/test-vectors/) — 12 in-house deterministic vectors shipped, vendor vectors pending license review |
-| **Mutation testing** | Test suite catches single-line code mutations | Score: **100.0%** (340 caught / 0 missed) across the four crypto-critical files (`strict_dleq.rs`, `adaptor.rs`, `cync.rs`, `btc.rs`). `adaptor.rs` was 95/95 caught at baseline. See [§11.4 of the audit-prep doc](cyncswap-audit-prep.md#114-mutation-testing) for methodology. |
+| **Mutation testing** | Test suite catches single-line code mutations | 100.0% (340/340) measured 2026-05-20 on the v1 perimeter (`strict_dleq.rs`, `adaptor.rs`, `cync.rs`, `btc.rs`). The v2 `cross_curve_dleq*` files replace `strict_dleq.rs` and are not yet measured. See [§11.4 of the audit-prep doc](cyncswap-audit-prep.md#114-mutation-testing) for methodology. |
 | **Line coverage** | Source lines exercised by tests | **~97% average** across the four crypto-critical files (range 96.72% – 99.07%). Per-file report at [docs/cyncswap-coverage-2026-05-20.md](cyncswap-coverage-2026-05-20.md). |
 
 Mutation score is the empirical answer to "do your tests actually exercise the crypto, or just call it?" 100% across the four crypto-critical files means every operator, constant, return, and match arm in the audit perimeter has at least one test that fails when it's mutated.
@@ -91,7 +89,7 @@ Mutation score is the empirical answer to "do your tests actually exercise the c
 
 - **Live dual-testnet smoke** is operator-driven, not automated in CI.
 - **Joint-key full-CLSAG round-trip** is deferred to wallet integration.
-- ~~**Published strict-DLEQ benchmark numbers**~~ — **Closed 2026-05-20** via criterion at [benches/strict_dleq.rs](../crates/coincync-swap/benches/strict_dleq.rs). Measured: `prove` ≈ 133 ms / `verify` ≈ 172 ms median (modern x86 desktop, release mode, 100-sample criterion runs). Re-runnable via `cargo bench -p coincync-swap --features strict-dleq`.
+- **Cross-curve DLEQ v2 benchmark numbers** — criterion target at [benches/cross_curve_dleq.rs](../crates/coincync-swap/benches/cross_curve_dleq.rs) (`cargo bench -p coincync-swap --bench cross_curve_dleq`); not yet measured.
 - **Comit / Farcaster vendor vectors** — scaffolds + replay harness shipped; vector import deferred pending license review of the upstream `xmr-btc-swap` and `farcaster-rs` test-vector files specifically.
 
 ---

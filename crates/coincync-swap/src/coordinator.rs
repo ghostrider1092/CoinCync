@@ -91,7 +91,10 @@ pub enum Message {
         btc_adaptor: Vec<u8>,
         /// Adaptor signature on the CYNC side.
         cync_adaptor: Vec<u8>,
-        /// Cross-curve DL-equality proof.
+        /// Cross-curve DL-equality proof: the v2
+        /// `cross_curve_dleq::CrossCurveProof::to_bytes()` encoding
+        /// (fixed 56,608 bytes). Decode with `CrossCurveProof::from_bytes`
+        /// and verify against locally expected keys and context.
         dl_proof: Vec<u8>,
         /// Pre-signed refund transaction (BTC for Bob, CYNC for
         /// Alice). Phase 2 doesn't decode these; phase 3+ does.
@@ -595,9 +598,10 @@ use crate::{Error, Result};
 //   2. Schema flexibility — adding a field to `Message` doesn't
 //      invalidate older transcripts the way Bincode's positional
 //      encoding would.
-//   3. Negotiation messages are infrequent + small (≤ ~100 KB even
-//      with a strict-DLEQ proof attached); the JSON overhead is
-//      irrelevant at this volume.
+//   3. Negotiation messages are infrequent. The largest carries the
+//      56,608-byte cross-curve proof, a few hundred KB once JSON
+//      encodes it as a byte array; the overhead is irrelevant at
+//      this volume.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -605,8 +609,8 @@ use std::time::Duration;
 
 /// Maximum length of a single wire message in bytes. Protects the
 /// receiver against a malicious sender claiming a multi-gigabyte
-/// frame. 16 MiB is well above the worst-case strict-DLEQ proof
-/// (~81 KB) with comfortable headroom.
+/// frame. 16 MiB is well above the JSON-encoded cross-curve proof
+/// (56,608 bytes raw) with comfortable headroom.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default per-operation socket timeout. Handshake messages should
@@ -784,8 +788,8 @@ const NOISE_PARAMS: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 /// Maximum Noise message size per the spec: 65535 bytes including the
 /// 16-byte AEAD tag. Our handshake messages fit well within this; for
 /// post-handshake [`Message`] payloads larger than ~65 KiB we'd need
-/// to chunk + reassemble. The largest expected message is a
-/// strict-DLEQ proof (~81 KB); see the chunking logic in
+/// to chunk + reassemble. The largest expected message carries the
+/// cross-curve proof (56,608 bytes raw); see the chunking logic in
 /// [`NoiseTransport::send`].
 const NOISE_MAX_MESSAGE: usize = 65535;
 

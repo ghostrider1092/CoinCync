@@ -32,8 +32,16 @@ use crate::adaptor::{
 use crate::btc::{FundingUtxo, DUST_THRESHOLD_SATS};
 use crate::cync::{compute_swap_lock_recipient, SwapLockRecipient};
 use crate::protocol::Swap;
-use crate::strict_dleq::{verify_cross_curve_strict, CrossCurveDlProofStrict};
+use crate::cross_curve_dleq::{verify, CrossCurveProof, CrossCurveStatement};
 use crate::{Error, Result};
+
+/// Fixed context for the pre-CYNC-lock cross-curve DLEQ. Both the prover (the
+/// counterparty producing `strict_dleq_proof_hex`) and this verifier bind their
+/// statement to it, giving domain separation from any other DLEQ use. It is NOT
+/// yet per-session: binding a unique swap-session id (full replay resistance,
+/// #331's session-context item) needs the coordinator to thread an agreed id
+/// through both sides — a follow-up on top of this criticals fix.
+const PRE_LOCK_DLEQ_CONTEXT: &[u8] = b"coincync-swap pre-cync-lock v2";
 
 const EVIDENCE_VERSION: u8 = 1;
 const NUMS_DOMAIN: &[u8] = b"CoinCync/Swap/Taproot-NUMS-v1";
@@ -706,15 +714,16 @@ fn verify_share_binding(evidence: &ShareBindingEvidence) -> Result<([u8; 33], [u
         &evidence.cync_spend_share_hex,
         "share CYNC point must be 32-byte compressed point hex",
     )?;
-    if evidence.strict_dleq_proof_hex.len() != CrossCurveDlProofStrict::CANONICAL_LEN * 2 {
+    if evidence.strict_dleq_proof_hex.len() != CrossCurveProof::ENCODED_LEN * 2 {
         return Err(Error::Verification(
-            "strict-DLEQ proof hex has wrong canonical length",
+            "cross-curve DLEQ proof hex has wrong length",
         ));
     }
     let proof_bytes = hex::decode(&evidence.strict_dleq_proof_hex)
-        .map_err(|_| Error::Verification("strict-DLEQ proof is not valid hex"))?;
-    let proof = CrossCurveDlProofStrict::from_canonical_bytes(&proof_bytes)?;
-    verify_cross_curve_strict(&proof, &btc_point, &cync_point)?;
+        .map_err(|_| Error::Verification("cross-curve DLEQ proof is not valid hex"))?;
+    let proof = CrossCurveProof::from_bytes(&proof_bytes)?;
+    let statement = CrossCurveStatement::new(&btc_point, &cync_point, PRE_LOCK_DLEQ_CONTEXT)?;
+    verify(&proof, &statement)?;
     Ok((btc_point, cync_point))
 }
 
@@ -968,7 +977,7 @@ mod tests {
     };
     use crate::cync::public_share_from_secret;
     use crate::protocol::{Role, State, SwapParameters, Transition};
-    use crate::strict_dleq::prove_cross_curve_strict;
+    use crate::cross_curve_dleq::prove;
     use bitcoin::secp256k1::{Keypair, SecretKey};
     use curve25519_dalek::scalar::Scalar;
 
@@ -1003,14 +1012,19 @@ mod tests {
         let btc_secret = SecretKey::from_slice(&secret.secp256k1_bytes()).unwrap();
         let btc_point = PublicKey::from_secret_key(&secp, &btc_secret).serialize();
         let cync_point = cync_adaptor_point(&secret).unwrap();
-        let proof =
-            prove_cross_curve_strict(&secret, &btc_point, &cync_point, &[seed_byte; 32]).unwrap();
+        // v2 prove draws independent per-curve nonces from the rng (no caller
+        // nonce — the fix for the v1 shared-k adaptor-secret leak), so `seed_byte`
+        // no longer seeds the proof; distinct `value`s still give distinct proofs.
+        let _ = seed_byte;
+        let statement =
+            CrossCurveStatement::new(&btc_point, &cync_point, PRE_LOCK_DLEQ_CONTEXT).unwrap();
+        let proof = prove(&secret, &statement, &mut rand::rngs::OsRng).unwrap();
         (
             secret,
             ShareBindingEvidence {
                 btc_adaptor_point_hex: hex::encode(btc_point),
                 cync_spend_share_hex: hex::encode(cync_point),
-                strict_dleq_proof_hex: hex::encode(proof.canonical_bytes()),
+                strict_dleq_proof_hex: hex::encode(proof.to_bytes()),
             },
         )
     }
@@ -1358,8 +1372,8 @@ mod tests {
     fn strict_proof_decoder_round_trips_canonical_bytes() {
         let fixture = fixture();
         let bytes = hex::decode(&fixture.evidence.alice_share.strict_dleq_proof_hex).unwrap();
-        let decoded = CrossCurveDlProofStrict::from_canonical_bytes(&bytes).unwrap();
-        assert_eq!(decoded.canonical_bytes(), bytes);
-        assert!(CrossCurveDlProofStrict::from_canonical_bytes(&bytes[..bytes.len() - 1]).is_err());
+        let decoded = CrossCurveProof::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.to_bytes(), bytes);
+        assert!(CrossCurveProof::from_bytes(&bytes[..bytes.len() - 1]).is_err());
     }
 }
