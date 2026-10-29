@@ -104,9 +104,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake clang libssl-dev pkg-config
 
-      # `cargo check` on the gated features also runs build.rs, which enforces
-      # critical_files.lock integrity for the consensus-critical files — so a
-      # locked-file change that forgot to regenerate the lock fails here too,
-      # under the SAME feature set the bridge actually compiles with.
-      - name: cargo check (gated features, enforces critical_files.lock)
-        run: cargo check --release --features "${GATED_FEATURES}"
+      # `cargo check --all-targets` on the gated features type-checks EVERY
+      # target — lib, bins, AND the tests/ integration targets that the test job
+      # above only partially builds (it runs --lib + a single --test). That
+      # closes the gap where a tests/ target left stale by an API change compiles
+      # NOWHERE in CI and only breaks a full local `cargo test`. It also runs
+      # build.rs, which enforces critical_files.lock integrity for the
+      # consensus-critical files — so a locked-file change that forgot to
+      # regenerate the lock fails here too, under the SAME feature set the bridge
+      # actually compiles with.
+      - name: cargo check --all-targets (gated; compiles tests + enforces critical_files.lock)
+        run: cargo check --release --all-targets --features "${GATED_FEATURES}"
