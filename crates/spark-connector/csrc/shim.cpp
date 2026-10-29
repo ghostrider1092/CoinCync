@@ -1188,6 +1188,62 @@ int spark_ffi_spend_fee(const unsigned char* ptr, int len, uint64_t* out_fee) {
     }
 }
 
+// Extract a spend bundle's linking tags (`SpendTransaction.getUsedLTags()` = the
+// Chaum tags T) WITHOUT verifying the proof. The tags T are plain group elements
+// read straight off the wire by deserialization (spend_transaction.h §V2 reads
+// `T` before any verification, exactly as `f` is), so this is a cheap, no-multiexp
+// read — the apply-path counterpart to `spark_ffi_spend_fee`. The chain uses it to
+// recover the tags for `mark_tag_spent` at APPLY, where the block was ALREADY
+// proof-verified by `spark_ffi_verify_bundle`/`spark_ffi_verify_spend_batch` at the
+// validation gate; re-running the Grootle multiexp just to re-derive the same tags
+// is pure redundancy. Deserializes exactly as `spark_ffi_spend_fee` does and emits
+// the SAME `[u32 count][serialize_size-byte tag]...` layout the verify path emits,
+// so the Rust tag parser is shared. Returns 1 on success, 0 on any malformed/decode
+// error (fail-closed). NOT a substitute for verification: a caller must have
+// verified the bundle (the gate does) before trusting these tags as authenticated.
+int spark_ffi_spend_tags(const unsigned char* ptr, int len,
+                         unsigned char* out_tags, int tags_cap, int* out_tags_len) {
+    try {
+        const spark::Params* params = cc_params();
+        CDataStream ss((const char*)ptr, (const char*)ptr + len, SER_NETWORK, PROTOCOL_VERSION);
+
+        uint64_t cover_set_id;
+        std::vector<unsigned char> rep;
+        uint256 block_hash;
+        std::vector<spark::Coin> cover_set, out_coins;
+        uint64_t output_count;
+        ss >> cover_set_id;
+        ss >> rep;
+        ss >> block_hash;
+        ss >> cover_set;
+        ss >> out_coins;
+        ss >> output_count;
+        for (auto& c : cover_set) c.setParams(params);
+        for (auto& c : out_coins) c.setParams(params);
+
+        spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2, (std::size_t)output_count);
+        ss >> tx;
+
+        // Same layout as spark_ffi_verify_bundle's tag emission.
+        const std::vector<GroupElement>& tags = tx.getUsedLTags();
+        const int enc = (int)GroupElement::serialize_size;
+        int need = 4 + (int)tags.size() * enc;
+        if (need > tags_cap) return 0;
+        uint32_t n = (uint32_t)tags.size();
+        out_tags[0] = (unsigned char)(n & 0xff);
+        out_tags[1] = (unsigned char)((n >> 8) & 0xff);
+        out_tags[2] = (unsigned char)((n >> 16) & 0xff);
+        out_tags[3] = (unsigned char)((n >> 24) & 0xff);
+        for (std::size_t i = 0; i < tags.size(); i++) {
+            tags[i].serialize(out_tags + 4 + (int)i * enc);
+        }
+        *out_tags_len = need;
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
 // Read a spend bundle's libspark `vout` — the transparent output value baked
 // into libspark's OWN balance equation (`input = Σ outputs + f + vout`,
 // spend_transaction.cpp). The Option-B value model ALWAYS keeps `vout = 0`: all
