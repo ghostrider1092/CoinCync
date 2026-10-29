@@ -1163,39 +1163,38 @@ impl Blockchain {
             Some(s) => s,
             None => return,
         };
-        let backend = spark_connector::ffi::LibsparkBackend;
-        // Collect all shielded v2 payloads, then BATCH-verify their spend proofs
-        // ONCE (grouped by cover set) to obtain the linking tags — the apply
-        // counterpart to verify_block_spark_v2's batched gate (both run per block,
-        // including during IBD). Validation already verified the same proofs, so a
-        // fault here is a consensus fault → halt.
-        let mut items: Vec<(usize, crate::consensus::spark_payload::SparkPayload, u64)> = Vec::new();
+        // Collect all shielded v2 payloads to apply in order.
+        let mut items: Vec<(usize, crate::consensus::spark_payload::SparkPayload)> = Vec::new();
         for (idx, tx) in transactions.iter().enumerate() {
             if !tx.is_shielded() {
                 continue;
             }
             match crate::consensus::spark_payload::SparkPayload::decode(&tx.extra) {
-                Ok(p) => items.push((idx, p, tx.fee.as_atomic())),
+                Ok(p) => items.push((idx, p)),
                 Err(_) => continue,
             }
         }
-        let verify_items: Vec<(crate::consensus::spark_payload::SparkPayload, u64)> =
-            items.iter().map(|(_, p, f)| (p.clone(), *f)).collect();
-        let all_tags = crate::consensus::spark_payload::verify_spark_payloads_batch(
-            store.as_ref(),
-            &backend,
-            &verify_items,
-        )
-        .unwrap_or_else(|e| {
-            panic!(
-                "CONSENSUS FAULT: spark v2 batched verify failed at apply (h{height}): {e}. \
-                 Validation should have rejected. Halting to preserve on-disk state."
-            )
-        });
 
-        for (slot, (idx, payload, _fee)) in items.into_iter().enumerate() {
+        for (idx, payload) in items.into_iter() {
             let tx = &transactions[idx];
-            let tags = all_tags[slot].clone();
+            // Recover the spend's linking tags for the `mark_tag_spent`
+            // double-spend guard. The block's spend PROOFS were already verified at
+            // the validation gate (`verify_block_spark_v2`'s batched Grootle verify)
+            // before it was connected; re-running that whole multiexp at apply just
+            // to re-derive the same tags is pure redundancy (a full per-block
+            // multiexp, incl. during IBD). Instead extract the tags directly off the
+            // bundle (no multiexp) — they are bytewise identical to what the gate
+            // authenticated. A malformed bundle here means validation admitted an
+            // invalid block → consensus fault → halt.
+            let tags: Vec<spark_connector::Nullifier> = match &payload.spend {
+                Some(sb) => spark_connector::ffi::spend_tags(&sb.bundle).unwrap_or_else(|| {
+                    panic!(
+                        "CONSENSUS FAULT: spark v2 spend-tag extraction failed at apply \
+                         (tx {idx}, h{height}). Validation should have rejected. Halting."
+                    )
+                }),
+                None => Vec::new(),
+            };
             let input_outpoints: Vec<Vec<u8>> = tx
                 .inputs
                 .iter()
