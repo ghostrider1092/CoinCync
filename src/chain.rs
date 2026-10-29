@@ -930,6 +930,10 @@ impl Blockchain {
         };
         let backend = spark_connector::ffi::LibsparkBackend;
         let mut seen_tags: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        // Collected for the BATCHED proof verify after the per-tx cheap checks:
+        // (payload, tx.fee) per spend-bearing tx, plus its tx index for errors.
+        let mut items: Vec<(crate::consensus::spark_payload::SparkPayload, u64)> = Vec::new();
+        let mut item_tx_idx: Vec<usize> = Vec::new();
         // Simulate the pool value across the block to reject (pre-apply) any
         // block that would unshield more than the pool holds — prevention of
         // inflation across the veil, before any state is mutated.
@@ -1114,16 +1118,33 @@ impl Blockchain {
                     }
                 }
             }
-            let tags = crate::consensus::spark_payload::verify_spark_payload(
-                store.as_ref(),
-                &backend,
-                &payload,
-                tx.fee.as_atomic(),
-            )
-            .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
-            for t in &tags {
+            // The EXPENSIVE Grootle proof verify is DEFERRED + BATCHED: the cheap
+            // per-tx checks above (value bridge, pool-underflow sim, mint, bare-
+            // output reject, inflation guard) already ran; collect this tx's
+            // payload and verify ALL of the block's spend proofs together after
+            // the loop, grouped by cover set, via `verify_spark_payloads_batch`
+            // (one shared cover-set multiexp per group — ~Kx cheaper).
+            items.push((payload, tx.fee.as_atomic()));
+            item_tx_idx.push(idx);
+        }
+
+        // BATCHED proof verify across the whole block (grouped by (cover_set_id,
+        // anchor_height)). Equivalent to a per-tx `verify_spark_payload` but with
+        // the cover-set multiexp amortized across each group; fail-closed and
+        // ATOMIC (any spend failing rejects the whole block, same as before).
+        let batch_tags = crate::consensus::spark_payload::verify_spark_payloads_batch(
+            store.as_ref(),
+            &backend,
+            &items,
+        )
+        .map_err(|e| format!("spark v2 batch verify: {e}"))?;
+        for (slot, tags) in batch_tags.iter().enumerate() {
+            for t in tags {
                 if !seen_tags.insert(t.0.clone()) {
-                    return Err(format!("spark v2 tx {idx}: duplicate linking tag within block"));
+                    return Err(format!(
+                        "spark v2 tx {}: duplicate linking tag within block",
+                        item_tx_idx[slot]
+                    ));
                 }
             }
         }
@@ -1143,26 +1164,38 @@ impl Blockchain {
             None => return,
         };
         let backend = spark_connector::ffi::LibsparkBackend;
+        // Collect all shielded v2 payloads, then BATCH-verify their spend proofs
+        // ONCE (grouped by cover set) to obtain the linking tags — the apply
+        // counterpart to verify_block_spark_v2's batched gate (both run per block,
+        // including during IBD). Validation already verified the same proofs, so a
+        // fault here is a consensus fault → halt.
+        let mut items: Vec<(usize, crate::consensus::spark_payload::SparkPayload, u64)> = Vec::new();
         for (idx, tx) in transactions.iter().enumerate() {
             if !tx.is_shielded() {
                 continue;
             }
-            let payload = match crate::consensus::spark_payload::SparkPayload::decode(&tx.extra) {
-                Ok(p) => p,
+            match crate::consensus::spark_payload::SparkPayload::decode(&tx.extra) {
+                Ok(p) => items.push((idx, p, tx.fee.as_atomic())),
                 Err(_) => continue,
-            };
-            let tags = crate::consensus::spark_payload::verify_spark_payload(
-                store.as_ref(),
-                &backend,
-                &payload,
-                tx.fee.as_atomic(),
+            }
+        }
+        let verify_items: Vec<(crate::consensus::spark_payload::SparkPayload, u64)> =
+            items.iter().map(|(_, p, f)| (p.clone(), *f)).collect();
+        let all_tags = crate::consensus::spark_payload::verify_spark_payloads_batch(
+            store.as_ref(),
+            &backend,
+            &verify_items,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "CONSENSUS FAULT: spark v2 batched verify failed at apply (h{height}): {e}. \
+                 Validation should have rejected. Halting to preserve on-disk state."
             )
-            .unwrap_or_else(|e| {
-                panic!(
-                    "CONSENSUS FAULT: spark v2 verify failed at apply (tx {idx}, h{height}): {e}. \
-                     Validation should have rejected. Halting to preserve on-disk state."
-                )
-            });
+        });
+
+        for (slot, (idx, payload, _fee)) in items.into_iter().enumerate() {
+            let tx = &transactions[idx];
+            let tags = all_tags[slot].clone();
             let input_outpoints: Vec<Vec<u8>> = tx
                 .inputs
                 .iter()
@@ -5340,6 +5373,86 @@ mod tests {
         assert!(
             chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_err(),
             "chain verify hook rejects the now-spent spend (double-spend guard)"
+        );
+    }
+
+    /// BATCHED BLOCK VERIFY (K>1): multiple shielded spends in ONE block verify
+    /// TOGETHER through the batched path (one shared cover-set multiexp) and
+    /// yield the SAME linking tags as per-tx `verify_spark_payload`; a two-spend
+    /// block accepts, and a within-block duplicate tag (same note spent twice) is
+    /// rejected. This is the amortization case the K=1 hook tests don't cover.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn spark_v2_batched_block_verify_equals_per_tx_and_rejects_dup_tag() {
+        use crate::consensus::spark_payload::build::{build_mint_payload, build_transfer_payload};
+        use crate::consensus::spark_payload::{
+            derive_outpoint, verify_spark_payload, verify_spark_payloads_batch,
+        };
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxType};
+        use spark_connector::ffi::{address_from_seed, LibsparkBackend};
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new();
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+        let backend = LibsparkBackend;
+
+        let mk_shielded_tx = |extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+
+        // Mint a small cover set (n=8; a full-N mint is rejectable at production params).
+        let seed = b"batch-equiv-seed";
+        let n = 8usize;
+        let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
+        let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
+        chain.apply_spark_v2_txs(std::slice::from_ref(&mk_shielded_tx(mint_payload.encode())), 1);
+        assert_eq!(store.coin_count(), n);
+
+        // Two transfers of two DISTINCT owned coins, both pool-internal
+        // (value_balance == 0) and anchored at the same (cover_set_id,
+        // anchor_height) so they share ONE cover set — the batch amortization case.
+        let addr_b = address_from_seed(b"batch-equiv-recipient").expect("recipient address");
+        let pa = build_transfer_payload(seed, store.as_ref(), &derive_outpoint(&[], 2), 100, 0, 1, &addr_b)
+            .expect("transfer a builds");
+        let pb = build_transfer_payload(seed, store.as_ref(), &derive_outpoint(&[], 5), 100, 0, 1, &addr_b)
+            .expect("transfer b builds");
+
+        // Per-tx verify (fee/value_balance are ignored by the libspark verify —
+        // the bundle self-verifies — so 0 is fine; value_balance == 0 here anyway).
+        let single_a = verify_spark_payload(store.as_ref(), &backend, &pa, 0).expect("single a");
+        let single_b = verify_spark_payload(store.as_ref(), &backend, &pb, 0).expect("single b");
+
+        // Batched verify over the same two payloads — SAME tags, SAME order.
+        let batched = verify_spark_payloads_batch(
+            store.as_ref(),
+            &backend,
+            &[(pa.clone(), 0), (pb.clone(), 0)],
+        )
+        .expect("batch verify a+b");
+        assert_eq!(batched.len(), 2);
+        assert_eq!(batched[0], single_a, "batch tags[0] == per-tx verify a");
+        assert_eq!(batched[1], single_b, "batch tags[1] == per-tx verify b");
+        assert_ne!(single_a, single_b, "distinct notes yield distinct linking tags");
+
+        // A two-spend BLOCK verifies through the (batched) verify_block_spark_v2.
+        let tx_a = mk_shielded_tx(pa.encode());
+        let tx_b = mk_shielded_tx(pb.encode());
+        chain
+            .verify_block_spark_v2(&[tx_a.clone(), tx_b.clone()])
+            .expect("two-spend block accepted (batched verify)");
+
+        // A within-block DUPLICATE tag (the same note spent twice) is rejected.
+        assert!(
+            chain.verify_block_spark_v2(&[tx_a.clone(), tx_a.clone()]).is_err(),
+            "a block spending the same note twice is rejected (duplicate linking tag)"
         );
     }
 

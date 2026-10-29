@@ -58,11 +58,12 @@ use crate::error::{Error, Result};
 const MAX_CHECKPOINTS: usize = 1000;
 
 /// Maximum coins in a single Spark cover-set group (= N, the libspark
-/// `get_default` Grootle capacity n^m = 8^5 = 32768). libspark rejects a cover
-/// set larger than N on both prove and verify, so [`SparkPoolStore::cover_set_at`]
-/// buckets the pool into fixed groups of at most this many coins (#259). MUST
-/// stay in lock-step with `cc_params()`/`spark_ffi_cover_set_size` in the shim.
-pub const SPARK_COVER_SET_GROUP: usize = 32_768;
+/// `get_coincync` Grootle capacity n^m = 8^3 = 512, CoinCync's RATIFIED
+/// production anon-set). libspark rejects a cover set larger than N on both
+/// prove and verify, so [`SparkPoolStore::cover_set_at`] buckets the pool into
+/// fixed groups of at most this many coins (#259). MUST stay in lock-step with
+/// `cc_params()`/`spark_ffi_cover_set_size` in the shim.
+pub const SPARK_COVER_SET_GROUP: usize = 512;
 
 /// Borsh-serializable form of a [`SparkPoolCoin`] for RocksDB. `CoinBytes` /
 /// `Nullifier` are the connector's plain byte wrappers (not Borsh), so the
@@ -317,7 +318,7 @@ impl SparkPoolStore {
     /// against).
     ///
     /// #259: the pool is split into FIXED groups of at most
-    /// [`SPARK_COVER_SET_GROUP`] (= N, the libspark `get_default` Grootle
+    /// [`SPARK_COVER_SET_GROUP`] (= N, the libspark `get_coincync` Grootle
     /// capacity) coins, indexed by `cover_set_id`: group `g` is the coins whose
     /// insertion position lies in `[g*N, (g+1)*N)`. A coin's group is stable (its
     /// insertion index never changes), so it is always spendable in exactly one
@@ -989,7 +990,7 @@ mod tests {
 
         let store = SparkPoolStore::new();
         let seed = b"treasury-e2e-seed";
-        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
 
         // Mint N coins into the store, each keyed by a synthetic outpoint whose
         // deterministic serial context we store alongside the coin.

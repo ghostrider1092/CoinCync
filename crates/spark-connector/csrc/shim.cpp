@@ -24,21 +24,27 @@
 using secp_primitives::GroupElement;
 using secp_primitives::Scalar;
 
-// ── #259: the single Spark parameter accessor ───────────────────────────────
-// Every libspark call in the shim goes through this. It returns the PRODUCTION
-// parameters (`get_default()`: Grootle n=8, m=5 → cover-set capacity
-// N = n^m = 32768), NOT `get_test()` (n=2, m=4 → N = 16, which made the shielded
-// anonymity set the same 16 as a CLSAG ring and — once the node-authoritative
-// verify of #258 is in — broke every spend as soon as the pool passed 16 coins,
-// since libspark rejects a cover set larger than N). Routing through one accessor
-// keeps the prove and verify sides in lock-step on the same parameters.
+// ── anon-set: the single Spark parameter accessor ───────────────────────────
+// Every libspark call in the shim goes through this. It returns CoinCync's
+// RATIFIED production parameters (`get_coincync()`: Grootle n=8, m=3 → cover-set
+// capacity N = n^m = 512), a COINCYNC DELTA added to the vendored libspark
+// (see vendor/src/libspark/params.cpp). 512 was chosen from the verify-cost
+// benchmark (docs/design/cip-shielded-anonset.md): ~60 ms/block base multiexp,
+// IBD-viable — unlike Firo's get_default (n=8,m=5 → N=32768, ~2.7 s/block base,
+// non-viable on a chain where shielded spends are the norm) and unlike get_test
+// (n=2,m=4 → N=16, the same size as a CLSAG ring, which — once the
+// node-authoritative verify of #258 is in — broke every spend as soon as the
+// pool passed 16 coins, since libspark rejects a cover set larger than N). A coin
+// built under one param set is NOT verifiable under another, so the whole network
+// MUST agree — never mix. Routing through one accessor keeps the prove and verify
+// sides in lock-step on the same parameters.
 static const spark::Params* cc_params() {
-    return spark::Params::get_default();
+    return spark::Params::get_coincync();
 }
 
-// #259: the shim's internal FIXTURE builders (spend_verify_roundtrip,
+// The shim's internal FIXTURE builders (spend_verify_roundtrip,
 // make_verify_bundle, build_spend) used to mint a FULL cover set of N = n^m
-// coins. With production params that is 32768 coins — far too many for a build
+// coins. With production params that is 512 coins — far too many for a build
 // fixture. Grootle accepts and pads any partial cover set in [1, N], so these
 // fixtures use a small set instead. (The real wallet/node path supplies its own
 // cover set and is unaffected; `spark_ffi_cover_set_size` still reports the true
@@ -444,6 +450,109 @@ int spark_ffi_verify_bundle(const unsigned char* ptr, int len,
         // A rejected/malformed spend is NORMAL operation on this adversarial path
         // (a thrown libspark decode/verify error == "invalid"), so fail-closed
         // silently — no diagnostic spam.
+        return 0;
+    }
+}
+
+// BATCHED verify: verify K spend bundles over ONE shared node-authoritative
+// cover set TOGETHER, via libspark's vector overload (one combined cover-set
+// multiexp amortized across the K spends — ~Kx vs K single verifies; see
+// docs/design/cip-shielded-anonset.md). The caller MUST group a block's spends
+// by (cover_set_id, anchor) first, so all K here share one set; a bundle whose
+// cover_set_id differs from the group's is rejected. The node set in `set_ptr`
+// is AUTHORITATIVE (#258): each bundle's own embedded set is ignored; the proof
+// is verified against the node's coins + the deterministic rep recomputed from
+// them. `spends` is the K bundles concatenated; `spend_lens[j]` is bundle j's
+// length. Each v2 spend is single-input (one linking tag); on success (ALL
+// verify) writes K tags as `[u32 k][34-byte tag]...` in input order and returns
+// 1. Returns 0 on ANY failure — the batch is atomic (one bad spend rejects the
+// whole block), matching the block-level all-or-nothing semantics.
+int spark_ffi_verify_spend_batch(const unsigned char* set_ptr, int set_len,
+                                 const unsigned char* spends, const int* spend_lens, int k,
+                                 unsigned char* out_tags, int tags_cap, int* out_tags_len) {
+    try {
+        if (k <= 0 || set_len <= 0) return 0; // batch REQUIRES the node set (authoritative)
+        const spark::Params* params = cc_params();
+
+        // The shared node-authoritative cover set + its deterministic rep.
+        std::vector<spark::Coin> node_set = cc_parse_cover_set(set_ptr, set_len, params);
+        for (auto& c : node_set) c.setParams(params);
+        std::vector<unsigned char> rep = cc_cover_set_rep(node_set);
+
+        std::unordered_map<uint64_t, spark::CoverSetData> cover_set_data;
+        std::unordered_map<uint64_t, std::vector<spark::Coin>> cover_sets;
+
+        std::vector<spark::SpendTransaction> txs;
+        txs.reserve(k);
+        std::size_t off = 0;
+        uint64_t group_id = 0;
+        bool have_group = false;
+        for (int j = 0; j < k; j++) {
+            int blen = spend_lens[j];
+            if (blen <= 0) return 0;
+            CDataStream ss((const char*)spends + off, (const char*)spends + off + blen,
+                           SER_NETWORK, PROTOCOL_VERSION);
+            off += (std::size_t)blen;
+
+            uint64_t cover_set_id;
+            std::vector<unsigned char> bundle_rep;
+            uint256 block_hash;
+            std::vector<spark::Coin> bundle_set, out_coins;
+            uint64_t output_count;
+            ss >> cover_set_id;
+            ss >> bundle_rep;
+            ss >> block_hash;
+            ss >> bundle_set; // embedded set IGNORED — node set is authoritative
+            ss >> out_coins;
+            ss >> output_count;
+            for (auto& c : out_coins) c.setParams(params);
+
+            spark::SpendTransaction tx(params, spark::SpendTransactionVersion::V2,
+                                       (std::size_t)output_count);
+            ss >> tx;
+
+            // One shared group: first bundle fixes the cover_set_id; all others
+            // must match (the caller grouped by (cover_set_id, anchor)).
+            if (!have_group) {
+                group_id = cover_set_id;
+                spark::CoverSetData sd;
+                sd.cover_set_size = node_set.size();
+                sd.cover_set_representation = rep;
+                cover_set_data[group_id] = sd;
+                cover_sets[group_id] = node_set;
+                have_group = true;
+            } else if (cover_set_id != group_id) {
+                return 0; // mixed groups in one batch — caller must group first
+            }
+
+            tx.setCoverSets(cover_set_data);
+            tx.setOutCoins(out_coins);
+            txs.push_back(std::move(tx));
+        }
+
+        // The batched verify — ONE shared cover-set multiexp across all K spends.
+        if (!spark::SpendTransaction::verify(params, txs, cover_sets)) return 0;
+
+        // Emit K tags (one linking tag per single-input v2 spend, in input order).
+        const int enc = (int)GroupElement::serialize_size;
+        int need = 4 + k * enc;
+        if (need > tags_cap) return 0;
+        uint32_t n = (uint32_t)k;
+        out_tags[0] = (unsigned char)(n & 0xff);
+        out_tags[1] = (unsigned char)((n >> 8) & 0xff);
+        out_tags[2] = (unsigned char)((n >> 16) & 0xff);
+        out_tags[3] = (unsigned char)((n >> 24) & 0xff);
+        int w = 4;
+        for (int j = 0; j < k; j++) {
+            const std::vector<GroupElement>& tags = txs[j].getUsedLTags();
+            if (tags.size() != 1) return 0; // v2 invariant: one input ⇒ one tag per spend
+            tags[0].serialize(out_tags + w);
+            w += enc;
+        }
+        *out_tags_len = w;
+        return 1;
+    } catch (...) {
+        // Any malformed/invalid spend fails the whole batch closed.
         return 0;
     }
 }
