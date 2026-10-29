@@ -179,6 +179,16 @@ pub fn verify_spark_payloads_batch<B: SparkBackend>(
     let spent = store.spent_tags();
     for ((cover_set_id, anchor_height), idxs) in groups {
         let cover = store.cover_set_at(cover_set_id, anchor_height);
+        // Mirror verify_spark_payload's #258 trust-boundary guard: a spend MUST
+        // anchor to a NON-EMPTY node-resolved cover set. An empty set is the
+        // permissive STATELESS-admit side door (a backend's default
+        // verify_spend_batch fallback would verify the spender's own embedded set
+        // instead of the node's). Reject it here, at the spark_payload boundary,
+        // independent of which backend is wired — a one-of-many membership proof
+        // over zero coins is never legitimate.
+        if cover.is_empty() {
+            return Err(Error::SparkVerifyFailed);
+        }
         let bundles: Vec<SpendBytes> = idxs
             .iter()
             .map(|&i| SpendBytes(items[i].0.spend.as_ref().unwrap().bundle.clone()))
