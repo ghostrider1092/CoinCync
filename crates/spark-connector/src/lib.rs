@@ -320,6 +320,13 @@ pub mod ffi {
             out_tags_len: *mut c_int,
         ) -> c_int;
         fn spark_ffi_spend_fee(ptr: *const u8, len: c_int, out_fee: *mut u64) -> c_int;
+        fn spark_ffi_spend_tags(
+            ptr: *const u8,
+            len: c_int,
+            out_tags: *mut u8,
+            tags_cap: c_int,
+            out_tags_len: *mut c_int,
+        ) -> c_int;
         fn spark_ffi_spend_vout(ptr: *const u8, len: c_int, out_vout: *mut u64) -> c_int;
         fn spark_ffi_coin_ltag(
             seed: *const u8,
@@ -730,6 +737,50 @@ pub mod ffi {
             return None;
         }
         Some(fee)
+    }
+
+    /// Extract a spend bundle's linking tags WITHOUT verifying its proof — the
+    /// tags `T` are read straight off the wire by deserialization (as the fee is),
+    /// so this is a cheap, no-multiexp read. This is the APPLY-path counterpart to
+    /// re-running [`SparkBackend::verify_spend_batch`]: once the validation gate
+    /// has proof-verified the block, apply only needs the tags for
+    /// `mark_tag_spent`, and re-deriving them via the full Grootle multiexp is pure
+    /// redundancy. Returns the same `Nullifier`s a successful verify would return
+    /// (identical bytes, identical layout). `None` on a malformed bundle
+    /// (fail-closed). MUST only be trusted for a bundle already verified elsewhere
+    /// (the chain verifies at the gate before applying); it performs NO
+    /// verification itself.
+    pub fn spend_tags(bundle: &[u8]) -> Option<Vec<Nullifier>> {
+        let mut tags = vec![0u8; 8192];
+        let mut tags_len: c_int = 0;
+        // Safety: the shim reads `bundle` and writes <= tags.len() into `tags`.
+        let rc = unsafe {
+            spark_ffi_spend_tags(
+                bundle.as_ptr(),
+                bundle.len() as c_int,
+                tags.as_mut_ptr(),
+                tags.len() as c_int,
+                &mut tags_len,
+            )
+        };
+        if rc != 1 {
+            return None;
+        }
+        let tl = tags_len.max(0) as usize;
+        if tl < 4 {
+            return None;
+        }
+        let count = u32::from_le_bytes([tags[0], tags[1], tags[2], tags[3]]) as usize;
+        let mut out = Vec::with_capacity(count);
+        let mut off = 4usize;
+        for _ in 0..count {
+            if off + 34 > tl {
+                return None;
+            }
+            out.push(Nullifier(tags[off..off + 34].to_vec()));
+            off += 34;
+        }
+        Some(out)
     }
 
     /// Read a spend bundle's libspark `vout` — the transparent output value in
@@ -1586,6 +1637,44 @@ pub mod ffi {
                 b.verify_solvency(&coins, &bundle, 2301, 0, &spent).is_err(),
                 "a spent linking tag must fail the unspent-solvency check"
             );
+        }
+
+        #[test]
+        fn spend_tags_matches_verify_tags_without_verifying() {
+            // #1 (apply-path multiexp elision): `ffi::spend_tags` recovers a
+            // spend's linking tags by PLAIN DESERIALIZATION — no Grootle multiexp —
+            // and must return EXACTLY the tags a full `verify_spend` returns. This
+            // is the invariant that lets the chain's apply path skip re-verifying a
+            // block whose proofs the validation gate already verified, and just
+            // extract the tags for the `mark_tag_spent` double-spend guard.
+            let seed = b"treasury-seed-spend-tags";
+            let n = cover_set_size().expect("cover set size");
+            let mut coins = Vec::with_capacity(n);
+            let mut ctxs = Vec::with_capacity(n);
+            for i in 0..n {
+                let mut ctx = [0u8; 32];
+                ctx[0] = i as u8;
+                ctx[1] = 0x5c;
+                coins.push(mint_to_seed(seed, 4_000 + i as u64, &ctx).expect("mint"));
+                ctxs.push(ctx.to_vec());
+            }
+            let spend_index = 3usize;
+            let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 800, 0)
+                .expect("build spend");
+
+            let b = LibsparkBackend;
+            // The node-authoritative verify (the gate's path) and the cheap
+            // extraction (the apply path) must agree byte-for-byte.
+            let verified = b.verify_spend(&coins, &bundle, 0, 0).expect("verify");
+            let extracted = spend_tags(&bundle.0).expect("extract tags");
+            assert_eq!(extracted.len(), 1, "single-input v2 spend reveals one tag");
+            assert_eq!(
+                extracted, verified,
+                "cheap-extracted tags must equal the verified tags"
+            );
+
+            // Extraction is pure parsing → fail-closed on a malformed bundle.
+            assert!(spend_tags(&[]).is_none(), "empty bundle → None");
         }
 
         #[test]
