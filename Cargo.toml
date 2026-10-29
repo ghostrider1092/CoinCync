@@ -59,7 +59,18 @@ path = "src/bin/diag.rs"
 
 [features]
 default = ["randomx"]
-testnet = ["randomx"]
+# testnet MANDATES the shielded verifier: `sketch-gk-proof` + `libspark-ffi`
+# compile the shielded verify/apply path (chain::verify_block_spark_v2 /
+# apply_spark_v2_txs) into EVERY testnet binary. This is activation precondition 1
+# (see constants.rs SHIELDED_TESTNET_ACTIVATION_HEIGHT): a testnet node WITHOUT the
+# verifier fail-closes on the first shielded tx and forks off, so the verifier must
+# not be an optional extra. Pulls in the vendored libspark C++ build → every
+# testnet build needs clang + OpenSSL (SPARK_OPENSSL_DIR on Windows; libssl-dev via
+# pkg-config on Linux; brew openssl@3 on macOS). Shielded stays gated OFF
+# (SHIELDED_TESTNET_ACTIVATION_HEIGHT = u64::MAX) — this arms NO activation, it only
+# guarantees the binary CAN verify once a height is cut. mainnet stays verifier-free
+# (its shielded height is permanently u64::MAX).
+testnet = ["randomx", "sketch-gk-proof", "libspark-ffi"]
 mainnet = ["randomx"]
 randomx = ["randomx-rs"]
 metrics = []
