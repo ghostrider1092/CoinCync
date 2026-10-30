@@ -335,13 +335,15 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
-    // ── chaos_generate (REGTEST-ONLY): on-demand block production ───────────
+    // ── chaos_generate (TEST-BUILD-ONLY): on-demand block production ─────────
     // params [n, spend_hex, view_hex]: build + submit n blocks paying coinbase to
     // (spend,view), each with nonce 0 (accepted under `test-fast-pow`). This is
     // the Bitcoin-regtest `generate` equivalent — no background miner, so there
     // is no mempool-admission race with tx submission, and blocks come on demand
-    // (instant + deterministic) for the live-user harness. Feature `regtest-chaos`
-    // (+ `test-fast-pow` for the nonce-0 acceptance); NEVER in production.
+    // (instant + deterministic) for the live-user harness. Builds for the node's
+    // OWN network (regtest / beta / testnet sandbox), not hardcoded regtest, so it
+    // can drive the testnet shielded sandbox too. Gated `regtest-chaos` (+
+    // `test-fast-pow` for the nonce-0 acceptance); both test-only, NEVER in production.
     #[cfg(feature = "regtest-chaos")]
     module
         .register_blocking_method("chaos_generate", |params, state, _ext| {
@@ -360,7 +362,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                     &state.mempool,
                     &spend,
                     &view,
-                    crate::config::NetworkType::Regtest,
+                    state.chain.network(),
                     crate::consensus::fork_signal::SignalBits(0),
                 )
                 .map_err(|e| ErrorObjectOwned::owned(-32000, format!("build candidate at {made}: {e}"), None::<()>))?;
