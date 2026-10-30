@@ -1039,6 +1039,147 @@ int spark_ffi_build_spend_over_set(const unsigned char* seed, int seed_len,
     }
 }
 
+// Build a shielded->shielded transfer that pays `output_value` to the recipient
+// AND returns the funding note's remainder (input - output_value - fee) to the
+// SPENDER as a shielded CHANGE coin, with an EXPLICIT miner `fee`. The mirror of
+// spark_ffi_build_spend_over_set, which instead sinks the entire remainder into
+// the fee (no change) — spending a small amount from a large note there forfeits
+// the difference. The serialization framing is byte-identical to that function,
+// so the Rust/node side parses both the same way (single- or two-output spend).
+int spark_ffi_build_spend_change(const unsigned char* seed, int seed_len,
+                                 const unsigned char* set_ptr, int set_len,
+                                 uint64_t spend_index,
+                                 const unsigned char* ctx_ptr, int ctx_len,
+                                 uint64_t output_value,
+                                 const unsigned char* recip_addr_ptr, int recip_addr_len,
+                                 uint64_t fee,
+                                 unsigned char* out, int cap) {
+    try {
+        const spark::Params* params = cc_params();
+        spark::SpendKey spend_key(params, seed_to_r(seed, seed_len));
+        spark::FullViewKey full_view_key(spend_key);
+        spark::IncomingViewKey incoming_view_key(full_view_key);
+
+        // Parse the cover set: [u32 count][ (u32 len)(bytes) ]...
+        std::size_t off = 0;
+        auto need = [&](std::size_t n) {
+            if (off + n > (std::size_t)set_len) throw std::runtime_error("cover set truncated");
+        };
+        auto rd_u32 = [&]() -> uint32_t {
+            need(4);
+            uint32_t v = (uint32_t)set_ptr[off] | ((uint32_t)set_ptr[off + 1] << 8) |
+                         ((uint32_t)set_ptr[off + 2] << 16) | ((uint32_t)set_ptr[off + 3] << 24);
+            off += 4;
+            return v;
+        };
+        uint32_t count = rd_u32();
+        std::vector<spark::Coin> cover_set;
+        cover_set.reserve(count);
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t clen = rd_u32();
+            need(clen);
+            spark::Coin c(params);
+            CDataStream in((const char*)set_ptr + off, (const char*)set_ptr + off + clen,
+                           SER_NETWORK, PROTOCOL_VERSION);
+            in >> c;
+            c.setParams(params);
+            cover_set.push_back(c);
+            off += clen;
+        }
+        if (spend_index >= (uint64_t)cover_set.size()) {
+            throw std::runtime_error("spend_index out of range");
+        }
+        if (recip_addr_len <= 0) {
+            throw std::invalid_argument("a transfer with change requires a recipient address");
+        }
+
+        // Only the spent coin needs its serial context (to recover s, T).
+        std::vector<unsigned char> ctx(ctx_ptr, ctx_ptr + ctx_len);
+        cover_set[(std::size_t)spend_index].setSerialContext(ctx);
+        spark::IdentifiedCoinData id = cover_set[(std::size_t)spend_index].identify(incoming_view_key);
+        spark::RecoveredCoinData rec = cover_set[(std::size_t)spend_index].recover(full_view_key, id);
+
+        // input == output_value (recipient) + change (back to us) + fee (miner).
+        if (output_value == 0) {
+            throw std::invalid_argument("output_value must be greater than zero");
+        }
+        if (output_value + fee < output_value /* overflow */ || output_value + fee > id.v) {
+            throw std::invalid_argument("output_value + fee exceeds input value");
+        }
+        const uint64_t change = id.v - output_value - fee;
+
+        const uint64_t cover_set_id = 31415;
+        std::vector<unsigned char> rep = cc_cover_set_rep(cover_set); // #258: deterministic
+        uint256 block_hash = uint256();
+
+        std::vector<spark::InputCoinData> spend_coin_data;
+        spend_coin_data.emplace_back();
+        spend_coin_data.back().cover_set_id = cover_set_id;
+        spend_coin_data.back().index = (std::size_t)spend_index;
+        spend_coin_data.back().k = id.k;
+        spend_coin_data.back().s = rec.s;
+        spend_coin_data.back().T = rec.T;
+        spend_coin_data.back().v = id.v;
+
+        std::unordered_map<uint64_t, spark::CoverSetData> cover_set_data;
+        spark::CoverSetData sd;
+        sd.cover_set_size = cover_set.size();
+        sd.cover_set_representation = rep;
+        cover_set_data[cover_set_id] = sd;
+        std::unordered_map<uint64_t, std::vector<spark::Coin>> cover_sets;
+        cover_sets[cover_set_id] = cover_set;
+
+        // Recipient output coin.
+        std::string addr_str((const char*)recip_addr_ptr, (std::size_t)recip_addr_len);
+        spark::Address recipient(incoming_view_key, 0);
+        recipient.decode(addr_str);
+        std::vector<spark::OutputCoinData> out_coin_data;
+        out_coin_data.emplace_back();
+        out_coin_data.back().address = recipient;
+        out_coin_data.back().v = output_value;
+        out_coin_data.back().memo = "solvency";
+        // Change coin back to the spender (diversifier 0), only when > 0.
+        if (change > 0) {
+            spark::Address self_addr(incoming_view_key, 0);
+            out_coin_data.emplace_back();
+            out_coin_data.back().address = self_addr;
+            out_coin_data.back().v = change;
+            out_coin_data.back().memo = "change";
+        }
+
+        std::map<uint64_t, uint256> block_hashes;
+        block_hashes.emplace(cover_set_id, block_hash);
+
+        spark::SpendTransaction tx(
+            params, full_view_key, spend_key, spend_coin_data, cover_set_data,
+            cover_sets, fee, 0, out_coin_data,
+            spark::SpendTransactionVersion::V2, block_hash, block_hashes);
+        tx.setCoverSets(cover_set_data);
+        std::vector<spark::Coin> out_coins = tx.getOutCoins();
+
+        CDataStream tx_stream(SER_NETWORK, PROTOCOL_VERSION);
+        tx_stream << tx;
+
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+        ss << cover_set_id;
+        ss << rep;
+        ss << block_hash;
+        ss << cover_set;
+        ss << out_coins;
+        ss << (uint64_t)out_coins.size();
+        ss.insert(ss.end(), tx_stream.data(), tx_stream.data() + tx_stream.size());
+
+        if ((int)ss.size() > cap) return -1;
+        std::copy(ss.begin(), ss.end(), out);
+        return (int)ss.size();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "build_spend_change threw: %s\n", e.what());
+        return -1;
+    } catch (...) {
+        return -1;
+    }
+}
+
 // Extract a spend bundle's OUTPUT coins (the spend's change/payments) and their
 // shared serial context, so the pool can be fed with them (symmetric with the
 // mint feed). libspark derives an output coin's serial context as the

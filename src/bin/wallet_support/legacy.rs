@@ -198,14 +198,18 @@ enum Command {
         password: Option<String>,
     },
 
-    /// Build + verify a shielded (Spark) transfer to another wallet.
+    /// Build, verify, and SUBMIT a shielded (Spark) transfer to another wallet.
     ///
-    /// EXPERIMENTAL / regtest-only: shielded txs are activation-gated OFF on
-    /// testnet/mainnet and there is no shielded node RPC yet, so this runs the
-    /// full transfer path end to end against a local regtest pool (funds this
-    /// wallet, scans, builds, and NODE-verifies a real shielded transfer) and
-    /// reports it. Live submission awaits activation + a shielded RPC. Present
-    /// only in a `sketch-gk-proof + libspark-ffi` build.
+    /// The live path fetches the node's anchored cover set via
+    /// `get_shielded_cover_set`, builds a shielded→shielded spend that pays the
+    /// recipient AND returns the funding note's remainder to THIS wallet as a
+    /// shielded CHANGE coin, then submits the `TxType::Shielded` tx via
+    /// `send_raw_transaction` — the same submit path mint/unshield use. It
+    /// CONFIRMS once shielded is active for the network
+    /// (`shielded_activation_height`); below that height the node accepts it
+    /// structurally but will not mine it. `--demo` runs a self-contained regtest
+    /// round instead (no node). Present only in a `sketch-gk-proof + libspark-ffi`
+    /// build.
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
     ShieldedSend {
         /// Recipient's bech32m Spark address (see `shielded-address`).
@@ -214,6 +218,11 @@ enum Command {
         /// Amount to send, in atomic units.
         #[arg(long)]
         amount: u64,
+        /// Fee multiplier (1.0 = the base per-byte floor). Miner fee is
+        /// `tx_size × MIN_FEE_PER_BYTE × this`. Clamped to [1.0, 100.0]. The
+        /// funding note's remainder after amount + fee returns as shielded change.
+        #[arg(long, default_value = "1.0")]
+        fee_multiplier: f64,
         /// Self-contained REGTEST run: bootstrap a local pool, fund this
         /// wallet, then build + verify — no node needed. Without this the
         /// command fetches the live node's cover set via `get_shielded_cover_set`
@@ -929,9 +938,13 @@ async fn main() {
         Command::ShieldedSend {
             to,
             amount,
+            fee_multiplier,
             demo,
             password,
-        } => cmd_shielded_send(&wallet_path, password, &cli.node, to, amount, demo).await,
+        } => {
+            cmd_shielded_send(&wallet_path, password, &cli.node, to, amount, fee_multiplier, demo)
+                .await
+        }
         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
         Command::ShieldedMint { amount, password } => {
             cmd_shielded_mint(&wallet_path, password, &cli.node, amount).await
@@ -2186,6 +2199,7 @@ async fn cmd_shielded_send(
     node: &str,
     to: String,
     amount: u64,
+    fee_multiplier: f64,
     demo: bool,
 ) -> Result<(), String> {
     if to.is_empty() {
@@ -2207,7 +2221,7 @@ async fn cmd_shielded_send(
     if demo {
         shielded_send_demo(&seed, &to, amount)
     } else {
-        shielded_send_live(&seed, node, &to, amount).await
+        shielded_send_live(&seed, node, &to, amount, fee_multiplier).await
     }
 }
 
@@ -2429,13 +2443,26 @@ fn shielded_send_demo(seed: &[u8], to: &str, amount: u64) -> Result<(), String> 
 }
 
 /// LIVE run: fetch the node's anchored cover set via `get_shielded_cover_set`,
-/// scan it for this wallet's notes, and build + self-verify a shielded spend to
-/// `to` against that set — the real client→node path. NOT submitted (there is no
-/// shielded submission RPC yet; see the endpoint's docs).
+/// scan it for this wallet's notes, build a shielded spend that pays `to` AND
+/// returns the funding note's remainder to this wallet as shielded CHANGE, then
+/// submit the `TxType::Shielded` tx to the node via `send_raw_transaction` (the
+/// same submit path mint/unshield use). The miner fee is size-based
+/// (`tx_size × MIN_FEE_PER_BYTE × fee_multiplier`); the bundle's internal
+/// `spend_fee`, the payload `value_balance`, and the tx fee all equal it (no
+/// transparent side), satisfying both the `value_balance == spend_fee` and
+/// `tx.fee == value_balance` consensus bindings.
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> Result<(), String> {
+async fn shielded_send_live(
+    seed: &[u8],
+    node: &str,
+    to: &str,
+    amount: u64,
+    fee_multiplier: f64,
+) -> Result<(), String> {
     use coincync::consensus::spark_payload::{SparkPayload, SpendBundle, SPARK_PAYLOAD_VERSION};
-    use spark_connector::ffi::{build_spend_to_address, LibsparkBackend};
+    use coincync::constants::MIN_FEE_PER_BYTE;
+    use coincync::transaction::Transaction;
+    use spark_connector::ffi::{build_spend_to_address_with_change, LibsparkBackend};
     use spark_connector::SparkBackend;
 
     let (anchor_height, cover_coins, owned) = scan_live_cover_set(seed, node).await?;
@@ -2453,8 +2480,50 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
         ));
     }
 
-    // Pick the smallest owned note strictly greater than `amount` (positive fee).
-    let (spend_index, chosen_value, chosen_ctx) = owned
+    // Build a spend of the note at `note_idx` (value `note_value`) that pays
+    // `amount` to `to` as a shielded output, `miner_fee` to the miner, and returns
+    // `note_value − amount − miner_fee` to this wallet as a shielded CHANGE coin.
+    // The bundle's internal spend_fee == miner_fee == value_balance (no
+    // transparent side), so `value_balance == spend_fee` and `tx.fee ==
+    // value_balance` both hold. `None`/`Err` if the note can't cover amount + fee.
+    let mk_tx = |note_idx: usize,
+                 note_value: u64,
+                 note_ctx: &[u8],
+                 miner_fee: u64|
+     -> Result<(Transaction, spark_connector::SpendBytes), String> {
+        let need = amount.checked_add(miner_fee).ok_or("amount + fee overflow")?;
+        if note_value < need {
+            return Err(format!("note {note_value} < send {amount} + fee {miner_fee}"));
+        }
+        let bundle = build_spend_to_address_with_change(
+            seed,
+            &cover_coins,
+            note_idx,
+            note_ctx,
+            amount,
+            miner_fee,
+            to.as_bytes(),
+        )
+        .ok_or("failed to build shielded spend (bad recipient address or values)")?;
+        let payload = SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![],
+            spend: Some(SpendBundle {
+                cover_set_id: 0,
+                anchor_height,
+                bundle: bundle.0.clone(),
+            }),
+            value_balance: miner_fee as i64,
+        };
+        let tx = shielded_transaction(payload.encode(), miner_fee);
+        Ok((tx, bundle))
+    };
+
+    // Pass 1: smallest note strictly greater than `amount` → probe to size the
+    // fee. The probe already carries the change output, so its size matches the
+    // final tx (same two-output shape).
+    let (probe_index, probe_value, probe_ctx) = owned
         .iter()
         .filter(|(_, v, _)| *v > amount)
         .min_by_key(|(_, v, _)| *v)
@@ -2463,64 +2532,46 @@ async fn shielded_send_live(seed: &[u8], node: &str, to: &str, amount: u64) -> R
             let largest = owned.iter().map(|(_, v, _)| *v).max().unwrap_or(0);
             format!("no single owned note covers {amount} atomic (largest owned note is {largest})")
         })?;
+    let (probe_tx, _) = mk_tx(probe_index, probe_value, &probe_ctx, 0)?;
+    let tx_size = borsh::to_vec(&probe_tx).map(|b| b.len()).unwrap_or(0);
+    let mult_x100: u64 = {
+        let m = if fee_multiplier.is_nan() { 1.0 } else { fee_multiplier };
+        ((m.max(1.0) * 100.0).min(10_000.0)) as u64
+    };
+    let miner_fee = (tx_size as u64)
+        .saturating_mul(MIN_FEE_PER_BYTE)
+        .saturating_mul(mult_x100)
+        / 100;
 
-    // fee = funding note value − amount — the spend's implicit fee, which its
-    // balance proof is built with (input == output + fee); the node verifies the
-    // bundle against exactly this fee.
-    let fee = chosen_value
-        .checked_sub(amount)
-        .ok_or("funding note does not cover the amount")?;
+    // Pass 2: smallest note covering amount + fee; the remainder returns as change.
+    let need = amount.checked_add(miner_fee).ok_or("amount + fee overflow")?;
+    let (spend_index, chosen_value, chosen_ctx) = owned
+        .iter()
+        .filter(|(_, v, _)| *v >= need)
+        .min_by_key(|(_, v, _)| *v)
+        .cloned()
+        .ok_or_else(|| {
+            let largest = owned.iter().map(|(_, v, _)| *v).max().unwrap_or(0);
+            format!(
+                "no single owned note covers send {amount} + fee {miner_fee} = {need} atomic \
+                 (largest owned note is {largest})"
+            )
+        })?;
+    let (tx, spend) = mk_tx(spend_index, chosen_value, &chosen_ctx, miner_fee)?;
+    let change = chosen_value - amount - miner_fee;
 
-    // #302: guard against the no-change-note funds-loss. `build_spend_to_address`
-    // takes a single recipient + value today, so there is no change note — the
-    // ENTIRE funding-note remainder (chosen_value − amount) becomes the fee.
-    // Spending a small `amount` from a much larger note therefore silently burns
-    // the difference. Until a self-change output lands (shim work, tracked
-    // follow-up), refuse when the fee would exceed the amount sent (you would
-    // lose more than you send) unless the operator explicitly opts in.
-    let allow_high_fee = std::env::var("COINCYNC_ALLOW_HIGH_SHIELDED_FEE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if fee > amount && !allow_high_fee {
-        return Err(format!(
-            "refusing shielded send: funding note is {chosen_value} atomic but you are sending \
-             only {amount} — the remaining {fee} atomic would ALL be paid as fee (no change note \
-             is created yet). Spend a note closer to {amount}, or set \
-             COINCYNC_ALLOW_HIGH_SHIELDED_FEE=1 to proceed and forfeit the remainder."
-        ));
-    }
-
-    // Build the spend to the recipient over the fetched cover set, then
-    // self-verify the bundle (standalone — the node re-verifies on submit).
-    let spend = build_spend_to_address(seed, &cover_coins, spend_index, &chosen_ctx, amount, to.as_bytes())
-        .ok_or("failed to build shielded spend (bad recipient address or output value)")?;
-    // Self-verify against the REAL node-resolved cover set (not an empty set,
-    // which would take the permissive stateless path and not actually check
-    // membership). This mirrors what the node's authoritative verify does.
+    // Self-verify against the REAL node-resolved cover set (mirrors the node's
+    // authoritative verify; spend_fee == value_balance == miner_fee).
     let tags = backend
-        .verify_spend(&cover_coins, &spend, fee, fee as i64)
+        .verify_spend(&cover_coins, &spend, miner_fee, miner_fee as i64)
         .map_err(|e| format!("built spend failed self-verification: {e}"))?;
 
     println!("  Funding note:    value {chosen_value} atomic at cover index {spend_index}");
-    println!("  Fee:             {fee} atomic");
+    println!("  Sent:            {amount} atomic to {to}");
+    println!("  Change (to you): {change} atomic (shielded)");
+    println!("  Miner fee:       {miner_fee} atomic");
     println!("  Nullifier tags:  {} (funding note spent)", tags.len());
 
-    // #172 PR2: wrap the spend in a v2 SparkPayload + a TxType::Shielded tx and
-    // submit it to the node via send_raw_transaction (replaces the old build-only
-    // "not submitted" report).
-    // The fee (`chosen_value − amount`) is the value the bundle releases across
-    // the veil to the miner, so the public `value_balance` MUST equal it: the
-    // transparent value bridge needs `tx.fee == value_balance` (both = fee here,
-    // so it reduces to 0 with no transparent side), and consensus binds
-    // `value_balance == spend_fee(bundle)` as the cross-veil inflation guard.
-    let payload = SparkPayload {
-        version: SPARK_PAYLOAD_VERSION,
-        mint: None,
-        outputs: vec![],
-        spend: Some(SpendBundle { cover_set_id: 0, anchor_height, bundle: spend.0 }),
-        value_balance: fee as i64,
-    };
-    let tx = shielded_transaction(payload.encode(), fee);
     submit_shielded_tx(node, &tx, &format!("shielded spend of {amount} atomic to {to}")).await
 }
 
