@@ -268,6 +268,22 @@ pub mod ffi {
             out: *mut u8,
             cap: c_int,
         ) -> c_int;
+        #[allow(clippy::too_many_arguments)]
+        fn spark_ffi_build_spend_change(
+            seed: *const u8,
+            seed_len: c_int,
+            set_ptr: *const u8,
+            set_len: c_int,
+            spend_index: u64,
+            ctx_ptr: *const u8,
+            ctx_len: c_int,
+            output_value: u64,
+            recip_addr_ptr: *const u8,
+            recip_addr_len: c_int,
+            fee: u64,
+            out: *mut u8,
+            cap: c_int,
+        ) -> c_int;
         fn spark_ffi_serial_context(
             op_ptr: *const u8,
             op_len: c_int,
@@ -899,6 +915,62 @@ pub mod ffi {
             return None; // a transfer must name a recipient
         }
         build_spend_inner(seed, cover_set, spend_index, context, output_value, recipient_addr)
+    }
+
+    /// Build a shielded→shielded transfer that pays `output_value` to
+    /// `recipient_addr` AND returns the funding note's remainder
+    /// (`input − output_value − fee`) to the SPENDER as a shielded CHANGE coin,
+    /// with an EXPLICIT miner `fee`. Unlike [`build_spend_to_address`] — which
+    /// sinks the entire remainder into the fee — this preserves the change, so a
+    /// small payment from a large note no longer forfeits the difference. The
+    /// bundle's internal `spend_fee` equals `fee`, so the caller sets both the
+    /// tx fee and the payload `value_balance` to `fee`. Returns the verify
+    /// bundle, or `None` on error (bad index, empty recipient, `output_value` +
+    /// `fee` ≥ input, bad address, …).
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_spend_to_address_with_change(
+        seed: &[u8],
+        cover_set: &[CoinBytes],
+        spend_index: usize,
+        context: &[u8],
+        output_value: u64,
+        fee: u64,
+        recipient_addr: &[u8],
+    ) -> Option<SpendBytes> {
+        if recipient_addr.is_empty() {
+            return None; // a transfer must name a recipient
+        }
+        // Marshal the cover set: [u32 count][ (u32 len)(bytes) ]...
+        let mut set = Vec::with_capacity(4 + cover_set.iter().map(|c| 4 + c.0.len()).sum::<usize>());
+        set.extend_from_slice(&(cover_set.len() as u32).to_le_bytes());
+        for c in cover_set {
+            set.extend_from_slice(&(c.0.len() as u32).to_le_bytes());
+            set.extend_from_slice(&c.0);
+        }
+        let mut out = vec![0u8; 1 << 17];
+        // Safety: all pointers/lengths valid for the call; shim writes <= cap into `out`.
+        let len = unsafe {
+            spark_ffi_build_spend_change(
+                seed.as_ptr(),
+                seed.len() as c_int,
+                set.as_ptr(),
+                set.len() as c_int,
+                spend_index as u64,
+                context.as_ptr(),
+                context.len() as c_int,
+                output_value,
+                recipient_addr.as_ptr(),
+                recipient_addr.len() as c_int,
+                fee,
+                out.as_mut_ptr(),
+                out.len() as c_int,
+            )
+        };
+        if len <= 0 {
+            return None;
+        }
+        out.truncate(len as usize);
+        Some(SpendBytes(out))
     }
 
     /// Shared spend builder: `recipient_addr` empty → self-spend, else transfer.
@@ -1537,6 +1609,82 @@ pub mod ffi {
         }
 
         #[test]
+        fn transfer_with_change_returns_remainder_to_sender() {
+            // Shielded→shielded transfer WITH CHANGE: A spends a 5002 note, pays
+            // 2000 to B and a SMALL explicit fee, and the remainder returns to A
+            // as a shielded change coin — proving the funding-note remainder is no
+            // longer burned into the fee (the bug this builder fixes).
+            let a = b"sender-seed-A-change";
+            let b_seed = b"recipient-seed-B-change";
+            let addr_b = address_from_seed(b_seed).expect("B's address");
+            let n = 8usize; // #259: small fixture cover set (Grootle pads; real N=512)
+
+            let mut coins = Vec::with_capacity(n);
+            let mut ctxs = Vec::with_capacity(n);
+            for i in 0..n {
+                let mut ctx = [0u8; 32];
+                ctx[0] = i as u8;
+                ctx[1] = 0xc4;
+                coins.push(mint_to_seed(a, 5_000 + i as u64, &ctx).expect("mint"));
+                ctxs.push(ctx.to_vec());
+            }
+
+            // Spend coins[2] = 5002: pay 2000 to B, fee 100 => change 2902 back to A.
+            let spend_index = 2usize;
+            let amount = 2_000u64;
+            let fee = 100u64;
+            let expected_change = 5_002 - amount - fee; // 2902
+            let bundle = build_spend_to_address_with_change(
+                a,
+                &coins,
+                spend_index,
+                &ctxs[spend_index],
+                amount,
+                fee,
+                &addr_b,
+            )
+            .expect("build transfer with change");
+
+            let backend = LibsparkBackend;
+            // Backend verify ignores the fee/vb args (consensus-layer binding); it
+            // proves the Grootle+balance proof and returns the input's nullifier.
+            let tags = backend
+                .verify_spend(&coins, &bundle, fee, fee as i64)
+                .expect("spend with change verifies");
+            assert_eq!(tags.len(), 1, "one input → one nullifier");
+
+            // The bundle's internal fee is the SMALL explicit fee, not the burned
+            // remainder — the whole point of the fix.
+            assert_eq!(
+                spend_fee(&bundle.0),
+                Some(fee),
+                "fee is the explicit miner fee, not the funding-note remainder"
+            );
+
+            // Two output coins: the recipient's payment and the sender's change.
+            let (out_coins, out_ctx) = spend_outputs(&bundle.0).expect("extract spend outputs");
+            assert_eq!(out_coins.len(), 2, "recipient output + sender change output");
+
+            // Exactly one output is B's (value 2000); exactly one is A's change (2902).
+            let mut b_value = None;
+            let mut a_value = None;
+            for coin in &out_coins {
+                if let Some(rec) = backend.identify(b_seed, coin, &out_ctx).expect("identify B") {
+                    assert!(b_value.replace(rec.value).is_none(), "B owns at most one output");
+                }
+                if let Some(rec) = backend.identify(a, coin, &out_ctx).expect("identify A") {
+                    assert!(a_value.replace(rec.value).is_none(), "A owns at most one output");
+                }
+            }
+            assert_eq!(b_value, Some(amount), "recipient receives the sent amount");
+            assert_eq!(
+                a_value,
+                Some(expected_change),
+                "sender gets the remainder back as shielded change"
+            );
+        }
+
+        #[test]
         fn partial_cover_set_smaller_than_N_verifies() {
             // (c) Grootle accepts any set size in [1, N] and pads internally,
             // so a real (partial) cover set — fewer than N coins — must still
@@ -1659,7 +1807,7 @@ pub mod ffi {
                 ctxs.push(ctx.to_vec());
             }
             let spend_index = 3usize;
-            let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 800, 0)
+            let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 800)
                 .expect("build spend");
 
             let b = LibsparkBackend;
