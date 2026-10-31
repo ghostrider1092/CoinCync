@@ -250,6 +250,12 @@ impl ShadowEvictChain for FakeShadowChain {
             Ok(())
         }
     }
+
+    fn shielded_unminable(&self, _tx: &Transaction) -> bool {
+        // This fake models only structural (hash-based) validity; its txs are
+        // never shielded, so none are shielded-unminable (per the trait doc).
+        false
+    }
 }
 
 // ===========================================================================

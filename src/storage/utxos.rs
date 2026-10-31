@@ -835,18 +835,29 @@ impl UtxoSet {
             let tx_hash = tx.hash();
             let is_coinbase = tx.is_coinbase();
 
-            // Shielded (Spark) transactions do NOT live in the transparent UTXO
-            // set: their outputs are Spark notes appended to the accumulator and
-            // their spends burn a serial tag, neither of which belongs here.
-            // Applying them via this transparent path would wrongly insert Spark
-            // outputs as spendable UTXOs and ignore the spend. When shielded is
-            // activated, its apply routes to the Spark accumulator/serial store
-            // (see consensus::validation::check_shielded_tx). Until then shielded
-            // txs are rejected in validation and never reach apply; this guard
-            // keeps the transparent path correct regardless.
-            if tx.is_shielded() {
-                continue;
-            }
+            // Shielded (Spark v2) VALUE lives entirely in `tx.extra` (the mint
+            // bundle and spend tags), which `apply_spark_v2_txs` routes to the
+            // SparkPoolStore (`add_coin` / `mark_tag_spent`) — it is NEVER in
+            // `tx.outputs`. A shielded tx's `tx.outputs` / `tx.inputs` are its
+            // TRANSPARENT side: under the transparent<->shielded bridge, a
+            // shield-in carries a transparent CHANGE output and spends transparent
+            // ring inputs, and an unshield carries a transparent recipient output.
+            // Those belong in the transparent UTXO set exactly like any other
+            // transparent output/spend, so we apply them here for ALL tx types:
+            //   - the change/unshield output must be spendable, and its canonical
+            //     locator ordinal must match the light-wallet digest (which counts
+            //     every tx's outputs) — a mismatch is the decoy "RealOutputIdentity
+            //     mismatch" bug, since this `locator_index` and the digest must
+            //     enumerate the SAME per-height set;
+            //   - the transparent ring inputs' key images MUST be marked spent, or
+            //     the funds consumed by a shield-in could be double-spent
+            //     transparently (`contains_key_image` is the authoritative check).
+            // In production (Option A, pure-shielded) a shielded tx has empty
+            // transparent inputs/outputs (enforced in `validation::check_shielded_tx`),
+            // so this loop is a no-op for it there. This mirrors
+            // `batch_disconnect_block`, which already removes these outputs and
+            // un-marks these key images for ALL txs on reorg — making connect and
+            // disconnect symmetric.
 
             // Add outputs (with coinbase flag for maturity tracking - CRIT-5)
             for (idx, output) in tx.outputs.iter().enumerate() {
@@ -1451,6 +1462,98 @@ mod tests {
             range_proof: vec![],
             extra: vec![],
         }
+    }
+
+    /// A transparent<->shielded BRIDGE tx (shield-in): `TxType::Shielded`, but it
+    /// spends a transparent ring input and carries a transparent CHANGE output.
+    /// The Spark value lives in `extra` (not modelled here — `is_shielded()` keys
+    /// off `tx_type` only, so `extra` content is irrelevant to this path).
+    fn shielded_bridge_tx() -> crate::transaction::Transaction {
+        crate::transaction::Transaction {
+            version: 1,
+            tx_type: crate::transaction::TxType::Shielded,
+            inputs: vec![tx_input(200)],
+            outputs: vec![tx_output(210)],
+            fee: crate::primitives::Amount::ZERO,
+            range_proof: vec![],
+            extra: vec![1, 2, 3], // stand-in for the Spark mint bundle
+        }
+    }
+
+    /// Regression for decoy #2: under the transparent<->shielded bridge, connect
+    /// MUST apply the TRANSPARENT side of a `TxType::Shielded` tx (its change
+    /// output + its ring inputs' key images), because (a) the change must be
+    /// spendable, (b) its canonical locator ordinal must match the light-wallet
+    /// digest — which enumerates EVERY tx's outputs — or ring building fails with
+    /// `RealOutputIdentityMismatch`, and (c) the transparent input must be marked
+    /// spent or the shielded-in funds could be double-spent transparently. The
+    /// Spark coin itself is in `extra` and routed to the pool separately, so the
+    /// transparent path never touches it.
+    #[test]
+    fn batch_from_block_applies_bridge_tx_transparent_side() {
+        use crate::decoy::canonical_output_locators;
+        let mut utxos = UtxoSet::new();
+
+        let transfer = two_in_two_out_transfer();
+        let shielded = shielded_bridge_tx();
+        let sh_hash = shielded.hash();
+        let sh_ki = shielded.inputs[0].key_image;
+        assert!(shielded.is_shielded());
+        assert!(!utxos.contains_key_image(&sh_ki));
+
+        let height = 9;
+        let block_txs = vec![transfer.clone(), shielded.clone()];
+        utxos.apply_batch(UtxoSet::batch_from_block(height, &block_txs));
+
+        // (a) the bridge tx's transparent change output is indexed / spendable.
+        assert!(
+            utxos.get_output(&sh_hash, 0).is_some(),
+            "bridge tx transparent change must be in the UTXO set"
+        );
+        // (b) its transparent ring input is marked spent (no transparent double-spend).
+        assert!(
+            utxos.contains_key_image(&sh_ki),
+            "bridge tx transparent input must be marked spent on connect"
+        );
+
+        // (c) FACET-1 INVARIANT: the node's locator_index and the light-wallet
+        // digest must enumerate the SAME per-height set, so ordinals agree. Build
+        // the canonical locators over EVERY output in the block (exactly what
+        // BlockDigest::from_block does) and confirm the node resolves the bridge
+        // output's locator back to that very output.
+        let all_pairs: Vec<(Hash, u8)> = block_txs
+            .iter()
+            .flat_map(|tx| {
+                let h = tx.hash();
+                (0..tx.outputs.len()).map(move |i| (h, i as u8))
+            })
+            .collect();
+        let wallet_locators = canonical_output_locators(height, all_pairs);
+        let sh_locator = wallet_locators[&(sh_hash, 0)];
+        let resolved = utxos
+            .resolve_output_locators(&[sh_locator])
+            .expect("bridge output locator must resolve on the node after the fix");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].public_key, shielded.outputs[0].stealth_address,
+            "the node ordinal must resolve to the bridge tx's own output \
+             (digest and node agree on the per-height ordinal)"
+        );
+
+        // (d) REORG SYMMETRY: disconnecting the block must reverse the bridge tx's
+        // transparent side exactly — its change output gone, its key image
+        // spendable again — so a reorg across a shield-in leaves no orphaned UTXO
+        // and no stuck key image. (batch_disconnect_block already processes all
+        // txs; this is the matching inverse now that connect does too.)
+        utxos.apply_batch(UtxoSet::batch_disconnect_block(&block_txs));
+        assert!(
+            utxos.get_output(&sh_hash, 0).is_none(),
+            "disconnect must remove the bridge tx's transparent change"
+        );
+        assert!(
+            !utxos.contains_key_image(&sh_ki),
+            "disconnect must un-mark the bridge tx's transparent key image"
+        );
     }
 
     /// KEY PROPERTY: batch_from_block and batch_disconnect_block are exact

@@ -55,7 +55,11 @@ impl MempoolEntry {
         let fee_per_byte = if size > 0 {
             // Use u128 intermediate to prevent overflow for large fees
             let scaled_fee = fee as u128 * 1_000_000;
-            (scaled_fee / size as u128) as u64
+            // Clamp to u64::MAX rather than truncating/wrapping on an extreme fee,
+            // matching the in-memory Mempool fee-rate clamp. (MempoolDb is not the
+            // authoritative admission path today; this keeps its fee ordering
+            // correct if it is ever wired as one.)
+            (scaled_fee / size as u128).min(u64::MAX as u128) as u64
         } else {
             0
         };

@@ -309,7 +309,13 @@ impl ChurnEngine {
         let mut rng = rand::rngs::OsRng;
         let built = self
             .coordinator
-            .build_privacy_transaction(session, balance, &keys, intent, &mut rng)
+            .build_privacy_transaction(
+                session,
+                balance,
+                &crate::wallet::send::SpendKeys::Single(&keys),
+                intent,
+                &mut rng,
+            )
             .await
             .map_err(|error| format!("build churn transaction: {error}"))?;
 

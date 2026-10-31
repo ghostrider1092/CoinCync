@@ -712,6 +712,14 @@ impl Blockchain {
             if !tx.is_shielded() {
                 continue;
             }
+            // v2 SparkPayload (libspark) txs are applied by `apply_spark_v2_txs`
+            // against the SparkPoolStore, not this v1 ShieldedStore path. Skip them
+            // here so the v1 decoder never sees a v2 payload. Default build has no
+            // v2 txs (feature off), so this is unchanged there.
+            #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+            if crate::consensus::spark_payload::SparkPayload::decode(&tx.extra).is_ok() {
+                continue;
+            }
             let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)
                 .unwrap_or_else(|e| {
                     panic!(
@@ -771,6 +779,19 @@ impl Blockchain {
             .as_ref()
             .map(|s| s.cover_entries_at(cover_set_id, anchor_height))
             .unwrap_or_default()
+    }
+
+    /// Whether a v2 (libspark) shielded linking tag is already spent on-chain.
+    /// A wallet derives each owned pool coin's tag (`coin_ltag`) and calls this to
+    /// exclude already-spent notes from its balance and spend selection — a spent
+    /// coin's bytes stay in the cover set, so view-key identification alone
+    /// over-counts. `false` when the pool store is absent.
+    #[cfg(feature = "sketch-gk-proof")]
+    pub fn spark_pool_tag_spent(&self, tag: &[u8]) -> bool {
+        self.spark_pool_store
+            .as_ref()
+            .map(|s| s.is_tag_spent(&spark_connector::Nullifier(tag.to_vec())))
+            .unwrap_or(false)
     }
 
     /// The unified operator security sweep: run every initialized detail —
@@ -873,6 +894,14 @@ impl Blockchain {
             if !tx.is_shielded() {
                 continue;
             }
+            // v2 SparkPayload (libspark) txs are spend-verified by
+            // `verify_block_spark_v2` against the SparkPoolStore, not this v1 GK
+            // path. Skip them here so the v1 decoder never sees a v2 payload.
+            // Default build has no v2 txs (feature off), so this is unchanged there.
+            #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+            if crate::consensus::spark_payload::SparkPayload::decode(&tx.extra).is_ok() {
+                continue;
+            }
             let payload = crate::consensus::shielded::ShieldedPayload::decode(&tx.extra)?;
             crate::consensus::shielded_pipeline::gk::verify_shielded_payload(
                 store,
@@ -893,7 +922,7 @@ impl Blockchain {
     /// real backend) — the only config where the libspark pool exists; inert and
     /// fail-closed otherwise. Returns `Err(reason)` to reject the block.
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-    fn verify_block_spark_v2(
+    pub(crate) fn verify_block_spark_v2(
         &self,
         transactions: &[Transaction],
     ) -> std::result::Result<(), String> {
@@ -903,6 +932,10 @@ impl Blockchain {
         };
         let backend = spark_connector::ffi::LibsparkBackend;
         let mut seen_tags: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        // Collected for the BATCHED proof verify after the per-tx cheap checks:
+        // (payload, tx.fee) per spend-bearing tx, plus its tx index for errors.
+        let mut items: Vec<(crate::consensus::spark_payload::SparkPayload, u64)> = Vec::new();
+        let mut item_tx_idx: Vec<usize> = Vec::new();
         // Simulate the pool value across the block to reject (pre-apply) any
         // block that would unshield more than the pool holds — prevention of
         // inflation across the veil, before any state is mutated.
@@ -924,12 +957,32 @@ impl Blockchain {
             // the single source of truth shared with check_shielded_tx and the
             // mempool gate (validation::require_pure_shielded_shape); value_balance
             // == 0 is enforced here for the v2 payload.
-            crate::consensus::validation::require_pure_shielded_shape(tx)
-                .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
-            if payload.value_balance != 0 {
+            // Pure-shielded Option-A gate — RELAXED only on the regtest test bridge
+            // (sketch-gk-proof + Regtest) so the harness can shield-in/unshield; the
+            // value bridge below still enforces conservation. Production always enforces.
+            if !crate::consensus::validation::regtest_bridge_enabled(self.network) {
+                crate::consensus::validation::require_pure_shielded_shape(tx)
+                    .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
+                if payload.value_balance != 0 {
+                    return Err(format!(
+                        "spark v2 tx {idx}: value_balance must be 0 — transparent \
+                         shield-in/unshield is gated until the bridge is validated (#314)"
+                    ));
+                }
+            }
+            // MINT-XOR-SPEND: a v2 payload is EITHER a shield-in (mint, no spend)
+            // OR a shielded spend (spend, no mint) — never both. A combined
+            // mint+spend would SKIP the `value_balance == spend_fee` binding below
+            // (which is scoped to `mint.is_none()`), while `verify_mint_shield_in`
+            // checks only the mint half and `verify_spark_payload` only the spend
+            // half — so the spend's cross-veil fee release would bind to nothing
+            // and the pool turnstile (`apply_value_balance`) would desync from the
+            // real pooled value by the bundle fee (attacker-chosen inflation). A
+            // shield-in and a spend must be separate txs; reject the combination.
+            if payload.mint.is_some() && payload.spend.is_some() {
                 return Err(format!(
-                    "spark v2 tx {idx}: value_balance must be 0 — transparent \
-                     shield-in/unshield is gated until the bridge is validated (#314)"
+                    "spark v2 tx {idx}: a payload may carry a mint OR a spend, not both \
+                     (combined mint+spend bypasses the value_balance/spend-fee binding)"
                 ));
             }
             // Transparent↔shielded value bridge: the tx's public value_balance
@@ -947,6 +1000,19 @@ impl Blockchain {
                 payload.value_balance,
             )
             .map_err(|e| format!("spark v2 tx {idx}: value bridge: {e}"))?;
+            // SECURITY (unshield inflation guard — authoritative gate): the value
+            // bridge above binds only the SUM of the transparent output
+            // commitments. Each UNSHIELD output is value-REVEALING and carries no
+            // range proof, so without a per-output binding two outputs with
+            // blindings x and −x cancel in that sum while committing to arbitrary
+            // values the attacker knows, minting a spendable UTXO worth more than
+            // left the pool (the coinbase C19 trick, unshield path). Require every
+            // unshield output == commit(declared, 0). Self-guards on the unshield
+            // shape (inputs empty, outputs non-empty); inert for shield-in and
+            // pure-shielded. Shared with the mempool + contextual gates so it
+            // cannot drift (F4/F7).
+            crate::consensus::validation::check_unshield_outputs_revealed(tx)
+                .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
             // Cumulative pool-value check (prevention): reject before apply if
             // this tx would unshield more than the pool holds.
             simulated_pool -= payload.value_balance as i128;
@@ -978,17 +1044,109 @@ impl Blockchain {
             if let Some(mint) = &payload.mint {
                 crate::consensus::spark_payload::verify_mint_shield_in(mint, payload.value_balance)
                     .map_err(|e| format!("spark v2 tx {idx}: mint: {e}"))?;
+                // Reject a mint whose coins are ALREADY in the pool — an
+                // already-confirmed shield-in re-added to the mempool (e.g. by
+                // Dandelion fluff) and re-proposed. Without this it passes verify
+                // and HALTS at apply on "duplicate mint coin outpoint". Rejecting
+                // here keeps the block gate fail-closed AND lets the mempool's
+                // `shielded_unminable` sweep evict the re-added tx (it reads this
+                // same verify). Mirror of apply's outpoint derivation.
+                let input_outpoints: Vec<Vec<u8>> = tx
+                    .inputs
+                    .iter()
+                    .map(|i| borsh::to_vec(&i.key_image).unwrap_or_default())
+                    .collect();
+                let (_total, coins) = spark_connector::ffi::verify_mint_bundle(mint)
+                    .ok_or_else(|| format!("spark v2 tx {idx}: mint bundle unparseable"))?;
+                for i in 0..coins.len() {
+                    let op = crate::consensus::spark_payload::derive_outpoint(&input_outpoints, i as u32);
+                    if store.index_of(&op).is_some() {
+                        return Err(format!(
+                            "spark v2 tx {idx}: mint coin outpoint already in the pool \
+                             (already-confirmed shield-in re-proposed)"
+                        ));
+                    }
+                }
             }
-            let tags = crate::consensus::spark_payload::verify_spark_payload(
-                store.as_ref(),
-                &backend,
-                &payload,
-                tx.fee.as_atomic(),
-            )
-            .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
-            for t in &tags {
+            // OPTION-B VOUT BINDING. A spend bundle's libspark `vout` (the
+            // transparent output value in libspark's own balance equation
+            // `input = Σ outputs + f + vout`) MUST be 0: all value crossing the
+            // veil is carried by the bundle fee `f`, which is bound to the tx's
+            // public `value_balance` / `tx.fee` by the guard below. A bundle with
+            // `vout > 0` still satisfies the libspark balance proof, so without
+            // this check it verifies while the pool turnstile (which credits only
+            // `f`) drifts ABOVE the real pooled value — a silent burn. Reject any
+            // non-zero vout; fail-closed if it is unreadable. Applies to EVERY
+            // spend, independent of value_balance (a value_balance == 0 pool send
+            // carries a spend too).
+            if let Some(sb) = &payload.spend {
+                let vout = spark_connector::ffi::spend_vout(&sb.bundle)
+                    .ok_or_else(|| format!("spark v2 tx {idx}: unreadable spend bundle vout"))?;
+                if vout != 0 {
+                    return Err(format!(
+                        "spark v2 tx {idx}: spend bundle vout {vout} != 0 — Option-B carries all \
+                         cross-veil value in the bundle fee (non-zero vout drifts pool accounting)"
+                    ));
+                }
+            }
+            // CROSS-VEIL INFLATION GUARD (shielded-send fee binding). A MINEABLE
+            // SPEND releases its bundle's internal fee (`input − Σ pool outputs`)
+            // across the veil to the miner; its public `value_balance` MUST equal
+            // that bundle fee, or a shielded tx could declare a different crossing
+            // than the bundle actually made (over-claim the miner fee / hide value
+            // in the pool). The value bridge above already tied `value_balance` to
+            // `tx.fee`; this ties it to the bundle. A paying spend's `value_balance`
+            // is `> 0` (fee leaving the pool). Fail-closed if the bundle's fee is
+            // unreadable. (A shield-in's value is proven by its mint bundle above,
+            // not this path.)
+            //
+            // Scoped to `value_balance != 0`: a `value_balance == 0` spend declares
+            // no crossing, so the value bridge forces `tx.fee == 0` — and the block
+            // fee floor (§8 + min-fee, no shielded exemption) then rejects it, so
+            // it is unmineable regardless. That lets the pool state-machine tests,
+            // which drive `verify_block_spark_v2` in isolation with a pool-internal
+            // fee (`value_balance == 0`), exercise the spend path without the floor.
+            if payload.value_balance != 0 && payload.mint.is_none() {
+                if let Some(sb) = &payload.spend {
+                    let bundle_fee = spark_connector::ffi::spend_fee(&sb.bundle).ok_or_else(|| {
+                        format!("spark v2 tx {idx}: unreadable spend bundle fee")
+                    })?;
+                    if payload.value_balance as i128 != bundle_fee as i128 {
+                        return Err(format!(
+                            "spark v2 tx {idx}: value_balance {} != spend bundle fee {} \
+                             (cross-veil inflation guard)",
+                            payload.value_balance, bundle_fee
+                        ));
+                    }
+                }
+            }
+            // The EXPENSIVE Grootle proof verify is DEFERRED + BATCHED: the cheap
+            // per-tx checks above (value bridge, pool-underflow sim, mint, bare-
+            // output reject, inflation guard) already ran; collect this tx's
+            // payload and verify ALL of the block's spend proofs together after
+            // the loop, grouped by cover set, via `verify_spark_payloads_batch`
+            // (one shared cover-set multiexp per group — ~Kx cheaper).
+            items.push((payload, tx.fee.as_atomic()));
+            item_tx_idx.push(idx);
+        }
+
+        // BATCHED proof verify across the whole block (grouped by (cover_set_id,
+        // anchor_height)). Equivalent to a per-tx `verify_spark_payload` but with
+        // the cover-set multiexp amortized across each group; fail-closed and
+        // ATOMIC (any spend failing rejects the whole block, same as before).
+        let batch_tags = crate::consensus::spark_payload::verify_spark_payloads_batch(
+            store.as_ref(),
+            &backend,
+            &items,
+        )
+        .map_err(|e| format!("spark v2 batch verify: {e}"))?;
+        for (slot, tags) in batch_tags.iter().enumerate() {
+            for t in tags {
                 if !seen_tags.insert(t.0.clone()) {
-                    return Err(format!("spark v2 tx {idx}: duplicate linking tag within block"));
+                    return Err(format!(
+                        "spark v2 tx {}: duplicate linking tag within block",
+                        item_tx_idx[slot]
+                    ));
                 }
             }
         }
@@ -1007,27 +1165,38 @@ impl Blockchain {
             Some(s) => s,
             None => return,
         };
-        let backend = spark_connector::ffi::LibsparkBackend;
+        // Collect all shielded v2 payloads to apply in order.
+        let mut items: Vec<(usize, crate::consensus::spark_payload::SparkPayload)> = Vec::new();
         for (idx, tx) in transactions.iter().enumerate() {
             if !tx.is_shielded() {
                 continue;
             }
-            let payload = match crate::consensus::spark_payload::SparkPayload::decode(&tx.extra) {
-                Ok(p) => p,
+            match crate::consensus::spark_payload::SparkPayload::decode(&tx.extra) {
+                Ok(p) => items.push((idx, p)),
                 Err(_) => continue,
+            }
+        }
+
+        for (idx, payload) in items.into_iter() {
+            let tx = &transactions[idx];
+            // Recover the spend's linking tags for the `mark_tag_spent`
+            // double-spend guard. The block's spend PROOFS were already verified at
+            // the validation gate (`verify_block_spark_v2`'s batched Grootle verify)
+            // before it was connected; re-running that whole multiexp at apply just
+            // to re-derive the same tags is pure redundancy (a full per-block
+            // multiexp, incl. during IBD). Instead extract the tags directly off the
+            // bundle (no multiexp) — they are bytewise identical to what the gate
+            // authenticated. A malformed bundle here means validation admitted an
+            // invalid block → consensus fault → halt.
+            let tags: Vec<spark_connector::Nullifier> = match &payload.spend {
+                Some(sb) => spark_connector::ffi::spend_tags(&sb.bundle).unwrap_or_else(|| {
+                    panic!(
+                        "CONSENSUS FAULT: spark v2 spend-tag extraction failed at apply \
+                         (tx {idx}, h{height}). Validation should have rejected. Halting."
+                    )
+                }),
+                None => Vec::new(),
             };
-            let tags = crate::consensus::spark_payload::verify_spark_payload(
-                store.as_ref(),
-                &backend,
-                &payload,
-                tx.fee.as_atomic(),
-            )
-            .unwrap_or_else(|e| {
-                panic!(
-                    "CONSENSUS FAULT: spark v2 verify failed at apply (tx {idx}, h{height}): {e}. \
-                     Validation should have rejected. Halting to preserve on-disk state."
-                )
-            });
             let input_outpoints: Vec<Vec<u8>> = tx
                 .inputs
                 .iter()
@@ -1418,6 +1587,9 @@ impl Blockchain {
         );
 
         let mut all_orphaned_txs = Vec::new();
+        // Every disconnected tx's hash (incl. coinbase), to drop from the
+        // tx-index below — mirrors the reorg path's `ti_removes`.
+        let mut ti_removes: Vec<[u8; 32]> = Vec::new();
         {
             let mut inner = self.inner.write();
 
@@ -1466,8 +1638,10 @@ impl Blockchain {
                         // order as the UTXO disconnect. Inert while stores
                         // are None.
                         self.rewind_phase2_stores(h);
-                        // Collect non-coinbase txs
+                        // Collect non-coinbase txs (returned for mempool re-add)
+                        // and EVERY tx's hash (incl. coinbase) for tx-index removal.
                         for tx in &txs {
+                            ti_removes.push(*tx.hash().as_bytes());
                             if !tx.is_coinbase() {
                                 all_orphaned_txs.push(tx.clone());
                             }
@@ -1644,6 +1818,16 @@ impl Blockchain {
             if let Err(e) = db.blocks.remove_heights_above(target_height) {
                 tracing::error!("Failed to clean heights during rollback: {}", e);
             }
+            // Drop the tx-index entries for every disconnected tx. Without this,
+            // `remove_heights_above` clears height->hash and the UTXO rewind
+            // clears the output set, but `tx_index` still maps these hashes to
+            // their now-orphaned (height, idx); after a forward resync
+            // `get_tx_location` returns a STALE location, so `get_transaction` /
+            // explorer / wallet lookups return the wrong tx or None. The reorg
+            // path removes these atomically (`ti_removes`); match it here.
+            for h in &ti_removes {
+                db.remove_tx_index(h);
+            }
             let inner = self.inner.read();
             let last_checkpoint = db
                 .state
@@ -1725,7 +1909,7 @@ impl Blockchain {
                 if crate::fuse::enforce_trips(
                     surface,
                     connected_height,
-                    crate::fuse::default_arm_height(surface),
+                    crate::fuse::effective_arm_height(surface),
                 ) {
                     return Err(crate::error::Error::InvalidState(format!(
                         "block-integrity breaker armed and latched at height {connected_height}: \
@@ -1757,7 +1941,7 @@ impl Blockchain {
                 if crate::fuse::enforce_trips(
                     surface,
                     connected_height,
-                    crate::fuse::default_arm_height(surface),
+                    crate::fuse::effective_arm_height(surface),
                 ) {
                     return Err(crate::error::Error::InvalidState(format!(
                         "supply breaker armed and latched at height {connected_height}: a monetary \
@@ -1789,7 +1973,7 @@ impl Blockchain {
                 if crate::fuse::enforce_trips(
                     surface,
                     connected_height,
-                    crate::fuse::default_arm_height(surface),
+                    crate::fuse::effective_arm_height(surface),
                 ) {
                     return Err(crate::error::Error::InvalidState(format!(
                         "shielded breaker armed and latched at height {connected_height}: the \
@@ -1947,7 +2131,9 @@ impl Blockchain {
             crate::config::NetworkType::Mainnet => {
                 crate::mainnet::verify_checkpoint(block.header.height.as_u64(), &hash)
             }
-            crate::config::NetworkType::Testnet | crate::config::NetworkType::Regtest => {
+            crate::config::NetworkType::Testnet
+            | crate::config::NetworkType::Regtest
+            | crate::config::NetworkType::Beta => {
                 crate::testnet::verify_checkpoint(block.header.height.as_u64(), &hash)
             }
         };
@@ -3196,6 +3382,57 @@ impl Blockchain {
                         }
                     }
 
+                    // STORE-AWARE shielded/spark verification for the reorg TIP.
+                    // The fork-block loop above runs these for every ANCESTOR, but
+                    // the triggering tip is excluded from collect_fork_chain and is
+                    // validated above ONLY by the stateless
+                    // validate_block_with_checkpoint_for_network — which does NOT
+                    // run the pool-aware spark/shielded gate. Without this, a reorg
+                    // whose tip is a shield-in/unshield bypasses the value bridge,
+                    // the pool-underflow guard, the tag-double-spend check and mint
+                    // authentication, while the tip's transparent outputs ARE still
+                    // created by apply_batch below = cross-veil inflation / shielded
+                    // double-spend. The store here holds all fork blocks (the tip's
+                    // parent state) and the tip is NOT yet applied, exactly as the
+                    // fork-block verify sees its own parent state. Mirror that loop
+                    // and route failures through reorg_error (→ full rollback).
+                    // Inert while the stores are None / features off.
+                    if reorg_error.is_none() {
+                        if let Some(ref sstore) = self.shielded_store {
+                            if let Err(e) =
+                                crate::consensus::shielded::check_block_shielded_double_spends(
+                                    &block.transactions,
+                                    |t| sstore.is_nullifier_spent(t),
+                                )
+                            {
+                                reorg_error = Some(format!(
+                                    "shielded double-spend in reorg tip block: {}",
+                                    e
+                                ));
+                            }
+                            #[cfg(feature = "sketch-gk-proof")]
+                            if reorg_error.is_none() {
+                                if let Err(e) =
+                                    Self::verify_block_shielded_spends(sstore, &block.transactions)
+                                {
+                                    reorg_error = Some(format!(
+                                        "shielded spend proof invalid in reorg tip block: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                    if reorg_error.is_none() {
+                        if let Err(reason) = self.verify_block_spark_v2(&block.transactions) {
+                            reorg_error = Some(format!(
+                                "spark v2 spend invalid in reorg tip block: {}",
+                                reason
+                            ));
+                        }
+                    }
+
                     // #supply-commitment: also validate the reorg TIP's
                     // commitment. All fork blocks are applied, so inner.stats is
                     // the tip's parent cumulative supply. On mismatch, set
@@ -3564,6 +3801,18 @@ impl Blockchain {
                         let tip_batch =
                             UtxoSet::batch_from_block(block.header.height.as_u64(), &block.transactions);
                         inner.utxos.apply_batch(tip_batch);
+                        // Shielded (Spark) pool apply for the reorg TIP block,
+                        // mirroring the fork-block loop and the clean-extend path.
+                        // The tip is excluded from collect_fork_chain, so without
+                        // these its shielded coins are never add_coin'd and its
+                        // spent tags never mark_tag_spent'd — pool_value and the
+                        // membership/double-spend sets would permanently diverge
+                        // from the chain. (The store-aware verify added at the
+                        // tip-validate above already rejected an unconserved tip, so
+                        // this only ever applies a verified one.) Inert while None.
+                        self.apply_shielded_txs(&block.transactions, block.header.height.as_u64());
+                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                        self.apply_spark_v2_txs(&block.transactions, block.header.height.as_u64());
 
                         // Add triggering block's emission to supply.
                         //
@@ -4244,6 +4493,8 @@ mod generation_tests {
 pub fn create_genesis_block_for(network: NetworkType) -> Block {
     match network {
         NetworkType::Testnet | NetworkType::Regtest => crate::testnet::testnet_genesis(),
+        // Beta: testnet genesis with BETA_MAGIC swapped in → distinct hash.
+        NetworkType::Beta => crate::beta::beta_genesis(),
         NetworkType::Mainnet => crate::mainnet::mainnet_genesis(),
     }
 }
@@ -5207,6 +5458,153 @@ mod tests {
             chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_err(),
             "chain verify hook rejects the now-spent spend (double-spend guard)"
         );
+    }
+
+    /// BATCHED BLOCK VERIFY (K>1): multiple shielded spends in ONE block verify
+    /// TOGETHER through the batched path (one shared cover-set multiexp) and
+    /// yield the SAME linking tags as per-tx `verify_spark_payload`; a two-spend
+    /// block accepts, and a within-block duplicate tag (same note spent twice) is
+    /// rejected. This is the amortization case the K=1 hook tests don't cover.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn spark_v2_batched_block_verify_equals_per_tx_and_rejects_dup_tag() {
+        use crate::consensus::spark_payload::build::{build_mint_payload, build_transfer_payload};
+        use crate::consensus::spark_payload::{
+            derive_outpoint, verify_spark_payload, verify_spark_payloads_batch,
+        };
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxType};
+        use spark_connector::ffi::{address_from_seed, LibsparkBackend};
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new();
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+        let backend = LibsparkBackend;
+
+        let mk_shielded_tx = |extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+
+        // Mint a small cover set (n=8; a full-N mint is rejectable at production params).
+        let seed = b"batch-equiv-seed";
+        let n = 8usize;
+        let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
+        let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
+        chain.apply_spark_v2_txs(std::slice::from_ref(&mk_shielded_tx(mint_payload.encode())), 1);
+        assert_eq!(store.coin_count(), n);
+
+        // Two transfers of two DISTINCT owned coins, both pool-internal
+        // (value_balance == 0) and anchored at the same (cover_set_id,
+        // anchor_height) so they share ONE cover set — the batch amortization case.
+        let addr_b = address_from_seed(b"batch-equiv-recipient").expect("recipient address");
+        let pa = build_transfer_payload(seed, store.as_ref(), &derive_outpoint(&[], 2), 100, 0, 1, &addr_b)
+            .expect("transfer a builds");
+        let pb = build_transfer_payload(seed, store.as_ref(), &derive_outpoint(&[], 5), 100, 0, 1, &addr_b)
+            .expect("transfer b builds");
+
+        // Per-tx verify (fee/value_balance are ignored by the libspark verify —
+        // the bundle self-verifies — so 0 is fine; value_balance == 0 here anyway).
+        let single_a = verify_spark_payload(store.as_ref(), &backend, &pa, 0).expect("single a");
+        let single_b = verify_spark_payload(store.as_ref(), &backend, &pb, 0).expect("single b");
+
+        // Batched verify over the same two payloads — SAME tags, SAME order.
+        let batched = verify_spark_payloads_batch(
+            store.as_ref(),
+            &backend,
+            &[(pa.clone(), 0), (pb.clone(), 0)],
+        )
+        .expect("batch verify a+b");
+        assert_eq!(batched.len(), 2);
+        assert_eq!(batched[0], single_a, "batch tags[0] == per-tx verify a");
+        assert_eq!(batched[1], single_b, "batch tags[1] == per-tx verify b");
+        assert_ne!(single_a, single_b, "distinct notes yield distinct linking tags");
+
+        // A two-spend BLOCK verifies through the (batched) verify_block_spark_v2.
+        let tx_a = mk_shielded_tx(pa.encode());
+        let tx_b = mk_shielded_tx(pb.encode());
+        chain
+            .verify_block_spark_v2(&[tx_a.clone(), tx_b.clone()])
+            .expect("two-spend block accepted (batched verify)");
+
+        // A within-block DUPLICATE tag (the same note spent twice) is rejected.
+        assert!(
+            chain.verify_block_spark_v2(&[tx_a.clone(), tx_a.clone()]).is_err(),
+            "a block spending the same note twice is rejected (duplicate linking tag)"
+        );
+    }
+
+    /// BATCHED VERIFY ACROSS MULTIPLE GROUPS: `verify_spark_payloads_batch` groups
+    /// a block's spends by `(cover_set_id, anchor_height)` and reconstructs +
+    /// verifies each group's cover set INDEPENDENTLY. The K>1 test above only
+    /// exercises a SINGLE group; this covers the multi-group loop — two distinct
+    /// groups in one batch — so a wrong group→`out[i]` mapping or per-group set
+    /// resolution would be caught. Two distinct `anchor_height`s give two groups
+    /// cheaply (the `cover_set_id > 0` pool>N bucketing is covered by the
+    /// single-verify `spend_works_when_pool_exceeds_group_size` test).
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn batch_verify_spans_multiple_cover_set_groups() {
+        use crate::consensus::spark_payload::build::{build_mint_payload, build_transfer_payload};
+        use crate::consensus::spark_payload::{
+            derive_outpoint, verify_spark_payload, verify_spark_payloads_batch,
+        };
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxType};
+        use spark_connector::ffi::{address_from_seed, LibsparkBackend};
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new();
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+        let backend = LibsparkBackend;
+
+        let mk_shielded_tx = |extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+
+        // One small cover set minted at height 1.
+        let seed = b"multi-group-seed";
+        let n = 8usize;
+        let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
+        let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
+        chain.apply_spark_v2_txs(std::slice::from_ref(&mk_shielded_tx(mint_payload.encode())), 1);
+        assert_eq!(store.coin_count(), n);
+
+        // Two transfers of two DISTINCT coins anchored at DIFFERENT heights →
+        // two distinct (cover_set_id, anchor_height) group KEYS in one batch.
+        let addr_b = address_from_seed(b"multi-group-recipient").expect("recipient address");
+        let pa = build_transfer_payload(seed, store.as_ref(), &derive_outpoint(&[], 2), 100, 0, 1, &addr_b)
+            .expect("group-(0,1) transfer builds");
+        let pb = build_transfer_payload(seed, store.as_ref(), &derive_outpoint(&[], 5), 100, 0, 2, &addr_b)
+            .expect("group-(0,2) transfer builds");
+        assert_eq!(pa.spend.as_ref().unwrap().anchor_height, 1);
+        assert_eq!(pb.spend.as_ref().unwrap().anchor_height, 2, "second spend is a DIFFERENT group");
+
+        let t_a = verify_spark_payload(store.as_ref(), &backend, &pa, 0).expect("verify a");
+        let t_b = verify_spark_payload(store.as_ref(), &backend, &pb, 0).expect("verify b");
+        assert_ne!(t_a, t_b, "distinct notes in distinct groups → distinct tags");
+
+        // Batched verify spans the two groups and returns the same per-spend tags,
+        // in input order — each group reconstructed + verified independently.
+        let batched =
+            verify_spark_payloads_batch(store.as_ref(), &backend, &[(pa, 0), (pb, 0)])
+                .expect("batch across two groups");
+        assert_eq!(batched.len(), 2);
+        assert_eq!(batched[0], t_a, "group-(0,1) tag preserved in a multi-group batch");
+        assert_eq!(batched[1], t_b, "group-(0,2) tag preserved in a multi-group batch");
     }
 
     /// IN-BLOCK shielded-consensus SOAK. Drives mint → spend → double-spend →

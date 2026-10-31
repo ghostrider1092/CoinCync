@@ -104,6 +104,29 @@ pub trait SparkBackend {
         value_balance: i64,
     ) -> Result<Vec<Nullifier>>;
 
+    /// BATCH-verify K spends over ONE shared `cover_set` together — amortizing
+    /// the shared cover-set multiexp across all K (~Kx vs K single verifies; see
+    /// docs/design/cip-shielded-anonset.md). All spends MUST share the one cover
+    /// set (the caller groups a block's spends by cover_set_id + anchor first).
+    /// `fees[i]`/`value_balances[i]` pair with `spends[i]`; returns per-spend
+    /// nullifiers (`out[i]` ↔ `spends[i]`). DEFAULT: verify each spend
+    /// individually (correct, unamortized) so every backend works; a backend
+    /// overrides it for the batched speedup. Fail-closed and ATOMIC: any spend
+    /// failing rejects the whole batch.
+    fn verify_spend_batch(
+        &self,
+        cover_set: &[CoinBytes],
+        spends: &[SpendBytes],
+        fees: &[u64],
+        value_balances: &[i64],
+    ) -> Result<Vec<Vec<Nullifier>>> {
+        let mut out = Vec::with_capacity(spends.len());
+        for (i, s) in spends.iter().enumerate() {
+            out.push(self.verify_spend(cover_set, s, fees[i], value_balances[i])?);
+        }
+        Ok(out)
+    }
+
     /// Identify + recover an owned coin's value with an incoming/full view key.
     /// `Ok(None)` means "not ours". Never yields spend authority.
     ///
@@ -139,6 +162,20 @@ pub trait SparkBackend {
         value_balance: i64,
         spent_tags: &[Nullifier],
     ) -> Result<Vec<Nullifier>> {
+        // CLOSE THE EMPTY-COVER-SET FALLBACK (#258 / #308). `verify_spend` treats
+        // an empty cover set as the permissive STATELESS admit — it verifies the
+        // spender's OWN embedded set instead of a node-resolved one, so a spender
+        // could prove membership in a set they made up. This method is the
+        // AUTHORITATIVE solvency entry (node-resolved set + spent-tag check), so it
+        // must never run permissively: require a non-empty node set here, at the
+        // trust boundary, independent of any individual caller's own guard.
+        if cover_set.is_empty() {
+            return Err(ConnectorError::Rejected(
+                "authoritative solvency verify requires a non-empty node-resolved cover set \
+                 (empty would fall back to the spender's own bundle set — #258)"
+                    .into(),
+            ));
+        }
         let tags = self.verify_spend(cover_set, spend, fee, value_balance)?;
         for t in &tags {
             if spent_tags.contains(t) {
@@ -191,7 +228,6 @@ pub mod ffi {
             len: c_int,
             set_ptr: *const u8,
             set_len: c_int,
-            vout: u64,
             out_tags: *mut u8,
             tags_cap: c_int,
             out_tags_len: *mut c_int,
@@ -229,6 +265,22 @@ pub mod ffi {
             output_value: u64,
             recip_addr_ptr: *const u8,
             recip_addr_len: c_int,
+            out: *mut u8,
+            cap: c_int,
+        ) -> c_int;
+        #[allow(clippy::too_many_arguments)]
+        fn spark_ffi_build_spend_change(
+            seed: *const u8,
+            seed_len: c_int,
+            set_ptr: *const u8,
+            set_len: c_int,
+            spend_index: u64,
+            ctx_ptr: *const u8,
+            ctx_len: c_int,
+            output_value: u64,
+            recip_addr_ptr: *const u8,
+            recip_addr_len: c_int,
+            fee: u64,
             out: *mut u8,
             cap: c_int,
         ) -> c_int;
@@ -272,6 +324,35 @@ pub mod ffi {
             out_tags: *mut u8,
             tags_cap: c_int,
             out_tags_len: *mut c_int,
+        ) -> c_int;
+        fn spark_ffi_verify_spend_batch(
+            set_ptr: *const u8,
+            set_len: c_int,
+            spends: *const u8,
+            spend_lens: *const c_int,
+            k: c_int,
+            out_tags: *mut u8,
+            tags_cap: c_int,
+            out_tags_len: *mut c_int,
+        ) -> c_int;
+        fn spark_ffi_spend_fee(ptr: *const u8, len: c_int, out_fee: *mut u64) -> c_int;
+        fn spark_ffi_spend_tags(
+            ptr: *const u8,
+            len: c_int,
+            out_tags: *mut u8,
+            tags_cap: c_int,
+            out_tags_len: *mut c_int,
+        ) -> c_int;
+        fn spark_ffi_spend_vout(ptr: *const u8, len: c_int, out_vout: *mut u64) -> c_int;
+        fn spark_ffi_coin_ltag(
+            seed: *const u8,
+            seed_len: c_int,
+            coin_ptr: *const u8,
+            coin_len: c_int,
+            ctx_ptr: *const u8,
+            ctx_len: c_int,
+            out: *mut u8,
+            cap: c_int,
         ) -> c_int;
         fn spark_ffi_address_from_seed(seed: *const u8, seed_len: c_int, out: *mut u8, cap: c_int) -> c_int;
         fn spark_ffi_identify(
@@ -658,6 +739,111 @@ pub mod ffi {
         Some(out)
     }
 
+    /// Read a spend bundle's PUBLIC internal fee (`input − Σ pool outputs`) — the
+    /// value the bundle releases across the veil to the miner (amounts stay
+    /// hidden). Consensus binds the tx's public `value_balance` to this so a
+    /// shielded spend cannot claim a different fee than the bundle actually
+    /// released (cross-veil inflation guard). `None` on a malformed bundle
+    /// (fail-closed). Call on a bundle whose structure already verified.
+    pub fn spend_fee(bundle: &[u8]) -> Option<u64> {
+        let mut fee: u64 = 0;
+        // Safety: the shim reads `bundle` and writes a single u64 to `fee`.
+        let rc = unsafe { spark_ffi_spend_fee(bundle.as_ptr(), bundle.len() as c_int, &mut fee) };
+        if rc != 1 {
+            return None;
+        }
+        Some(fee)
+    }
+
+    /// Extract a spend bundle's linking tags WITHOUT verifying its proof — the
+    /// tags `T` are read straight off the wire by deserialization (as the fee is),
+    /// so this is a cheap, no-multiexp read. This is the APPLY-path counterpart to
+    /// re-running [`SparkBackend::verify_spend_batch`]: once the validation gate
+    /// has proof-verified the block, apply only needs the tags for
+    /// `mark_tag_spent`, and re-deriving them via the full Grootle multiexp is pure
+    /// redundancy. Returns the same `Nullifier`s a successful verify would return
+    /// (identical bytes, identical layout). `None` on a malformed bundle
+    /// (fail-closed). MUST only be trusted for a bundle already verified elsewhere
+    /// (the chain verifies at the gate before applying); it performs NO
+    /// verification itself.
+    pub fn spend_tags(bundle: &[u8]) -> Option<Vec<Nullifier>> {
+        let mut tags = vec![0u8; 8192];
+        let mut tags_len: c_int = 0;
+        // Safety: the shim reads `bundle` and writes <= tags.len() into `tags`.
+        let rc = unsafe {
+            spark_ffi_spend_tags(
+                bundle.as_ptr(),
+                bundle.len() as c_int,
+                tags.as_mut_ptr(),
+                tags.len() as c_int,
+                &mut tags_len,
+            )
+        };
+        if rc != 1 {
+            return None;
+        }
+        let tl = tags_len.max(0) as usize;
+        if tl < 4 {
+            return None;
+        }
+        let count = u32::from_le_bytes([tags[0], tags[1], tags[2], tags[3]]) as usize;
+        let mut out = Vec::with_capacity(count);
+        let mut off = 4usize;
+        for _ in 0..count {
+            if off + 34 > tl {
+                return None;
+            }
+            out.push(Nullifier(tags[off..off + 34].to_vec()));
+            off += 34;
+        }
+        Some(out)
+    }
+
+    /// Read a spend bundle's libspark `vout` — the transparent output value in
+    /// libspark's own balance equation (`input = Σ outputs + f + vout`). The
+    /// Option-B value model ALWAYS keeps `vout = 0` (value crosses the veil via
+    /// the bundle fee `f`, bound to the tx's public `value_balance`); a bundle
+    /// with `vout > 0` still satisfies the libspark balance proof but would make
+    /// the node's pool accounting drift above the real pooled value (a silent
+    /// burn), so consensus rejects `vout != 0`. `None` on a malformed bundle
+    /// (fail-closed). Call on a bundle whose structure already verified.
+    pub fn spend_vout(bundle: &[u8]) -> Option<u64> {
+        let mut vout: u64 = 0;
+        // Safety: the shim reads `bundle` and writes a single u64 to `vout`.
+        let rc = unsafe { spark_ffi_spend_vout(bundle.as_ptr(), bundle.len() as c_int, &mut vout) };
+        if rc != 1 {
+            return None;
+        }
+        Some(vout)
+    }
+
+    /// Derive the linking tag (`Nullifier`) of an owned `coin` (minted with
+    /// `context`) for the `seed` wallet — the tag it reveals when spent. A wallet
+    /// checks it against the pool's spent set (`is_spark_pool_tag_spent`) to
+    /// exclude already-spent notes from its balance and from spend selection.
+    /// `None` if the coin is not owned by `seed` or on FFI failure.
+    pub fn coin_ltag(seed: &[u8], coin: &CoinBytes, context: &[u8]) -> Option<Nullifier> {
+        let mut out = vec![0u8; 64];
+        // Safety: the shim reads the inputs and writes <= cap bytes into `out`.
+        let len = unsafe {
+            spark_ffi_coin_ltag(
+                seed.as_ptr(),
+                seed.len() as c_int,
+                coin.0.as_ptr(),
+                coin.0.len() as c_int,
+                context.as_ptr(),
+                context.len() as c_int,
+                out.as_mut_ptr(),
+                out.len() as c_int,
+            )
+        };
+        if len <= 0 {
+            return None;
+        }
+        out.truncate(len as usize);
+        Some(Nullifier(out))
+    }
+
     /// The Grootle cover-set cardinality `N = n_grootle ^ m_grootle` for the
     /// active params — the exact number of coins a caller must supply to
     /// [`build_spend_over_set`]. `None` on error.
@@ -729,6 +915,62 @@ pub mod ffi {
             return None; // a transfer must name a recipient
         }
         build_spend_inner(seed, cover_set, spend_index, context, output_value, recipient_addr)
+    }
+
+    /// Build a shielded→shielded transfer that pays `output_value` to
+    /// `recipient_addr` AND returns the funding note's remainder
+    /// (`input − output_value − fee`) to the SPENDER as a shielded CHANGE coin,
+    /// with an EXPLICIT miner `fee`. Unlike [`build_spend_to_address`] — which
+    /// sinks the entire remainder into the fee — this preserves the change, so a
+    /// small payment from a large note no longer forfeits the difference. The
+    /// bundle's internal `spend_fee` equals `fee`, so the caller sets both the
+    /// tx fee and the payload `value_balance` to `fee`. Returns the verify
+    /// bundle, or `None` on error (bad index, empty recipient, `output_value` +
+    /// `fee` ≥ input, bad address, …).
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_spend_to_address_with_change(
+        seed: &[u8],
+        cover_set: &[CoinBytes],
+        spend_index: usize,
+        context: &[u8],
+        output_value: u64,
+        fee: u64,
+        recipient_addr: &[u8],
+    ) -> Option<SpendBytes> {
+        if recipient_addr.is_empty() {
+            return None; // a transfer must name a recipient
+        }
+        // Marshal the cover set: [u32 count][ (u32 len)(bytes) ]...
+        let mut set = Vec::with_capacity(4 + cover_set.iter().map(|c| 4 + c.0.len()).sum::<usize>());
+        set.extend_from_slice(&(cover_set.len() as u32).to_le_bytes());
+        for c in cover_set {
+            set.extend_from_slice(&(c.0.len() as u32).to_le_bytes());
+            set.extend_from_slice(&c.0);
+        }
+        let mut out = vec![0u8; 1 << 17];
+        // Safety: all pointers/lengths valid for the call; shim writes <= cap into `out`.
+        let len = unsafe {
+            spark_ffi_build_spend_change(
+                seed.as_ptr(),
+                seed.len() as c_int,
+                set.as_ptr(),
+                set.len() as c_int,
+                spend_index as u64,
+                context.as_ptr(),
+                context.len() as c_int,
+                output_value,
+                recipient_addr.as_ptr(),
+                recipient_addr.len() as c_int,
+                fee,
+                out.as_mut_ptr(),
+                out.len() as c_int,
+            )
+        };
+        if len <= 0 {
+            return None;
+        }
+        out.truncate(len as usize);
+        Some(SpendBytes(out))
     }
 
     /// Shared spend builder: `recipient_addr` empty → self-spend, else transfer.
@@ -828,20 +1070,21 @@ pub mod ffi {
         /// verifier-side context libspark needs (cover set, its representation,
         /// output coins, block hash). Returns the linking-tag nullifiers on a
         /// valid spend; fail-closed otherwise.
-        fn verify_spend(&self, cover_set: &[CoinBytes], spend: &SpendBytes, _fee: u64, value_balance: i64) -> Result<Vec<Nullifier>> {
+        fn verify_spend(&self, cover_set: &[CoinBytes], spend: &SpendBytes, _fee: u64, _value_balance: i64) -> Result<Vec<Nullifier>> {
             // #258: when a NODE-RESOLVED cover set is supplied it is authoritative
             // (the shim verifies the Grootle proof against it, not the spender's
-            // bundle) and the spend's public output is bound to `value_balance`.
-            // An empty set keeps the legacy stateless (permissive) behaviour.
+            // bundle). An empty set keeps the legacy stateless (permissive) admit.
+            //
+            // Option-B value model: the spend keeps libspark `vout = 0` (its output
+            // re-enters the pool); the value crossing the veil is the bundle's
+            // internal fee, bound to the tx's public `value_balance` at the
+            // consensus layer (`verify_block_spark_v2`: `value_balance ==
+            // spend_fee(bundle)`) and to `tx.fee` by the transparent value bridge.
+            // So `value_balance` is NOT bound here — the old `getVout() ==
+            // value_balance` check would force `value_balance == 0` and make a
+            // fee-paying transfer unmineable. The bundle's own balance proof
+            // conserves input == outputs + fee.
             let set = marshal_cover_set(cover_set);
-            // Public value this spend releases to the transparent side: for an
-            // unshield value_balance > 0 and the spend's `vout` must equal it; a
-            // shielded→shielded transfer has value_balance == 0 → vout 0. A net
-            // shield-in (value_balance < 0) is carried on the MINT side, so the
-            // spend's own public output must be 0 — fail-closed otherwise. (The
-            // spend's internal libspark fee is pool-internal, not `_fee`, and is
-            // conserved by the spend's own balance proof — see the shim.)
-            let vout: u64 = if value_balance > 0 { value_balance as u64 } else { 0 };
             let mut tags = vec![0u8; 8192];
             let mut tags_len: c_int = 0;
             // Safety: pointers/lengths are valid for the duration of the call; the
@@ -852,7 +1095,6 @@ pub mod ffi {
                     spend.0.len() as c_int,
                     set.as_ptr(),
                     set.len() as c_int,
-                    vout,
                     tags.as_mut_ptr(),
                     tags.len() as c_int,
                     &mut tags_len,
@@ -873,6 +1115,86 @@ pub mod ffi {
                     return Err(ConnectorError::Marshalling("truncated nullifier tags".into()));
                 }
                 out.push(Nullifier(tags[off..off + 34].to_vec()));
+                off += 34;
+            }
+            Ok(out)
+        }
+        /// Batched verify over ONE shared node cover set via libspark's `vector`
+        /// overload — amortizes the cover-set multiexp across all K spends
+        /// (~Kx vs K single verifies). Marshals the node set once + the K bundles
+        /// concatenated; the shim verifies them together and returns one linking
+        /// tag per single-input v2 spend. Fail-closed/atomic: any spend failing
+        /// rejects the whole batch.
+        fn verify_spend_batch(
+            &self,
+            cover_set: &[CoinBytes],
+            spends: &[SpendBytes],
+            _fees: &[u64],
+            _value_balances: &[i64],
+        ) -> Result<Vec<Vec<Nullifier>>> {
+            let k = spends.len();
+            if k == 0 {
+                return Ok(Vec::new());
+            }
+            if cover_set.is_empty() {
+                return Err(ConnectorError::Marshalling(
+                    "batched verify requires a node-authoritative cover set".into(),
+                ));
+            }
+            // Shared node cover set (flat form) — marshaled ONCE for all K.
+            let mut set_wire =
+                Vec::with_capacity(4 + cover_set.iter().map(|c| 4 + c.0.len()).sum::<usize>());
+            set_wire.extend_from_slice(&(cover_set.len() as u32).to_le_bytes());
+            for c in cover_set {
+                set_wire.extend_from_slice(&(c.0.len() as u32).to_le_bytes());
+                set_wire.extend_from_slice(&c.0);
+            }
+            // K bundles concatenated + their lengths.
+            let mut blob = Vec::with_capacity(spends.iter().map(|s| s.0.len()).sum());
+            let mut lens: Vec<c_int> = Vec::with_capacity(k);
+            for s in spends {
+                lens.push(s.0.len() as c_int);
+                blob.extend_from_slice(&s.0);
+            }
+            let mut tags = vec![0u8; 4 + k * 64]; // 34 B/tag; 64 generous headroom
+            let mut tags_len: c_int = 0;
+            // Safety: all pointers/lengths are valid for the call; the shim reads
+            // `set_wire`/`blob`/`lens` and writes <= tags.len() into `tags`.
+            let rc = unsafe {
+                spark_ffi_verify_spend_batch(
+                    set_wire.as_ptr(),
+                    set_wire.len() as c_int,
+                    blob.as_ptr(),
+                    lens.as_ptr(),
+                    k as c_int,
+                    tags.as_mut_ptr(),
+                    tags.len() as c_int,
+                    &mut tags_len,
+                )
+            };
+            if rc != 1 {
+                return Err(ConnectorError::Rejected(
+                    "batched shielded spend failed verification".into(),
+                ));
+            }
+            // Parse [u32 k][34-byte tag]... — one tag per single-input v2 spend.
+            let tl = tags_len.max(0) as usize;
+            if tl < 4 {
+                return Err(ConnectorError::Marshalling("batch tag buffer too short".into()));
+            }
+            let count = u32::from_le_bytes([tags[0], tags[1], tags[2], tags[3]]) as usize;
+            if count != k {
+                return Err(ConnectorError::Marshalling(
+                    "batch returned a tag count != number of spends".into(),
+                ));
+            }
+            let mut out = Vec::with_capacity(k);
+            let mut off = 4usize;
+            for _ in 0..k {
+                if off + 34 > tl {
+                    return Err(ConnectorError::Marshalling("batch tag truncated".into()));
+                }
+                out.push(vec![Nullifier(tags[off..off + 34].to_vec())]);
                 off += 34;
             }
             Ok(out)
@@ -924,16 +1246,18 @@ pub mod ffi {
         }
 
         #[test]
-        fn cover_set_size_is_production_default_not_test_params() {
-            // #259: the shim routes every libspark call through cc_params() =
-            // get_default() (Grootle n=8, m=5), so the cover-set capacity is
-            // N = 8^5 = 32768 — NOT the get_test() N = 2^4 = 16 that made the
-            // shielded anonymity set the same size as a CLSAG ring and broke
-            // spends once the pool passed 16 coins.
+        fn cover_set_size_is_ratified_production_not_test_params() {
+            // The shim routes every libspark call through cc_params() =
+            // get_coincync() (Grootle n=8, m=3), CoinCync's RATIFIED production
+            // anon-set, so the cover-set capacity is N = 8^3 = 512 — NOT the
+            // get_test() N = 2^4 = 16 that made the shielded anonymity set the
+            // same size as a CLSAG ring and broke spends once the pool passed 16
+            // coins, and NOT Firo's get_default() N = 8^5 = 32768, whose
+            // ~2.7 s/block base multiexp is not IBD-viable here.
             assert_eq!(
                 cover_set_size(),
-                Some(32_768),
-                "the shim must use production (get_default) Grootle parameters"
+                Some(512),
+                "the shim must use CoinCync's ratified (get_coincync) Grootle parameters"
             );
         }
 
@@ -967,7 +1291,7 @@ pub mod ffi {
         fn build_strict_spend(seed: &[u8], base: u64, index: usize, out_value: u64)
             -> (SpendBytes, Vec<CoinBytes>, u64)
         {
-            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
             let ctx = serial_context(b"strict:tx:0").expect("ctx");
             let mut cover_set = Vec::with_capacity(n);
             for i in 0..n {
@@ -1006,25 +1330,36 @@ pub mod ffi {
         }
 
         #[test]
-        fn verify_rejects_value_balance_the_spend_does_not_release() {
-            // #258 core break (2): the spend's public output (vout) must match the
-            // transaction's declared value_balance, or the tx could unshield value
-            // its spend never releases (the inflation hole). This fixture is a
-            // self-spend: vout 0, so value_balance must be 0. (The spend's internal
-            // libspark fee is pool-internal and conserved by its own balance proof,
-            // so it is intentionally NOT bound to the transparent tx fee here.)
+        fn verify_spend_ignores_value_balance_binding_is_consensus_layer() {
+            // Option-B value model: the connector's verify_spend checks ONLY the
+            // libspark spend proof (Grootle membership + linking-tag binding)
+            // against the cover set. It does NOT bind `fee`/`value_balance` — the
+            // spend keeps libspark `vout = 0` (its output re-enters the pool) and
+            // the value crossing the veil (the bundle's internal fee) is bound to
+            // the tx's public `value_balance` at the CONSENSUS layer
+            // (`chain::verify_block_spark_v2`: `value_balance == spend_fee(bundle)`;
+            // and the transparent value bridge:
+            // `spark_payload::verify_transparent_shielded_balance`), covered by the
+            // value-bridge conservation proptest — NOT here. This test documents
+            // that real contract: the `value_balance` arg does not change
+            // verify_spend's verdict.
+            //
+            // (A prior version of this test asserted `verify_spend(.., 0, 5)` is
+            // Err — a value_balance binding this layer never performed; since
+            // `_value_balance` is ignored it would in fact return the same verdict
+            // as `(.., 0, 0)`, so the old assertion was false and only "passed"
+            // because the ffi test build was not run in CI. Corrected to assert the
+            // real behaviour so the audit looks for the binding at the consensus
+            // layer, where it actually lives.)
             let b = LibsparkBackend;
             let (bundle, set, _fee) = build_strict_spend(b"strict-vb", 1_000, 2, 400);
-            // value_balance 0 matches the spend's vout 0 → verifies.
             assert!(
                 b.verify_spend(&set, &bundle, 0, 0).is_ok(),
-                "a self-spend with value_balance 0 verifies"
+                "a well-formed spend verifies against its real cover set"
             );
-            // Claiming a positive value_balance (unshield) the spend does not
-            // release (its vout is 0) → rejected.
             assert!(
-                b.verify_spend(&set, &bundle, 0, 5).is_err(),
-                "claiming an unshield the spend does not release must be rejected"
+                b.verify_spend(&set, &bundle, 0, 5).is_ok(),
+                "verify_spend ignores value_balance; the cross-veil binding is consensus-layer"
             );
         }
 
@@ -1183,7 +1518,7 @@ pub mod ffi {
             // owned note into it, and drives a spend over THAT set (not the shim's
             // internal fixture). This is the Route-B seam for shielded solvency.
             let seed = b"treasury-seed-omega";
-            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
             assert!(n >= 2, "need a non-trivial cover set");
 
             // Mint N cover coins owned by the seed wallet, each with a known,
@@ -1223,7 +1558,7 @@ pub mod ffi {
             let a = b"sender-seed-A";
             let b_seed = b"recipient-seed-B";
             let addr_b = address_from_seed(b_seed).expect("B's address");
-            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
 
             // A mints its cover set (owns every coin).
             let mut coins = Vec::with_capacity(n);
@@ -1274,12 +1609,88 @@ pub mod ffi {
         }
 
         #[test]
+        fn transfer_with_change_returns_remainder_to_sender() {
+            // Shielded→shielded transfer WITH CHANGE: A spends a 5002 note, pays
+            // 2000 to B and a SMALL explicit fee, and the remainder returns to A
+            // as a shielded change coin — proving the funding-note remainder is no
+            // longer burned into the fee (the bug this builder fixes).
+            let a = b"sender-seed-A-change";
+            let b_seed = b"recipient-seed-B-change";
+            let addr_b = address_from_seed(b_seed).expect("B's address");
+            let n = 8usize; // #259: small fixture cover set (Grootle pads; real N=512)
+
+            let mut coins = Vec::with_capacity(n);
+            let mut ctxs = Vec::with_capacity(n);
+            for i in 0..n {
+                let mut ctx = [0u8; 32];
+                ctx[0] = i as u8;
+                ctx[1] = 0xc4;
+                coins.push(mint_to_seed(a, 5_000 + i as u64, &ctx).expect("mint"));
+                ctxs.push(ctx.to_vec());
+            }
+
+            // Spend coins[2] = 5002: pay 2000 to B, fee 100 => change 2902 back to A.
+            let spend_index = 2usize;
+            let amount = 2_000u64;
+            let fee = 100u64;
+            let expected_change = 5_002 - amount - fee; // 2902
+            let bundle = build_spend_to_address_with_change(
+                a,
+                &coins,
+                spend_index,
+                &ctxs[spend_index],
+                amount,
+                fee,
+                &addr_b,
+            )
+            .expect("build transfer with change");
+
+            let backend = LibsparkBackend;
+            // Backend verify ignores the fee/vb args (consensus-layer binding); it
+            // proves the Grootle+balance proof and returns the input's nullifier.
+            let tags = backend
+                .verify_spend(&coins, &bundle, fee, fee as i64)
+                .expect("spend with change verifies");
+            assert_eq!(tags.len(), 1, "one input → one nullifier");
+
+            // The bundle's internal fee is the SMALL explicit fee, not the burned
+            // remainder — the whole point of the fix.
+            assert_eq!(
+                spend_fee(&bundle.0),
+                Some(fee),
+                "fee is the explicit miner fee, not the funding-note remainder"
+            );
+
+            // Two output coins: the recipient's payment and the sender's change.
+            let (out_coins, out_ctx) = spend_outputs(&bundle.0).expect("extract spend outputs");
+            assert_eq!(out_coins.len(), 2, "recipient output + sender change output");
+
+            // Exactly one output is B's (value 2000); exactly one is A's change (2902).
+            let mut b_value = None;
+            let mut a_value = None;
+            for coin in &out_coins {
+                if let Some(rec) = backend.identify(b_seed, coin, &out_ctx).expect("identify B") {
+                    assert!(b_value.replace(rec.value).is_none(), "B owns at most one output");
+                }
+                if let Some(rec) = backend.identify(a, coin, &out_ctx).expect("identify A") {
+                    assert!(a_value.replace(rec.value).is_none(), "A owns at most one output");
+                }
+            }
+            assert_eq!(b_value, Some(amount), "recipient receives the sent amount");
+            assert_eq!(
+                a_value,
+                Some(expected_change),
+                "sender gets the remainder back as shielded change"
+            );
+        }
+
+        #[test]
         fn partial_cover_set_smaller_than_N_verifies() {
             // (c) Grootle accepts any set size in [1, N] and pads internally,
             // so a real (partial) cover set — fewer than N coins — must still
             // build and verify.
             let seed = b"treasury-seed-partial";
-            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
             let partial = (n / 2).max(2); // strictly fewer than N
             let mut coins = Vec::with_capacity(partial);
             let mut ctxs = Vec::with_capacity(partial);
@@ -1307,7 +1718,7 @@ pub mod ffi {
             // only the outpoint later — and a WRONG outpoint's context cannot
             // recover the coin (fail-closed).
             let seed = b"treasury-seed-ctx";
-            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
 
             // Same outpoint → same context (determinism).
             let outpoint = b"tx:abcd1234:vout:1";
@@ -1346,7 +1757,7 @@ pub mod ffi {
             // (b) The unspent-solvency check: verify the spend, then require its
             // linking tag ∉ spent-set. Unspent → Ok; tag already spent → reject.
             let seed = b"treasury-seed-solvency";
-            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
             let mut coins = Vec::with_capacity(n);
             let mut ctxs = Vec::with_capacity(n);
             for i in 0..n {
@@ -1377,9 +1788,47 @@ pub mod ffi {
         }
 
         #[test]
+        fn spend_tags_matches_verify_tags_without_verifying() {
+            // #1 (apply-path multiexp elision): `ffi::spend_tags` recovers a
+            // spend's linking tags by PLAIN DESERIALIZATION — no Grootle multiexp —
+            // and must return EXACTLY the tags a full `verify_spend` returns. This
+            // is the invariant that lets the chain's apply path skip re-verifying a
+            // block whose proofs the validation gate already verified, and just
+            // extract the tags for the `mark_tag_spent` double-spend guard.
+            let seed = b"treasury-seed-spend-tags";
+            let n = cover_set_size().expect("cover set size");
+            let mut coins = Vec::with_capacity(n);
+            let mut ctxs = Vec::with_capacity(n);
+            for i in 0..n {
+                let mut ctx = [0u8; 32];
+                ctx[0] = i as u8;
+                ctx[1] = 0x5c;
+                coins.push(mint_to_seed(seed, 4_000 + i as u64, &ctx).expect("mint"));
+                ctxs.push(ctx.to_vec());
+            }
+            let spend_index = 3usize;
+            let bundle = build_spend_over_set(seed, &coins, spend_index, &ctxs[spend_index], 800)
+                .expect("build spend");
+
+            let b = LibsparkBackend;
+            // The node-authoritative verify (the gate's path) and the cheap
+            // extraction (the apply path) must agree byte-for-byte.
+            let verified = b.verify_spend(&coins, &bundle, 0, 0).expect("verify");
+            let extracted = spend_tags(&bundle.0).expect("extract tags");
+            assert_eq!(extracted.len(), 1, "single-input v2 spend reveals one tag");
+            assert_eq!(
+                extracted, verified,
+                "cheap-extracted tags must equal the verified tags"
+            );
+
+            // Extraction is pure parsing → fail-closed on a malformed bundle.
+            assert!(spend_tags(&[]).is_none(), "empty bundle → None");
+        }
+
+        #[test]
         fn spend_over_set_rejects_bad_index_and_overspend() {
             let seed = b"treasury-seed-beta";
-            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
+            let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
             let mut coins = Vec::with_capacity(n);
             let mut ctxs = Vec::with_capacity(n);
             for i in 0..n {

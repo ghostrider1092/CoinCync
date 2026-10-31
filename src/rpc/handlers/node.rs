@@ -269,6 +269,111 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── chaos_inject_fault / chaos_rearm (REGTEST-ONLY) ─────────
+    // Live-user test-harness hooks: force-trip a breaker surface so the
+    // consensus/money breakers that never trip on a correct node CAN be
+    // exercised (then rearm to watch recovery). Feature `regtest-chaos` — NEVER
+    // compiled into a production node. See scripts/live-user-chaos.sh.
+    #[cfg(feature = "regtest-chaos")]
+    module
+        .register_blocking_method("chaos_inject_fault", |params, _state, _ext| {
+            let name: String = params
+                .one()
+                .map_err(|_| ErrorObjectOwned::owned(-32602, "expected [surface]", None::<()>))?;
+            let surface = match name.to_ascii_lowercase().as_str() {
+                "shielded" => crate::breaker_recovery::BreakerSurface::Shielded,
+                "supply" => crate::breaker_recovery::BreakerSurface::Supply,
+                "mempool" => crate::breaker_recovery::BreakerSurface::Mempool,
+                "p2p" => crate::breaker_recovery::BreakerSurface::P2p,
+                "rpc" => crate::breaker_recovery::BreakerSurface::Rpc,
+                "reorg" => crate::breaker_recovery::BreakerSurface::Reorg,
+                "blockintegrity" | "block-integrity" => {
+                    crate::breaker_recovery::BreakerSurface::BlockIntegrity
+                }
+                _ => {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        format!("unknown breaker surface {name:?}"),
+                        None::<()>,
+                    ))
+                }
+            };
+            let st = crate::fuse::inject_fault(surface, "chaos-injected");
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "surface": format!("{surface:?}"),
+                "state": format!("{st:?}"),
+                "injected": true,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+    #[cfg(feature = "regtest-chaos")]
+    module
+        .register_blocking_method("chaos_rearm", |params, _state, _ext| {
+            let name: String = params
+                .one()
+                .map_err(|_| ErrorObjectOwned::owned(-32602, "expected [surface]", None::<()>))?;
+            let surface = match name.to_ascii_lowercase().as_str() {
+                "shielded" => crate::breaker_recovery::BreakerSurface::Shielded,
+                "supply" => crate::breaker_recovery::BreakerSurface::Supply,
+                "mempool" => crate::breaker_recovery::BreakerSurface::Mempool,
+                "p2p" => crate::breaker_recovery::BreakerSurface::P2p,
+                "rpc" => crate::breaker_recovery::BreakerSurface::Rpc,
+                "reorg" => crate::breaker_recovery::BreakerSurface::Reorg,
+                "blockintegrity" | "block-integrity" => {
+                    crate::breaker_recovery::BreakerSurface::BlockIntegrity
+                }
+                _ => {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        format!("unknown breaker surface {name:?}"),
+                        None::<()>,
+                    ))
+                }
+            };
+            crate::fuse::rearm(surface);
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "surface": format!("{surface:?}"), "rearmed": true }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
+    // ── chaos_generate (TEST-BUILD-ONLY): on-demand block production ─────────
+    // params [n, spend_hex, view_hex]: build + submit n blocks paying coinbase to
+    // (spend,view), each with nonce 0 (accepted under `test-fast-pow`). This is
+    // the Bitcoin-regtest `generate` equivalent — no background miner, so there
+    // is no mempool-admission race with tx submission, and blocks come on demand
+    // (instant + deterministic) for the live-user harness. Builds for the node's
+    // OWN network (regtest / beta / testnet sandbox), not hardcoded regtest, so it
+    // can drive the testnet shielded sandbox too. Gated `regtest-chaos` (+
+    // `test-fast-pow` for the nonce-0 acceptance); both test-only, NEVER in production.
+    #[cfg(feature = "regtest-chaos")]
+    module
+        .register_blocking_method("chaos_generate", |params, state, _ext| {
+            let (n, spend_hex, view_hex): (u64, String, String) =
+                params.parse().map_err(|e: ErrorObjectOwned| {
+                    ErrorObjectOwned::owned(-32602, format!("expected [n, spend_hex, view_hex]: {e}"), None::<()>)
+                })?;
+            let spend = crate::primitives::PublicKey::from_hex(&spend_hex)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, format!("bad spend key: {e}"), None::<()>))?;
+            let view = crate::primitives::PublicKey::from_hex(&view_hex)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, format!("bad view key: {e}"), None::<()>))?;
+            let mut made = 0u64;
+            for _ in 0..n {
+                let cand = crate::mining::block_builder::build_candidate_block(
+                    &state.chain,
+                    &state.mempool,
+                    &spend,
+                    &view,
+                    state.chain.network(),
+                    crate::consensus::fork_signal::SignalBits(0),
+                )
+                .map_err(|e| ErrorObjectOwned::owned(-32000, format!("build candidate at {made}: {e}"), None::<()>))?;
+                crate::mining::block_builder::submit_mined_block(&state.chain, &state.mempool, cand.into_block(0))
+                    .map_err(|e| ErrorObjectOwned::owned(-32000, format!("submit at {made}: {e}"), None::<()>))?;
+                made += 1;
+            }
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "generated": made }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── get_difficulty_health ──────────────────────────────────
     // Non-consensus difficulty/block-production telemetry: current difficulty,
     // an informational hashrate estimate, and inter-block interval statistics

@@ -30,11 +30,11 @@
 use rand::{CryptoRng, RngCore};
 
 use super::super::decoy_selection::{AllocatedRings, RealOutputIdentity};
-use super::super::{Balance, KeyEpoch, UTXO};
+use super::super::{Balance, UTXO};
 use super::fee::estimate_tx_size;
 use super::inputs::{add_prepared_inputs, prepare_input};
 use super::selection::{ensure_spendable, select_utxos};
-use super::types::{CoinSelection, PreparedInput, SpendContext};
+use super::types::{CoinSelection, PreparedInput, SpendContext, SpendKeys};
 use crate::consensus::spark_payload::build::build_mint_payload;
 use crate::constants::{MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT};
 use crate::error::{Error, Result};
@@ -139,7 +139,7 @@ pub fn prepare_shield_in<R: RngCore + CryptoRng>(
     balance: &Balance,
     seed: &[u8],
     amount: u64,
-    keys: &KeyEpoch,
+    spend_keys: &SpendKeys,
     current_height: u64,
     ring_size: usize,
     rng: &mut R,
@@ -149,6 +149,9 @@ pub fn prepare_shield_in<R: RngCore + CryptoRng>(
             "shield-in amount must be greater than zero".into(),
         ));
     }
+    // Transparent change uses the current-epoch keys; each funding input is derived
+    // under ITS OWN epoch below (Wallet-1 / Monero-style per-output key context).
+    let change = spend_keys.change_keys()?;
     let context = SpendContext::with_ring_size(current_height, ring_size)?;
     let min_age = context.min_output_age();
 
@@ -183,7 +186,7 @@ pub fn prepare_shield_in<R: RngCore + CryptoRng>(
 
     let inputs: Vec<PreparedInput> = selected
         .into_iter()
-        .map(|utxo| prepare_input(utxo, keys))
+        .map(|utxo| prepare_input(utxo, spend_keys.input_keys(utxo)?))
         .collect::<Result<_>>()?;
 
     // Build the REAL mint bundle, bound to the actual inputs' key-image outpoints
@@ -205,8 +208,8 @@ pub fn prepare_shield_in<R: RngCore + CryptoRng>(
         fee: Amount::from_atomic(fee),
         amount,
         extra: payload.encode(),
-        spend_public: keys.spend_public,
-        view_public: keys.view_public,
+        spend_public: change.spend_public,
+        view_public: change.view_public,
         context,
     })
 }

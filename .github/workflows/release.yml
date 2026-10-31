@@ -154,6 +154,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # libspark (pulled in by the testnet feature) needs OpenSSL on Windows via
+      # SPARK_OPENSSL_DIR. vcpkg's x64-windows-static-md triplet matches the layout
+      # the shim's build.rs expects (include/ + lib/libcrypto.lib). For a mainnet
+      # (default-feature) tag the shim isn't compiled, so this is harmless there.
+      - name: Install OpenSSL for libspark (vcpkg x64-windows-static-md)
+        shell: pwsh
+        run: |
+          vcpkg install openssl:x64-windows-static-md
+          "SPARK_OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Build coincync (node + wallet)
         run: cargo build --release --features "${{ needs.prepare.outputs.features }}" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
@@ -183,7 +192,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install deps
-        run: brew install cmake
+        run: brew install cmake openssl@3
       - name: Build coincync (node + wallet)
         run: cargo build --release --features "${{ needs.prepare.outputs.features }}" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)
@@ -215,7 +224,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install deps
-        run: brew install cmake
+        run: brew install cmake openssl@3
       - name: Build coincync (node + wallet)
         run: cargo build --release --features "${{ needs.prepare.outputs.features }}" --bin coincync-node --bin coincync-wallet
       - name: Build coincync-rig (canonical retail miner)

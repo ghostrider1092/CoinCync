@@ -38,9 +38,10 @@ use super::fee::{scaled_fee, FeeMultiplier};
 use super::inputs::prepare_input;
 use super::selection::{ensure_spendable, select_utxos, select_utxos_uniform};
 use super::types::{
-    CoinSelection, Payment, PreparedPrivacyTransaction, SendRequest, SpendContext, TransferShape,
+    CoinSelection, Payment, PreparedPrivacyTransaction, SendRequest, SpendContext, SpendKeys,
+    TransferShape,
 };
-use super::super::{Balance, KeyEpoch, UTXO};
+use super::super::{Balance, UTXO};
 use crate::constants::{STANDARD_INPUT_COUNT, STANDARD_OUTPUT_COUNT};
 use crate::error::Result;
 use crate::primitives::{Amount, PublicKey};
@@ -59,7 +60,7 @@ pub fn prepare_privacy_transaction_with_options<R: RngCore + CryptoRng>(
     // recipient can detect/spend them against their view key C_i = a*D_i.
     // Getting it wrong makes the payment unspendable by the recipient.
     recipients: &[(PublicKey, PublicKey, Amount, bool)],
-    keys: &KeyEpoch,
+    spend_keys: &SpendKeys,
     current_height: u64,
     ring_size: usize,
     fee_multiplier: f64,
@@ -79,13 +80,13 @@ pub fn prepare_privacy_transaction_with_options<R: RngCore + CryptoRng>(
         .with_memo(memo.map(ToOwned::to_owned))
         .with_extra(extra);
 
-    prepare_privacy_transaction(balance, request, keys, rng)
+    prepare_privacy_transaction(balance, request, spend_keys, rng)
 }
 
 pub fn prepare_privacy_transaction<R: RngCore + CryptoRng>(
     balance: &Balance,
     request: SendRequest,
-    keys: &KeyEpoch,
+    spend_keys: &SpendKeys,
     rng: &mut R,
 ) -> Result<PreparedPrivacyTransaction> {
     let SendRequest {
@@ -96,6 +97,11 @@ pub fn prepare_privacy_transaction<R: RngCore + CryptoRng>(
         extra,
         payment_id,
     } = request;
+    // Change output + subaddress derivation use the current-epoch keys; each spent
+    // INPUT is derived under ITS OWN epoch below (Monero-style: the output carries
+    // the key context it was received under). `SpendKeys` resolves both — a single
+    // epoch for swap/churn, the full key set for a (possibly rotated) wallet.
+    let change = spend_keys.change_keys()?;
     let shape = TransferShape::classify(&payments, context.target_height())?;
     let total_send: Amount = payments.iter().map(|payment| payment.amount).sum();
     let output_count = if shape.is_uniform() {
@@ -161,7 +167,7 @@ pub fn prepare_privacy_transaction<R: RngCore + CryptoRng>(
     Ok(PreparedPrivacyTransaction {
         inputs: selected
             .into_iter()
-            .map(|utxo| prepare_input(utxo, keys))
+            .map(|utxo| prepare_input(utxo, spend_keys.input_keys(utxo)?))
             .collect::<Result<_>>()?,
         payments,
         change_amount: input_sum
@@ -170,8 +176,8 @@ pub fn prepare_privacy_transaction<R: RngCore + CryptoRng>(
         estimated_fee,
         context,
         shape,
-        spend_public: keys.spend_public,
-        view_public: keys.view_public,
+        spend_public: change.spend_public,
+        view_public: change.view_public,
         memo,
         extra,
         payment_id,

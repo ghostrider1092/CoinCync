@@ -14,6 +14,8 @@ class Params {
 public:
     static Params const* get_default();
     static Params const* get_test();
+    // COINCYNC DELTA (vendor/NOTICE.md): production n=8,m=3 => N=512.
+    static Params const* get_coincync();
 
     const GroupElement& get_F() const;
     const GroupElement& get_G() const;

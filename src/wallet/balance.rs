@@ -118,6 +118,17 @@ pub struct UTXO {
     /// the deposit. `#[serde(default)]` so pre-fix sidecars still load as `None`.
     #[serde(default)]
     pub payment_id: Option<[u8; 8]>,
+    /// The key epoch (rotation generation) this output was RECEIVED under. The
+    /// one-time spend secret is derived from THAT epoch's spend/view secrets, so a
+    /// spend MUST use the matching epoch — deriving under a different (e.g. the
+    /// current) epoch after a `derive_epoch` rotation yields a wrong one-time key,
+    /// so the real output's public key no longer matches on-chain and the output
+    /// is unspendable (it surfaces as a decoy `RealOutputIdentityMismatch`).
+    /// Threaded from the scanner's per-key-set match. `#[serde(default)]` so
+    /// pre-rotation wallet sidecars (serde_json) load as epoch 0 — their only
+    /// epoch — and remain spendable.
+    #[serde(default)]
+    pub key_epoch: u64,
 }
 
 impl std::fmt::Debug for UTXO {
@@ -509,6 +520,7 @@ mod tests {
 
     fn make_utxo(amount: u64, height: u64, spent: bool) -> UTXO {
         UTXO {
+            key_epoch: 0,
             tx_hash: Hash::from_bytes([0u8; 32]),
             output_index: 0,
             output_locator: None,
@@ -592,6 +604,7 @@ mod tests {
 
     fn make_utxo_at_idx(amount: u64, height: u64, idx: u8) -> UTXO {
         UTXO {
+            key_epoch: 0,
             tx_hash: Hash::from_bytes([idx; 32]),
             output_index: idx,
             output_locator: None,
