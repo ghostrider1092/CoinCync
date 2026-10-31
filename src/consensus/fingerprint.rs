@@ -68,6 +68,7 @@ pub fn consensus_fingerprint(network: NetworkType) -> Hash {
     let genesis = match network {
         NetworkType::Mainnet => crate::mainnet::expected_genesis_hash(),
         NetworkType::Testnet | NetworkType::Regtest => crate::testnet::expected_genesis_hash(),
+        NetworkType::Beta => crate::beta::expected_genesis_hash(),
     };
     // Resolved from the single canonical checkpoint source (#173), so the
     // fingerprint reflects exactly the checkpoints the validator enforces.

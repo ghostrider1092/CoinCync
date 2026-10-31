@@ -88,7 +88,7 @@ use crate::config::NetworkType;
 /// This is the final safety net — hard finality.
 pub fn max_reorg_depth_for(network: NetworkType) -> u64 {
     match network {
-        NetworkType::Testnet | NetworkType::Regtest => 1000,
+        NetworkType::Testnet | NetworkType::Regtest | NetworkType::Beta => 1000,
         NetworkType::Mainnet => 100,
     }
 }

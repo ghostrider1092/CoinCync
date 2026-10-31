@@ -141,6 +141,83 @@ pub fn verify_spark_payload<B: SparkBackend>(
     Ok(tags)
 }
 
+/// BATCH-verify a block's v2 payloads. Groups the spend payloads by
+/// `(cover_set_id, anchor_height)`, reconstructs each group's node-authoritative
+/// cover set ONCE, and verifies the group's spend proofs TOGETHER via
+/// [`SparkBackend::verify_spend_batch`] — one shared cover-set multiexp
+/// amortized across the group (~Kx cheaper than K single verifies; see
+/// docs/design/cip-shielded-anonset.md). Mint-only payloads (no spend)
+/// contribute no proof. Each spend's revealed linking tags are checked UNSPENT
+/// against the pool's spent set (the solvency half of `verify_solvency`).
+///
+/// Returns per-payload tags in the SAME order as `items` (mint-only → empty),
+/// so the caller can run its own within-block duplicate-tag check. Fail-closed:
+/// any group failing (bad proof, or a tag already spent) rejects the whole batch
+/// — matching block-level all-or-nothing verification. Equivalent to calling
+/// [`verify_spark_payload`] per item, but amortized.
+pub fn verify_spark_payloads_batch<B: SparkBackend>(
+    store: &SparkPoolStore,
+    backend: &B,
+    items: &[(SparkPayload, u64)],
+) -> Result<Vec<Vec<Nullifier>>> {
+    use std::collections::HashMap;
+    let mut out: Vec<Vec<Nullifier>> = vec![Vec::new(); items.len()];
+    // Group spend payloads by their anchored cover set; mint-only items are left
+    // with empty tags (as `verify_spark_payload` returns for them).
+    let mut groups: HashMap<(u64, u64), Vec<usize>> = HashMap::new();
+    for (i, (payload, _fee)) in items.iter().enumerate() {
+        if payload.version != SPARK_PAYLOAD_VERSION {
+            return Err(Error::SparkVerifyFailed);
+        }
+        if let Some(sb) = &payload.spend {
+            groups
+                .entry((sb.cover_set_id, sb.anchor_height))
+                .or_default()
+                .push(i);
+        }
+    }
+    let spent = store.spent_tags();
+    for ((cover_set_id, anchor_height), idxs) in groups {
+        let cover = store.cover_set_at(cover_set_id, anchor_height);
+        // Mirror verify_spark_payload's #258 trust-boundary guard: a spend MUST
+        // anchor to a NON-EMPTY node-resolved cover set. An empty set is the
+        // permissive STATELESS-admit side door (a backend's default
+        // verify_spend_batch fallback would verify the spender's own embedded set
+        // instead of the node's). Reject it here, at the spark_payload boundary,
+        // independent of which backend is wired — a one-of-many membership proof
+        // over zero coins is never legitimate.
+        if cover.is_empty() {
+            return Err(Error::SparkVerifyFailed);
+        }
+        let bundles: Vec<SpendBytes> = idxs
+            .iter()
+            .map(|&i| SpendBytes(items[i].0.spend.as_ref().unwrap().bundle.clone()))
+            .collect();
+        let fees: Vec<u64> = idxs.iter().map(|&i| items[i].1).collect();
+        let vbs: Vec<i64> = idxs.iter().map(|&i| items[i].0.value_balance).collect();
+        let group_tags = backend
+            .verify_spend_batch(&cover, &bundles, &fees, &vbs)
+            .map_err(|e| Error::CryptoError(format!("spark v2 batch verify: {e}")))?;
+        if group_tags.len() != idxs.len() {
+            return Err(Error::CryptoError(
+                "spark v2 batch: tag-list count != spend count".into(),
+            ));
+        }
+        for (slot, &i) in idxs.iter().enumerate() {
+            let tags = &group_tags[slot];
+            for t in tags {
+                if spent.contains(t) {
+                    return Err(Error::CryptoError(
+                        "spark v2 batch: linking tag already spent (coin is not unspent)".into(),
+                    ));
+                }
+            }
+            out[i] = tags.clone();
+        }
+    }
+    Ok(out)
+}
+
 /// Apply an ALREADY-VERIFIED v2 payload to the pool, in the chain's apply path
 /// (after the block's checkpoint). Marks each spend tag spent (with a
 /// double-spend guard) FIRST, then adds each mint coin keyed by its derived
@@ -397,9 +474,13 @@ pub mod build {
     /// `output_value` to `recipient_addr` (a bech32m Spark address, as bytes) —
     /// a shielded→shielded send to another wallet. The output coin re-enters the
     /// pool at apply and is recoverable by the recipient (fee = input −
-    /// `output_value`, `value_balance = 0` — nothing crosses the veil). `None`
-    /// if the coin is not in the anchored cover set, the recipient is empty, or
-    /// the FFI fails.
+    /// `output_value`, `value_balance = 0` — this builder models the fee as
+    /// pool-internal, which is fine for the stateless/state-machine tests and the
+    /// non-submitting demo path). The MINEABLE live send path builds its own
+    /// payload with `value_balance = fee` (see wallet `shielded_send_live`), which
+    /// is what the `value_balance == spend_fee(bundle)` consensus guard binds.
+    /// `None` if the coin is not in the anchored cover set, the recipient is
+    /// empty, or the FFI fails.
     pub fn build_transfer_payload(
         seed: &[u8],
         store: &SparkPoolStore,
@@ -510,6 +591,43 @@ mod tests {
                 vb in any::<i64>(),
             ) {
                 let _ = verify_transparent_shielded_balance(&pin, &pout, fee, vb);
+            }
+
+            /// CONSERVATION — the audit's crux. The transparent↔shielded value
+            /// bridge must accept a tx EXACTLY when value is conserved across the
+            /// veil: `Σ transparent-in == Σ transparent-out + (fee − value_balance)`.
+            /// Any `perturb != 0` is the adversary over-/under-claiming what crossed
+            /// (cross-veil inflation or burn) and MUST be rejected; `perturb == 0`
+            /// is the unique conserving input and MUST be accepted. One in / one out
+            /// with equal blinding, so the blinding cancels and acceptance depends
+            /// solely on the value equation — i.e. no sequence of accepted shielded
+            /// txs can change the total money supply.
+            #[test]
+            fn value_bridge_accepts_exactly_the_conserving_tx(
+                to in 0u64..500_000_000,
+                fee in 0u64..2_000_000,
+                vb in -500_000_000i64..500_000_000,
+                perturb in -4i64..=4,
+            ) {
+                // The transparent input that exactly conserves: ti = to + fee − vb.
+                let target = to as i128 + fee as i128 - vb as i128;
+                prop_assume!((0..=1_000_000_000i128).contains(&target));
+                let ti_i = target + perturb as i128;
+                prop_assume!((0..=u64::MAX as i128).contains(&ti_i));
+                let ti = ti_i as u64;
+                let r = [7u8; 32]; // single in/out, equal blinding ⇒ blinding cancels
+                let res = verify_transparent_shielded_balance(
+                    &[commit_bytes(ti, r)],
+                    &[commit_bytes(to, r)],
+                    fee,
+                    vb,
+                );
+                prop_assert_eq!(
+                    res.is_ok(),
+                    perturb == 0,
+                    "bridge must accept IFF value is conserved (ti={}, to={}, fee={}, vb={}, perturb={})",
+                    ti, to, fee, vb, perturb
+                );
             }
         }
     }
@@ -726,7 +844,7 @@ mod tests {
 
         let store = SparkPoolStore::new();
         let seed = b"v2-payload-seed";
-        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
         // Seed the pool with N coins at height 1 (each keyed by a synthetic outpoint).
         for i in 0..n {
             let outpoint = format!("v2:seed:{i}").into_bytes();
@@ -779,7 +897,7 @@ mod tests {
 
         let store = SparkPoolStore::new();
         let seed = b"ltag-match-seed";
-        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
         let inputs = vec![vec![0x33u8; 36]];
         let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
         let (mint_payload, contexts) = build_mint_payload(seed, &values, &inputs).unwrap();
@@ -836,7 +954,7 @@ mod tests {
 
         let store = SparkPoolStore::new();
         let seed = b"mint-builder-seed";
-        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=32768)
+        let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
 
         // Mint N coins via the builder, funded by a synthetic transparent input.
         let mint_inputs = vec![vec![0xEEu8; 36]];

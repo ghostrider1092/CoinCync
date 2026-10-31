@@ -90,7 +90,13 @@ where
 {
     let intent = SpendIntent::new(vec![lock_payment(verified.cync_recipient())?]);
     coordinator
-        .build_privacy_transaction(session, funding_balance, funding_keys, intent, rng)
+        .build_privacy_transaction(
+            session,
+            funding_balance,
+            &crate::wallet::send::SpendKeys::Single(funding_keys),
+            intent,
+            rng,
+        )
         .await
 }
 
@@ -114,7 +120,7 @@ where
         .build_privacy_transaction(
             session,
             joint_balance,
-            joint_keys,
+            &crate::wallet::send::SpendKeys::Single(joint_keys),
             SpendIntent::new(vec![destination]),
             rng,
         )

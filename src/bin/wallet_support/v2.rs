@@ -274,7 +274,7 @@ async fn cmd_send_v2(arguments: SendCommandArguments) -> Result<(), String> {
         .build_privacy_transaction(
             session,
             wallet.balance_ref(),
-            &keys,
+            &coincync::wallet::send::SpendKeys::Single(&keys),
             intent,
             &mut rng,
         )

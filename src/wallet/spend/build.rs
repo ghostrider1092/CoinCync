@@ -47,8 +47,8 @@
 use super::super::decoy_selection::{
     allocate_unique_rings, build_covered_request, validate_covered_response,
 };
-use super::super::send::{build_prepared_privacy_transaction, prepare_privacy_transaction};
-use super::super::{Balance, KeyEpoch};
+use super::super::send::{build_prepared_privacy_transaction, prepare_privacy_transaction, SpendKeys};
+use super::super::Balance;
 use super::{BuiltSpend, SpendCoordinator, SpendIntent, SpendSession};
 use crate::error::Result;
 use rand::{CryptoRng, RngCore};
@@ -66,7 +66,7 @@ impl SpendCoordinator {
         &self,
         session: SpendSession,
         balance: &Balance,
-        keys: &KeyEpoch,
+        spend_keys: &SpendKeys<'_>,
         intent: SpendIntent,
         rng: &mut R,
     ) -> Result<BuiltSpend>
@@ -76,7 +76,7 @@ impl SpendCoordinator {
         let prepared = prepare_privacy_transaction(
             balance,
             intent.into_request(session.context()),
-            keys,
+            spend_keys,
             rng,
         )?;
         let selected_outputs = prepared.selected_output_keys();
