@@ -182,29 +182,47 @@ fn main() {
 }
 
 fn emit_build_metadata() {
-    let git_sha = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
+    // Prefer an explicit override (set by the deploy/CI build when git is not
+    // usable in the build env — e.g. a Docker build mounting a worktree whose
+    // `.git` is a file pointer, or a `git archive` tree). The deploy build does:
+    //   COINCYNC_BUILD_GIT_SHA=$(git rev-parse --short=12 HEAD) cargo build ...
+    // so the node always stamps a real sha (the fleet preflight compares binaries,
+    // and an "unknown" stamp defeats that). Falls back to shelling out to git.
+    let git_sha = std::env::var("COINCYNC_BUILD_GIT_SHA")
         .ok()
-        .and_then(|out| {
-            if out.status.success() {
-                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            Command::new("git")
+                .args(["rev-parse", "--short=12", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|out| {
+                    if out.status.success() {
+                        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| "unknown".to_string());
 
-    let git_dirty = Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .ok()
-        .map(|out| out.status.success() && !out.stdout.is_empty())
-        .unwrap_or(false);
+    let git_dirty = match std::env::var("COINCYNC_BUILD_GIT_DIRTY") {
+        Ok(v) => v.trim() == "1",
+        Err(_) => Command::new("git")
+            .args(["status", "--porcelain"])
+            .output()
+            .ok()
+            .map(|out| out.status.success() && !out.stdout.is_empty())
+            .unwrap_or(false),
+    };
 
     let build_profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
 
+    // Re-run when the override env changes so the stamp never goes stale.
+    println!("cargo:rerun-if-env-changed=COINCYNC_BUILD_GIT_SHA");
+    println!("cargo:rerun-if-env-changed=COINCYNC_BUILD_GIT_DIRTY");
     println!("cargo:rustc-env=COINCYNC_BUILD_GIT_SHA={}", git_sha);
     println!(
         "cargo:rustc-env=COINCYNC_BUILD_GIT_DIRTY={}",

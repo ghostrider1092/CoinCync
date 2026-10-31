@@ -23,8 +23,13 @@ down by two avoidable failure modes. These tools stop both from recurring.
 Use this instead of raw `scp binary + systemctl restart`:
 
 ```bash
-bash deploy/fleet/safe-deploy.sh ./coincync-node 2.29.34.197 37.27.185.37 77.42.64.199 89.167.93.52 89.167.113.125
+bash deploy/fleet/safe-deploy.sh ./coincync-node 2.29.34.197 37.27.185.37 77.42.64.199 89.167.93.52 2.31.63.25 5.161.214.98
 ```
+
+The 6 seed/relay boxes above are the current backbone (hel1 seed + hel2/hel3/hel4
++ nbg1 + ash1), matching `nodes` in [`scripts/fleet-config.json`](../../scripts/fleet-config.json).
+The miner rig `62.238.121.186` is **not** a P2P node (it mines via an RPC tunnel) —
+do not deploy the node binary to it. `89.167.113.125` (old hel5) is decommissioned.
 
 Per host it:
 - **Takes an advisory lock** (`/run/coincync-deploy.lock`, holder + timestamp).
@@ -52,7 +57,7 @@ and skips while a deploy lock is held (`ConditionPathExists=!/run/coincync-deplo
 Install on every node:
 
 ```bash
-bash deploy/fleet/install-watchdog.sh 2.29.34.197 37.27.185.37 77.42.64.199 89.167.93.52 89.167.113.125
+bash deploy/fleet/install-watchdog.sh 2.29.34.197 37.27.185.37 77.42.64.199 89.167.93.52 2.31.63.25 5.161.214.98
 ```
 
 Check it: `systemctl list-timers coincync-sync-watchdog.timer` and
