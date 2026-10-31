@@ -454,7 +454,30 @@ pub const SHIELDED_TX_ACTIVATION_HEIGHT: u64 = u64::MAX;
 /// `#[cfg]`-gated): a persistent public network must activate by HEIGHT for every
 /// node, never by build flag (that would split the net by binary). That is
 /// precisely why precondition (1) — verifier in every binary — is mandatory.
+///
+/// ROLLOUT STATUS (step c): precondition (1) is now MET — the `testnet` feature
+/// implies `libspark-ffi + sketch-gk-proof` (#352), so every testnet binary
+/// carries the shielded verifier. What remains before the flip:
+///   - deploy the verifier-carrying build to the WHOLE fleet + community nodes
+///     (precondition 2), and
+///   - set this constant from the `u64::MAX` sentinel below to the live testnet
+///     tip at deploy time + [`TESTNET_SHIELDED_ACTIVATION_LEAD`] (precondition 3),
+///     then regen `critical_files.lock`.
+/// TODO(testnet-activation): replace `u64::MAX` with the computed rollout height.
+/// It stays `u64::MAX` (off, byte-identical to before the knob existed) until
+/// that one-line change — the coordinated testnet hard fork. The invariant tests
+/// in `consensus::validation` and the knob test in this module are already driven
+/// by this constant, so the flip needs no test edits, only the lock regen.
 pub const SHIELDED_TESTNET_ACTIVATION_HEIGHT: u64 = u64::MAX;
+
+/// Upgrade-window lead for the testnet shielded rollout (step c): the number of
+/// blocks between the fleet redeploy and the activation height, so stragglers
+/// have time to upgrade before the rule turns on. At `TESTNET`'s ~120s target
+/// block time, 5 040 blocks ≈ 1 week. The rollout height is
+/// `<live testnet tip at deploy> + TESTNET_SHIELDED_ACTIVATION_LEAD`; a solo
+/// cutover should use at least this much margin (raise it if unsure — a too-small
+/// lead risks a straggler forking at activation).
+pub const TESTNET_SHIELDED_ACTIVATION_LEAD: u64 = 5_040;
 
 /// Shielded activation height on **regtest only** — a finite height so the full
 /// shielded verify/apply path (SparkPayload v2 → `verify_block_spark_v2` →

@@ -5512,12 +5512,42 @@ mod tests {
             below.contains("not activated"),
             "below activation must be rejected as not-activated, got: {below}"
         );
-        // Testnet: shielded is inactive at every REALISTIC height (activation is
-        // u64::MAX — the unreachable sentinel; a real chain never reaches it).
-        assert!(
-            validate_transaction_for_network_ctx(&tx, &utxos, 1_000_000_000, Testnet, false).is_err(),
-            "testnet must not activate shielded at any reachable height"
-        );
+        // Testnet: driven by the rollout knob (SHIELDED_TESTNET_ACTIVATION_HEIGHT)
+        // so this holds both while the knob is the u64::MAX placeholder (off) and
+        // after a finite rollout height is set (the coordinated hard fork).
+        {
+            use crate::constants::{
+                shielded_tx_active_at_height, SHIELDED_TESTNET_ACTIVATION_HEIGHT as TACT,
+            };
+            // BELOW activation shielded is inactive and the shield-in is rejected
+            // at the activation gate, whatever the knob's value.
+            let below = TACT.saturating_sub(1).min(1_000_000_000);
+            assert!(
+                !shielded_tx_active_at_height(Testnet, below),
+                "testnet shielded must be inactive below its activation height"
+            );
+            assert!(
+                validate_transaction_for_network_ctx(&tx, &utxos, below, Testnet, false).is_err(),
+                "testnet below activation must reject the shield-in at the activation gate"
+            );
+            if TACT == u64::MAX {
+                // Placeholder (off): inactive at every reachable height.
+                assert!(
+                    !shielded_tx_active_at_height(Testnet, 1_000_000_000),
+                    "testnet shielded must stay inactive at every reachable height \
+                     while the activation knob is the u64::MAX placeholder"
+                );
+            } else {
+                // Finite rollout height set: the activation predicate is true at/
+                // above it. (Full shield-in ROUTING on testnet additionally needs
+                // the Option-B bridge / ShieldInPolicy — covered by the
+                // testnet-bridge tests, step d — so this asserts the gate only.)
+                assert!(
+                    shielded_tx_active_at_height(Testnet, TACT),
+                    "testnet shielded must be active at/after its activation height"
+                );
+            }
+        }
         // A malformed payload is rejected even on regtest at activation.
         tx.extra = vec![0xFFu8; 4];
         assert!(
@@ -5566,16 +5596,25 @@ mod tests {
 
     #[test]
     fn shielded_root_gate_requires_zero_while_inactive() {
-        // Testnet is permanently inactive (u64::MAX) in every build, so it
-        // exercises the "while inactive" gate stably.
+        // The root gate requires a zero spark-set root while shielded is INACTIVE,
+        // and permits any root once active. Driven by the testnet rollout knob so
+        // it holds both while the knob is the u64::MAX placeholder (off) and after
+        // a finite rollout height is set.
         use crate::config::NetworkType::Testnet as N;
-        // Zero root is always permitted.
+        use crate::constants::SHIELDED_TESTNET_ACTIVATION_HEIGHT as TACT;
+        // Zero root is always permitted, active or not.
         assert!(shielded_root_permitted(&[0u8; 32], N, 0));
         assert!(shielded_root_permitted(&[0u8; 32], N, 100_000));
-        // A non-zero root is rejected while shielded is inactive (the current,
-        // permanently-disabled state) — at genesis and at any height.
+        // A non-zero root is rejected at any height BELOW activation (genesis and
+        // just under the knob).
+        let below = TACT.saturating_sub(1).min(123_456);
         assert!(!shielded_root_permitted(&[1u8; 32], N, 0));
-        assert!(!shielded_root_permitted(&[9u8; 32], N, 123_456));
+        assert!(!shielded_root_permitted(&[9u8; 32], N, below));
+        // Once a finite rollout height is set, a non-zero shielded root is
+        // permitted at/after activation.
+        if TACT != u64::MAX {
+            assert!(shielded_root_permitted(&[9u8; 32], N, TACT));
+        }
     }
 
     // ── validate_transaction_basic granular gates ───────────────────────
