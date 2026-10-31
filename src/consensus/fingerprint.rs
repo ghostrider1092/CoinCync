@@ -1,8 +1,9 @@
 //! Consensus-rules fingerprint.
 //!
 //! A short digest of the chain-affecting consensus **parameters** — network
-//! magic, genesis hash, and the hard-fork schedule — that two nodes must agree
-//! on to stay on the same chain. Nodes advertise it in the P2P handshake (as a
+//! magic, genesis hash, the hard-fork schedule, and the shielded activation
+//! height — that two nodes must agree on to stay on the same chain. Nodes
+//! advertise it in the P2P handshake (as a
 //! capability-gated `ConsensusFingerprint` message, see
 //! `network::firework::CAP_CONSENSUS_FINGERPRINT`), so a peer running divergent
 //! consensus rules can be **detected early** — before it silently forks the
@@ -26,7 +27,13 @@ use crate::primitives::{hash_domain, Hash};
 /// Domain separator; bump the version suffix if the set of hashed parameters
 /// changes (that is itself a fingerprint-format change, distinct from a
 /// consensus-rule change).
-pub const FINGERPRINT_DOMAIN: &[u8] = b"coincync/consensus-fingerprint/v1";
+///
+/// v1 → v2: added `shielded_activation_height`. The shielded pool activates by
+/// height on testnet (the `SHIELDED_TESTNET_ACTIVATION_HEIGHT` rollout knob), a
+/// future-activation hard fork exactly like the ones this digest exists to flag
+/// early — so an upgraded node (finite height) and a non-upgraded node
+/// (`u64::MAX`) must advertise *different* fingerprints before they fork.
+pub const FINGERPRINT_DOMAIN: &[u8] = b"coincync/consensus-fingerprint/v2";
 
 /// The runtime-resolved consensus parameters that define chain identity.
 /// Kept explicit (rather than reading globals) so [`fingerprint_from_parts`]
@@ -38,6 +45,11 @@ pub struct FingerprintParts<'a> {
     pub min_output_age_hardfork_height: u64,
     pub rolling_finality_enable_height: u64,
     pub rolling_finality_enforce_height: u64,
+    /// Height at which the shielded (Lelantus-Spark) pool activates for this
+    /// network. `u64::MAX` while disabled (the rollout placeholder); a finite
+    /// value is the coordinated shielded hard fork. Included so the fingerprint
+    /// diverges across that upgrade (see the v1 → v2 note on `FINGERPRINT_DOMAIN`).
+    pub shielded_activation_height: u64,
     pub checkpoints: &'a [(u64, [u8; 32])],
 }
 
@@ -45,13 +57,14 @@ pub struct FingerprintParts<'a> {
 /// Fixed-width fields first, then the checkpoint list length-prefixed so its
 /// boundary can never be confused with a following field.
 pub fn fingerprint_from_parts(p: &FingerprintParts<'_>) -> Hash {
-    let mut buf = Vec::with_capacity(4 + 32 + 8 * 4 + 8 + p.checkpoints.len() * 40);
+    let mut buf = Vec::with_capacity(4 + 32 + 8 * 5 + 8 + p.checkpoints.len() * 40);
     buf.extend_from_slice(&p.magic);
     buf.extend_from_slice(p.genesis.as_bytes());
     buf.extend_from_slice(&p.fee_distribution_height.to_le_bytes());
     buf.extend_from_slice(&p.min_output_age_hardfork_height.to_le_bytes());
     buf.extend_from_slice(&p.rolling_finality_enable_height.to_le_bytes());
     buf.extend_from_slice(&p.rolling_finality_enforce_height.to_le_bytes());
+    buf.extend_from_slice(&p.shielded_activation_height.to_le_bytes());
     buf.extend_from_slice(&(p.checkpoints.len() as u64).to_le_bytes());
     for (height, hash) in p.checkpoints {
         buf.extend_from_slice(&height.to_le_bytes());
@@ -80,6 +93,9 @@ pub fn consensus_fingerprint(network: NetworkType) -> Hash {
         min_output_age_hardfork_height: network.min_output_age_hardfork_height(),
         rolling_finality_enable_height: network.rolling_finality_enable_height(),
         rolling_finality_enforce_height: network.rolling_finality_enforce_height(),
+        // Resolved from the same accessor the validator uses, so the fingerprint
+        // tracks the shielded fork this binary would actually enforce.
+        shielded_activation_height: crate::constants::shielded_activation_height(network),
         checkpoints: &checkpoints,
     })
 }
@@ -101,6 +117,7 @@ mod tests {
             min_output_age_hardfork_height: 5000,
             rolling_finality_enable_height: 200,
             rolling_finality_enforce_height: 300,
+            shielded_activation_height: u64::MAX,
             checkpoints: &[],
         }
     }
@@ -132,6 +149,17 @@ mod tests {
         let mut p = base_parts();
         p.rolling_finality_enforce_height = 301;
         assert_ne!(fingerprint_from_parts(&p), base, "finality height must matter");
+
+        // The shielded activation height: flipping the rollout knob from the
+        // u64::MAX placeholder to a finite height must change the fingerprint, so
+        // upgraded and non-upgraded nodes diverge before the shielded fork.
+        let mut p = base_parts();
+        p.shielded_activation_height = 23_552;
+        assert_ne!(
+            fingerprint_from_parts(&p),
+            base,
+            "shielded activation height must matter"
+        );
 
         let cps: &[(u64, [u8; 32])] = &[(10, [7u8; 32])];
         let mut p = base_parts();
