@@ -1689,7 +1689,117 @@ impl Blockchain {
 
     /// Process/add block to chain
     pub fn process_block(&self, block: Block) -> Result<BlockStatus> {
-        self.add_block(block)
+        #[cfg(all(
+            feature = "breaker-recovery",
+            any(
+                feature = "block-integrity-breaker",
+                feature = "supply-breaker",
+                all(feature = "shielded-breaker", feature = "sketch-gk-proof")
+            )
+        ))]
+        let connected_height = block.header.height.as_u64();
+        let status = self.add_block(block)?;
+
+        // Block-integrity fuse feed (connector seam): on a block that connected to
+        // the main chain, observe the REAL post-apply UTXO-set counters through the
+        // universal fuse box. Observe-only (Latch), gated OFF, node-local — reads
+        // public accessors AFTER the lock-held apply returned, never edits it.
+        #[cfg(all(feature = "block-integrity-breaker", feature = "breaker-recovery"))]
+        {
+            if matches!(
+                status,
+                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+            ) {
+                let _ = crate::block_integrity_live_breaker::on_block_connected(
+                    self.total_outputs_ever(),
+                    self.reorg_disconnects_total(),
+                    self.utxo_count() as u64,
+                );
+                // ARM SWITCH (default OFF — arm height u64::MAX): once the
+                // BlockIntegrity breaker is armed at a height AND it has latched
+                // on a post-apply integrity breach, fail closed — refuse to
+                // advance on possibly-corrupted chain state rather than continue.
+                // No behaviour change until an arm height is set (reviewed code
+                // change, not a runtime switch). See docs/design/breaker-arm-switch.md.
+                let surface = crate::breaker_recovery::BreakerSurface::BlockIntegrity;
+                if crate::fuse::enforce_trips(
+                    surface,
+                    connected_height,
+                    crate::fuse::default_arm_height(surface),
+                ) {
+                    return Err(crate::error::Error::InvalidState(format!(
+                        "block-integrity breaker armed and latched at height {connected_height}: \
+                         refusing to advance on possibly-corrupted chain state — investigate and rearm"
+                    )));
+                }
+            }
+        }
+
+        // Supply breaker feed + arm gate (connector seam). Observe-only +
+        // default-OFF; reads post-apply supply stats, never edits the locked
+        // apply. See docs/design/breaker-arm-switch.md.
+        #[cfg(all(feature = "supply-breaker", feature = "breaker-recovery"))]
+        {
+            if matches!(
+                status,
+                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+            ) {
+                let (total_supply, total_burned) = {
+                    let inner = self.inner.read();
+                    (inner.stats.total_supply, inner.stats.total_burned)
+                };
+                let _ = crate::supply_live_breaker::on_block_connected(
+                    total_supply,
+                    total_burned,
+                    connected_height,
+                );
+                let surface = crate::breaker_recovery::BreakerSurface::Supply;
+                if crate::fuse::enforce_trips(
+                    surface,
+                    connected_height,
+                    crate::fuse::default_arm_height(surface),
+                ) {
+                    return Err(crate::error::Error::InvalidState(format!(
+                        "supply breaker armed and latched at height {connected_height}: a monetary \
+                         invariant (circulating supply / ceiling) broke — refusing to advance"
+                    )));
+                }
+            }
+        }
+
+        // Shielded-pool breaker feed + arm gate (connector seam). Observe-only +
+        // default-OFF; reads the post-apply pool value. Gated on sketch-gk-proof
+        // because that is where the shielded pool store exists; the pool is off
+        // (activation u64::MAX) until post-audit, so this watches value 0 at
+        // launch. See the adapter + docs/design/breaker-arm-switch.md.
+        #[cfg(all(
+            feature = "shielded-breaker",
+            feature = "breaker-recovery",
+            feature = "sketch-gk-proof"
+        ))]
+        {
+            if matches!(
+                status,
+                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+            ) {
+                let pool_value =
+                    self.spark_pool_store.as_ref().map(|s| s.pool_value()).unwrap_or(0);
+                let _ = crate::shielded_live_breaker::on_block_connected(pool_value);
+                let surface = crate::breaker_recovery::BreakerSurface::Shielded;
+                if crate::fuse::enforce_trips(
+                    surface,
+                    connected_height,
+                    crate::fuse::default_arm_height(surface),
+                ) {
+                    return Err(crate::error::Error::InvalidState(format!(
+                        "shielded breaker armed and latched at height {connected_height}: the \
+                         shielded pool broke an invariant (pool value) — refusing to advance"
+                    )));
+                }
+            }
+        }
+
+        Ok(status)
     }
 
     /// TEST-ONLY: seed a linear main chain of `n_blocks` empty blocks on top of
@@ -2628,6 +2738,27 @@ impl Blockchain {
                     current_total_difficulty,
                     reorg_depth
                 );
+
+                // Reorg fuse feed (connector seam): a single side-effect-free line
+                // that observes this accepted reorg's REAL depth / finality floor /
+                // work ratio through the universal fuse box. Observe-only, gated
+                // OFF, node-local — mutates no chain state. `finalized` mirrors the
+                // chain's finality-floor rule (reject fork_point < floor) so the
+                // breaker's `<=` check agrees: floor-1.
+                #[cfg(all(feature = "reorg-breaker", feature = "breaker-recovery"))]
+                {
+                    let floor = self
+                        .height()
+                        .saturating_sub(crate::constants::CHECKPOINT_INTERVAL);
+                    let _ = crate::reorg_live_breaker::on_reorg(
+                        reorg_depth,
+                        net_max,
+                        fork_point,
+                        floor.saturating_sub(1),
+                        fork_cumulative,
+                        current_total_difficulty,
+                    );
+                }
 
                 // Save pre-reorg state for rollback on fork validation failure
                 let pre_reorg_tip = {

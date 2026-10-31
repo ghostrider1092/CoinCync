@@ -26,6 +26,22 @@ impl Blockchain {
         self.inner.read().utxos.output_count()
     }
 
+    /// Monotonic count of transparent outputs ever created on the active chain
+    /// (never decremented by spends; see `UtxoSet::total_outputs_ever`). With
+    /// [`reorg_disconnects_total`](Self::reorg_disconnects_total) this gives the
+    /// availability metric (`ever − disconnects`) the block-integrity breaker
+    /// checks for underflow. Read-only getter.
+    pub fn total_outputs_ever(&self) -> u64 {
+        self.inner.read().utxos.total_outputs_ever()
+    }
+
+    /// Cumulative count of live outputs disconnected by reorgs. Pairs with
+    /// [`total_outputs_ever`](Self::total_outputs_ever) for the availability
+    /// invariant. Read-only getter.
+    pub fn reorg_disconnects_total(&self) -> u64 {
+        self.inner.read().utxos.reorg_disconnects_total()
+    }
+
     /// Look up a transaction's block height and index via the tx_index.
     pub fn get_tx_location(&self, tx_hash: &[u8]) -> Option<(u64, u32)> {
         self.db.as_ref().and_then(|db| db.get_tx_location(tx_hash))

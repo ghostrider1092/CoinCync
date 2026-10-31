@@ -917,6 +917,18 @@ impl Mempool {
         self.current_size += entry.size;
         self.transactions.insert(tx_hash, entry);
 
+        // Mempool fuse feed (connector seam): observe the REAL post-admit mempool
+        // count + byte footprint through the universal fuse box. Observe-only
+        // (it logs, never throttles — admission already returned Ok), node-local,
+        // no consensus effect; gated OFF by default.
+        #[cfg(all(feature = "mempool-breaker", feature = "breaker-recovery"))]
+        {
+            let _ = crate::mempool_live_breaker::on_admission(
+                self.transactions.len(),
+                self.current_size,
+            );
+        }
+
         Ok(tx_hash)
     }
 
