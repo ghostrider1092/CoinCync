@@ -463,12 +463,19 @@ pub const SHIELDED_TX_ACTIVATION_HEIGHT: u64 = u64::MAX;
 ///   - set this constant from the `u64::MAX` sentinel below to the live testnet
 ///     tip at deploy time + [`TESTNET_SHIELDED_ACTIVATION_LEAD`] (precondition 3),
 ///     then regen `critical_files.lock`.
-/// TODO(testnet-activation): replace `u64::MAX` with the computed rollout height.
-/// It stays `u64::MAX` (off, byte-identical to before the knob existed) until
-/// that one-line change — the coordinated testnet hard fork. The invariant tests
-/// in `consensus::validation` and the knob test in this module are already driven
-/// by this constant, so the flip needs no test edits, only the lock regen.
-pub const SHIELDED_TESTNET_ACTIVATION_HEIGHT: u64 = u64::MAX;
+/// TESTNET SHIELDED ACTIVATION — the coordinated testnet hard fork. Baked
+/// 2026-10-31 from live tip 18764 (hel1 + hel2 agreed; chain fingerprint
+/// d312f6ee) plus a ~14-day upgrade lead of 10 236 blocks (≈ 2×
+/// [`TESTNET_SHIELDED_ACTIVATION_LEAD`]), rounded up to a clean height. Below
+/// this height the Option-B bridge stays closed — byte-identical to the former
+/// `u64::MAX` sentinel; at/after it, shield-in / shielded-send / unshield become
+/// valid on testnet. The verifier-carrying build ships to the whole fleet during
+/// the lead window, so until the tip crosses this height the rollout is fully
+/// reversible by redeploying the prior binary (no block at/after it exists yet).
+/// The invariant tests in `consensus::validation` and the knob test in this
+/// module are constant-driven, so this flip needs no test edits, only the
+/// `critical_files.lock` regen.
+pub const SHIELDED_TESTNET_ACTIVATION_HEIGHT: u64 = 29_000;
 
 /// Upgrade-window lead for the testnet shielded rollout (step c): the number of
 /// blocks between the fleet redeploy and the activation height, so stragglers
