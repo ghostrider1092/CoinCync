@@ -161,7 +161,7 @@ finalized before genesis.
 |---|---|---|---|---|
 | Testnet | 13,000 | — | Hard-fork rules activation | v1.0.12 |
 | Testnet | 50,000 | — | CIP-011 rolling soft-finality (behind `rolling-finality`) | TBD |
-| Mainnet | genesis | 2026-10-01 (target) | Genesis; full ruleset from block 0 | TBD |
+| Mainnet | genesis | 2027-03-01 (target) | Genesis; full ruleset from block 0 | TBD |
 
 Values marked TBD/— are not finalized as of this revision.
 
