@@ -96,6 +96,13 @@ subsystems — they map onto the tables above:
 
 ## 2. Phase 2 — partial; the activation path is *not* just "wire it up"
 
+> **Testnet update (`v1.1.0-testnet`).** The **Option-B shielded bridge** — Lelantus
+> Spark shield-in / shielded-send / unshield — is wired and **activates on the public
+> testnet at block 29,000** (a pre-audit testnet activation, exercised live ahead of
+> the audit). The broader Phase-2 work described below (Orchard/Halo2 action circuit,
+> `Transaction` shielded variants, MimbleWimble kernels) remains **unwired and off on
+> mainnet** — mainnet stays ring-only until the security audit clears.
+
 Verified state. The cryptographic primitives are **partially** in-tree —
 Lelantus Spark (`lelantus_spark.rs`, 917 lines), kernel offsets, and MW
 cut-through are real implementations. **The shielded half now has substantial

@@ -160,6 +160,7 @@ finalized before genesis.
 | Network | Height | Date | Change | Minimum version |
 |---|---|---|---|---|
 | Testnet | 13,000 | — | Hard-fork rules activation | v1.0.12 |
+| Testnet | 29,000 | — | Shielded (Lelantus Spark) bridge activation — shield-in / shielded-send / unshield | v1.1.0-testnet |
 | Testnet | 50,000 | — | CIP-011 rolling soft-finality (behind `rolling-finality`) | TBD |
 | Mainnet | genesis | 2026-10-01 (target) | Genesis; full ruleset from block 0 | TBD |
 
@@ -223,15 +224,30 @@ can independently reproduce the release artifacts from a recorded revision. See
 ## Installing CoinCync from a release
 
 Prebuilt Linux x86_64 binaries are attached to each release (node, wallet, and
-miner). Download, make executable, and place on your `PATH`:
+miner). The current testnet pre-release is
+[`v1.1.0-testnet`](https://github.com/ghostrider1092/CoinCync/releases/tag/v1.1.0-testnet)
+— it activates the shielded bridge at testnet block 29,000. Download, **verify**,
+make executable, and place on your `PATH`:
 
 ```bash
-wget <release-url>/coincync-node
-chmod +x coincync-node
+base=https://github.com/ghostrider1092/CoinCync/releases/download/v1.1.0-testnet
+wget $base/coincync-node $base/coincync-wallet $base/coincync-rig \
+     $base/SHA256SUMS $base/SHA256SUMS.sig $base/allowed_signers
+
+# verify the signed checksums, then the binaries
+ssh-keygen -Y verify -f allowed_signers \
+  -I 192831449+ghostrider1092@users.noreply.github.com \
+  -n file -s SHA256SUMS.sig < SHA256SUMS
+sha256sum -c SHA256SUMS
+
+chmod +x coincync-node coincync-wallet coincync-rig
+./coincync-node --version   # expect testnet fingerprint fc428e86…64ca
 ./coincync-node --network testnet
 ```
 
 Always prefer a tagged release over a source build of `main` for production use.
+Upgrade to `v1.1.0-testnet` **before** testnet block 29,000 or you will fork off
+the canonical chain at activation.
 
 ## Running coincync-node
 
@@ -345,9 +361,11 @@ current state:
 - **Provider concentration.** Fleet nodes are hosted across regions of a single
   cloud provider; we mitigate by inviting independent operators on other
   providers.
-- **Phase-2 modules feature-gated.** Shielded modules (Orchard / Lelantus Spark /
-  MimbleWimble kernels) and rolling soft-finality ship behind feature flags,
-  off by default until a future activation.
+- **Shielded pool activating on testnet.** The shielded (Lelantus Spark) bridge
+  — shield-in / shielded-send / unshield — activates on the **public testnet** at
+  block 29,000, shipped in `v1.1.0-testnet`. This is a pre-audit testnet
+  activation, exercised live ahead of the security audit. MimbleWimble kernels
+  and CIP-011 rolling soft-finality remain feature-gated and off by default.
 - **Atomic swaps in progress.** CYNC↔BTC atomic-swap machinery is shipped; the
   real adaptor-signature crypto is pending its audit window.
 - **Wallet UX** is mid-refactor; some flows are still utilitarian.
