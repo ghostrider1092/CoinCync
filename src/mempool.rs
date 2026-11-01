@@ -51,10 +51,14 @@ impl ShadowEvictChain for crate::chain::Blockchain {
                 // tag is already spent OR a shield-in mint's coins are already in
                 // the pool (the duplicate-mint-coin reject) — exactly the "no
                 // longer minable" conditions. Read-only; no state mutation. Inert
-                // (Ok) when the pool store is uninitialized.
-                return crate::chain::Blockchain::verify_block_spark_v2(
+                // (Ok) when the pool store is uninitialized. Pass the TIP height so
+                // the height-aware bridge gate matches what the next block's gate
+                // will enforce (a bridge tx below the testnet activation height is
+                // correctly reported unminable).
+                return crate::chain::Blockchain::verify_block_spark_v2_at_height(
                     self,
                     std::slice::from_ref(tx),
+                    self.height(),
                 )
                 .is_err();
             }

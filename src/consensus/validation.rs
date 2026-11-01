@@ -1633,7 +1633,7 @@ pub(crate) fn validate_transaction_for_network_ctx(
         // pure-shielded shape leaves the transparent side empty, so the guard is
         // false.
         if contextual
-            && regtest_bridge_enabled(expected_network)
+            && shield_bridge_enabled(expected_network, current_height)
             && (!tx.inputs.is_empty() || !tx.outputs.is_empty())
         {
             // Curve/identity validity of every output applies to BOTH bridge
@@ -1774,6 +1774,58 @@ pub(crate) fn regtest_bridge_enabled(network: crate::config::NetworkType) -> boo
     }
 }
 
+/// Height-aware shielded-bridge gate for the PUBLIC testnet rollout
+/// (CIP-011 / Option B). The transparent↔shielded bridge (the shield-in /
+/// unshield shape + `value_balance != 0` relaxation) opens when EITHER:
+///  - the isolated test bridge is on (`regtest_bridge_enabled` — Regtest/Beta,
+///    compile-time gated on the shielded features, never a production build), OR
+///  - this is **Testnet** and `height` is at/after the coordinated activation
+///    height (`shielded_tx_active_at_height`, driven by
+///    `SHIELDED_TESTNET_ACTIVATION_HEIGHT`).
+///
+/// It is the single height-aware replacement for the ungated
+/// `regtest_bridge_enabled` at the three bridge enforcement zones (the
+/// tx-context shape gate here and in `check_shielded_tx`, and the block gate in
+/// `chain::verify_block_spark_v2_at_height`). `verify_transparent_shielded_balance`
+/// still enforces cross-veil value conservation underneath it on every path.
+///
+/// SAFETY. The testnet branch is itself compile-time gated on BOTH shielded
+/// features (`sketch-gk-proof` + `libspark-ffi`) — which the `testnet` feature
+/// implies, so every real testnet binary carries the verifier, but a
+/// default/production binary has the bridge compile-time `false` on EVERY
+/// network and stays byte-identical to Option A, even if built from the cutover
+/// commit that sets a finite testnet height. Below the activation height the
+/// testnet branch is `false` (pure-shielded; no retroactive bridge), and
+/// mainnet never enters it (its activation height is `u64::MAX`,
+/// unconditionally — never coupled to the testnet knob). With the placeholder
+/// `SHIELDED_TESTNET_ACTIVATION_HEIGHT = u64::MAX`, `shield_bridge_enabled`
+/// equals `regtest_bridge_enabled` on every network, so staging this changes no
+/// live behavior until the cutover commit sets a finite height.
+#[inline]
+pub(crate) fn shield_bridge_enabled(network: crate::config::NetworkType, height: u64) -> bool {
+    // Isolated test bridge (Regtest/Beta); height-agnostic, feature-gated false
+    // in production. Keeps every existing regtest/beta call site unchanged.
+    if regtest_bridge_enabled(network) {
+        return true;
+    }
+    // Public-testnet rollout branch — ONLY in a build that carries the shielded
+    // verifier (same feature set as `regtest_bridge_enabled`), so a featureless
+    // binary is byte-identical to Option A on testnet too.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    {
+        if matches!(network, crate::config::NetworkType::Testnet)
+            && crate::constants::shielded_tx_active_at_height(network, height)
+        {
+            return true;
+        }
+    }
+    #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
+    {
+        let _ = height;
+    }
+    false
+}
+
 /// Validate a shielded (Lelantus-Spark) transaction — CIP-Shielded.
 ///
 /// FAIL-CLOSED SKELETON. The wire type (`TxType::Shielded`, borsh discriminant
@@ -1801,10 +1853,12 @@ fn check_shielded_tx(
 
     // Option A (#314): pure-shielded shape, before the v1/v2 split and un-gated,
     // so it covers both payload formats and the default (non-libspark) build.
-    // Single source of truth — see require_pure_shielded_shape. RELAXED only on
-    // the regtest test bridge (sketch-gk-proof + Regtest) so the harness can
-    // shield-in; production (no sketch-gk-proof) always enforces it.
-    if !regtest_bridge_enabled(network) {
+    // Single source of truth — see require_pure_shielded_shape. RELAXED on the
+    // regtest/beta test bridge (sketch-gk-proof + Regtest/Beta) so the harness
+    // can shield-in, and on the PUBLIC testnet at/after the activation height
+    // (shield_bridge_enabled); below the height — and in every production build
+    // and on mainnet — it is always enforced (Option A, #314).
+    if !shield_bridge_enabled(network, current_height) {
         require_pure_shielded_shape(tx)?;
     }
 
@@ -1822,7 +1876,7 @@ fn check_shielded_tx(
         // chain.rs::verify_block_spark_v2. Transparent I/O is already rejected
         // above (pure-shielded, all versions); here enforce the v2 payload's
         // `value_balance == 0` until the shield-in/unshield bridge is validated.
-        if payload.value_balance != 0 && !regtest_bridge_enabled(network) {
+        if payload.value_balance != 0 && !shield_bridge_enabled(network, current_height) {
             return Err(Error::InvalidTransaction(
                 "shielded tx must have value_balance == 0 until the transparent \
                  shield-in/unshield bridge is validated (#314)"
@@ -5512,12 +5566,42 @@ mod tests {
             below.contains("not activated"),
             "below activation must be rejected as not-activated, got: {below}"
         );
-        // Testnet: shielded is inactive at every REALISTIC height (activation is
-        // u64::MAX — the unreachable sentinel; a real chain never reaches it).
-        assert!(
-            validate_transaction_for_network_ctx(&tx, &utxos, 1_000_000_000, Testnet, false).is_err(),
-            "testnet must not activate shielded at any reachable height"
-        );
+        // Testnet: driven by the rollout knob (SHIELDED_TESTNET_ACTIVATION_HEIGHT)
+        // so this holds both while the knob is the u64::MAX placeholder (off) and
+        // after a finite rollout height is set (the coordinated hard fork).
+        {
+            use crate::constants::{
+                shielded_tx_active_at_height, SHIELDED_TESTNET_ACTIVATION_HEIGHT as TACT,
+            };
+            // BELOW activation shielded is inactive and the shield-in is rejected
+            // at the activation gate, whatever the knob's value.
+            let below = TACT.saturating_sub(1).min(1_000_000_000);
+            assert!(
+                !shielded_tx_active_at_height(Testnet, below),
+                "testnet shielded must be inactive below its activation height"
+            );
+            assert!(
+                validate_transaction_for_network_ctx(&tx, &utxos, below, Testnet, false).is_err(),
+                "testnet below activation must reject the shield-in at the activation gate"
+            );
+            if TACT == u64::MAX {
+                // Placeholder (off): inactive at every reachable height.
+                assert!(
+                    !shielded_tx_active_at_height(Testnet, 1_000_000_000),
+                    "testnet shielded must stay inactive at every reachable height \
+                     while the activation knob is the u64::MAX placeholder"
+                );
+            } else {
+                // Finite rollout height set: the activation predicate is true at/
+                // above it. (Full shield-in ROUTING on testnet additionally needs
+                // the Option-B bridge / ShieldInPolicy — covered by the
+                // testnet-bridge tests, step d — so this asserts the gate only.)
+                assert!(
+                    shielded_tx_active_at_height(Testnet, TACT),
+                    "testnet shielded must be active at/after its activation height"
+                );
+            }
+        }
         // A malformed payload is rejected even on regtest at activation.
         tx.extra = vec![0xFFu8; 4];
         assert!(
@@ -5566,16 +5650,73 @@ mod tests {
 
     #[test]
     fn shielded_root_gate_requires_zero_while_inactive() {
-        // Testnet is permanently inactive (u64::MAX) in every build, so it
-        // exercises the "while inactive" gate stably.
+        // The root gate requires a zero spark-set root while shielded is INACTIVE,
+        // and permits any root once active. Driven by the testnet rollout knob so
+        // it holds both while the knob is the u64::MAX placeholder (off) and after
+        // a finite rollout height is set.
         use crate::config::NetworkType::Testnet as N;
-        // Zero root is always permitted.
+        use crate::constants::SHIELDED_TESTNET_ACTIVATION_HEIGHT as TACT;
+        // Zero root is always permitted, active or not.
         assert!(shielded_root_permitted(&[0u8; 32], N, 0));
         assert!(shielded_root_permitted(&[0u8; 32], N, 100_000));
-        // A non-zero root is rejected while shielded is inactive (the current,
-        // permanently-disabled state) — at genesis and at any height.
+        // A non-zero root is rejected at any height BELOW activation (genesis and
+        // just under the knob).
+        let below = TACT.saturating_sub(1).min(123_456);
         assert!(!shielded_root_permitted(&[1u8; 32], N, 0));
-        assert!(!shielded_root_permitted(&[9u8; 32], N, 123_456));
+        assert!(!shielded_root_permitted(&[9u8; 32], N, below));
+        // Once a finite rollout height is set, a non-zero shielded root is
+        // permitted at/after activation.
+        if TACT != u64::MAX {
+            assert!(shielded_root_permitted(&[9u8; 32], N, TACT));
+        }
+    }
+
+    /// The height-aware testnet bridge gate (CIP-011 / Option B). Pins the
+    /// `shield_bridge_enabled` testnet branch at its boundary WITHOUT flipping
+    /// the global activation constant: with the placeholder
+    /// `SHIELDED_TESTNET_ACTIVATION_HEIGHT == u64::MAX` the bridge is open
+    /// exactly at `u64::MAX` and shut one block below, which pins "activates at
+    /// the height, no retroactive bridge". The assertions are written against
+    /// the live constant, so they stay correct after the cutover sets a finite
+    /// height too. Feature-gated because the testnet branch and the regtest
+    /// bridge both compile only under the shielded verifier features.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn shield_bridge_enabled_testnet_activates_at_height_and_never_on_mainnet() {
+        use crate::config::NetworkType;
+        let act = crate::constants::shielded_activation_height(NetworkType::Testnet);
+
+        // Testnet: open exactly at the activation height, shut below it.
+        assert!(
+            shield_bridge_enabled(NetworkType::Testnet, act),
+            "testnet bridge must be open at the activation height"
+        );
+        if act > 0 {
+            assert!(
+                !shield_bridge_enabled(NetworkType::Testnet, act - 1),
+                "testnet bridge must be shut one block below the activation height"
+            );
+        }
+        assert!(
+            !shield_bridge_enabled(NetworkType::Testnet, 0),
+            "testnet bridge must be shut at genesis (no retroactive relaxation)"
+        );
+
+        // Mainnet NEVER bridges, even at u64::MAX (its own activation height):
+        // the testnet branch is scoped to Testnet and never coupled to mainnet.
+        assert!(
+            !shield_bridge_enabled(NetworkType::Mainnet, u64::MAX),
+            "mainnet must never open the shielded bridge"
+        );
+
+        // Regtest stays height-agnostic (governed by regtest_bridge_enabled), so
+        // the existing harness behavior is preserved under the new gate.
+        assert!(shield_bridge_enabled(NetworkType::Regtest, 0));
+        assert_eq!(
+            shield_bridge_enabled(NetworkType::Regtest, 0),
+            shield_bridge_enabled(NetworkType::Regtest, 123_456),
+            "regtest bridge gate must not depend on height"
+        );
     }
 
     // ── validate_transaction_basic granular gates ───────────────────────

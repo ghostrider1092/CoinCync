@@ -912,6 +912,25 @@ impl Blockchain {
         Ok(())
     }
 
+    /// Back-compat shim for height-agnostic callers (the regtest `#[cfg(test)]`
+    /// hooks, where the transparent↔shielded bridge is governed by
+    /// `regtest_bridge_enabled`, which is height-independent). Passes height `0`,
+    /// at which `shield_bridge_enabled` reduces to `regtest_bridge_enabled` on
+    /// EVERY network (the testnet branch needs `0 >= activation_height`, false
+    /// for `u64::MAX` and for any finite post-cutover height) — so this is
+    /// behaviorally identical to the pre-rollout gate for every such caller. The
+    /// production block-apply and reorg paths call
+    /// `verify_block_spark_v2_at_height` with the real block height. Compiled in
+    /// test builds only — every non-test caller passes the real block height, so
+    /// gating on `test` keeps the deploy binary free of an unused method.
+    #[cfg(all(test, feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    pub(crate) fn verify_block_spark_v2(
+        &self,
+        transactions: &[Transaction],
+    ) -> std::result::Result<(), String> {
+        self.verify_block_spark_v2_at_height(transactions, 0)
+    }
+
     /// v2 (libspark) store-aware spend verification — the pre-apply
     /// block-rejection check for `SparkPayload` v2 shielded txs (see
     /// `docs/design/cip-spark-block-format.md`). Skips v1 (native) shielded txs.
@@ -921,10 +940,18 @@ impl Blockchain {
     /// both `sketch-gk-proof` (the pool/payload types) and `libspark-ffi` (the
     /// real backend) — the only config where the libspark pool exists; inert and
     /// fail-closed otherwise. Returns `Err(reason)` to reject the block.
+    ///
+    /// `height` is the height of the block being verified; it drives the
+    /// height-aware `shield_bridge_enabled` gate for the public-testnet shielded
+    /// rollout (below the activation height the pure-shielded Option-A shape is
+    /// enforced; at/after it the shield-in/unshield bridge opens). The cross-veil
+    /// value-conservation binding (`verify_transparent_shielded_balance`) below
+    /// runs unconditionally regardless of the gate.
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-    pub(crate) fn verify_block_spark_v2(
+    pub(crate) fn verify_block_spark_v2_at_height(
         &self,
         transactions: &[Transaction],
+        height: u64,
     ) -> std::result::Result<(), String> {
         let store = match &self.spark_pool_store {
             Some(s) => s,
@@ -957,10 +984,13 @@ impl Blockchain {
             // the single source of truth shared with check_shielded_tx and the
             // mempool gate (validation::require_pure_shielded_shape); value_balance
             // == 0 is enforced here for the v2 payload.
-            // Pure-shielded Option-A gate — RELAXED only on the regtest test bridge
-            // (sketch-gk-proof + Regtest) so the harness can shield-in/unshield; the
-            // value bridge below still enforces conservation. Production always enforces.
-            if !crate::consensus::validation::regtest_bridge_enabled(self.network) {
+            // Pure-shielded Option-A gate — RELAXED on the regtest/beta test bridge
+            // (sketch-gk-proof + Regtest/Beta) so the harness can shield-in/unshield,
+            // and on the PUBLIC testnet at/after the activation height (height-aware
+            // shield_bridge_enabled). Below the height, and in every production build
+            // and on mainnet, it is always enforced. The value bridge below still
+            // enforces cross-veil conservation regardless.
+            if !crate::consensus::validation::shield_bridge_enabled(self.network, height) {
                 crate::consensus::validation::require_pure_shielded_shape(tx)
                     .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
                 if payload.value_balance != 0 {
@@ -2428,7 +2458,9 @@ impl Blockchain {
                     // (SparkPayload) against the SparkPoolStore. Inert unless both
                     // features are on and the pool store is initialized.
                     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                    if let Err(reason) = self.verify_block_spark_v2(&block.transactions) {
+                    if let Err(reason) = self
+                        .verify_block_spark_v2_at_height(&block.transactions, block.header.height.as_u64())
+                    {
                         tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
                         return Ok(BlockStatus::Invalid(reason));
                     }
@@ -3219,7 +3251,10 @@ impl Blockchain {
                         // Gated libspark v2 store-aware verification, mirroring
                         // the main path.
                         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                        if let Err(reason) = self.verify_block_spark_v2(&fork_block.transactions) {
+                        if let Err(reason) = self.verify_block_spark_v2_at_height(
+                            &fork_block.transactions,
+                            fork_block.header.height.as_u64(),
+                        ) {
                             reorg_error = Some(format!(
                                 "spark v2 spend invalid in fork block at height {}: {}",
                                 fork_block.header.height, reason
@@ -3425,7 +3460,9 @@ impl Blockchain {
                     }
                     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
                     if reorg_error.is_none() {
-                        if let Err(reason) = self.verify_block_spark_v2(&block.transactions) {
+                        if let Err(reason) = self
+                            .verify_block_spark_v2_at_height(&block.transactions, block.header.height.as_u64())
+                        {
                             reorg_error = Some(format!(
                                 "spark v2 spend invalid in reorg tip block: {}",
                                 reason
