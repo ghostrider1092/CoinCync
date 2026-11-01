@@ -9,7 +9,11 @@ days), **L** (two to five days), **XL** (more than a week).
 
 ---
 
-## Most recently shipped — v1.0.9-testnet-pre-audit
+## Most recently shipped — v1.1.0-testnet (shielded bridge activation)
+
+The `v1.1.0-testnet` pre-release is tagged and binaries are published at <https://github.com/ghostrider1092/CoinCync/releases/tag/v1.1.0-testnet> (signed `SHA256SUMS`, reproducible from the tag). **Coordinated testnet hard fork:** the Option-B shielded (Lelantus Spark) bridge — shield-in / shielded-send / unshield — activates on the public testnet at **block 29,000** (`SHIELDED_TESTNET_ACTIVATION_HEIGHT` flipped `u64::MAX → 29_000`). Below 29,000 the node is byte-identical to the prior testnet build; operators must upgrade before 29,000 or fork off at activation. This is a **pre-audit** testnet activation — the shielded pool is exercised live ahead of the security audit, per the audit firm's request. Testnet consensus fingerprint `fc428e86…`. Mainnet remains parked (shielded off) pending audit + counsel review.
+
+## Previously shipped — v1.0.9-testnet-pre-audit
 
 The v1.0.9 release is tagged and binaries are published at <https://github.com/ghostrider1092/CoinCync/releases/tag/v1.0.9-testnet-pre-audit>. Non-consensus, audit-prep-focused cut. **No protocol break** — operators upgrade at their own pace. Headline content:
 
