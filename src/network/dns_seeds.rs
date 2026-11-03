@@ -161,6 +161,10 @@ pub const TESTNET_FALLBACK: &[&str] = &[
     "89.167.93.52:28080", // hel4 — Hetzner (EU, Helsinki) — relay
     "2.31.63.25:28080",  // nbg1 — Hetzner (DE, Nuremberg) — relay
     "5.161.214.98:28080", // ash1 — Hetzner (US, Ashburn) — relay
+    // 2026-11-01: hil1 (Hillsboro, OR US-West) — dedicated full-mode miner +
+    // P2P relay added behind the shielded cutover. Owned Hetzner box → baked
+    // in. Kept in sync with testnet::TESTNET_SEED_NODES + scripts/fleet-config.json.
+    "5.78.221.28:28080", // hil1 — Hetzner (US, Hillsboro) — relay+miner
 ];
 
 // NOTE (2026-08-16 dead-code sweep): removed `resolve_seeds`,
