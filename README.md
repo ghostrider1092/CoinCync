@@ -161,8 +161,8 @@ finalized before genesis.
 |---|---|---|---|---|
 | Testnet | 13,000 | — | Hard-fork rules activation | v1.0.12 |
 | Testnet | 29,000 | — | Shielded (Lelantus Spark) bridge activation — shield-in / shielded-send / unshield | v1.1.0-testnet |
-| Testnet | 50,000 | — | CIP-011 rolling soft-finality (behind `rolling-finality`) | TBD |
-| Mainnet | genesis | 2027-03-01 (target) | Genesis; full ruleset from block 0 | TBD |
+| Testnet | TBD | — | CIP-011 rolling soft-finality (behind `rolling-finality`) — deferred until after mainnet; enabled later by scheduled activation | TBD |
+| Mainnet | genesis | 2027-03-01 (target) | Genesis — audited transparent ring-privacy core. Shielded pool and rolling finality enabled post-genesis via scheduled activations, after audit | TBD |
 
 Values marked TBD/— are not finalized as of this revision.
 
