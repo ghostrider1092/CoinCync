@@ -81,6 +81,11 @@ pub const TESTNET_SEED_NODES: &[&str] = &[
     "89.167.93.52:28080", // hel4 — Hetzner (EU, Helsinki) — relay
     "2.31.63.25:28080",  // nbg1 — Hetzner (DE, Nuremberg) — relay
     "5.161.214.98:28080", // ash1 — Hetzner (US, Ashburn) — relay
+    // 2026-11-01: appended hil1 (Hillsboro, OR US-West) — a dedicated
+    // full-mode miner + P2P relay added behind the shielded cutover. Owned
+    // Hetzner box, so it is baked in like the other relays (community/home
+    // nodes stay DNS-only). Kept in sync with TESTNET_FALLBACK + fleet-config.
+    "5.78.221.28:28080", // hil1 — Hetzner (US, Hillsboro) — relay+miner
 ];
 
 pub const TESTNET_MIN_RING_SIZE: usize = 11;
