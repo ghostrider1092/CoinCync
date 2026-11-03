@@ -1,6 +1,6 @@
 {
   "_description": "Single source of truth for the CoinCync testnet fleet topology. Every node in `nodes` has every other node added to its --addnode dial list via scripts/render-systemd-unit.sh + scripts/sync-fleet-config.sh. When a node is added, removed, or has its IP changed: (1) edit this file, (2) keep TESTNET_SEED_NODES (src/testnet.rs) and TESTNET_FALLBACK (src/network/dns_seeds.rs) in sync with the seed/relay-role entries here, (3) run scripts/sync-fleet-config.sh, (4) verify every node converges. See docs/operations/fleet-config.md for the runbook.",
-  "_last_changed": "2026-10-10 (later) — went GLOBAL: deleted hel5 (89.167.113.125, to free a Hetzner slot) and added two out-of-Helsinki relays for geo/jurisdiction diversity — nbg1 (2.31.63.25, Nuremberg DE) and ash1 (5.161.214.98, Ashburn VA US-East). Backbone is now seed hel1 (2.29.34.197) + relays hel2 (37.27.185.37), hel3 (77.42.64.199), hel4 (89.167.93.52), nbg1, ash1 — 4 countries (FI/DE/US), all on the 3217ec6d binary (fingerprint d312f6ee…), cross-connected. The rig 62.238.121.186 stays non-P2P (mines via rpc-tunnel-37 to hel2). First community node arrived: 89.34.25.42 (tester-operated, see community_seeds) — verified reachable + canonical, DNS-seed eligible. TODO: add seed*.coincync.network records across regions; optionally sync TESTNET_SEED_NODES/TESTNET_FALLBACK with a couple owned relays (locked files → rebuild+redeploy). Earlier 2026-10-10: re-provisioned from a single stuck seed to a 5-box Helsinki mesh. Prior 2026-09-07: migrated seed CPX22 2.28.1.75 (OOM) → CPX32 2.29.34.197.",
+  "_last_changed": "2026-11-01 — added hil1 (5.78.221.28, Hillsboro OR US-West, CCX13 2vCPU/8GB) as the 2nd FULL-mode miner (~400 H/s) + relay node behind the shielded cutover; non-seed, mesh via addnode only (no seed-list/code change). Earlier: 2026-10-10 (later) — went GLOBAL: deleted hel5 (89.167.113.125, to free a Hetzner slot) and added two out-of-Helsinki relays for geo/jurisdiction diversity — nbg1 (2.31.63.25, Nuremberg DE) and ash1 (5.161.214.98, Ashburn VA US-East). Backbone is now seed hel1 (2.29.34.197) + relays hel2 (37.27.185.37), hel3 (77.42.64.199), hel4 (89.167.93.52), nbg1, ash1 — 4 countries (FI/DE/US), all on the 3217ec6d binary (fingerprint d312f6ee…), cross-connected. The rig 62.238.121.186 stays non-P2P (mines via rpc-tunnel-37 to hel2). First community node arrived: 89.34.25.42 (tester-operated, see community_seeds) — verified reachable + canonical, DNS-seed eligible. TODO: add seed*.coincync.network records across regions; optionally sync TESTNET_SEED_NODES/TESTNET_FALLBACK with a couple owned relays (locked files → rebuild+redeploy). Earlier 2026-10-10: re-provisioned from a single stuck seed to a 5-box Helsinki mesh. Prior 2026-09-07: migrated seed CPX22 2.28.1.75 (OOM) → CPX32 2.29.34.197.",
   "network": "testnet",
   "p2p_port": 28080,
   "rpc_port": 28081,
@@ -44,6 +44,12 @@
       "rpc_bind": "127.0.0.1",
       "role": "relay",
       "notes": "Hetzner Ashburn, VA US-East (ash) CPX11 (2 GB) — public relay. Added 2026-10-10 for Americas coverage + the transatlantic bridge to the EU backbone. RPC loopback-only."
+    },
+    "hil1": {
+      "ip": "5.78.221.28",
+      "rpc_bind": "127.0.0.1",
+      "role": "relay",
+      "notes": "Hetzner Hillsboro, OR US-West (hil) CCX13 (2 dedicated vCPU / 8 GB / 80 GB). Added 2026-11-01 as the second FULL-mode miner (separate coincync-rig process, ~400 H/s, 1 thread) + a full P2P relay node, to add real hashrate behind the shielded cutover. Node runs light-RandomX; the co-located rig runs full-RandomX. RPC loopback-only. Non-seed (not in TESTNET_SEED_NODES/FALLBACK)."
     }
   },
   "community_seeds": {
