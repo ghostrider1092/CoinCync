@@ -115,6 +115,10 @@ features_table() {
     f && /^[a-zA-Z0-9_-]+[ ]*=/ {
       name=$1;
       line=$0; sub(/^[^=]*=[ ]*/,"",line);
+      while (line ~ /\[/ && line !~ /\]/ && (getline nxt) > 0) {
+        sub(/^[ \t]+/,"",nxt); line=line " " nxt
+      }
+      gsub(/\[ /,"[",line); gsub(/, \]/,"]",line);
       printf "| `%s` | `%s` |\n", name, line
     }
   ' Cargo.toml
@@ -124,7 +128,7 @@ features_table() {
 bins_list() {
   echo "- \`coincync-node\`, \`coincync-wallet\` (root package bins)"
   echo "- root helper bins: $(ls src/bin/*.rs 2>/dev/null | sed 's#.*/##; s/\.rs$//' | grep -v '^wallet$\|^node$' | sed 's/^/`/; s/$/`/' | paste -sd',' - | sed 's/,/, /g')"
-  echo "- workspace crates (\`-p <name>\`): $(ls crates 2>/dev/null | sed 's/^/`/; s/$/`/' | paste -sd',' - | sed 's/,/, /g')"
+  echo "- workspace crates (\`-p <name>\`): $(awk '/^members/{f=1} f{print} f&&/\]/{exit}' Cargo.toml | grep -o '"crates/[^"]*"' | sed 's#"crates/##; s#"$##; s/^/`/; s/$/`/' | paste -sd',' - | sed 's/,/, /g')"
 }
 
 # ── write the doc ────────────────────────────────────────────────────────────
@@ -166,7 +170,7 @@ GATED_FEATURES = $GATED_FEATURES
 ### Canonical recipes
 
 \`\`\`bash
-# Standard release build (ring-privacy chain, shielded OFF)
+# Standard release build (testnet pulls in sketch-gk-proof + libspark-ffi, so it needs SPARK_OPENSSL_DIR)
 cargo build --release --features "randomx testnet"
 
 # Gated CORRECTNESS suite — the 2400/0 bar. NEVER with test-fast-pow.

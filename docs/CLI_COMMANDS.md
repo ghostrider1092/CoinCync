@@ -1076,7 +1076,7 @@ GATED_FEATURES = testnet fuse block-integrity-breaker supply-breaker shielded-br
 ### Canonical recipes
 
 ```bash
-# Standard release build (ring-privacy chain, shielded OFF)
+# Standard release build (testnet pulls in sketch-gk-proof + libspark-ffi, so it needs SPARK_OPENSSL_DIR)
 cargo build --release --features "randomx testnet"
 
 # Gated CORRECTNESS suite — the 2400/0 bar. NEVER with test-fast-pow.
@@ -1110,14 +1110,14 @@ scripts/gen-cli-docs.sh --build    # build gated binaries first (NOT during a so
 
 - `coincync-node`, `coincync-wallet` (root package bins)
 - root helper bins: `bootstrap_manifest_tool`, `coincync-tick`, `diag`, `release_attest`, `sign_snapshot`, `stratum_ban_tool`, `update_critical_hashes`
-- workspace crates (`-p <name>`): `auxpow`, `bridge`, `coincync-dbg`, `coincync-faucet`, `coincync-frost-coordinator`, `coincync-rig`, `coincync-rolling-finality`, `coincync-swap`, `cynchub`, `cytop`, `orchard-side`, `spark-connector`, `tick`
+- workspace crates (`-p <name>`): `bridge`, `coincync-dbg`, `coincync-rig`, `coincync-swap`, `coincync-frost-coordinator`, `coincync-rolling-finality`, `cytop`, `spark-connector`, `tick`
 
 ### Feature flags (root `Cargo.toml`)
 
 | Feature | Definition |
 | --- | --- |
 | `default` | `["randomx"]` |
-| `testnet` | `["randomx"]` |
+| `testnet` | `["randomx", "sketch-gk-proof", "libspark-ffi"]` |
 | `mainnet` | `["randomx"]` |
 | `randomx` | `["randomx-rs"]` |
 | `metrics` | `[]` |
@@ -1148,4 +1148,4 @@ scripts/gen-cli-docs.sh --build    # build gated binaries first (NOT during a so
 | `breaker-recovery` | `[]` |
 | `regtest-chaos` | `["breaker-recovery"]` |
 | `state-root-commit` | `[]` |
-| `fuse` | `[` |
+| `fuse` | `["breaker-recovery", "mempool-breaker", "p2p-breaker", "supply-breaker", "reorg-breaker", "rpc-breaker", "shielded-breaker", "block-integrity-breaker"]` |
