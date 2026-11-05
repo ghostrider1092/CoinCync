@@ -41,7 +41,7 @@ use crate::{Error, Result};
 /// yet per-session: binding a unique swap-session id (full replay resistance,
 /// #331's session-context item) needs the coordinator to thread an agreed id
 /// through both sides — a follow-up on top of this criticals fix.
-const PRE_LOCK_DLEQ_CONTEXT: &[u8] = b"coincync-swap pre-cync-lock v2";
+pub const PRE_LOCK_DLEQ_CONTEXT: &str = "coincync-swap pre-cync-lock v2";
 
 const EVIDENCE_VERSION: u8 = 1;
 const NUMS_DOMAIN: &[u8] = b"CoinCync/Swap/Taproot-NUMS-v1";
@@ -722,7 +722,8 @@ fn verify_share_binding(evidence: &ShareBindingEvidence) -> Result<([u8; 33], [u
     let proof_bytes = hex::decode(&evidence.strict_dleq_proof_hex)
         .map_err(|_| Error::Verification("cross-curve DLEQ proof is not valid hex"))?;
     let proof = CrossCurveProof::from_bytes(&proof_bytes)?;
-    let statement = CrossCurveStatement::new(&btc_point, &cync_point, PRE_LOCK_DLEQ_CONTEXT)?;
+    let statement =
+        CrossCurveStatement::new(&btc_point, &cync_point, PRE_LOCK_DLEQ_CONTEXT.as_bytes())?;
     verify(&proof, &statement)?;
     Ok((btc_point, cync_point))
 }
@@ -1017,7 +1018,8 @@ mod tests {
         // no longer seeds the proof; distinct `value`s still give distinct proofs.
         let _ = seed_byte;
         let statement =
-            CrossCurveStatement::new(&btc_point, &cync_point, PRE_LOCK_DLEQ_CONTEXT).unwrap();
+            CrossCurveStatement::new(&btc_point, &cync_point, PRE_LOCK_DLEQ_CONTEXT.as_bytes())
+                .unwrap();
         let proof = prove(&secret, &statement, &mut rand::rngs::OsRng).unwrap();
         (
             secret,
