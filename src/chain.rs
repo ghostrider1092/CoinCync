@@ -1068,6 +1068,16 @@ impl Blockchain {
                     "spark v2 tx {idx}: shield-in requires an authenticated mint bundle"
                 ));
             }
+            // And a payload with NEITHER a mint nor a spend has nothing behind its
+            // value_balance at all: the turnstile would move pool value across the
+            // veil with no spend proof and no mint bundle. The mempool's structural
+            // gate already rejects the shape; this gate is the authoritative one.
+            if payload.mint.is_none() && payload.spend.is_none() {
+                return Err(format!(
+                    "spark v2 tx {idx}: a payload must carry a mint or a spend (neither \
+                     leaves value_balance backed by nothing)"
+                ));
+            }
             // Authenticated shield-in: the minted coins' total value proof must
             // equal the value entering the pool (−value_balance). Together with
             // the bridge above this fully conserves value across the veil.
@@ -7379,5 +7389,85 @@ mod tests {
             assert!(got.contains(w), "missing an orphaned non-coinbase tx");
         }
         assert_eq!(chain.tip_hash(), genesis_hash, "tip reset to genesis");
+    }
+
+    /// A v2 payload with neither a mint nor a spend has nothing behind its
+    /// value_balance. The mempool's structural gate refuses the shape, but a
+    /// miner never goes through the mempool, so the block gate has to refuse it
+    /// as well: before this check it accepted the tx, took value_balance out of
+    /// the pool and let batch_from_block create a transparent output for it.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn payload_without_mint_or_spend_is_rejected_at_the_block_gate() {
+        use crate::consensus::spark_payload::build::build_mint_payload;
+        use crate::consensus::spark_payload::{SparkPayload, SPARK_PAYLOAD_VERSION};
+        use crate::consensus::validation::validate_transaction_basic;
+        use crate::crypto::{BlindingFactor, PedersenCommitment};
+        use crate::primitives::PublicKey;
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxOutput, TxType};
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new_with_network(NetworkType::Regtest);
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+
+        let mk = |outputs: Vec<TxOutput>, fee: u64, extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs,
+            fee: crate::primitives::Amount::from_atomic(fee),
+            range_proof: vec![],
+            extra,
+        };
+        let values: Vec<u64> = (0..8u64).map(|i| 5_000_000_000 + i).collect();
+        let (mint_payload, _ctx) =
+            build_mint_payload(b"no-mint-no-spend-seed", &values, &[]).unwrap();
+        chain.apply_spark_v2_txs(
+            std::slice::from_ref(&mk(vec![], 0, mint_payload.encode())),
+            1,
+        );
+        let pool_before = store.pool_value();
+
+        let point = |b: u8| {
+            PublicKey::from_bytes(
+                PedersenCommitment::commit(u64::from(b) + 1, &BlindingFactor::from_bytes([b; 32]))
+                    .to_bytes(),
+            )
+        };
+        // Claims 3 CYNC leave the pool, revealed with zero blinding, backed by nothing.
+        let claimed: u64 = 3_000_000_000;
+        let extra = SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![],
+            spend: None,
+            value_balance: claimed as i64,
+        }
+        .encode();
+        let draft = mk(vec![], 0, extra.clone());
+        let fee = (draft.size() as u64 + 200) * crate::constants::MIN_FEE_PER_BYTE;
+        let paid = claimed - fee;
+        let crafted = mk(
+            vec![TxOutput {
+                stealth_address: point(3),
+                tx_public_key: point(4),
+                commitment: PedersenCommitment::commit(paid, &BlindingFactor::zero()).to_bytes(),
+                encrypted_amount: paid.to_le_bytes().to_vec(),
+                view_tag: 0,
+                lock_height: None,
+                encrypted_memo: vec![],
+            }],
+            fee,
+            extra,
+        );
+
+        assert!(validate_transaction_basic(&crafted).is_err());
+        let err = chain
+            .verify_block_spark_v2(std::slice::from_ref(&crafted))
+            .unwrap_err();
+        assert!(err.contains("must carry a mint or a spend"), "{err}");
+        assert_eq!(store.pool_value(), pool_before);
     }
 }
