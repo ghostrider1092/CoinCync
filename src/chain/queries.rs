@@ -124,6 +124,22 @@ impl Blockchain {
         )
     }
 
+    /// The store-aware checks the block gate runs on a shielded tx, against the
+    /// pool as it stands for the next block. Mempool admission runs this so a
+    /// tx the gate would refuse (spent tag, unknown cover set, bad proof, mint
+    /// already in the pool) never reaches a template.
+    pub fn check_shielded_minable(&self, tx: &Transaction) -> Result<()> {
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        if tx.is_shielded() {
+            let next = self.height() + 1;
+            return self
+                .verify_block_spark_v2_at_height(std::slice::from_ref(tx), next)
+                .map_err(crate::error::Error::InvalidTransaction);
+        }
+        let _ = tx;
+        Ok(())
+    }
+
     /// Get current difficulty
     pub fn difficulty(&self) -> u128 {
         self.inner.read().tip.difficulty
