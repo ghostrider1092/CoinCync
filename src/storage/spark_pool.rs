@@ -546,7 +546,7 @@ impl SparkPoolStore {
     /// Mark a reorg checkpoint for the block at `height`, taken BEFORE its coins
     /// and tags are applied. Capped at `MAX_CHECKPOINTS` (oldest dropped past
     /// the cap), matching the sibling stores.
-    pub fn checkpoint_at_height(&self, height: u64) {
+    pub fn checkpoint_at_height(&self, height: u64) -> bool {
         let coins_len = self.coins.read().len();
         let pool_value = *self.pool_value.read();
         // Session-local stack (in-memory), like the sibling Phase-2 stores — NOT
@@ -559,6 +559,9 @@ impl SparkPoolStore {
         if cps.len() > MAX_CHECKPOINTS {
             cps.remove(0);
         }
+        // Phase-2 lock-step: this store always takes a boundary per block. Ack
+        // it so the shared driver can enforce every store did.
+        true
     }
 
     /// Number of reorg checkpoints currently held.
@@ -676,7 +679,7 @@ impl crate::storage::phase2::Phase2Store for SparkPoolStore {
     fn store_label(&self) -> &'static str {
         "spark_pool"
     }
-    fn checkpoint_at_height(&self, height: u64) {
+    fn checkpoint_at_height(&self, height: u64) -> bool {
         self.checkpoint_at_height(height)
     }
     fn checkpoint_count(&self) -> usize {

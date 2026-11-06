@@ -1347,21 +1347,22 @@ impl Blockchain {
     }
 
     fn checkpoint_phase2_stores(&self, height: u64) {
-        // One shared driver checkpoints every initialized store in lock-step and
-        // returns the cross-store agreement status. The invariant stays a
-        // `debug_assert!` (dead in release): in production the only way it can
-        // fire is a programming bug — a store silently no-op'ing its checkpoint
-        // (e.g. a BridgeTree-declined non-monotonic height, warned in
-        // storage::shielded) or a new store added without going through this
-        // driver. Catching it at the moment of divergence keeps the bug class
-        // shallow. Empty/single-store windows (pre-activation) agree trivially.
+        // One shared driver takes a reorg boundary on every initialized store
+        // in lock-step (one boundary per block — even an empty store records
+        // one) and returns the cross-store agreement status. The only way it
+        // can fail is a programming bug: a store that declines its boundary, or
+        // a new store added without going through this driver. Empty/single-
+        // store windows (pre-activation) agree trivially.
         let stores = self.phase2_stores();
-        let status = crate::storage::phase2::checkpoint_all(&stores, height);
-        #[cfg(debug_assertions)]
-        if let Err(diagnostic) = status {
-            debug_assert!(false, "{diagnostic}");
+        // Fail CLOSED in EVERY build. This was a debug-only `debug_assert!`,
+        // invisible in release — the chaos run's `[shielded=1 … spark_pool=205]`
+        // divergence would have gone unnoticed on a production node. A Phase-2
+        // lock-step violation means a reorg would unwind the accumulator stores
+        // to different heights and diverge consensus state; halting is the only
+        // safe response, matching `apply_spark_v2_txs`'s CONSENSUS FAULT policy.
+        if let Err(diagnostic) = crate::storage::phase2::checkpoint_all(&stores, height) {
+            panic!("CONSENSUS FAULT: {diagnostic} Halting at height {height}.");
         }
-        let _ = status;
     }
 
     /// Rewind every initialized Phase-2 store by one checkpoint — i.e.

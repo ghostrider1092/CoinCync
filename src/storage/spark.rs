@@ -296,7 +296,7 @@ impl SparkStore {
     /// `ShieldedStore` forces (its native `rewind` reverts to the most
     /// recent checkpoint mark); `SparkStore` and `KernelStore` follow
     /// the same contract so the three stores rewind uniformly.
-    pub fn checkpoint_at_height(&self, height: u64) {
+    pub fn checkpoint_at_height(&self, height: u64) -> bool {
         let coins_len = self.coins.read().len();
         let mut cps = self.checkpoints.write();
         // INVARIANT (advisory): in production, heights are strictly
@@ -352,6 +352,9 @@ impl SparkStore {
         // assertion that catches any off-by-one in MAX_REORG_CHECKPOINTS
         // logic (e.g., `>` vs `>=` slip).
         debug_assert!(cps.len() <= MAX_REORG_CHECKPOINTS);
+        // Phase-2 lock-step: this store always takes a boundary per block. Ack
+        // it so the shared driver can enforce every store did.
+        true
     }
 
     /// Number of checkpoints currently in the rollback stack. Used by

@@ -23,7 +23,11 @@ pub trait Phase2Store: Send + Sync {
     /// Short name for diagnostics (`"shielded"`, `"spark"`, `"kernel"`).
     fn store_label(&self) -> &'static str;
     /// Take a reorg checkpoint for the block about to be applied at `height`.
-    fn checkpoint_at_height(&self, height: u64);
+    /// Returns whether a reorg boundary was taken. Under the one-boundary-per-
+    /// block rule every correct store returns `true` every block (even when its
+    /// accumulator is empty/unchanged); `false` is a decline the shared driver
+    /// ([`checkpoint_all`]) treats as a lock-step violation and rolls back.
+    fn checkpoint_at_height(&self, height: u64) -> bool;
     /// Depth of the reorg checkpoint stack (the lock-step quantity).
     fn checkpoint_count(&self) -> usize;
     /// Disconnect one block; `false` iff the checkpoint stack was empty.
@@ -55,7 +59,7 @@ impl Phase2Store for ShieldedStore {
     fn store_label(&self) -> &'static str {
         "shielded"
     }
-    fn checkpoint_at_height(&self, height: u64) {
+    fn checkpoint_at_height(&self, height: u64) -> bool {
         self.checkpoint_at_height(height)
     }
     fn checkpoint_count(&self) -> usize {
@@ -76,7 +80,7 @@ impl Phase2Store for SparkStore {
     fn store_label(&self) -> &'static str {
         "spark"
     }
-    fn checkpoint_at_height(&self, height: u64) {
+    fn checkpoint_at_height(&self, height: u64) -> bool {
         self.checkpoint_at_height(height)
     }
     fn checkpoint_count(&self) -> usize {
@@ -102,7 +106,7 @@ impl Phase2Store for KernelStore {
     fn store_label(&self) -> &'static str {
         "kernel"
     }
-    fn checkpoint_at_height(&self, height: u64) {
+    fn checkpoint_at_height(&self, height: u64) -> bool {
         self.checkpoint_at_height(height)
     }
     fn checkpoint_count(&self) -> usize {
@@ -132,9 +136,32 @@ impl Phase2Store for KernelStore {
 /// (chain.rs keeps the historical `debug_assert!` on this result). Passing fewer
 /// than two stores trivially agrees — the lock-step property is vacuous.
 pub fn checkpoint_all(stores: &[&dyn Phase2Store], height: u64) -> Result<usize, String> {
-    for s in stores {
-        s.checkpoint_at_height(height);
+    // One-boundary-per-block (Policy A): every store must take a reorg boundary
+    // for this block. A store that declines (ack = false) would fall behind its
+    // siblings' checkpoint depth, so a later reorg would unwind the stores to
+    // different heights. Fail CLOSED: roll back the boundaries already taken
+    // this block so no partial checkpoint survives, then return the divergence.
+    for (i, s) in stores.iter().enumerate() {
+        if !s.checkpoint_at_height(height) {
+            // Undo the stores that already took the boundary (process order).
+            for done in &stores[..i] {
+                done.rewind();
+            }
+            let taken: Vec<&str> = stores[..i].iter().map(|s| s.store_label()).collect();
+            return Err(format!(
+                "Phase-2 stores diverged at height {height}: store '{}' declined its \
+                 checkpoint while [{}] had already taken the boundary — rolled back to \
+                 keep the stores in lock-step. Every store must take one reorg boundary \
+                 per block; a decline means one silently skipped (a BridgeTree with no \
+                 append since its last checkpoint that failed to record a boundary, or a \
+                 code path that bypassed the shared checkpoint driver). A reorg from a \
+                 partial checkpoint would unwind the stores unevenly.",
+                s.store_label(),
+                taken.join(" ")
+            ));
+        }
     }
+    // Belt-and-suspenders: with every store acking, depths must now agree.
     check_lockstep(stores, height)
 }
 
@@ -370,13 +397,14 @@ mod tests {
         fn store_label(&self) -> &'static str {
             self.label
         }
-        fn checkpoint_at_height(&self, _height: u64) {
+        fn checkpoint_at_height(&self, _height: u64) -> bool {
             let mut skip = self.skip_next_checkpoint.lock();
             if *skip {
                 *skip = false;
-                return; // simulate a declined checkpoint → desync
+                return false; // simulate a store that declines its boundary
             }
             self.stack.lock().push(self.elements.load(Ordering::Relaxed));
+            true
         }
         fn checkpoint_count(&self) -> usize {
             self.stack.lock().len()
@@ -420,14 +448,34 @@ mod tests {
     }
 
     #[test]
-    fn check_lockstep_detects_a_skipped_checkpoint() {
+    fn checkpoint_all_fails_closed_and_rolls_back_a_declined_checkpoint() {
         let a = MockStore::new("a");
         let b = MockStore::new("b");
-        *b.skip_next_checkpoint.lock() = true; // b will silently decline once
+        *b.skip_next_checkpoint.lock() = true; // b will decline its boundary once
         let stores: [&dyn Phase2Store; 2] = [&a, &b];
         let err = checkpoint_all(&stores, 1).unwrap_err();
         assert!(err.contains("diverged"), "got: {err}");
-        assert!(err.contains("a=1") && err.contains("b=0"), "names both depths: {err}");
+        assert!(err.contains("'b' declined"), "names the declining store: {err}");
+        // `a` took the boundary before `b` declined; the driver must have rolled
+        // `a` back so no partial checkpoint survives this block.
+        assert_eq!(a.checkpoint_count(), 0, "a rolled back after b declined");
+        assert_eq!(b.checkpoint_count(), 0, "b never checkpointed");
+    }
+
+    #[test]
+    fn checkpoint_all_keeps_an_unchanging_store_in_lockstep() {
+        // Policy A in the driver: a store whose accumulator never changes (its
+        // mock stack still pushes a boundary each block — the real analogue is
+        // an empty ShieldedStore) stays in lock-step with an advancing store.
+        let advancing = MockStore::new("advancing");
+        let idle = MockStore::new("idle"); // never add_element — stays empty
+        let stores: [&dyn Phase2Store; 2] = [&advancing, &idle];
+        for h in 1..=205u64 {
+            advancing.add_element();
+            let depth = checkpoint_all(&stores, h).expect("stores stay in lock-step");
+            assert_eq!(depth, h as usize);
+        }
+        assert_eq!(advancing.checkpoint_count(), idle.checkpoint_count());
     }
 
     #[test]
@@ -544,7 +592,7 @@ mod tests {
         struct NoRecompute;
         impl Phase2Store for NoRecompute {
             fn store_label(&self) -> &'static str { "no-recompute" }
-            fn checkpoint_at_height(&self, _h: u64) {}
+            fn checkpoint_at_height(&self, _h: u64) -> bool { true }
             fn checkpoint_count(&self) -> usize { 0 }
             fn rewind(&self) -> bool { false }
             fn element_count(&self) -> usize { 0 }

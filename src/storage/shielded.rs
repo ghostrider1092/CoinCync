@@ -89,14 +89,21 @@
 //!   persistence gap diverges the replayed tree from the committed anchor after
 //!   restart. TESTS: (gap — needs a fault-injecting `shim::Tree` to exercise the
 //!   panic path).
-//! - **§3 `checkpoint_at_height` (two-stack lock-step)** — INVARIANT: the
-//!   side-table checkpoint is pushed ONLY if the BridgeTree accepted its own
-//!   checkpoint (`tree_checkpointed` gate), both are held under one guard, and
-//!   both cap at `MAX_CHECKPOINTS` (1000, covering testnet max_reorg_depth); a
-//!   non-monotonic id is declined by both. THREAT: **R-65** — the two stacks
-//!   desync so `rewind` rolls the side tables to a boundary the tree never
-//!   reverts to. TESTS: `checkpoint_stack_cap_keeps_tree_and_side_tables_synced`,
-//!   `non_monotonic_checkpoint_id_does_not_desync`.
+//! - **§3 `checkpoint_at_height` (one boundary per block, Phase-2 lock-step)** —
+//!   INVARIANT: a side-table boundary is pushed EVERY block (so this store's
+//!   checkpoint depth advances in lock-step with its sibling Phase-2 stores,
+//!   which push unconditionally — a cross-store reorg would otherwise unwind
+//!   them to different heights); each boundary is tagged `tree_checkpointed`
+//!   with whether the BridgeTree also advanced (it declines when nothing was
+//!   appended since its last checkpoint, or on a non-monotonic id). The push
+//!   and the tree checkpoint are held under one guard, and the side-table caps
+//!   at `MAX_CHECKPOINTS` (1000, covering testnet max_reorg_depth). `rewind`
+//!   rewinds the tree ONLY for a boundary whose `tree_checkpointed` is true.
+//!   THREAT: **R-65** — a boundary rolls the side tables to a point the tree
+//!   never reverts to (or vice-versa); the per-boundary tag closes it. TESTS:
+//!   `checkpoint_stack_cap_keeps_tree_and_side_tables_synced`,
+//!   `non_monotonic_checkpoint_id_does_not_desync`,
+//!   `empty_store_still_boundaries_every_block`.
 //! - **§4 `rewind` (drops entries + nullifiers + persistence, not just the
 //!   tree)** — INVARIANT: a rewind pops the side-table checkpoint, rewinds the
 //!   BridgeTree, drops entries at positions `>= entries_len`, drops nullifiers
@@ -225,6 +232,16 @@ struct ShieldedPersistence {
 struct ShieldedCheckpoint {
     height: u64,
     entries_len: usize,
+    /// Whether this boundary also created a `BridgeTree` internal checkpoint.
+    /// Under the one-boundary-per-block rule (Phase-2 lock-step), an
+    /// empty/unchanged tree still records a side-table boundary so the four
+    /// Phase-2 stores advance their checkpoint depth uniformly — but with
+    /// `tree_checkpointed = false`, because `BridgeTree::checkpoint` declines
+    /// when nothing was appended since its last checkpoint. `rewind` then pops
+    /// the boundary and rolls the side tables but skips the tree rewind (there
+    /// is nothing to revert), keeping the side-table stack and the tree's
+    /// internal stack mutually consistent.
+    tree_checkpointed: bool,
 }
 
 /// Persistent store for the shielded pool.
@@ -391,57 +408,44 @@ impl ShieldedStore {
     /// capped at `MAX_CHECKPOINTS`: the `BridgeTree` drops its oldest
     /// checkpoint past the cap, so the parallel stack drops its oldest
     /// too, keeping the depths aligned.
-    pub fn checkpoint_at_height(&self, height: u64) {
+    pub fn checkpoint_at_height(&self, height: u64) -> bool {
         let entries_len = self.entries.read().len();
 
-        // Checkpoint the BridgeTree FIRST and only push the parallel
-        // side-table checkpoint if the tree actually created one.
-        // `BridgeTree::checkpoint` returns `false` when it declines —
-        // notably for a non-monotonic checkpoint id. Pushing the
-        // parallel checkpoint unconditionally (the earlier behaviour)
-        // would silently desync the two stacks the moment that
-        // happened, and `rewind` would then roll the side tables to a
-        // boundary the tree never reverts to. Gating the push on the
-        // tree's own decision keeps the two stacks in lock-step by
-        // construction.
-        // AUDIT (R-65 note, 2026-07-03): the pre-fix pattern here IS
-        // the exact bug the struct doc claims to fix: two-phase
-        // checkpoint where the BridgeTree checkpoint AND the side-
-        // table push must land together, but nothing binds them into
-        // a single atomic op. A panic between the `tree.checkpoint(...)`
-        // return and the `cps.push(...)` acquire+push at L308-309
-        // (e.g. an OOM allocating the Vec growth, or another thread
-        // panicking while holding a lock the current thread is about
-        // to acquire) leaves the two stacks desynchronised: the tree
-        // has a checkpoint the side-table doesn't know about, and
-        // rewind() would then roll the side-table to a boundary the
-        // tree can't revert to.
+        // PHASE-2 LOCK-STEP (one boundary per block): record a side-table
+        // boundary EVERY block, and remember whether the BridgeTree also took
+        // an internal checkpoint. `BridgeTree::checkpoint` returns `false` when
+        // it declines — notably when nothing was appended since its last
+        // checkpoint (an empty/unchanged shielded pool) or for a non-monotonic
+        // id. The earlier behaviour skipped the side-table push on a decline to
+        // keep the tree and the side-table in sync; but that let THIS store's
+        // checkpoint depth fall behind its sibling Phase-2 stores
+        // (spark/kernel/spark_pool push unconditionally), so a reorg would
+        // unwind the four stores to different heights — the exact divergence
+        // `checkpoint_all` guards. Instead we always push the boundary and
+        // tag it with `tree_checkpointed`; `rewind` skips the tree rewind for
+        // a boundary the tree never advanced (nothing to revert), so the
+        // side-table stack and the tree's internal stack stay consistent while
+        // the cross-store depth advances uniformly.
         //
-        // The pre-fix docstring at L282-296 claimed this is safe
-        // "because gating the push on the tree's own decision keeps
-        // the two stacks in lock-step by construction" — that gates
-        // WHETHER we push, not WHEN, so the atomicity gap remains.
-        //
-        // Structural fix: hold the checkpoints write lock BEFORE
-        // touching the tree, so the tree.write() and cps.push happen
-        // under the same guard. Reordering is safe because tree
-        // acquisition is only inside `checkpoint`, not held across
-        // side-table ops.
+        // AUDIT (R-65): hold the checkpoints write lock BEFORE touching the
+        // tree so `tree.write().checkpoint(..)` and the `cps.push` land under
+        // the same guard — no window where the two stacks can desync if a
+        // concurrent panic lands between them.
         let mut cps = self.checkpoints.write();
         let tree_checkpointed = self.tree.write().checkpoint(height);
         if !tree_checkpointed {
-            tracing::warn!(
-                "ShieldedStore: BridgeTree declined checkpoint at height {} \
-                 (non-monotonic id?) — side-table checkpoint skipped to keep \
-                 the two checkpoint stacks in sync",
+            tracing::debug!(
+                "ShieldedStore: BridgeTree took no checkpoint at height {} \
+                 (no append since its last, or non-monotonic id) — recording a \
+                 side-table-only boundary so the Phase-2 stores stay in lock-step",
                 height
             );
-            return;
         }
 
         cps.push(ShieldedCheckpoint {
             height,
             entries_len,
+            tree_checkpointed,
         });
         // Mirror the BridgeTree's bounded checkpoint retention so the
         // two stacks never desync at the old end either. Emit a debug
@@ -458,6 +462,10 @@ impl ShieldedStore {
                 cps.first().map_or(0, |c| c.height)
             );
         }
+        // A reorg boundary is ALWAYS taken (Phase-2 lock-step), whether or not
+        // the BridgeTree advanced. Ack it so the shared driver can enforce that
+        // every store took the boundary this block.
+        true
     }
 
     /// Number of checkpoints currently in the side-table rollback
@@ -499,19 +507,22 @@ impl ShieldedStore {
             None => return false,
         };
 
-        // Rewind the BridgeTree to its matching checkpoint. The
-        // parallel stack and the tree's internal checkpoint stack are
-        // pushed and popped in lock-step (and capped identically), so
-        // this should always succeed; a false here means they
-        // desynced — log it, but still align the side tables to the
-        // checkpoint boundary, since leaving them ahead of the tree is
-        // strictly worse.
-        let tree_rewound = self.tree.write().rewind();
-        if !tree_rewound {
-            tracing::warn!(
-                "ShieldedStore: BridgeTree rewind failed while a side-table \
-                 checkpoint existed — tree/side-table state desynced"
-            );
+        // Rewind the BridgeTree ONLY for a boundary that actually advanced it.
+        // Under the one-boundary-per-block rule, an empty/unchanged block
+        // records a side-table boundary with `tree_checkpointed = false`: the
+        // tree took no checkpoint there, so there is nothing to revert and
+        // calling `tree.rewind()` would pop a DIFFERENT (older) tree checkpoint
+        // — desyncing the stacks. Skip it. For a boundary that did advance the
+        // tree, a `false` from `rewind()` means the two stacks desynced; log it
+        // but still align the side tables, since leaving them ahead is worse.
+        if restore.tree_checkpointed {
+            let tree_rewound = self.tree.write().rewind();
+            if !tree_rewound {
+                tracing::warn!(
+                    "ShieldedStore: BridgeTree rewind failed while a side-table \
+                     checkpoint existed — tree/side-table state desynced"
+                );
+            }
         }
 
         // Drop entries whose leaf position is at or past the boundary:
@@ -592,7 +603,10 @@ impl ShieldedStore {
             }
         }
 
-        tree_rewound
+        // A boundary was popped and the side tables were rolled back to it
+        // (the empty-stack case returned `false` at the top). Report success
+        // regardless of whether the tree itself needed to move.
+        true
     }
 
     /// Mark a nullifier as spent. Returns `false` if the nullifier
@@ -946,25 +960,32 @@ mod tests {
 
     #[test]
     fn non_monotonic_checkpoint_id_does_not_desync() {
-        // `BridgeTree::checkpoint` declines a non-monotonic id. The
-        // parallel stack push is gated on the tree accepting the
-        // checkpoint, so a declined checkpoint must leave the two
-        // stacks in sync — and a subsequent rewind must still land
-        // tree and side tables on the same boundary.
+        // `BridgeTree::checkpoint` declines a non-monotonic id. Under the
+        // one-boundary-per-block rule the store STILL records a side-table
+        // boundary (tagged `tree_checkpointed = false`) so its checkpoint depth
+        // stays in lock-step with the sibling Phase-2 stores — but `rewind`
+        // must SKIP the tree for that boundary, so tree and side tables never
+        // desync, and a subsequent real rewind still lands them together.
         let store = ShieldedStore::new();
         apply_block(&store, 5, &[[0xA1; 32]], &[]); // tree id now 5
         let root_after_5 = store.current_root();
         let size_after_5 = store.tree_size();
 
-        // A non-monotonic checkpoint (id 3 <= 5) — the tree declines
-        // it; the parallel push must be skipped, not desynced.
+        // A non-monotonic checkpoint (id 3 <= 5): the tree declines it, but the
+        // boundary is still taken (tree-less) to keep the stores in lock-step.
         let cps_before = store.checkpoints.read().len();
-        store.checkpoint_at_height(3);
+        assert!(store.checkpoint_at_height(3), "a boundary is always taken");
         assert_eq!(
             store.checkpoints.read().len(),
-            cps_before,
-            "declined tree checkpoint must not push to the parallel stack"
+            cps_before + 1,
+            "a declined tree checkpoint still records a side-table boundary"
         );
+
+        // Rewinding that tree-less boundary is a clean no-op: nothing was
+        // appended since block 5, so tree and side tables stay at block 5.
+        assert!(store.rewind(), "the side-table-only boundary pops");
+        assert_eq!(store.current_root(), root_after_5, "tree untouched by a tree-less rewind");
+        assert_eq!(store.tree_size(), size_after_5, "entries untouched");
 
         // Apply a real next block, then rewind it: tree and side
         // tables must land together on the post-block-5 boundary.
@@ -984,6 +1005,36 @@ mod tests {
             !store.is_nullifier_spent(&[0x66; 32]),
             "block-6 nullifier dropped — side tables tracked the tree"
         );
+    }
+
+    #[test]
+    fn empty_store_still_boundaries_every_block() {
+        // The exact Phase-2 divergence reproduced in isolation: an EMPTY
+        // shielded store (no notes ever added) must still record one reorg
+        // boundary per block so its checkpoint depth advances in lock-step with
+        // the sibling stores (spark/kernel/spark_pool, which push
+        // unconditionally). The BridgeTree declines every checkpoint after the
+        // first (nothing appended), but the side-table boundary — and the
+        // cross-store depth — advance regardless. Before the
+        // one-boundary-per-block fix this store stuck at depth 1 while
+        // spark_pool ran to 205, and a reorg would have unwound the four stores
+        // to different heights (chaos-run `[shielded=1 … spark_pool=205]`).
+        let store = ShieldedStore::new();
+        for h in 1..=205u64 {
+            assert!(store.checkpoint_at_height(h), "a boundary is taken every block");
+        }
+        assert_eq!(store.tree_size(), 0, "store stayed empty");
+        assert_eq!(
+            store.checkpoint_count(),
+            205,
+            "one boundary per block even with no appends (was stuck at 1 pre-fix)"
+        );
+        // Every tree-less boundary rewinds cleanly back to empty.
+        for _ in 0..205 {
+            assert!(store.rewind(), "each tree-less boundary pops");
+        }
+        assert!(!store.rewind(), "stack now empty");
+        assert_eq!(store.tree_size(), 0);
     }
 
     /// Hand-rolled aggressive op-sequence fuzzer for the
@@ -1276,13 +1327,14 @@ mod tests {
         // The `tree_rewound == false while a side-table checkpoint
         // exists` branch (rewind's warn path). In lock-step operation
         // the BridgeTree always has a matching checkpoint, so the only
-        // way to reach this branch is a genuine desync: a side-table
-        // checkpoint with no corresponding tree checkpoint. Force that
-        // directly, then prove rewind still drives the side tables
-        // (entries + nullifiers + tree_size) back to the checkpoint
-        // boundary — "leaving them ahead of the tree is strictly
-        // worse" is the contract — and reports `false` (the tree could
-        // not be rolled back), which the chain path treats as a warn.
+        // way to reach this branch is a genuine desync: a boundary
+        // tagged `tree_checkpointed = true` with no corresponding tree
+        // checkpoint. Force that directly, then prove rewind still
+        // drives the side tables (entries + nullifiers + tree_size) back
+        // to the checkpoint boundary — "leaving them ahead of the tree
+        // is strictly worse" is the contract — and still reports success:
+        // under one-boundary-per-block the tree-decline is a logged warn,
+        // not a failure return (the only `false` is an empty stack).
         let store = ShieldedStore::new();
         // Two commitments and one nullifier applied WITHOUT taking a
         // BridgeTree checkpoint, so the tree has nothing to rewind to.
@@ -1291,20 +1343,25 @@ mod tests {
         assert!(store.mark_nullifier_spent([0x22; 32], 2));
         assert_eq!(store.tree_size(), 2);
 
-        // Inject the desync: a side-table checkpoint guarding the
-        // boundary (entries_len 1, height 2) with no matching tree
-        // checkpoint.
+        // Inject the desync: a boundary (entries_len 1, height 2) tagged
+        // `tree_checkpointed = true` — claiming the tree advanced here —
+        // but with no matching BridgeTree checkpoint. Under
+        // one-boundary-per-block this can only arise from genuine
+        // corruption, which is exactly the warn branch under test.
         store.checkpoints.write().push(ShieldedCheckpoint {
             height: 2,
             entries_len: 1,
+            tree_checkpointed: true,
         });
 
-        // rewind pops the side-table checkpoint; tree.rewind() returns
-        // false (no tree checkpoint) → the desync warn branch. Side
-        // tables are still aligned to the boundary.
+        // rewind enters the tree branch (tree_checkpointed); tree.rewind()
+        // returns false (no tree checkpoint) → the desync warn fires, but
+        // the side tables are still driven back to the boundary and rewind
+        // reports success — leaving them ahead of the tree is strictly
+        // worse than a logged tree-decline.
         assert!(
-            !store.rewind(),
-            "tree could not be rewound → rewind returns false"
+            store.rewind(),
+            "side tables realign and rewind succeeds despite the tree declining"
         );
         assert_eq!(
             store.tree_size(),

@@ -233,7 +233,7 @@ impl KernelStore {
     /// stores in lock-step with the chain. See `SparkStore::
     /// checkpoint_at_height` for why "before the block" is the
     /// uniform contract.
-    pub fn checkpoint_at_height(&self, height: u64) {
+    pub fn checkpoint_at_height(&self, height: u64) -> bool {
         let kernels_len = self.kernels.read().len();
         let mut cps = self.checkpoints.write();
         cps.push(KernelCheckpoint {
@@ -245,6 +245,9 @@ impl KernelStore {
         if cps.len() > MAX_REORG_CHECKPOINTS {
             cps.remove(0);
         }
+        // Phase-2 lock-step: this store always takes a boundary per block. Ack
+        // it so the shared driver can enforce every store did.
+        true
     }
 
     /// Number of checkpoints currently in the rollback stack. Used by
