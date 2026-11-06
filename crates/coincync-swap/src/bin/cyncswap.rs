@@ -792,10 +792,11 @@ enum Command {
         /// `T_cync = t·G_cync`, 32-byte compressed Ristretto255 hex.
         #[arg(long)]
         cync_pub: String,
-        /// Session context bound into the proof, e.g. the network
-        /// and swap id both parties agreed on. The verifier must pass
+        /// Session context bound into the proof. The verifier must pass
         /// the identical string; a proof for another context fails.
-        #[arg(long)]
+        /// Defaults to the context the pre-CYNC-lock gate checks, so a
+        /// proof made with the default is the one that gate accepts.
+        #[arg(long, default_value = coincync_swap::safety::PRE_LOCK_DLEQ_CONTEXT)]
         context: String,
     },
 
@@ -817,7 +818,8 @@ enum Command {
         #[arg(long)]
         cync_pub: String,
         /// Session context; must equal the prover's `--context`.
-        #[arg(long)]
+        /// Defaults to the context the pre-CYNC-lock gate checks.
+        #[arg(long, default_value = coincync_swap::safety::PRE_LOCK_DLEQ_CONTEXT)]
         context: String,
         /// **Recommended.** UTF-8 JSON file containing the output of
         /// `prove-dleq`. Avoids command-line length limits on Windows.
