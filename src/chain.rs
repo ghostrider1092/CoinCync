@@ -1068,6 +1068,16 @@ impl Blockchain {
                     "spark v2 tx {idx}: shield-in requires an authenticated mint bundle"
                 ));
             }
+            // And a payload with NEITHER a mint nor a spend has nothing behind its
+            // value_balance at all: the turnstile would move pool value across the
+            // veil with no spend proof and no mint bundle. The mempool's structural
+            // gate already rejects the shape; this gate is the authoritative one.
+            if payload.mint.is_none() && payload.spend.is_none() {
+                return Err(format!(
+                    "spark v2 tx {idx}: a payload must carry a mint or a spend (neither \
+                     leaves value_balance backed by nothing)"
+                ));
+            }
             // Authenticated shield-in: the minted coins' total value proof must
             // equal the value entering the pool (−value_balance). Together with
             // the bridge above this fully conserves value across the veil.
@@ -2372,6 +2382,42 @@ impl Blockchain {
                     true
                 } else {
                     // Race check passed — safe to apply as main chain.
+                    // Shielded (Spark) contextual double-spend check: reject the
+                    // block BEFORE any mutation if a shielded serial tag is
+                    // already spent on-chain or duplicated within the block —
+                    // the pre-apply guard mirroring the transparent key-image
+                    // check. Inert while the store is None (gated off).
+                    if let Some(ref sstore) = self.shielded_store {
+                        if let Err(e) = crate::consensus::shielded::check_block_shielded_double_spends(
+                            &block.transactions,
+                            |t| sstore.is_nullifier_spent(t),
+                        ) {
+                            let reason = format!("shielded double-spend: {}", e);
+                            tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
+                            return Ok(BlockStatus::Invalid(reason));
+                        }
+                        // Gated store-aware spend-proof verification (membership +
+                        // nullifier + message). Only compiled under sketch-gk-proof.
+                        #[cfg(feature = "sketch-gk-proof")]
+                        if let Err(e) =
+                            Self::verify_block_shielded_spends(sstore, &block.transactions)
+                        {
+                            let reason = format!("shielded spend proof invalid: {}", e);
+                            tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
+                            return Ok(BlockStatus::Invalid(reason));
+                        }
+                    }
+                    // Gated store-aware verification for libspark v2 shielded txs
+                    // (SparkPayload) against the SparkPoolStore. Inert unless both
+                    // features are on and the pool store is initialized.
+                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                    if let Err(reason) = self
+                        .verify_block_spark_v2_at_height(&block.transactions, block.header.height.as_u64())
+                    {
+                        tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
+                        return Ok(BlockStatus::Invalid(reason));
+                    }
+
                     inner.height_to_hash.insert(block.header.height.as_u64(), hash);
                     inner.tip = ChainTip {
                         hash,
@@ -2429,42 +2475,6 @@ impl Blockchain {
                         });
 
                     // ── Phase 2 store reorg checkpoint (site 1: clean tip-extend) ──
-                    // Shielded (Spark) contextual double-spend check: reject the
-                    // block BEFORE any mutation if a shielded serial tag is
-                    // already spent on-chain or duplicated within the block —
-                    // the pre-apply guard mirroring the transparent key-image
-                    // check. Inert while the store is None (gated off).
-                    if let Some(ref sstore) = self.shielded_store {
-                        if let Err(e) = crate::consensus::shielded::check_block_shielded_double_spends(
-                            &block.transactions,
-                            |t| sstore.is_nullifier_spent(t),
-                        ) {
-                            let reason = format!("shielded double-spend: {}", e);
-                            tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
-                            return Ok(BlockStatus::Invalid(reason));
-                        }
-                        // Gated store-aware spend-proof verification (membership +
-                        // nullifier + message). Only compiled under sketch-gk-proof.
-                        #[cfg(feature = "sketch-gk-proof")]
-                        if let Err(e) =
-                            Self::verify_block_shielded_spends(sstore, &block.transactions)
-                        {
-                            let reason = format!("shielded spend proof invalid: {}", e);
-                            tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
-                            return Ok(BlockStatus::Invalid(reason));
-                        }
-                    }
-                    // Gated store-aware verification for libspark v2 shielded txs
-                    // (SparkPayload) against the SparkPoolStore. Inert unless both
-                    // features are on and the pool store is initialized.
-                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                    if let Err(reason) = self
-                        .verify_block_spark_v2_at_height(&block.transactions, block.header.height.as_u64())
-                    {
-                        tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
-                        return Ok(BlockStatus::Invalid(reason));
-                    }
-
                     // CIP-009.D Interp-B contract: checkpoint each Phase-2
                     // store BEFORE this block's state is applied, so a later
                     // reorg `rewind` rolls them back to exactly this
@@ -7497,5 +7507,248 @@ mod tests {
         assert!(chain
             .verify_block_spark_v2(std::slice::from_ref(&crafted))
             .is_err());
+    }
+
+    /// A v2 payload with neither a mint nor a spend has nothing behind its
+    /// value_balance. The mempool's structural gate refuses the shape, but a
+    /// miner never goes through the mempool, so the block gate has to refuse it
+    /// as well: before this check it accepted the tx, took value_balance out of
+    /// the pool and let batch_from_block create a transparent output for it.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn payload_without_mint_or_spend_is_rejected_at_the_block_gate() {
+        use crate::consensus::spark_payload::build::build_mint_payload;
+        use crate::consensus::spark_payload::{SparkPayload, SPARK_PAYLOAD_VERSION};
+        use crate::consensus::validation::validate_transaction_basic;
+        use crate::crypto::{BlindingFactor, PedersenCommitment};
+        use crate::primitives::PublicKey;
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxOutput, TxType};
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new_with_network(NetworkType::Regtest);
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+
+        let mk = |outputs: Vec<TxOutput>, fee: u64, extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs,
+            fee: crate::primitives::Amount::from_atomic(fee),
+            range_proof: vec![],
+            extra,
+        };
+        let values: Vec<u64> = (0..8u64).map(|i| 5_000_000_000 + i).collect();
+        let (mint_payload, _ctx) =
+            build_mint_payload(b"no-mint-no-spend-seed", &values, &[]).unwrap();
+        chain.apply_spark_v2_txs(
+            std::slice::from_ref(&mk(vec![], 0, mint_payload.encode())),
+            1,
+        );
+        let pool_before = store.pool_value();
+
+        let point = |b: u8| {
+            PublicKey::from_bytes(
+                PedersenCommitment::commit(u64::from(b) + 1, &BlindingFactor::from_bytes([b; 32]))
+                    .to_bytes(),
+            )
+        };
+        // Claims 3 CYNC leave the pool, revealed with zero blinding, backed by nothing.
+        let claimed: u64 = 3_000_000_000;
+        let extra = SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![],
+            spend: None,
+            value_balance: claimed as i64,
+        }
+        .encode();
+        let draft = mk(vec![], 0, extra.clone());
+        let fee = (draft.size() as u64 + 200) * crate::constants::MIN_FEE_PER_BYTE;
+        let paid = claimed - fee;
+        let crafted = mk(
+            vec![TxOutput {
+                stealth_address: point(3),
+                tx_public_key: point(4),
+                commitment: PedersenCommitment::commit(paid, &BlindingFactor::zero()).to_bytes(),
+                encrypted_amount: paid.to_le_bytes().to_vec(),
+                view_tag: 0,
+                lock_height: None,
+                encrypted_memo: vec![],
+            }],
+            fee,
+            extra,
+        );
+
+        assert!(validate_transaction_basic(&crafted).is_err());
+        let err = chain
+            .verify_block_spark_v2(std::slice::from_ref(&crafted))
+            .unwrap_err();
+        assert!(err.contains("must carry a mint or a spend"), "{err}");
+        assert_eq!(store.pool_value(), pool_before);
+    }
+
+    /// A block the spark gate rejects must leave the tip where it was. The
+    /// extend path used to advance height_to_hash, the tip and the supply
+    /// stats before running the gate, and a rejection returned without
+    /// rolling them back: the node reported the bad block's height as its
+    /// tip until restart while the UTXO set and the database stayed one
+    /// block behind. Mines a real regtest block at the activation height
+    /// carrying a bare coin with no mint bundle and a fee the pool does not
+    /// back, which validate_block_ctx accepts (the contextual arm only decodes
+    /// the payload) and the block gate refuses.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn block_rejected_by_the_spark_gate_leaves_the_tip_alone() {
+        use crate::config::NetworkType;
+        use crate::consensus::spark_payload::{SparkPayload, SPARK_PAYLOAD_VERSION};
+        use crate::consensus::{compute_full_anchor, compute_pow_hash, BlockHeader, PowAlgorithm};
+        use crate::crypto::{coinbase_stealth_address, BlindingFactor, PedersenCommitment};
+        use crate::emission::calculate_block_reward;
+        use crate::primitives::{hash_domain, merkle_root, Hash, PublicKey};
+        use crate::transaction::{Transaction, TxOutput, TxType};
+
+        std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
+        crate::consensus::bind_randomx_genesis_for_network(NetworkType::Regtest);
+        let magic = NetworkType::Regtest.magic_bytes();
+        let act = crate::constants::shielded_activation_height(NetworkType::Regtest);
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(db_dir.path()).unwrap());
+        let chain = Blockchain::with_database(db, NetworkType::Regtest);
+        chain.init_genesis().unwrap();
+        let genesis = chain.get_block_by_height(0).unwrap();
+        chain.restore_state(0, genesis.hash(), 1).unwrap();
+
+        let kp = || {
+            let s = crate::crypto::SecretScalar::random(&mut rand::rngs::OsRng);
+            PublicKey::from_bytes(s.to_public().to_bytes())
+        };
+        let spend_pub = kp();
+        let view_pub = kp();
+        // Regtest splits fees from height 525 on, so here the coinbase claims
+        // the whole fee on top of the reward.
+        let coinbase = |height: u64, fees: u64| -> Transaction {
+            let amt = calculate_block_reward(height).as_atomic() + fees;
+            let miner_secret: [u8; 32] = *blake3::hash(view_pub.as_bytes()).as_bytes();
+            let (stealth, _) =
+                coinbase_stealth_address(&spend_pub, &view_pub, height, 0, &miner_secret).unwrap();
+            let view_tag = hash_domain(
+                b"COINCYNC_VIEW_TAG",
+                &[stealth.tx_public_key.as_bytes().as_slice(), &[0u8]].concat(),
+            )
+            .as_bytes()[0];
+            Transaction {
+                version: 1,
+                tx_type: TxType::Coinbase,
+                inputs: vec![],
+                outputs: vec![TxOutput {
+                    stealth_address: stealth.public_key,
+                    tx_public_key: stealth.tx_public_key,
+                    encrypted_amount: amt.to_le_bytes().to_vec(),
+                    commitment: PedersenCommitment::commit(amt, &BlindingFactor::zero()).to_bytes(),
+                    view_tag,
+                    lock_height: None,
+                    encrypted_memo: vec![],
+                }],
+                fee: crate::primitives::Amount::ZERO,
+                range_proof: vec![],
+                extra: crate::consensus::fork_signal::encode_coinbase_extra(
+                    height,
+                    crate::consensus::fork_signal::SignalBits(0),
+                ),
+            }
+        };
+        let base_ts = genesis.header.timestamp.as_secs();
+        let mine = |prev: &Block, height: u64, txs: Vec<Transaction>| -> Block {
+            let ts = base_ts + height * 3600;
+            let target = chain.next_target();
+            let prev_hash = prev.hash();
+            let tx_root = merkle_root(&txs.iter().map(|t| t.hash()).collect::<Vec<Hash>>());
+            let mut header = BlockHeader {
+                network_magic: magic,
+                version: crate::constants::block_version_at_height(height),
+                height: crate::primitives::Height::new(height),
+                timestamp: ts.into(),
+                prev_hash,
+                tx_root,
+                anchor: Hash::from_bytes([0u8; 32]),
+                algorithm: PowAlgorithm::RandomX as u8,
+                nonce: 0,
+                target,
+                miner_pubkey: spend_pub,
+                supply_commitment: [0u8; 32],
+                checkpoint_vote: None,
+                spark_set_root: [0u8; 32],
+                mw_kernel_root: [0u8; 32],
+            };
+            let binding = header.pow_binding();
+            header.anchor = compute_full_anchor(&prev_hash, height, ts, &binding)
+                .unwrap()
+                .mixed_hash;
+            let mut nonce = 0u64;
+            loop {
+                let pow = compute_pow_hash(
+                    PowAlgorithm::RandomX,
+                    &header.anchor,
+                    nonce,
+                    &tx_root,
+                    height,
+                )
+                .unwrap();
+                if pow.meets_difficulty(&target) {
+                    break;
+                }
+                nonce += 1;
+            }
+            header.nonce = nonce;
+            Block::new(header, txs)
+        };
+
+        let floor_target = {
+            let mut tb = [0xffu8; 32];
+            tb[0] = 0x00;
+            tb[1] = 0x7f;
+            Hash::from_bytes(tb)
+        };
+        chain.seed_linear_chain_for_testing_with_target(act - 1, 3600, floor_target);
+        let parent = chain.get_block_by_height(act - 1).unwrap();
+        let supply_before = chain.stats().total_supply;
+
+        let bare = SparkPayload {
+            version: SPARK_PAYLOAD_VERSION,
+            mint: None,
+            outputs: vec![vec![7u8; 40]],
+            spend: None,
+            value_balance: 0,
+        }
+        .encode();
+        let mk = |fee: u64| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(fee),
+            range_proof: vec![],
+            extra: bare.clone(),
+        };
+        let fee = (mk(0).size() as u64 + 200) * crate::constants::MIN_FEE_PER_BYTE;
+        let bad = mine(&parent, act, vec![coinbase(act, fee), mk(fee)]);
+        let status = format!("{:?}", chain.add_block(bad).unwrap());
+        assert!(status.contains("spark v2 tx 1"), "{status}");
+        assert_eq!(
+            chain.height(),
+            act - 1,
+            "rejected block must not advance the tip"
+        );
+        assert_eq!(chain.tip_hash(), parent.hash());
+        assert_eq!(chain.stats().total_supply, supply_before);
+
+        // The chain keeps going from the real tip.
+        let good = mine(&parent, act, vec![coinbase(act, 0)]);
+        let status = format!("{:?}", chain.add_block(good).unwrap());
+        assert!(status.contains("Accepted"), "{status}");
+        assert_eq!(chain.height(), act);
     }
 }
