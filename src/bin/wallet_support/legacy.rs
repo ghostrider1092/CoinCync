@@ -2367,7 +2367,14 @@ async fn cmd_shielded_mint(
         return Err(format!("failed to persist shield-in reservation: {e}"));
     }
 
-    submit_shielded_tx(node, &tx, &format!("shield-in mint of {amount} atomic")).await
+    if submit_shielded_tx(node, &tx, &format!("shield-in mint of {amount} atomic")).await? {
+        return Ok(());
+    }
+    // The node said no, so the inputs are not in flight: free them. On a
+    // transport error the `?` above keeps the reservation, like cmd_send.
+    let released = wallet.release_reservations_by_tx(tx_hash);
+    let _ = wallet.save(Some(&password));
+    Err(format!("shield-in rejected by the node (released {released} reservation(s))"))
 }
 
 /// The "mole" notice: announce that a transaction is going UNDERGROUND (shielded).
@@ -2379,16 +2386,6 @@ fn mole_notice(amount: u64) {
     eprintln!(" [MOLE] The mole has started.");
     eprintln!("        {amount} atomic is burrowing underground (shielded)");
     eprintln!("        - no transparent trace of sender, recipient, or amount.");
-    eprintln!("=====================================================");
-    // On-chain shield-in needs a transparent side (ring-signed inputs +
-    // transparent change, value_balance < 0). That path is GATED at consensus:
-    // a block-admitted shielded tx must be pure-shielded until the transparent
-    // bridge is validated and audited (F4, issue #314). A node will REJECT this
-    // broadcast with "transparent inputs/outputs are forbidden". This command
-    // exercises the builder path; it will not relay until #314 lands.
-    eprintln!(" [GATED] on-chain shield-in is disabled until the transparent");
-    eprintln!("         bridge is validated (issue #314) — the node will reject");
-    eprintln!("         this transaction. Builder/testing use only for now.");
     eprintln!("=====================================================");
 }
 
@@ -2572,7 +2569,12 @@ async fn shielded_send_live(
     println!("  Miner fee:       {miner_fee} atomic");
     println!("  Nullifier tags:  {} (funding note spent)", tags.len());
 
-    submit_shielded_tx(node, &tx, &format!("shielded spend of {amount} atomic to {to}")).await
+    let what = format!("shielded spend of {amount} atomic to {to}");
+    if submit_shielded_tx(node, &tx, &what).await? {
+        Ok(())
+    } else {
+        Err("shielded spend rejected by the node".to_string())
+    }
 }
 
 /// Build a `TxType::Shielded` transaction carrying `extra` (an encoded
@@ -2597,12 +2599,15 @@ fn shielded_transaction(extra: Vec<u8>, fee: u64) -> coincync::transaction::Tran
 /// node's full validator rejects shielded txs at the activation gate
 /// (`SHIELDED_TX_ACTIVATION_HEIGHT = u64::MAX`) — expected and surfaced plainly;
 /// the wiring is complete for when shielded activates. (#172 PR2)
+/// Ok(true): in the mempool. Ok(false): the node answered and said no, so the
+/// caller may free the inputs it reserved. Err: the call itself failed and the
+/// tx may still have reached the node, so the caller must keep them reserved.
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
 async fn submit_shielded_tx(
     node: &str,
     tx: &coincync::transaction::Transaction,
     what: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let bytes = borsh::to_vec(tx).map_err(|e| format!("serialize shielded tx: {e}"))?;
     let tx_hex = hex::encode(&bytes);
     let txid = hex::encode(tx.hash().as_bytes());
@@ -2616,23 +2621,15 @@ async fn submit_shielded_tx(
         Ok(result) => {
             if result.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false) {
                 println!("  OK: accepted by the mempool. txid {txid}");
-                println!(
-                    "  NOTE: it will not CONFIRM until shielded activation \
-                     (SHIELDED_TX_ACTIVATION_HEIGHT is u64::MAX pre-audit)."
-                );
-                Ok(())
+                Ok(true)
             } else {
-                Err(format!("node rejected: {result}"))
+                println!("  node rejected: {result}");
+                Ok(false)
             }
         }
-        // Pre-activation the full validator rejects shielded txs — that is the
-        // fail-closed activation gate, not a wiring bug. Report it and succeed.
-        Err(e) if e.contains("not activated") || e.contains("activation") => {
-            println!("  Node rejected (expected pre-activation): {e}");
-            println!(
-                "  The submission path is wired; the tx is accepted once shielded activates."
-            );
-            Ok(())
+        Err(e) if e.starts_with("rpc error: ") => {
+            println!("  node rejected: {e}");
+            Ok(false)
         }
         Err(e) => Err(format!("rpc send_raw_transaction: {e}")),
     }
