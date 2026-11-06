@@ -559,10 +559,10 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
   </div>
   <div class="hero-badge">
     <span class="dot"></span>
-    <span>Testnet live &mdash; <span id="live-nodes">9</span> nodes &mdash; block <span id="live-height">&mdash;</span></span>
+    <span>Testnet live &mdash; <span id="live-nodes">&mdash;</span> peers &mdash; block <span id="live-height">&mdash;</span></span>
   </div>
   <h1>Your money<br>is <em class="bubble"><span class="bubble-letter">y</span><span class="bubble-letter">o</span><span class="bubble-letter">u</span><span class="bubble-letter">r</span><span class="bubble-letter">s</span></em>.</h1>
-  <p class="hero-sub">A privacy-first cryptocurrency where every transaction is shielded by default, supply is cryptographically auditable, and no permission is required to participate.</p>
+  <p class="hero-sub">A privacy-first cryptocurrency where every transaction is private by default &mdash; ring signatures, stealth addresses, hidden amounts &mdash; supply is cryptographically auditable, and no permission is required to participate.</p>
   <p class="hero-thesis" style="font-family:var(--serif);font-style:italic;font-size:clamp(15px,1.5vw,18px);line-height:1.5;color:var(--t2);max-width:680px;margin:0 auto 36px;padding:0 24px;border-left:2px solid var(--ac);text-align:left;padding-left:20px">Privacy money that doesn&rsquo;t depend on permission to participate &mdash; built on <strong>Concentric Privacy</strong>: independent privacy layers, each guarding a different attack surface, arranged so that no single break exposes the whole. Consensus stays live; privacy never silently downgrades. Built in the same staging Monero proved out &mdash; chain first, novel crypto later, each behind its own audit.</p>
   <div class="hero-actions">
     <a href="#download" class="btn-primary">Download Wallet</a>
@@ -604,7 +604,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     <div class="pillar">
       <div class="pillar-num">&sect; 01</div>
       <h3>Private by default</h3>
-      <p>Every transaction is shielded with CLSAG ring-16 signatures, Pedersen commitments, Bulletproofs+ range proofs, and stealth addresses. No opt-out. No transparent mode. Privacy is mandatory.</p>
+      <p>Every transaction is private by default: CLSAG ring-16 signatures, Pedersen commitments, Bulletproofs+ range proofs, and stealth addresses. No opt-out, no transparent transaction mode. The Spark shielded pool activates at testnet height 29,000.</p>
     </div>
     <div class="pillar">
       <div class="pillar-num">&sect; 02</div>
@@ -894,13 +894,13 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     </div>
     <div class="terminal-body">
       <span class="comment"># Clone and build (Rust 1.75+, ~3 min)</span><br>
-      <span class="prompt">$</span> git clone https://git.coincync.network/coincync/cync-protocol.git<br>
+      <span class="prompt">$</span> git clone https://github.com/ghostrider1092/CoinCync.git<br>
       <span class="prompt">$</span> cd Cync-Protocol<br>
       <span class="prompt">$</span> cargo build --release --features "randomx testnet"<br>
-      <span class="output">&nbsp;&nbsp;Compiling coincync v1.0.8 &mdash; 700+ tests pass</span><br><br>
+      <span class="output">&nbsp;&nbsp;Compiling coincync v1.1.1-testnet &mdash; tests pass</span><br><br>
       <span class="comment"># Start a node</span><br>
       <span class="prompt">$</span> ./target/release/coincync-node --network testnet<br>
-      <span class="output">&nbsp;&nbsp;Syncing... block 43891 of 43891 (100%)</span><br><br>
+      <span class="output">&nbsp;&nbsp;Syncing... caught up to tip (100%)</span><br><br>
       <span class="comment"># Mine on personal hardware (cloud VPS providers prohibit it)</span><br>
       <span class="prompt">$</span> ./target/release/coincync-tui-miner --testnet --address tCYNC3... --threads 4<br>
       <span class="output">&nbsp;&nbsp;Mining at 142 H/s &mdash; RandomX &mdash; 4 threads</span>
@@ -929,7 +929,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
       <div style="font-family:var(--display);font-size:24px;font-weight:400;color:var(--t);margin-bottom:6px">Send and receive CYNC</div>
       <div style="font-size:12px;color:var(--t3);margin-bottom:18px;line-height:1.6">Install the wallet, fund it, send your first private transaction. About 5 minutes.</div>
       <ol style="padding-left:18px;margin:0;font-size:13px;color:var(--t2);line-height:2">
-        <li><a href="https://github.com/ghostrider1092/CoinCync/releases/download/v1.0.8-testnet/CoinCync-Wallet-Setup.exe" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">Download the wallet</a> &mdash; Windows installer, auto-syncs to testnet</li>
+        <li><a href="https://github.com/ghostrider1092/CoinCync/releases/latest" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">Download the wallet</a> &mdash; Windows installer, auto-syncs to testnet</li>
         <li><a href="https://docs.coincync.network/getting-started/create-a-wallet" target="_blank" rel="noopener" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">Create a wallet</a> &mdash; 24-word seed, encrypted on disk</li>
         <li><a href="/faucet" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">Claim 10 tCYNC from the faucet</a> &mdash; or mine your own with the wallet's built-in miner</li>
         <li>Send your first private transaction &mdash; ring-signed by default, no opt-in needed</li>
@@ -945,17 +945,17 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
         <li><a href="https://docs.coincync.network/getting-started/build" target="_blank" rel="noopener" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">Build from source</a> &mdash; Rust toolchain, <code style="font-family:var(--mono);font-size:11px">cargo build --release</code></li>
         <li><a href="https://docs.coincync.network/getting-started/run-a-node" target="_blank" rel="noopener" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">Run a node</a> &mdash; 2GB RAM, 20GB disk, syncs in &lt;1h on testnet</li>
         <li><a href="https://docs.coincync.network/api/json-rpc" target="_blank" rel="noopener" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">Talk to it via JSON-RPC</a> &mdash; 16 methods, curl-friendly examples</li>
-        <li><a href="https://git.coincync.network/coincync/cync-protocol/blob/main/docs/cip/" target="_blank" rel="noopener" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">Submit a CIP</a> &mdash; propose changes, no permission required</li>
+        <li><a href="https://github.com/ghostrider1092/CoinCync/blob/main/docs/cip/" target="_blank" rel="noopener" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">Submit a CIP</a> &mdash; propose changes, no permission required</li>
       </ol>
     </div>
   </div>
 
   <!-- LINK CARDS (DETAIL) -->
   <div class="link-grid reveal-stagger">
-    <a href="https://github.com/ghostrider1092/CoinCync/releases/download/v1.0.8-testnet/CoinCync-Wallet-Setup.exe" class="link-card">
+    <a href="https://github.com/ghostrider1092/CoinCync/releases/latest" class="link-card">
       <div class="link-title">Desktop Wallet</div>
       <div class="link-desc">Windows installer. Auto-spawns a local node, generates an RPC key, and connects to testnet on first launch.</div>
-      <span class="link-arrow">&darr; Download Setup.exe</span>
+      <span class="link-arrow">&darr; Download latest release</span>
     </a>
     <a href="https://docs.coincync.network/getting-started/mining-on-your-pc" class="link-card">
       <div class="link-title">Start Mining</div>
@@ -986,7 +986,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     <div class="roadmap-item completed">
       <div class="roadmap-phase">Phase 1 &mdash; Foundation</div>
       <div class="roadmap-title">Core Protocol &amp; Internal Testnet</div>
-      <div class="roadmap-desc">RandomX CPU mining, CLSAG-16 ring signatures (ring size 11&rarr;16 bootstrap ramp at block 10,000), Bulletproofs+ range proofs, stealth addresses, Dandelion++ propagation, desktop wallet, block explorer, 5-node fleet across 3 continents.</div>
+      <div class="roadmap-desc">RandomX CPU mining, CLSAG-16 ring signatures (ring size 11&rarr;16 bootstrap ramp at block 10,000), Bulletproofs+ range proofs, stealth addresses, Dandelion++ propagation, desktop wallet, block explorer, public testnet seed node.</div>
       <div class="roadmap-tag done">Complete</div>
     </div>
     <div class="roadmap-item completed">
@@ -1004,25 +1004,25 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     <div class="roadmap-item current">
       <div class="roadmap-phase">Phase 4 &mdash; Public Testnet</div>
       <div class="roadmap-title">Open Network &amp; Hardening</div>
-      <div class="roadmap-desc">Public testnet launched 2026-05-09 and has been live continuously since. <strong>v1.0.12-testnet</strong> is the current release &mdash; a hard fork activating at testnet h=13,000 that tightens five consensus rules (encrypted_amount sizing, per-output caps, stealth-address dedup, ring-size enforcement). v1.0.12 also ships <strong>snapshot fast-sync</strong> (bootstrap a fresh or lagging node to the tip in minutes instead of full-genesis IBD &mdash; guarded by checkpoint-binding, tip-integrity, and optional signed-manifest trust), work-aware sync and eclipse-defense hardening that closed a recurring node-wedge class, and a fork-divergence mine-gate. Network is 9 hosts (3 seeds + explorer + 2 miners + 2 gossip-resilience relays + api). Live binaries, full chain history, and a public block explorer. 12-PR audit-prep marathon completed June 2026 (Bitcoin-Core-equivalent defense-in-depth: UTXO atomic cleanup, eclipse-attack defense, CVE-2015-3641 IP filter, compact-block validation, RPC saturating math). Next privacy step: <strong>CIP-017</strong> proposes raising the ring size above 16 (phased 16&rarr;24&rarr;32) for a larger decoy set &mdash; sanctioned by Constitution Article III's &ldquo;privacy may be strengthened&rdquo; clause. Three infrastructure crates shipped this phase: <code>coincync-frost-coordinator</code>, <code>coincync-rolling-finality</code>, and <code>coincync-swap</code>. 700+ tests across the workspace.</div>
+      <div class="roadmap-desc">Public testnet launched 2026-05-09 and has been live continuously since. <strong>v1.1.1-testnet</strong> is the current release &mdash; shielded-gate hardening ahead of the Spark shielded pool activating on testnet at h=29,000. It also ships <strong>snapshot fast-sync</strong> (bootstrap a fresh or lagging node to the tip in minutes instead of full-genesis IBD &mdash; guarded by checkpoint-binding, tip-integrity, and optional signed-manifest trust), work-aware sync and eclipse-defense hardening that closed a recurring node-wedge class, and a fork-divergence mine-gate. Network is served by a public seed node. Live binaries, full chain history, and a public block explorer. 12-PR hardening marathon completed June 2026 (Bitcoin-Core-equivalent defense-in-depth: UTXO atomic cleanup, eclipse-attack defense, CVE-2015-3641 IP filter, compact-block validation, RPC saturating math). Next privacy step: <strong>CIP-017</strong> proposes raising the ring size above 16 (phased 16&rarr;24&rarr;32) for a larger decoy set &mdash; sanctioned by Constitution Article III's &ldquo;privacy may be strengthened&rdquo; clause. Three infrastructure crates shipped this phase: <code>coincync-frost-coordinator</code>, <code>coincync-rolling-finality</code>, and <code>coincync-swap</code>. 700+ tests across the workspace.</div>
       <div class="roadmap-tag active">In Progress</div>
     </div>
     <div class="roadmap-item">
       <div class="roadmap-phase">Phase 5 &mdash; Mainnet Prep (v1.0)</div>
-      <div class="roadmap-title">Base-Chain Audit &amp; Signed Releases</div>
-      <div class="roadmap-desc">Base-chain audit on consensus, P2P, wallet, mining, and reorg defense. Multi-maintainer signed-release infrastructure (M-of-N via FROST coordinator). Reproducible Docker builds verified byte-identical. Genesis ceremony preparation: mainnet seed nodes, initial checkpoint set, monitoring live ≥ 7 days pre-genesis. <strong>Atomic swaps (cyncswap) and the Orchard shielded pool are deliberately not in v1.0 scope</strong> &mdash; each is the largest novel-cryptography surface in the codebase and ships in its own release after its own audit. Same staging Monero used: chain first, novel crypto later.</div>
+      <div class="roadmap-title">Signed Releases &amp; Genesis Prep</div>
+      <div class="roadmap-desc">Multi-maintainer signed-release infrastructure (M-of-N via FROST coordinator). Reproducible Docker builds verified byte-identical. Genesis ceremony preparation: mainnet seed nodes, initial checkpoint set, monitoring live ≥ 7 days pre-genesis. <strong>Atomic swaps (cyncswap) and the Orchard shielded pool are deliberately not in v1.0 scope</strong> &mdash; each is the largest novel-cryptography surface in the codebase and ships in its own later release. Same staging Monero used: chain first, novel crypto later.</div>
       <div class="roadmap-tag">Planned</div>
     </div>
     <div class="roadmap-item">
       <div class="roadmap-phase">Phase 6 &mdash; Mainnet Genesis (v1.0)</div>
-      <div class="roadmap-title">October 1, 2026 &mdash; Base Chain</div>
-      <div class="roadmap-desc">v1.0 mainnet launch. Privacy money chain: mine, send, receive, multi-sig, with the full 7-feature privacy stack and CIP-009 reorg defense active. Desktop wallet ships base-chain features only; the Trade tab unhides in v1.1 once cyncswap clears its own audit. Hardware wallet support and mobile wallet beta land in v1.0.x point releases.</div>
+      <div class="roadmap-title">Target: March 2027 &mdash; Base Chain</div>
+      <div class="roadmap-desc">v1.0 mainnet launch. Privacy money chain: mine, send, receive, multi-sig, with the full 7-feature privacy stack and CIP-009 reorg defense active. Desktop wallet ships base-chain features only; the Trade tab unhides in v1.1 once cyncswap ships. Hardware wallet support and mobile wallet beta land in v1.0.x point releases.</div>
       <div class="roadmap-tag">Planned</div>
     </div>
     <div class="roadmap-item">
       <div class="roadmap-phase">Phase 7 &mdash; cyncswap (v1.1)</div>
       <div class="roadmap-title">CIP-001: CYNC&harr;BTC Atomic Swaps</div>
-      <div class="roadmap-desc">Trustless CYNC&harr;BTC atomic swaps with the 6-layer user-safety stack. Substantially complete today &mdash; 346 tests pass with strict-DLEQ, mutation score 100% on audit-critical files, ~97% line coverage on the audit perimeter, libFuzzer + AddressSanitizer overnight runs clean across 27 targets. Ships <strong>after v1.0 mainnet is live</strong> and cyncswap has cleared its own dedicated audit (kickoff target ~30 days post-mainnet; estimated Q1&ndash;Q2 2027). Once it ships, every Bitcoin holder is one transaction away from holding CYNC trustlessly &mdash; no centralized exchange, no federation, no custodial bridge.</div>
+      <div class="roadmap-desc">Trustless CYNC&harr;BTC atomic swaps with the 6-layer user-safety stack. Substantially complete today &mdash; 346 tests pass with strict-DLEQ, mutation score 100% on security-critical files, ~97% line coverage on the security perimeter, libFuzzer + AddressSanitizer overnight runs clean across 27 targets. Ships <strong>after v1.0 mainnet is live</strong> (estimated Q1&ndash;Q2 2027). Once it ships, every Bitcoin holder is one transaction away from holding CYNC trustlessly &mdash; no centralized exchange, no federation, no custodial bridge.</div>
       <div class="roadmap-tag">Planned</div>
     </div>
     <div class="roadmap-item">
@@ -1040,14 +1040,8 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
 <!-- MAINNET COUNTDOWN -->
 <div class="manifesto reveal" style="background:var(--bg)">
   <div style="font-family:var(--mono);font-size:11px;color:var(--ac);letter-spacing:.2em;text-transform:uppercase;margin-bottom:8px">Mainnet Genesis</div>
-  <div style="font-family:var(--display);font-size:clamp(24px,3vw,36px);font-weight:300;color:var(--t);margin-bottom:4px">October 1, 2026</div>
-  <div style="font-size:13px;color:var(--t3);margin-bottom:0">00:00:00 UTC &mdash; the first block that can never be changed</div>
-  <div class="countdown" id="countdown">
-    <div class="cd-unit"><div class="cd-val" id="cd-days">&mdash;</div><div class="cd-label">Days</div></div>
-    <div class="cd-unit"><div class="cd-val" id="cd-hours">&mdash;</div><div class="cd-label">Hours</div></div>
-    <div class="cd-unit"><div class="cd-val" id="cd-mins">&mdash;</div><div class="cd-label">Minutes</div></div>
-    <div class="cd-unit"><div class="cd-val" id="cd-secs">&mdash;</div><div class="cd-label">Seconds</div></div>
-  </div>
+  <div style="font-family:var(--display);font-size:clamp(24px,3vw,36px);font-weight:300;color:var(--t);margin-bottom:4px">Target &mdash; March 2027</div>
+  <div style="font-size:13px;color:var(--t3);margin-bottom:0">The base-chain genesis block. Testnet is live now.</div>
 </div>
 
 <!-- SECURITY -->
@@ -1066,7 +1060,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
   </div>
   <div class="reveal" style="max-width:760px;margin:0 auto;padding:32px 28px;background:var(--s1);border:1px solid var(--b)">
     <p style="font-size:14px;color:var(--t2);line-height:1.7;margin:0 0 18px">
-      CoinCync is a solo-developer, MIT-licensed project at testnet stage. We don't currently have funding to back a paid bug-bounty program, and we'd rather say so plainly than promise payouts we can't honor. A funded program will launch alongside the third-party audit before mainnet.
+      CoinCync is a solo-developer, MIT-licensed project at testnet stage. We don't currently have funding to back a paid bug-bounty program, and we'd rather say so plainly than promise payouts we can't honor. A funded program will launch before mainnet.
     </p>
     <p style="font-size:14px;color:var(--t2);line-height:1.7;margin:0 0 18px">
       In the meantime, please report security issues responsibly. Public credit on disclosure (with your consent), and a coordinated fix-and-publish timeline that protects users.
@@ -1075,7 +1069,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
       Email:&nbsp; <a href="mailto:CyncLabs@proton.me" style="color:var(--ac);text-decoration:none;border-bottom:1px solid var(--ac-dim)">CyncLabs@proton.me</a><br>
       PGP:&nbsp;&nbsp;&nbsp; <span style="color:var(--t4)">Proton-published key — fetch from inbox profile or keys.openpgp.org</span><br>
       Scope:&nbsp; consensus, privacy, wallet integrity, key handling, network<br>
-      CI:&nbsp;&nbsp;&nbsp;&nbsp; 520+ tests, fmt + clippy + audit on every PR
+      CI:&nbsp;&nbsp;&nbsp;&nbsp; 520+ tests, fmt + clippy on every PR
     </p>
   </div>
 </section>
@@ -1113,7 +1107,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     </div>
     <div class="faq-item">
       <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">When does mainnet launch?</div>
-      <div class="faq-a"><div class="faq-a-inner">October 1, 2026 at 00:00:00 UTC. The genesis message reads: "CoinCync Mainnet Genesis - Privacy You Can Audit - October 2026". Until then, the testnet is live with mining active. All testnet coins will be wiped at mainnet launch. <strong>v1.0 mainnet ships the base chain only</strong> &mdash; mine, send, receive, multi-sig, with the full 7-feature privacy stack. CYNC&harr;BTC atomic swaps (cyncswap) ship in v1.1 after their own dedicated audit, ~Q1&ndash;Q2 2027. Same staging Monero used: chain first, novel crypto later, each behind its own audit.</div></div>
+      <div class="faq-a"><div class="faq-a-inner">Not yet scheduled &mdash; mainnet is parked pending the security audit, so there is no genesis date. The testnet is live now with mining active; all testnet coins will be wiped at mainnet launch. <strong>v1.0 mainnet will ship the base chain only</strong> &mdash; mine, send, receive, multi-sig, with the full 7-feature privacy stack. CYNC&harr;BTC atomic swaps (cyncswap) ship in v1.1 after their own dedicated audit, ~Q1&ndash;Q2 2027. Same staging Monero used: chain first, novel crypto later, each behind its own audit.</div></div>
     </div>
   </div>
 </section>
@@ -1215,7 +1209,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
   <div class="footer-grid">
     <div class="footer-col">
       <h4>Product</h4>
-      <a href="https://github.com/ghostrider1092/CoinCync/releases/download/v1.0.8-testnet/CoinCync-Wallet-Setup.exe">Desktop Wallet</a>
+      <a href="https://github.com/ghostrider1092/CoinCync/releases/latest">Desktop Wallet</a>
       <a href="https://explorer.coincync.network" target="_blank">Block Explorer</a>
       <a href="https://docs.coincync.network/getting-started/mining-on-your-pc">Mining Guide</a>
       <a href="https://docs.coincync.network/getting-started/run-a-node">Run a Node</a>
@@ -1229,7 +1223,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     </div>
     <div class="footer-col">
       <h4>Community</h4>
-      <a href="https://git.coincync.network/coincync/cync-protocol" target="_blank">GitHub</a>
+      <a href="https://github.com/ghostrider1092/CoinCync" target="_blank">GitHub</a>
       <a href="https://discord.gg/5tYNSCsqzy" target="_blank">Discord</a>
       <a href="https://x.com/coincync" target="_blank">X / Twitter</a>
     </div>
@@ -1322,31 +1316,8 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
   if(heroStats) observer.observe(heroStats);
 })();
 
-// --- MAINNET COUNTDOWN ---
-(function(){
-  var genesis=new Date('2026-10-01T00:00:00Z').getTime();
-  function tick(){
-    var now=Date.now();
-    var diff=genesis-now;
-    if(diff<=0){
-      document.getElementById('cd-days').textContent='0';
-      document.getElementById('cd-hours').textContent='0';
-      document.getElementById('cd-mins').textContent='0';
-      document.getElementById('cd-secs').textContent='0';
-      return;
-    }
-    var d=Math.floor(diff/86400000);
-    var h=Math.floor((diff%86400000)/3600000);
-    var m=Math.floor((diff%3600000)/60000);
-    var s=Math.floor((diff%60000)/1000);
-    document.getElementById('cd-days').textContent=d;
-    document.getElementById('cd-hours').textContent=h;
-    document.getElementById('cd-mins').textContent=m;
-    document.getElementById('cd-secs').textContent=s;
-  }
-  tick();
-  setInterval(tick,1000);
-})();
+// --- MAINNET COUNTDOWN (removed) ---
+// Mainnet target is March 2027; the page shows a target, not a live countdown.
 
 // --- MARK ROLODEX (cycles 4 brand-mark variants in §06) ---
 // Two faces, four marks: every ~3 s we flip the card and swap whichever
