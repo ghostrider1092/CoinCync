@@ -7391,6 +7391,124 @@ mod tests {
         assert_eq!(chain.tip_hash(), genesis_hash, "tip reset to genesis");
     }
 
+    /// An unshield with two transparent outputs whose blindings cancel still
+    /// sums to (leaving - fee) * H, so the value bridge alone cannot tell it
+    /// from an honest unshield. The per-output zero-blinding check has to
+    /// refuse it at all three gates, and the honest single-output version has
+    /// to pass the same three gates through the same mint -> spend path.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn unshield_with_cancelling_blindings_is_rejected_at_every_gate() {
+        use crate::consensus::spark_payload::build::{build_mint_payload, build_spend_payload};
+        use crate::consensus::spark_payload::{
+            derive_outpoint, verify_transparent_shielded_balance,
+        };
+        use crate::consensus::validation::{
+            validate_transaction_basic, validate_transaction_for_network_ctx,
+        };
+        use crate::crypto::{BlindingFactor, PedersenCommitment};
+        use crate::primitives::PublicKey;
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::storage::UtxoSet;
+        use crate::transaction::{Transaction, TxOutput, TxType};
+        use curve25519_dalek::ristretto::CompressedRistretto;
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new_with_network(NetworkType::Regtest);
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+
+        let mk = |outputs: Vec<TxOutput>, fee: u64, extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs,
+            fee: crate::primitives::Amount::from_atomic(fee),
+            range_proof: vec![],
+            extra,
+        };
+
+        let seed = b"unshield-blinding-seed";
+        let values: Vec<u64> = (0..8u64).map(|i| 5_000_000_000 + i).collect();
+        let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
+        chain.apply_spark_v2_txs(
+            std::slice::from_ref(&mk(vec![], 0, mint_payload.encode())),
+            1,
+        );
+
+        // Spend coin 2 into a 1_000 pool output; the bundle fee is what leaves the pool.
+        let owned_op = derive_outpoint(&[], 2);
+        let mut spend = build_spend_payload(seed, store.as_ref(), &owned_op, 1_000, 0, 1).unwrap();
+        let leaving = values[2] - 1_000;
+        spend.value_balance = leaving as i64;
+        let extra = spend.encode();
+
+        let point = |b: u8| {
+            PublicKey::from_bytes(
+                PedersenCommitment::commit(u64::from(b) + 1, &BlindingFactor::from_bytes([b; 32]))
+                    .to_bytes(),
+            )
+        };
+        let out = |commitment: [u8; 32], amount: u64, b: u8| TxOutput {
+            stealth_address: point(b),
+            tx_public_key: point(b + 1),
+            commitment,
+            encrypted_amount: amount.to_le_bytes().to_vec(),
+            view_tag: 0,
+            lock_height: None,
+            encrypted_memo: vec![],
+        };
+        let utxos = UtxoSet::new();
+        let height = crate::constants::SHIELDED_REGTEST_ACTIVATION_HEIGHT;
+        // Fee floor of the two-output shape; the one-output honest tx is smaller.
+        let draft = mk(
+            vec![out([1u8; 32], 0, 3), out([1u8; 32], 0, 5)],
+            0,
+            extra.clone(),
+        );
+        let fee = (draft.size() as u64) * crate::constants::MIN_FEE_PER_BYTE;
+        let paid = leaving - fee;
+
+        // Honest: one revealed output, zero blinding, exactly what leaves minus the fee.
+        let c = PedersenCommitment::commit(paid, &BlindingFactor::zero()).to_bytes();
+        let honest = mk(vec![out(c, paid, 3)], fee, extra.clone());
+        validate_transaction_basic(&honest).unwrap();
+        validate_transaction_for_network_ctx(&honest, &utxos, height, NetworkType::Regtest, true)
+            .unwrap();
+        chain
+            .verify_block_spark_v2(std::slice::from_ref(&honest))
+            .unwrap();
+        let mut set = UtxoSet::new();
+        set.apply_batch(UtxoSet::batch_from_block(2, std::slice::from_ref(&honest)));
+        assert!(set.get_output(&honest.hash(), 0).is_some());
+
+        // Crafted: blindings x and -x on paid + k and -k. Same sum, so the bridge
+        // equation accepts it, and the first output would be worth paid + k.
+        let k: u64 = 1_000_000_000_000;
+        let x = BlindingFactor::from_bytes([9u8; 32]);
+        let c1 = PedersenCommitment::commit(paid + k, &x).to_bytes();
+        let c2 = (-CompressedRistretto(PedersenCommitment::commit(k, &x).to_bytes())
+            .decompress()
+            .unwrap())
+        .compress()
+        .to_bytes();
+        verify_transparent_shielded_balance(&[], &[c1, c2], fee, leaving as i64).unwrap();
+
+        let crafted = mk(vec![out(c1, paid + k, 3), out(c2, 0, 5)], fee, extra);
+        assert!(validate_transaction_basic(&crafted).is_err());
+        assert!(validate_transaction_for_network_ctx(
+            &crafted,
+            &utxos,
+            height,
+            NetworkType::Regtest,
+            true
+        )
+        .is_err());
+        assert!(chain
+            .verify_block_spark_v2(std::slice::from_ref(&crafted))
+            .is_err());
+    }
+
     /// A v2 payload with neither a mint nor a spend has nothing behind its
     /// value_balance. The mempool's structural gate refuses the shape, but a
     /// miner never goes through the mempool, so the block gate has to refuse it
