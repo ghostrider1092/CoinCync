@@ -474,11 +474,11 @@ pub mod build {
     /// `output_value` to `recipient_addr` (a bech32m Spark address, as bytes) —
     /// a shielded→shielded send to another wallet. The output coin re-enters the
     /// pool at apply and is recoverable by the recipient (fee = input −
-    /// `output_value`, `value_balance = 0` — this builder models the fee as
-    /// pool-internal, which is fine for the stateless/state-machine tests and the
-    /// non-submitting demo path). The MINEABLE live send path builds its own
-    /// payload with `value_balance = fee` (see wallet `shielded_send_live`), which
-    /// is what the `value_balance == spend_fee(bundle)` consensus guard binds.
+    /// `output_value`, `value_balance = 0`, enough for the stateless tests and
+    /// the non-submitting demo path). Anything that goes through the block gate
+    /// sets `value_balance` to the bundle fee first, as the live send path does
+    /// (see wallet `shielded_send_live`): the `value_balance == spend_fee(bundle)`
+    /// consensus guard binds the two on every spend.
     /// `None` if the coin is not in the anchored cover set, the recipient is
     /// empty, or the FFI fails.
     pub fn build_transfer_payload(

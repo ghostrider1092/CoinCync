@@ -1140,13 +1140,11 @@ impl Blockchain {
             // unreadable. (A shield-in's value is proven by its mint bundle above,
             // not this path.)
             //
-            // Scoped to `value_balance != 0`: a `value_balance == 0` spend declares
-            // no crossing, so the value bridge forces `tx.fee == 0` — and the block
-            // fee floor (§8 + min-fee, no shielded exemption) then rejects it, so
-            // it is unmineable regardless. That lets the pool state-machine tests,
-            // which drive `verify_block_spark_v2` in isolation with a pool-internal
-            // fee (`value_balance == 0`), exercise the spend path without the floor.
-            if payload.value_balance != 0 && payload.mint.is_none() {
+            // This holds for a `value_balance == 0` spend as well: its bundle fee
+            // leaves the coin set with nothing credited to the turnstile, and once
+            // the bridge is open a transparent input can pay `tx.fee`, so the fee
+            // floor no longer keeps such a spend out of a block.
+            if payload.mint.is_none() {
                 if let Some(sb) = &payload.spend {
                     let bundle_fee = spark_connector::ffi::spend_fee(&sb.bundle).ok_or_else(|| {
                         format!("spark v2 tx {idx}: unreadable spend bundle fee")
@@ -5434,6 +5432,23 @@ mod tests {
         );
     }
 
+    /// Wrap a built spend the way the wallet submits it: value_balance and
+    /// tx.fee are both the bundle fee, which the block gate binds them to.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    fn bound_spend_tx(mut payload: crate::consensus::spark_payload::SparkPayload) -> Transaction {
+        let fee = spark_connector::ffi::spend_fee(&payload.spend.as_ref().unwrap().bundle).unwrap();
+        payload.value_balance = i64::try_from(fee).unwrap();
+        Transaction {
+            version: 1,
+            tx_type: crate::transaction::TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(fee),
+            range_proof: vec![],
+            extra: payload.encode(),
+        }
+    }
+
     /// Drive a REAL `TxType::Shielded` transaction (extra = a builder-produced
     /// libspark v2 `SparkPayload`) through the chain's actual consensus hooks —
     /// `apply_spark_v2_txs` (the mint FEED) and `verify_block_spark_v2` (the
@@ -5453,7 +5468,7 @@ mod tests {
         use std::sync::Arc;
 
         // A chain with the libspark pool store initialized.
-        let mut chain = Blockchain::new();
+        let mut chain = Blockchain::new_with_network(NetworkType::Regtest);
         chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
         let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
 
@@ -5485,7 +5500,7 @@ mod tests {
         // Build a spend of the coin at vout 2 over the anchored cover set.
         let owned_op = derive_outpoint(&[], 2);
         let spend_payload = build_spend_payload(seed, store.as_ref(), &owned_op, 3_000, 0, 1).unwrap();
-        let spend_tx = mk_shielded_tx(spend_payload.encode());
+        let spend_tx = bound_spend_tx(spend_payload);
 
         // Pre-apply verify hook: accepts the unspent spend.
         assert!(
@@ -5524,7 +5539,7 @@ mod tests {
         use spark_connector::ffi::{address_from_seed, LibsparkBackend};
         use std::sync::Arc;
 
-        let mut chain = Blockchain::new();
+        let mut chain = Blockchain::new_with_network(NetworkType::Regtest);
         chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
         let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
         let backend = LibsparkBackend;
@@ -5574,8 +5589,8 @@ mod tests {
         assert_ne!(single_a, single_b, "distinct notes yield distinct linking tags");
 
         // A two-spend BLOCK verifies through the (batched) verify_block_spark_v2.
-        let tx_a = mk_shielded_tx(pa.encode());
-        let tx_b = mk_shielded_tx(pb.encode());
+        let tx_a = bound_spend_tx(pa);
+        let tx_b = bound_spend_tx(pb);
         chain
             .verify_block_spark_v2(&[tx_a.clone(), tx_b.clone()])
             .expect("two-spend block accepted (batched verify)");
@@ -5692,7 +5707,7 @@ mod tests {
             .unwrap_or(0xC0FFEE_1234);
         let deadline = Instant::now() + Duration::from_secs(secs);
 
-        let mut chain = Blockchain::new();
+        let mut chain = Blockchain::new_with_network(NetworkType::Regtest);
         chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
         let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
         // #311: small mint, not the full cover set (production N=32768 makes
@@ -5783,7 +5798,7 @@ mod tests {
             let xfer_payload =
                 build_transfer_payload(wseed.as_bytes(), store.as_ref(), &xfer_op, 100, 0, 1, &addr_b)
                     .unwrap_or_else(|| anomaly!("build_transfer"));
-            let xfer_tx = mk(xfer_payload.encode());
+            let xfer_tx = bound_spend_tx(xfer_payload.clone());
             if chain.verify_block_spark_v2(std::slice::from_ref(&xfer_tx)).is_err() {
                 anomaly!("valid_transfer_rejected");
             }
@@ -5819,7 +5834,7 @@ mod tests {
             let owned_op = derive_outpoint(&[], spend_vout);
             let spend_payload = build_spend_payload(wseed.as_bytes(), store.as_ref(), &owned_op, 100, 0, 1)
                 .unwrap_or_else(|| anomaly!("build_spend"));
-            let spend_tx = mk(spend_payload.encode());
+            let spend_tx = bound_spend_tx(spend_payload);
             if chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_err() {
                 anomaly!("valid_spend_rejected");
             }
@@ -5901,7 +5916,7 @@ mod tests {
         // height 1 seeds owned coins so the add_block'd TRANSFER below has a cover
         // set to spend. The value-bridge-backed shield-in through add_block needs
         // real transparent ring members (forbidden as synthetic ≥100), so we use a
-        // value_balance=0 TRANSFER to exercise the activation gate cleanly.
+        // pure-shielded TRANSFER to exercise the activation gate cleanly.
         let wseed = b"e2e-shielded-172-pr3";
         let store = chain
             .spark_pool_store
@@ -5926,19 +5941,21 @@ mod tests {
         assert_eq!(store.coin_count(), n, "mint seeded the pool");
 
         // The shielded tx we'll try to submit through add_block: a transfer of one
-        // owned coin to a second wallet (value_balance = 0).
+        // owned coin to a second wallet, value_balance bound to the bundle fee.
         let recipient_b = b"e2e-recipient-b";
         let addr_b = address_from_seed(recipient_b).expect("recipient B address");
         let xfer_op = derive_outpoint(&[], 0);
         let xfer_payload =
             build_transfer_payload(wseed, store.as_ref(), &xfer_op, 100, 0, 1, &addr_b)
                 .expect("build transfer");
-        // fee=0: this e2e proves the ACTIVATION GATE through add_block, not the
+        // The fee is the bundle fee (4_900 atomic), far under the floor for a tx
+        // this size: this e2e proves the ACTIVATION GATE through add_block, not the
         // fee-market. The gate fires BEFORE any fee check (validation.rs: the
-        // `is_shielded()` branch returns early), so a fee=0 bundle is all we need to
-        // show the gate opening. Bundle validity + the fee path are covered by the
+        // `is_shielded()` branch returns early), so that is all we need to show
+        // the gate opening. Bundle validity + the fee path are covered by the
         // wallet tests and the 24h soak (which drives apply_spark_v2_txs directly).
-        let shielded_tx = mk(xfer_payload.encode(), 0);
+        let shielded_tx = bound_spend_tx(xfer_payload);
+        let fee = shielded_tx.fee.as_atomic();
         // Sanity: the bundle itself is valid (independent of the block gate).
         assert!(
             chain.verify_block_spark_v2(std::slice::from_ref(&shielded_tx)).is_ok(),
@@ -5955,9 +5972,10 @@ mod tests {
         };
         let spend_pub = kp();
         let view_pub = kp();
-        let coinbase = |height: u64| -> Transaction {
+        // The coinbase check wants exactly reward + fees, so claim the carried fee.
+        let coinbase = |height: u64, fees: u64| -> Transaction {
             let reward = calculate_block_reward(height);
-            let amt = reward.as_atomic();
+            let amt = reward.as_atomic() + fees;
             let commitment = PedersenCommitment::commit(amt, &BlindingFactor::zero());
             let miner_secret: [u8; 32] = *blake3::hash(view_pub.as_bytes()).as_bytes();
             let (stealth, _) =
@@ -6048,7 +6066,7 @@ mod tests {
         };
         chain.seed_linear_chain_for_testing_with_target(49, 3600, floor_target);
         let parent49 = chain.get_block_by_height(49).expect("seeded block 49");
-        let gated = mine(&parent49, 50, vec![coinbase(50), shielded_tx.clone()]);
+        let gated = mine(&parent49, 50, vec![coinbase(50, fee), shielded_tx.clone()]);
         let res_a = chain.add_block(gated);
         let msg_a = format!("{res_a:?}");
         // add_block reports a bad block as Ok(BlockStatus::Invalid(reason)); the
@@ -6064,16 +6082,17 @@ mod tests {
 
         // ── Seed to 99, then submit the SAME shielded tx at height 100 (= activation)
         // through add_block → the activation gate OPENS: the tx is no longer rejected
-        // for inactivity. (With fee=0 it then trips the fee-market — a DIFFERENT check
+        // for inactivity. (It then trips the fee-market, a DIFFERENT check
         // that lives AFTER the gate; a real wallet tx carries a fee. The point proven
         // here is that the submission path exists and is height-gated, closing #172.)
         chain.seed_linear_chain_for_testing_with_target(50, 3600, floor_target); // → height 99
         let parent99 = chain.get_block_by_height(99).expect("seeded block 99");
-        let activated = mine(&parent99, 100, vec![coinbase(100), shielded_tx]);
+        let activated = mine(&parent99, 100, vec![coinbase(100, fee), shielded_tx]);
         let res_b = chain.add_block(activated);
         let msg_b = format!("{res_b:?}");
         // AT activation the gate OPENS: the activation rejection is gone, and the
-        // tx reaches the post-gate block fee-market check (fee=0 ⇒ "fee too low").
+        // tx reaches the post-gate block fee-market check (the bundle fee is under
+        // the floor, so "fee too low").
         // Seeing the fee complaint but NOT the activation one proves the gate let
         // it through (rather than the block failing earlier for some other reason).
         assert!(
@@ -7587,6 +7606,83 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("must carry a mint or a spend"), "{err}");
         assert_eq!(store.pool_value(), pool_before);
+    }
+
+    /// A spend's bundle fee leaves the coin set whether or not value_balance
+    /// says so. The binding was scoped to value_balance != 0 on the argument
+    /// that a value_balance == 0 spend cannot pay tx.fee and so never mines,
+    /// but with the bridge open a transparent input pays it. The gate then
+    /// accepted the spend and apply left pool_value where it was, so the
+    /// counter sat above the pooled value by the bundle fee.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn spend_with_zero_value_balance_is_bound_to_its_bundle_fee() {
+        use crate::consensus::spark_payload::build::{build_mint_payload, build_spend_payload};
+        use crate::consensus::spark_payload::derive_outpoint;
+        use crate::crypto::{BlindingFactor, ClsagSignature, PedersenCommitment, SecretScalar};
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxInput, TxType};
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new_with_network(NetworkType::Regtest);
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+
+        let mk = |inputs: Vec<TxInput>, fee: u64, extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs,
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(fee),
+            range_proof: vec![],
+            extra,
+        };
+        let seed = b"zero-balance-bundle-fee-seed";
+        let values: Vec<u64> = (0..8u64).map(|i| 5_000_000 + i).collect();
+        let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
+        chain.apply_spark_v2_txs(
+            std::slice::from_ref(&mk(vec![], 0, mint_payload.encode())),
+            1,
+        );
+        let pool_before = store.pool_value();
+
+        // Coin 2 spent into a 1_000 output; the rest of it is the bundle fee.
+        let spend =
+            build_spend_payload(seed, store.as_ref(), &derive_outpoint(&[], 2), 1_000, 0, 1)
+                .unwrap();
+        let bundle_fee =
+            spark_connector::ffi::spend_fee(&spend.spend.as_ref().unwrap().bundle).unwrap();
+        assert_eq!(bundle_fee, values[2] - 1_000);
+
+        // value_balance stays 0 and a transparent input pays tx.fee, so the value
+        // bridge balances and the fee floor is met. The gate does not check the
+        // ring signature, so a structurally complete input is enough here.
+        let fee: u64 = 50_000;
+        let secret = SecretScalar::from_bytes([7u8; 32]);
+        let image = crate::crypto::KeyImage::from_secret(&secret);
+        let input = TxInput {
+            key_image: KeyImage::from_bytes(image.to_bytes()),
+            ring_members: vec![],
+            signature: ClsagSignature {
+                key_image: image,
+                commitment_image: secret.to_public(),
+                c1: [1u8; 32],
+                responses: vec![[2u8; 32]; 2],
+            },
+            pseudo_output_commitment: PedersenCommitment::commit(fee, &BlindingFactor::zero())
+                .to_bytes(),
+        };
+        let crafted = mk(vec![input], fee, spend.encode());
+        let err = chain
+            .verify_block_spark_v2(std::slice::from_ref(&crafted))
+            .unwrap_err();
+        assert!(err.contains("value_balance 0 != spend bundle fee"), "{err}");
+        assert_eq!(store.pool_value(), pool_before);
+
+        // The same spend bound the way the wallet builds it passes.
+        chain
+            .verify_block_spark_v2(std::slice::from_ref(&bound_spend_tx(spend)))
+            .unwrap();
     }
 
     /// A block the spark gate rejects must leave the tip where it was. The
