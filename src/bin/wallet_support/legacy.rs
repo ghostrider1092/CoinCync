@@ -2950,32 +2950,54 @@ async fn cmd_shielded_unshield(
 }
 
 /// Fetch the whole set of UNAVAILABLE pool linking tags (spent on-chain OR on a
-/// pending mempool spend) in a single RPC call, so a wallet can test its own
-/// notes LOCALLY instead of asking the node about each owned tag one at a time.
-/// The per-tag probe (`is_spark_pool_tag_spent`) revealed the linking tags of a
-/// wallet's still-unspent notes to the node before they were ever spent (#378);
-/// this set is public data, so fetching it whole reveals nothing about which
-/// coins the wallet owns. Returns an error (rather than an empty set) if the
-/// node cannot be reached, so callers STOP instead of assuming everything is
-/// unspent.
+/// pending mempool spend), so a wallet can test its own notes LOCALLY instead of
+/// asking the node about each owned tag one at a time. The per-tag probe
+/// (`is_spark_pool_tag_spent`) revealed the linking tags of a wallet's
+/// still-unspent notes to the node before they were ever spent (#378); this set
+/// is public data, so fetching it whole reveals nothing about which coins the
+/// wallet owns.
+///
+/// The RPC is PAGINATED (`[offset, limit]`, response carries `total`): the set
+/// is GLOBAL (every group's spends), not bounded by the single cover-set group
+/// the wallet scans, so it can outgrow one response. We page until we have all
+/// `total` tags. Returns an error (rather than an empty/partial set) if the node
+/// cannot be reached, so callers STOP instead of assuming everything is unspent.
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
 async fn fetch_spent_tag_set(node: &str) -> Result<std::collections::HashSet<Vec<u8>>, String> {
-    let resp = rpc_call(node, "get_spark_spent_tags", serde_json::json!([]))
-        .await
-        .map_err(|e| {
-            format!(
-                "get_spark_spent_tags: {e} (the node must be a sketch-gk-proof build exposing \
-                 this RPC)"
-            )
-        })?;
-    let arr = resp
-        .get("tags")
-        .and_then(|t| t.as_array())
-        .ok_or("get_spark_spent_tags response missing tags array")?;
-    let mut set = std::collections::HashSet::with_capacity(arr.len());
-    for t in arr {
-        let hexs = t.as_str().ok_or("spent tag entry not a string")?;
-        set.insert(hex::decode(hexs).map_err(|e| format!("bad spent tag hex: {e}"))?);
+    // Matches the node's MAX_PAGE cap; a smaller value just means more round
+    // trips. On current testnet the whole set fits in the first page.
+    const PAGE: u64 = 50_000;
+    let mut set = std::collections::HashSet::new();
+    let mut offset: u64 = 0;
+    loop {
+        let resp = rpc_call(node, "get_spark_spent_tags", serde_json::json!([offset, PAGE]))
+            .await
+            .map_err(|e| {
+                format!(
+                    "get_spark_spent_tags: {e} (the node must be a sketch-gk-proof build exposing \
+                     this RPC)"
+                )
+            })?;
+        let total = resp
+            .get("total")
+            .and_then(|v| v.as_u64())
+            .ok_or("get_spark_spent_tags response missing total")?;
+        let arr = resp
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .ok_or("get_spark_spent_tags response missing tags array")?;
+        let got = arr.len() as u64;
+        for t in arr {
+            let hexs = t.as_str().ok_or("spent tag entry not a string")?;
+            set.insert(hex::decode(hexs).map_err(|e| format!("bad spent tag hex: {e}"))?);
+        }
+        offset += got;
+        // Done once we've pulled the whole set. The `got == 0` guard stops a
+        // stuck loop if the node ever reports more remaining than it returns
+        // (e.g. `total` shrank mid-paging after a reorg) rather than spinning.
+        if offset >= total || got == 0 {
+            break;
+        }
     }
     Ok(set)
 }

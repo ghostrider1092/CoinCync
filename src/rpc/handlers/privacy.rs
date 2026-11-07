@@ -10,6 +10,30 @@ use crate::primitives::Hash;
 
 use super::RpcState;
 
+/// Deterministically paginate a spent-tag set: returns `(total, page)` where
+/// `page` is the hex-encoded tags in sorted order sliced to
+/// `[offset, offset + limit)`. Extracted from the `get_spark_spent_tags`
+/// handler so the paging invariant (pages tile the whole set with no gap or
+/// overlap) is unit-testable without constructing an `RpcState`.
+#[cfg(feature = "sketch-gk-proof")]
+fn paginate_spent_tags(
+    set: std::collections::HashSet<Vec<u8>>,
+    offset: usize,
+    limit: usize,
+) -> (usize, Vec<String>) {
+    let total = set.len();
+    let mut all: Vec<Vec<u8>> = set.into_iter().collect();
+    // Sorted order makes successive [offset, limit) pages tile the set.
+    all.sort_unstable();
+    let page = all
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|t| hex::encode(&t))
+        .collect();
+    (total, page)
+}
+
 pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // ── get_privacy_stats ─────────────────────────────────────
     // Aggregate view of the Phase 2 privacy stores.
@@ -198,41 +222,51 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // The wallet-facing counterpart to is_spark_pool_tag_spent: instead of
     // asking the node whether each owned pool coin's tag is spent (which reveals
     // the linking tags of a wallet's STILL-UNSPENT notes — #378), a wallet
-    // fetches the whole "unavailable" tag set ONCE and tests its notes locally.
-    // The set is public chain + mempool data, so downloading it reveals nothing
+    // fetches the whole "unavailable" tag set and tests its notes locally. The
+    // set is public chain + mempool data, so downloading it reveals nothing
     // about which coins the wallet owns. "Unavailable" = spent on-chain OR on a
     // pending mempool spend, matching is_spark_pool_tag_spent's semantics (so a
-    // note whose spend is pending is excluded too). Array order is not
-    // meaningful. Read-only.
+    // note whose spend is pending is excluded too). Read-only.
+    //
+    // PAGINATED: params `[offset, limit]`, both optional (default offset 0,
+    // limit `MAX_PAGE`). `limit` is clamped to `MAX_PAGE`, which bounds a single
+    // response (the DoS guard) WITHOUT a whole-set error: the response carries
+    // `total` and the wallet pages until it has all of it. An earlier version
+    // returned an error past a 100k whole-set cap and bricked balance/send —
+    // wrong, because the pool is split into `SPARK_COVER_SET_GROUP`-sized cover
+    // groups but this spent set is GLOBAL, so it is NOT bounded by the single
+    // cover-set group the wallet fetches, and there was no per-tag fallback.
+    // Tags are returned SORTED so pages tile the set deterministically within a
+    // call; a spend mined between pages shifts the set by one tag, which the
+    // wallet's next scan reconciles.
     #[cfg(feature = "sketch-gk-proof")]
     module
-        .register_method("get_spark_spent_tags", |_params, state, _ext| {
+        .register_method("get_spark_spent_tags", |params, state, _ext| {
             use std::collections::HashSet;
+            // Optional positional params [offset, limit]; tolerate none/partial.
+            let args: Vec<u64> = params.parse().unwrap_or_default();
+            let offset = args.first().copied().unwrap_or(0) as usize;
+            // Per-response cap bounds the serialized size; a larger request is
+            // clamped and the wallet pages through the remainder.
+            const MAX_PAGE: usize = 50_000;
+            let limit = args
+                .get(1)
+                .map(|&l| (l as usize).min(MAX_PAGE))
+                .unwrap_or(MAX_PAGE);
+            // Snapshot the MEMPOOL FIRST, then the on-chain spent set. Block
+            // connect adds a tag to the chain spent set BEFORE removing it from
+            // the mempool, so this order guarantees a spend being mined
+            // concurrently is in at least one of the two snapshots. The reverse
+            // order (chain then mempool) has a window where a just-mined spend is
+            // in NEITHER — the chain read is too early, the mempool read too late
+            // — and the wallet would briefly treat a spent note as available.
             let mut set: HashSet<Vec<u8>> =
-                state.chain.spark_pool_spent_tags().into_iter().collect();
-            // Fold in pending mempool spends — a note whose spend is in the
-            // mempool but not yet mined is NOT in the on-chain spent set, so a
-            // wallet that omitted these would re-pick it and have the node
-            // reject the resulting double-spend.
-            set.extend(state.mempool.linking_tags_snapshot());
-            // Defensive cap, as in get_shielded_cover_set: never serialize an
-            // unbounded response. The spent set is bounded by the pool's own
-            // size (one tag per spent coin, each still in the cover set), so it
-            // cannot exceed the cover-set cap; a wallet that ever hit this would
-            // fall back to the per-tag RPC.
-            const MAX_SPENT_TAGS: usize = 100_000;
-            if set.len() > MAX_SPENT_TAGS {
-                return Err(ErrorObjectOwned::owned(
-                    -32000,
-                    format!(
-                        "spent-tag set too large ({} > {MAX_SPENT_TAGS}); pagination unimplemented",
-                        set.len()
-                    ),
-                    None::<()>,
-                ));
-            }
-            let tags: Vec<String> = set.iter().map(hex::encode).collect();
+                state.mempool.linking_tags_snapshot().into_iter().collect();
+            set.extend(state.chain.spark_pool_spent_tags());
+            let (total, tags) = paginate_spent_tags(set, offset, limit);
             Ok::<_, ErrorObjectOwned>(json!({
+                "total": total,
+                "offset": offset,
                 "count": tags.len(),
                 "tags": tags,
             }))
@@ -359,4 +393,43 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "sketch-gk-proof"))]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn paginate_spent_tags_tiles_whole_set_without_gaps_or_dups() {
+        // The #378 wallet pages this RPC until it has `total` tags; the pages
+        // must cover the whole set exactly once (no tag dropped, none repeated),
+        // or a wallet would miscount a spent note as available (or vice versa).
+        let mut set: HashSet<Vec<u8>> = HashSet::new();
+        for i in 0u8..10 {
+            set.insert(vec![i; 34]);
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut offset = 0usize;
+        let total = loop {
+            let (total, page) = paginate_spent_tags(set.clone(), offset, 3);
+            let got = page.len();
+            for t in page {
+                assert!(seen.insert(t), "a tag must not appear on two pages");
+            }
+            offset += got;
+            // Mirror the wallet's loop guard: stop at the end or an empty page.
+            if offset >= total || got == 0 {
+                break total;
+            }
+        };
+        assert_eq!(total, 10, "total reported independent of paging");
+        assert_eq!(seen.len(), 10, "every tag fetched exactly once across pages");
+
+        // An offset past the end yields an empty page but still reports `total`,
+        // so the wallet's `offset >= total` guard terminates cleanly.
+        let (total, page) = paginate_spent_tags(set, 100, 3);
+        assert_eq!(total, 10);
+        assert!(page.is_empty());
+    }
 }
