@@ -220,6 +220,22 @@ impl ConnectionTracker {
     pub fn untrack_outbound_subnet(&self, addr: &SocketAddr) {
         let subnet = Self::subnet_key(&addr.ip());
         if let Some(mut entry) = self.outbound_per_subnet.get_mut(&subnet) {
+            // Debug guard: a present counter is always >= 1 — untrack removes the
+            // entry when it reaches 0, and `reconcile_outbound_subnets` only ever
+            // inserts counts >= 1 — so decrementing a live entry must never find it
+            // already at 0. A 0 here is an outbound-count UNDER-RUN: a slot released
+            // twice, or an untrack without a matching track. In release the `> 0`
+            // check below saturates safely, but an under-run would leave the per-/16
+            // counter too low and silently weaken the eclipse-defense cap, so catch
+            // it loudly in debug/test. (An untrack for a subnet that `reconcile` has
+            // already pruned falls into the absent-entry path below, which is benign
+            // under the documented reconcile/try_track race and is NOT asserted.)
+            debug_assert!(
+                *entry > 0,
+                "outbound subnet counter under-run for /16 {subnet:#010x}: untrack \
+                 found the counter already 0 (double release, or untrack without a \
+                 matching track)"
+            );
             if *entry > 0 {
                 *entry -= 1;
             }
@@ -699,6 +715,36 @@ mod tests {
         // Drop one peer; slot must free up.
         t.untrack_outbound_subnet(&peers[0]);
         assert!(t.try_track_outbound_subnet(&addr_in(10, 0, 99)));
+    }
+
+    #[test]
+    fn owned_outbound_slots_return_count_to_zero_on_drop() {
+        // Guards the OutboundSubnetSlot leak class: acquiring owned slots then
+        // dropping them must return the per-/16 counter ALL the way to 0 (the
+        // Drop → untrack path), so a closed connection never leaves a phantom slot
+        // pinning the subnet cap. Pairs with the under-run debug_assert in
+        // `untrack_outbound_subnet` (which catches the opposite error — a double
+        // release) for full accounting coverage of the outbound counter.
+        let t = std::sync::Arc::new(ConnectionTracker::new(1024));
+        let subnet_sum =
+            || -> usize { t.outbound_subnet_snapshot().iter().map(|(_, c)| *c).sum() };
+        {
+            let mut slots = Vec::new();
+            for i in 0..MAX_OUTBOUND_PER_SUBNET as u8 {
+                slots.push(
+                    t.try_track_outbound_subnet_owned(&addr_in(10, 0, i))
+                        .expect("slot admitted under the cap"),
+                );
+            }
+            assert_eq!(
+                subnet_sum(),
+                MAX_OUTBOUND_PER_SUBNET,
+                "all slots counted while held"
+            );
+        } // slots drop here → each Drop decrements
+        assert_eq!(subnet_sum(), 0, "every slot's Drop returned the counter to zero");
+        // Full room restored: a fresh dial into the /16 is admitted again.
+        assert!(t.try_track_outbound_subnet(&addr_in(10, 0, 0)));
     }
 
     /// 2026-07-09 seed1 wedge: leaked outbound slots pin a /16 at the cap so
