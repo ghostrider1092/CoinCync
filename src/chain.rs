@@ -794,6 +794,22 @@ impl Blockchain {
             .unwrap_or(false)
     }
 
+    /// A snapshot of EVERY v2 shielded linking tag spent on-chain. A wallet
+    /// fetches this whole set once and tests its owned notes LOCALLY, rather
+    /// than asking the node whether each owned tag is spent one at a time — the
+    /// per-tag query reveals the linking tags of a wallet's STILL-UNSPENT notes
+    /// to the node (or whoever runs the public RPC) before they are ever spent,
+    /// which is the one thing the tag is meant to hide (#378). The set is public
+    /// chain data, so fetching it whole reveals nothing about ownership. Empty
+    /// when the pool store is absent.
+    #[cfg(feature = "sketch-gk-proof")]
+    pub fn spark_pool_spent_tags(&self) -> Vec<Vec<u8>> {
+        self.spark_pool_store
+            .as_ref()
+            .map(|s| s.spent_tags().into_iter().map(|n| n.0).collect())
+            .unwrap_or_default()
+    }
+
     /// The unified operator security sweep: run every initialized detail —
     /// Phase-2 lock-step (always) and the shielded-pool detail (gated + present)
     /// — under one `SecurityCommand` and return the report. **Pure** (does not

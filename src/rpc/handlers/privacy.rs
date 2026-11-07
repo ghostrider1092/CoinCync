@@ -194,6 +194,51 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         }))
     }).map_err(|e| Error::RpcError(e.to_string()))?;
 
+    // ── get_spark_spent_tags ──────────────────────────────────
+    // The wallet-facing counterpart to is_spark_pool_tag_spent: instead of
+    // asking the node whether each owned pool coin's tag is spent (which reveals
+    // the linking tags of a wallet's STILL-UNSPENT notes — #378), a wallet
+    // fetches the whole "unavailable" tag set ONCE and tests its notes locally.
+    // The set is public chain + mempool data, so downloading it reveals nothing
+    // about which coins the wallet owns. "Unavailable" = spent on-chain OR on a
+    // pending mempool spend, matching is_spark_pool_tag_spent's semantics (so a
+    // note whose spend is pending is excluded too). Array order is not
+    // meaningful. Read-only.
+    #[cfg(feature = "sketch-gk-proof")]
+    module
+        .register_method("get_spark_spent_tags", |_params, state, _ext| {
+            use std::collections::HashSet;
+            let mut set: HashSet<Vec<u8>> =
+                state.chain.spark_pool_spent_tags().into_iter().collect();
+            // Fold in pending mempool spends — a note whose spend is in the
+            // mempool but not yet mined is NOT in the on-chain spent set, so a
+            // wallet that omitted these would re-pick it and have the node
+            // reject the resulting double-spend.
+            set.extend(state.mempool.linking_tags_snapshot());
+            // Defensive cap, as in get_shielded_cover_set: never serialize an
+            // unbounded response. The spent set is bounded by the pool's own
+            // size (one tag per spent coin, each still in the cover set), so it
+            // cannot exceed the cover-set cap; a wallet that ever hit this would
+            // fall back to the per-tag RPC.
+            const MAX_SPENT_TAGS: usize = 100_000;
+            if set.len() > MAX_SPENT_TAGS {
+                return Err(ErrorObjectOwned::owned(
+                    -32000,
+                    format!(
+                        "spent-tag set too large ({} > {MAX_SPENT_TAGS}); pagination unimplemented",
+                        set.len()
+                    ),
+                    None::<()>,
+                ));
+            }
+            let tags: Vec<String> = set.iter().map(hex::encode).collect();
+            Ok::<_, ErrorObjectOwned>(json!({
+                "count": tags.len(),
+                "tags": tags,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
+
     // ── is_spark_serial_spent ─────────────────────────────────
     module.register_method("is_spark_serial_spent", |params, state, _ext| {
         let (hex_s,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
