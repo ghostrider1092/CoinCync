@@ -67,6 +67,59 @@ use crate::error::{Error, Result};
 
 struct KernelPersistence {
     kernels: shim::Tree,
+    /// Restart-durable copy of the reorg checkpoint stack, persisted as
+    /// one atomic blob under `CKPT_STACK_KEY` (≤ `MAX_REORG_CHECKPOINTS`
+    /// × 16 bytes). Restoring it on `open_with_db` lets a restarted node
+    /// rewind past the restart point, in lock-step with the sibling
+    /// Phase-2 stores (the #369/#373 durability fix).
+    checkpoints: shim::Tree,
+}
+
+/// Single key under which the whole checkpoint stack blob lives.
+const CKPT_STACK_KEY: &[u8] = b"__ckpt_stack__";
+
+/// Encode the checkpoint stack as `count:u32 LE` then `(height:u64 LE,
+/// kernels_len:u64 LE)` per entry — `kernels_len` is `usize` in memory,
+/// persisted as `u64` for a platform-independent on-disk format.
+fn encode_ckpt_stack(cps: &[KernelCheckpoint]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + cps.len() * 16);
+    out.extend_from_slice(&(cps.len() as u32).to_le_bytes());
+    for cp in cps {
+        out.extend_from_slice(&cp.height.to_le_bytes());
+        out.extend_from_slice(&(cp.kernels_len as u64).to_le_bytes());
+    }
+    out
+}
+
+/// Decode a stack blob written by [`encode_ckpt_stack`]. Errors (never
+/// a partial stack) on any length/format mismatch so a corrupt blob
+/// fails the open loudly rather than restoring a half stack.
+fn decode_ckpt_stack(bytes: &[u8]) -> Result<Vec<KernelCheckpoint>> {
+    if bytes.len() < 4 {
+        return Err(Error::SerializationError(
+            "kernel checkpoint stack blob shorter than its length prefix".into(),
+        ));
+    }
+    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let expected = 4 + count * 16;
+    if bytes.len() != expected {
+        return Err(Error::SerializationError(format!(
+            "kernel checkpoint stack blob is {} bytes, expected {} for {} entries",
+            bytes.len(),
+            expected,
+            count
+        )));
+    }
+    let mut cps = Vec::with_capacity(count);
+    let mut off = 4;
+    for _ in 0..count {
+        let height = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
+        let kernels_len =
+            u64::from_le_bytes(bytes[off + 8..off + 16].try_into().unwrap()) as usize;
+        cps.push(KernelCheckpoint { height, kernels_len });
+        off += 16;
+    }
+    Ok(cps)
 }
 
 /// Maximum depth of the reorg checkpoint stack — see the identically
@@ -93,9 +146,11 @@ pub struct KernelStore {
     kernels: RwLock<Vec<MwKernel>>,
     root: RwLock<[u8; 32]>,
     /// Reorg checkpoint stack — see `checkpoint_at_height` / `rewind`.
-    /// In-memory only, not persisted, so a restarted node cannot
-    /// rewind past the restart point; this matches the `ShieldedStore`
-    /// and `SparkStore` checkpoint discipline.
+    /// When the store is persistent, it is mirrored to disk
+    /// (`KernelPersistence::checkpoints`) on every push/pop and restored
+    /// on `open_with_db`, so a restarted node CAN rewind past the
+    /// restart point, in lock-step with the `ShieldedStore` and
+    /// `SparkStore` stacks.
     checkpoints: RwLock<Vec<KernelCheckpoint>>,
     persistence: Option<KernelPersistence>,
 }
@@ -132,6 +187,7 @@ impl KernelStore {
     /// vector.
     pub fn open_with_db(database: &Database) -> Result<Self> {
         let kernels_tree = database.open_tree("mw_kernels")?;
+        let checkpoints_tree = database.open_tree("mw_kernel_checkpoints")?;
 
         let mut loaded: Vec<(u64, MwKernel)> = Vec::new();
         for item in kernels_tree.iter() {
@@ -151,16 +207,57 @@ impl KernelStore {
 
         let root = Self::compute_root(&kernels);
 
+        // Restore the reorg checkpoint stack from disk so a restarted
+        // node can rewind past the restart point. Each `kernels_len` is
+        // a boundary into the kernel vector just replayed. Corrupt blob
+        // → fail the open; absent key (legacy db) → empty.
+        let checkpoints = match checkpoints_tree
+            .get(CKPT_STACK_KEY)
+            .map_err(|e| Error::DatabaseError(format!("kernel checkpoints read: {e}")))?
+        {
+            Some(blob) => decode_ckpt_stack(blob.as_ref())?,
+            None => Vec::new(),
+        };
+        tracing::info!(
+            target: "storage::kernels",
+            depth = checkpoints.len(),
+            "KernelStore: restored {} reorg checkpoint(s) from disk (restart-durable rewind active)",
+            checkpoints.len()
+        );
+
         Ok(Self {
             kernels: RwLock::new(kernels),
             root: RwLock::new(root),
-            // In-memory checkpoint stack, rebuilt as blocks are applied
-            // — see the field doc and `rewind`.
-            checkpoints: RwLock::new(Vec::new()),
+            checkpoints: RwLock::new(checkpoints),
             persistence: Some(KernelPersistence {
                 kernels: kernels_tree,
+                checkpoints: checkpoints_tree,
             }),
         })
+    }
+
+    /// Persist the current checkpoint stack as one atomic blob. Called
+    /// from `checkpoint_at_height` and `rewind` under the `checkpoints`
+    /// write lock, so disk and memory stay in step. No-op in-memory.
+    ///
+    /// R-61 CLASS: a write failure means restart-durable rewind can no
+    /// longer be guaranteed, so it halts (SIGTERM flushes cleanly),
+    /// matching the kernel-append write-failure policy.
+    fn persist_checkpoint_stack(&self, cps: &[KernelCheckpoint]) {
+        if let Some(p) = &self.persistence {
+            if let Err(e) = p.checkpoints.insert(CKPT_STACK_KEY, encode_ckpt_stack(cps)) {
+                tracing::error!(
+                    target: "storage::kernels::R61",
+                    error = %e,
+                    depth = cps.len(),
+                    "R-61: mw_kernel_checkpoints write failed (stack depth {}). \
+                     Restart-durable rewind can no longer be guaranteed. \
+                     Halting to preserve on-disk state; SIGTERM flushes cleanly.",
+                    cps.len()
+                );
+                panic!("R-61: mw_kernel_checkpoints write failed: {e}");
+            }
+        }
     }
 
     /// Append a kernel that has survived cut-through pruning.
@@ -245,6 +342,9 @@ impl KernelStore {
         if cps.len() > MAX_REORG_CHECKPOINTS {
             cps.remove(0);
         }
+        // Persist the updated stack so a restart can rewind past this
+        // point — still under the `cps` write lock.
+        self.persist_checkpoint_stack(&cps);
     }
 
     /// Number of checkpoints currently in the rollback stack. Used by
@@ -264,11 +364,12 @@ impl KernelStore {
     /// `open_with_db` replay reconstructs the rewound state.
     ///
     /// Returns `true` if a checkpoint was popped and the rewind ran,
-    /// `false` if the stack was already empty (nothing to rewind —
-    /// e.g. after a restart, since the stack is not persisted). The
-    /// chain reorg path treats `false` as a signal that the store
-    /// could not be rolled back and the operator must be warned,
-    /// matching the `ShieldedStore` / `SparkStore` contract.
+    /// `false` if the stack was already empty (nothing to rewind — a
+    /// reorg deeper than the retained stack; the stack IS now
+    /// restart-durable, so this no longer fires merely because the node
+    /// restarted). The chain reorg path treats `false` as a signal that
+    /// the store could not be rolled back and the operator must be
+    /// warned, matching the `ShieldedStore` / `SparkStore` contract.
     /// Rewind the kernel store to the last checkpoint.
     ///
     /// AUDIT (R-62 fix, 2026-07-03): the pre-fix code
@@ -358,6 +459,10 @@ impl KernelStore {
             }
         }
 
+        // Persist the popped stack so the restart-durable copy matches
+        // the rewound in-memory state. Still under the `checkpoints` lock.
+        self.persist_checkpoint_stack(&checkpoints);
+
         true
     }
 
@@ -419,6 +524,42 @@ mod tests {
     fn rewind_on_empty_stack_returns_false() {
         let store = KernelStore::new();
         assert!(!store.rewind(), "nothing checkpointed — rewind must no-op");
+    }
+
+    #[test]
+    fn checkpoint_stack_survives_reopen_and_rewinds_past_restart() {
+        // #369/#373 durability fix (kernel store): the reorg checkpoint
+        // stack is persisted, so a restarted node can rewind blocks
+        // applied before the restart, in lock-step with the sibling
+        // Phase-2 stores. Pre-fix, open_with_db reset it to empty.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+
+        let (root_after_1, len_after_1) = {
+            let store = KernelStore::open_with_db(&db).unwrap();
+            apply_block(&store, 1, &[kernel(0xA1, 1)]);
+            let snap = (store.current_root(), store.len());
+            apply_block(&store, 2, &[kernel(0xB1, 2)]);
+            apply_block(&store, 3, &[kernel(0xC1, 3)]);
+            assert_eq!(store.checkpoint_count(), 3);
+            snap
+        }; // drop == restart
+
+        let reopened = KernelStore::open_with_db(&db).unwrap();
+        assert_eq!(
+            reopened.checkpoint_count(),
+            3,
+            "kernel checkpoint stack restored across restart (pre-fix: 0)"
+        );
+        assert!(reopened.rewind(), "disconnect block 3 after restart");
+        assert!(reopened.rewind(), "disconnect block 2 after restart");
+        assert_eq!(reopened.current_root(), root_after_1, "back to block 1");
+        assert_eq!(reopened.len(), len_after_1);
+
+        let reopened2 = KernelStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened2.checkpoint_count(), 1, "rewind persisted");
+        assert_eq!(reopened2.current_root(), root_after_1);
     }
 
     #[test]
