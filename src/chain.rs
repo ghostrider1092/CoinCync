@@ -959,10 +959,14 @@ impl Blockchain {
         };
         let backend = spark_connector::ffi::LibsparkBackend;
         let mut seen_tags: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-        // #380: content hashes of mint coins seen in this block, to reject the same
-        // coin bytes minted twice within one block (the pool-presence check only
-        // catches a replay against ALREADY-committed coins).
-        let mut seen_mint_content: std::collections::HashSet<[u8; 32]> =
+        // #380: content hashes of EVERY coin fed into the pool by this block —
+        // mint coins AND spend output coins — so the same coin bytes cannot enter
+        // the pool twice within one block (the pool-presence check only catches a
+        // replay against ALREADY-committed coins). Shared across both feeds so a
+        // mint coin in one tx and a spend output coin in another tx of the same
+        // block cannot collide either (the mint gate alone sees only coins
+        // committed BEFORE this block).
+        let mut seen_content: std::collections::HashSet<[u8; 32]> =
             std::collections::HashSet::new();
         // Collected for the BATCHED proof verify after the per-tx cheap checks:
         // (payload, tx.fee) per spend-bearing tx, plus its tx index for errors.
@@ -1120,10 +1124,10 @@ impl Blockchain {
                     // whose serial context no longer matches (unspendable, dead).
                     // `pool_value` then counts value that can never leave. Reject a
                     // mint coin whose libspark bytes are already pooled (from an
-                    // earlier mint OR a spend output — the spend feed is already
-                    // content-addressed), and reject a duplicate WITHIN this block.
-                    // A libspark coin commits to a random serial, so identical bytes
-                    // are a replay, never two honest coins. Fail-closed.
+                    // earlier mint OR a spend output — both feeds are content-gated),
+                    // and reject a duplicate WITHIN this block. A libspark coin
+                    // commits to a random serial, so identical bytes are a replay,
+                    // never two honest coins. Fail-closed.
                     let content = *blake3::hash(&coin.0).as_bytes();
                     if store.coin_content_present(&content) {
                         return Err(format!(
@@ -1131,11 +1135,46 @@ impl Blockchain {
                              (mint bundle replayed under different inputs)"
                         ));
                     }
-                    if !seen_mint_content.insert(content) {
+                    if !seen_content.insert(content) {
                         return Err(format!(
                             "spark v2 tx {idx}: duplicate mint coin within block \
                              (same coin bytes minted twice)"
                         ));
+                    }
+                }
+            }
+            // #380 CONTENT BINDING (spend-output feed). Apply also feeds a spend's
+            // OUTPUT coins (change / payment) into the pool, keyed by content
+            // (`blake3(coin)`), with `add_coin`'s result IGNORED. Those bytes never
+            // pass the mint gate above, so the same pool_value-inflation is
+            // reachable on a narrower path: a spend output equal to an
+            // already-pooled coin (cross-block), or — because the mint gate sees
+            // only coins committed BEFORE this block — a same-block spend output
+            // equal to a LATER tx's mint coin. Gate spend outputs through the SAME
+            // content checks, in tx order, so the shared `seen_content` set catches
+            // a collision in either direction. Extract the output coins off the
+            // bundle (cheap; no Grootle multiexp) exactly as apply does; a bundle
+            // with no readable outputs feeds nothing, so there is nothing to gate.
+            // Honest output coins commit to a random serial — identical bytes are
+            // always a duplicate, never two real coins. Fail-closed.
+            if let Some(sb) = &payload.spend {
+                if let Some((out_coins, _out_ctx)) =
+                    spark_connector::ffi::spend_outputs(&sb.bundle)
+                {
+                    for coin in &out_coins {
+                        let content = *blake3::hash(&coin.0).as_bytes();
+                        if store.coin_content_present(&content) {
+                            return Err(format!(
+                                "spark v2 tx {idx}: spend output coin already in the pool by \
+                                 content (duplicate coin bytes)"
+                            ));
+                        }
+                        if !seen_content.insert(content) {
+                            return Err(format!(
+                                "spark v2 tx {idx}: duplicate spend output coin within block \
+                                 (same coin bytes twice)"
+                            ));
+                        }
                     }
                 }
             }
@@ -6304,6 +6343,82 @@ mod tests {
         );
         // The pool was not inflated: the replay never applied.
         assert_eq!(store.coin_count(), values.len(), "replay left the pool unchanged");
+    }
+
+    /// #380 (spend-output feed): a spend's OUTPUT coin whose bytes are ALREADY
+    /// pooled is rejected by the block gate. The mint gate alone left this path
+    /// open — spend outputs are fed by content with `add_coin`'s result ignored,
+    /// so a spend output equal to a pooled coin (or, same-block, to a later tx's
+    /// mint) re-created exactly the duplicate the #380 fix forbids. This drives a
+    /// REAL spend, pre-pools a coin equal to its output under a different outpoint
+    /// key (so the outpoint check can't catch it), and asserts the content gate
+    /// does. Sibling to `spark_v2_replayed_mint_bundle_rejected_by_content`.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn spark_v2_spend_output_colliding_with_pooled_coin_rejected() {
+        use crate::consensus::spark_payload::build::{build_mint_payload, build_spend_payload};
+        use crate::consensus::spark_payload::derive_outpoint;
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxType};
+        use spark_connector::ffi::spend_outputs;
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new();
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+
+        let mk_shielded_tx = |extra: Vec<u8>| Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra,
+        };
+
+        // Fund the pool: mint 8 coins owned by `seed`, applied at h1.
+        let seed = b"spend-output-380";
+        let n = 8usize;
+        let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
+        let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
+        chain.apply_spark_v2_txs(std::slice::from_ref(&mk_shielded_tx(mint_payload.encode())), 1);
+        assert_eq!(store.coin_count(), n, "mint funded the pool");
+
+        // A real spend of an owned coin; it produces an output (change) coin.
+        let owned_op = derive_outpoint(&[], 2);
+        let spend_payload =
+            build_spend_payload(seed, store.as_ref(), &owned_op, 3_000, 0, 1).unwrap();
+        let spend_tx = mk_shielded_tx(spend_payload.encode());
+
+        // Control: with its output coin NOT yet pooled, the spend is accepted.
+        assert!(
+            chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_ok(),
+            "spend with a fresh output coin is accepted"
+        );
+
+        // Pre-pool a coin whose bytes EQUAL the spend's own output, under a
+        // DIFFERENT outpoint key so the outpoint check can't see it — the
+        // cross-block collision the new spend-output content gate must reject.
+        let sb = spend_payload.spend.as_ref().expect("spend present");
+        let (out_coins, out_ctx) = spend_outputs(&sb.bundle).expect("spend has outputs");
+        store
+            .add_coin(b"preload-outpoint".to_vec(), out_coins[0].clone(), out_ctx, 1)
+            .expect("preload coin into the pool");
+        let pooled_after_preload = store.coin_count();
+
+        let err = chain
+            .verify_block_spark_v2(std::slice::from_ref(&spend_tx))
+            .expect_err("spend output colliding with a pooled coin must be rejected");
+        assert!(
+            err.contains("spend output coin already in the pool by content"),
+            "expected spend-output content rejection, got: {err}"
+        );
+        assert_eq!(
+            store.coin_count(),
+            pooled_after_preload,
+            "rejected block applied nothing"
+        );
     }
 
     // ─── count_signaling_blocks_in_window — BIP-9 helper ───────────────────
