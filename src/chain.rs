@@ -498,6 +498,39 @@ fn inner_stats_for_log(inner: &RwLock<BlockchainInner>) -> (u128, String) {
     )
 }
 
+thread_local! {
+    /// Set while `rebuild_spark_pool` replays the committed chain to reconstruct
+    /// the Spark pool after a restart. During that replay the pool climbs from an
+    /// empty stack back up to the committed depth while its sibling Phase-2 stores
+    /// are ALREADY restored to that depth, so the stores are transiently out of
+    /// lock-step by construction. The post-apply security sweep's Phase-2
+    /// lock-step guard must not HALT on that transient state — it is suppressed
+    /// while this is set, and the stores are verified consistent once the rebuild
+    /// completes and the first real block applies. Startup is single-threaded, so
+    /// a thread-local is sufficient and avoids a chain-wide field.
+    static SPARK_REBUILD_IN_PROGRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard: marks a Spark-pool rebuild in progress for the current thread and
+/// clears the flag on drop (even on an early `?`/panic unwind).
+struct SparkRebuildGuard;
+impl SparkRebuildGuard {
+    fn new() -> Self {
+        SPARK_REBUILD_IN_PROGRESS.with(|f| f.set(true));
+        SparkRebuildGuard
+    }
+}
+impl Drop for SparkRebuildGuard {
+    fn drop(&mut self) {
+        SPARK_REBUILD_IN_PROGRESS.with(|f| f.set(false));
+    }
+}
+
+/// Whether a Spark-pool rebuild replay is in progress on this thread.
+fn spark_rebuild_in_progress() -> bool {
+    SPARK_REBUILD_IN_PROGRESS.with(|f| f.get())
+}
+
 impl Blockchain {
     /// Create new blockchain with network type
     pub fn new() -> Self {
@@ -1330,7 +1363,15 @@ impl Blockchain {
         // state an honest node can never reach — HALT to preserve on-disk state
         // (defense-in-depth, mirroring the R-61 persistence halts). Operational
         // anomalies never reach here (they page, they don't halt).
-        {
+        //
+        // Skipped while a Spark-pool rebuild replay is in progress: the pool is
+        // then climbing from an empty stack back to the committed depth while its
+        // sibling stores are already restored to that depth, so the Phase-2
+        // lock-step guard would trip on a transient, by-construction mismatch.
+        // After the rebuild completes the four stacks are equal again, and the
+        // first real block applied after it sweeps normally — halting on any
+        // residual mismatch.
+        if !spark_rebuild_in_progress() {
             // Unified post-apply sweep (pool + Phase-2 lock-step). Record every
             // alert to the console's incident log + tracing so the operator sees
             // them, then halt only on a consensus-critical.

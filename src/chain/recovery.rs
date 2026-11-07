@@ -418,12 +418,28 @@ impl Blockchain {
     /// unless both shielded features are on AND the pool store is initialized.
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
     fn rebuild_spark_pool(&self, tip_height: u64) -> Result<()> {
-        match &self.spark_pool_store {
-            Some(store) => store.clear()?,
+        let store = match &self.spark_pool_store {
+            Some(store) => {
+                store.clear()?;
+                store
+            }
             None => return Ok(()),
-        }
+        };
+        // Suppress the per-block Phase-2 lock-step HALT for the duration of the
+        // replay: the pool is rebuilt from an empty stack while its sibling stores
+        // are already restored to the committed depth, so they are transiently out
+        // of lock-step until the replay catches up (see `SparkRebuildGuard`).
+        let _guard = super::SparkRebuildGuard::new();
         for h in 0..=tip_height {
             if let Some(block) = self.get_block_by_height(h) {
+                // Mirror the live apply path: checkpoint the pool BEFORE each block
+                // (genesis excepted, matching `checkpoint_phase2_stores`), so the
+                // rebuilt pool's checkpoint-stack depth equals the sibling stores'
+                // restored depth — restoring four-way lock-step and making a reorg
+                // reaching past the restart rewind correctly (#369/#373).
+                if h > 0 {
+                    store.checkpoint_at_height(h);
+                }
                 self.apply_spark_v2_txs(&block.transactions, h);
             }
         }
