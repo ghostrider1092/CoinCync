@@ -218,10 +218,8 @@ pub enum RewindOutcome {
     EmptyNoop,
     /// `rewind` returned false but the store still holds `remaining` elements —
     /// a disconnected block's state is stranded above the new tip. A genuine
-    /// inconsistency: now that the checkpoint stacks ARE restart-durable
-    /// (persisted per store, restored on open), this should only arise from a
-    /// reorg deeper than the retained stack (`MAX_REORG_CHECKPOINTS`), not from
-    /// a plain restart.
+    /// inconsistency (e.g. a reorg reaching past a restart, before rewind
+    /// checkpoints are restart-durable).
     Stranded { remaining: usize },
 }
 

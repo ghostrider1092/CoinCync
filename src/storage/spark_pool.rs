@@ -135,7 +135,7 @@ pub struct SparkPoolStore {
     spent_tags: RwLock<HashMap<Vec<u8>, u64>>,
     /// Reorg checkpoint stack (in lock-step with the block-apply path), capped
     /// at `MAX_CHECKPOINTS`. In-memory: the pool is rebuilt deterministically
-    /// from the committed chain on restart (`Blockchain::rebuild_spark_pool`),
+    /// from the committed chain on restart (`Blockchain::rebuild_phase2_stores`),
     /// which re-checkpoints this stack to the committed depth — so a reorg past a
     /// restart rewinds correctly without persisting the stack here.
     checkpoints: RwLock<Vec<PoolCheckpoint>>,
@@ -233,7 +233,7 @@ impl SparkPoolStore {
         // the block's atomic commit, so after an ill-timed crash it can be one
         // block AHEAD of the committed tip — and its checkpoint stack one deeper.
         // So the pool is REBUILT deterministically from the committed chain on
-        // restart (`Blockchain::rebuild_spark_pool`), which clears this store and
+        // restart (`Blockchain::rebuild_phase2_stores`), which clears this store and
         // replays committed blocks, re-checkpointing the stack to exactly the
         // committed depth — matching the siblings and making a reorg past the
         // restart rewind correctly (#369/#373). Start empty here; the rebuild
@@ -458,7 +458,7 @@ impl SparkPoolStore {
     /// committed chain tip; on restart the node re-syncs the uncommitted block and
     /// `verify_block_spark_v2` rejects it ("mint coin outpoint already in the
     /// pool"), wedging the node. Recovery clears the pool and replays block apply
-    /// up to the committed tip (see `Blockchain::rebuild_spark_pool`, mirroring
+    /// up to the committed tip (see `Blockchain::rebuild_phase2_stores`, mirroring
     /// `rebuild_utxo_set`), making the pool a deterministic function of the chain
     /// and eliminating the divergence for any crash window.
     pub fn clear(&self) -> Result<()> {
@@ -550,7 +550,7 @@ impl SparkPoolStore {
         let coins_len = self.coins.read().len();
         let pool_value = *self.pool_value.read();
         // In-memory stack. The pool is a deterministic rebuild of the committed
-        // chain on restart (`Blockchain::rebuild_spark_pool` clears + replays +
+        // chain on restart (`Blockchain::rebuild_phase2_stores` clears + replays +
         // re-checkpoints), so this stack is not persisted at the store level —
         // the rebuild repopulates it to the committed depth, matching the siblings.
         let mut cps = self.checkpoints.write();
@@ -862,7 +862,7 @@ mod tests {
         // their persisted checkpoint stack is exact), this pool writes its coins
         // OUTSIDE the block's atomic commit, so after a crash it can be one block
         // ahead. The chain therefore REBUILDS it deterministically on restart via
-        // `Blockchain::rebuild_spark_pool` (clear + replay + re-checkpoint to the
+        // `Blockchain::rebuild_phase2_stores` (clear + replay + re-checkpoint to the
         // committed depth), which is what restores four-way Phase-2 lock-step and
         // makes a reorg past a restart rewind — verified end-to-end by the
         // ApexParasite Phase-2 acceptance harness. This test pins the store-level
@@ -885,7 +885,7 @@ mod tests {
 
         // Session 2 (bare reopen, NO chain rebuild): the in-memory checkpoint stack
         // starts empty; coins/tags/pool_value are restored from disk. In the full
-        // node the chain's `rebuild_spark_pool` re-checkpoints this stack back to
+        // node the chain's `rebuild_phase2_stores` re-checkpoints this stack back to
         // the committed depth (2), matching the sibling stores.
         let re = SparkPoolStore::open_with_db(&db).unwrap();
         assert_eq!(re.checkpoint_count(), 0, "store-level stack is in-memory; the chain rebuild repopulates it");

@@ -90,62 +90,6 @@ pub struct SparkCoinEntry {
 struct SparkPersistence {
     coins: shim::Tree,
     serials: shim::Tree,
-    /// Restart-durable copy of the reorg checkpoint stack. The whole
-    /// stack is a small bounded structure (≤ `MAX_REORG_CHECKPOINTS`
-    /// entries × 16 bytes), so it is persisted as ONE atomic blob under
-    /// `CKPT_STACK_KEY` rather than per-entry keys: a single `insert`
-    /// per checkpoint/rewind, never a partially-written stack. Restoring
-    /// it on `open_with_db` is what lets a restarted node rewind past
-    /// the restart point (the phase-2-reorg-rewind durability fix —
-    /// closes #369/#373's non-monotonic-feeder + stranded-pool pair).
-    checkpoints: shim::Tree,
-}
-
-/// Single key under which the whole checkpoint stack blob lives.
-const CKPT_STACK_KEY: &[u8] = b"__ckpt_stack__";
-
-/// Encode the checkpoint stack as `count:u32 LE` then `(height:u64 LE,
-/// coins_len:u64 LE)` per entry. `coins_len` is `usize` in memory but
-/// persisted as `u64` so the on-disk format is platform-independent.
-fn encode_ckpt_stack(cps: &[SparkCheckpoint]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + cps.len() * 16);
-    out.extend_from_slice(&(cps.len() as u32).to_le_bytes());
-    for cp in cps {
-        out.extend_from_slice(&cp.height.to_le_bytes());
-        out.extend_from_slice(&(cp.coins_len as u64).to_le_bytes());
-    }
-    out
-}
-
-/// Decode a stack blob written by [`encode_ckpt_stack`]. Returns an
-/// error (never a partial stack) on any length/format mismatch, so a
-/// truncated or corrupt blob fails the open loudly rather than
-/// restoring a half stack that would desync the stores.
-fn decode_ckpt_stack(bytes: &[u8]) -> Result<Vec<SparkCheckpoint>> {
-    if bytes.len() < 4 {
-        return Err(Error::SerializationError(
-            "spark checkpoint stack blob shorter than its length prefix".into(),
-        ));
-    }
-    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let expected = 4 + count * 16;
-    if bytes.len() != expected {
-        return Err(Error::SerializationError(format!(
-            "spark checkpoint stack blob is {} bytes, expected {} for {} entries",
-            bytes.len(),
-            expected,
-            count
-        )));
-    }
-    let mut cps = Vec::with_capacity(count);
-    let mut off = 4;
-    for _ in 0..count {
-        let height = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
-        let coins_len = u64::from_le_bytes(bytes[off + 8..off + 16].try_into().unwrap()) as usize;
-        cps.push(SparkCheckpoint { height, coins_len });
-        off += 16;
-    }
-    Ok(cps)
 }
 
 /// Maximum depth of the reorg checkpoint stack. Must be at least the
@@ -182,10 +126,8 @@ pub struct SparkStore {
     /// block is applied; `rewind` pops to disconnect a block. Mirrors
     /// the `ShieldedStore` BridgeTree checkpoint discipline so the
     /// three Phase-2 stores rewind uniformly from the chain reorg
-    /// path. When the store is persistent, this stack is mirrored to
-    /// disk (`SparkPersistence::checkpoints`) on every push/pop and
-    /// restored on `open_with_db`, so a restarted node CAN rewind past
-    /// the restart point — see `persist_checkpoint_stack` / `rewind`.
+    /// path. Like `ShieldedStore`'s, this stack is in-memory only and
+    /// does not survive a restart — see `rewind` docs.
     checkpoints: RwLock<Vec<SparkCheckpoint>>,
     persistence: Option<SparkPersistence>,
 }
@@ -224,7 +166,6 @@ impl SparkStore {
     pub fn open_with_db(database: &Database) -> Result<Self> {
         let coins_tree = database.open_tree("spark_coins")?;
         let serials_tree = database.open_tree("spark_serials")?;
-        let checkpoints_tree = database.open_tree("spark_checkpoints")?;
 
         // Collect coins, sort by coin_id (the BE-encoded key).
         let mut loaded: Vec<(u64, SparkCoinEntry)> = Vec::new();
@@ -260,66 +201,46 @@ impl SparkStore {
 
         let root = Self::compute_root(&coins);
 
-        // Restore the reorg checkpoint stack from disk so a restarted
-        // node can rewind past the restart point. Each entry's
-        // `coins_len` is a boundary into the coin vector just replayed,
-        // so the restored stack rewinds exactly as it would have before
-        // the restart. A corrupt blob fails the open rather than
-        // restoring a half stack (which would desync the Phase-2
-        // stores). Absent key (never persisted / legacy db) → empty.
-        let checkpoints = match checkpoints_tree
-            .get(CKPT_STACK_KEY)
-            .map_err(|e| Error::DatabaseError(format!("spark checkpoints read: {e}")))?
-        {
-            Some(blob) => decode_ckpt_stack(blob.as_ref())?,
-            None => Vec::new(),
-        };
-        tracing::info!(
-            target: "storage::spark",
-            depth = checkpoints.len(),
-            "SparkStore: restored {} reorg checkpoint(s) from disk (restart-durable rewind active)",
-            checkpoints.len()
-        );
-
         Ok(Self {
             coins: RwLock::new(coins),
             spent_serials: RwLock::new(spent),
             root: RwLock::new(root),
-            checkpoints: RwLock::new(checkpoints),
+            // Checkpoint stack is in-memory only and starts empty on
+            // open: it is rebuilt as the node applies blocks. A node
+            // that restarts cannot rewind past the restart point —
+            // same limitation as `ShieldedStore`'s BridgeTree, whose
+            // checkpoints are likewise not persisted.
+            checkpoints: RwLock::new(Vec::new()),
             persistence: Some(SparkPersistence {
                 coins: coins_tree,
                 serials: serials_tree,
-                checkpoints: checkpoints_tree,
             }),
         })
     }
 
-    /// Persist the current checkpoint stack as one atomic blob. Called
-    /// at the end of `checkpoint_at_height` and `rewind` while the
-    /// `checkpoints` write lock is held, so the on-disk stack always
-    /// matches the in-memory one. No-op for an in-memory store.
-    ///
-    /// R-61 CLASS: a checkpoint-stack write failure means the node can
-    /// no longer guarantee a restart-durable rewind — exactly the
-    /// corruption this persistence exists to prevent — so it halts
-    /// (SIGTERM flushes RocksDB cleanly), matching the coin/serial
-    /// write-failure policy.
-    fn persist_checkpoint_stack(&self, cps: &[SparkCheckpoint]) {
+    /// Reset the store to empty — in-memory coins, spent serials, root, the reorg
+    /// checkpoint stack, and the persisted `spark_coins` / `spark_serials` trees —
+    /// so the chain can rebuild it deterministically from committed blocks on
+    /// restart (see `Blockchain::rebuild_phase2_stores`). Every Phase-2 store
+    /// persists its data via immediate writes OUTSIDE the block's atomic
+    /// `commit_block_atomic`, so after an ill-timed crash a store can be one block
+    /// AHEAD of the committed tip; clearing and replaying from the committed chain
+    /// is the uniform repair that keeps all four stores in lock-step with data
+    /// matching the committed tip. Mirrors `SparkPoolStore::clear`.
+    pub fn clear(&self) -> Result<()> {
+        self.coins.write().clear();
+        self.spent_serials.write().clear();
+        *self.root.write() = Self::compute_root(&[]);
+        self.checkpoints.write().clear();
         if let Some(p) = &self.persistence {
-            if let Err(e) = p.checkpoints.insert(CKPT_STACK_KEY, encode_ckpt_stack(cps)) {
-                tracing::error!(
-                    target: "storage::spark::R61",
-                    error = %e,
-                    depth = cps.len(),
-                    "R-61: spark_checkpoints write failed (stack depth {}). \
-                     Restart-durable rewind can no longer be guaranteed — \
-                     consensus storage is unavailable. Halting to preserve \
-                     on-disk state; SIGTERM handler will flush cleanly.",
-                    cps.len()
-                );
-                panic!("R-61: spark_checkpoints write failed: {e}");
-            }
+            p.coins
+                .clear()
+                .map_err(|e| Error::DatabaseError(format!("spark store coins clear: {e}")))?;
+            p.serials
+                .clear()
+                .map_err(|e| Error::DatabaseError(format!("spark store serials clear: {e}")))?;
         }
+        Ok(())
     }
 
     /// Add a newly-minted Spark coin to the accumulator.
@@ -456,10 +377,6 @@ impl SparkStore {
         // assertion that catches any off-by-one in MAX_REORG_CHECKPOINTS
         // logic (e.g., `>` vs `>=` slip).
         debug_assert!(cps.len() <= MAX_REORG_CHECKPOINTS);
-        // Persist the updated stack (atomic blob) so a restart can
-        // rewind past this point — still holding the `cps` write lock,
-        // so disk and memory stay in step.
-        self.persist_checkpoint_stack(&cps);
     }
 
     /// Number of checkpoints currently in the rollback stack. Used by
@@ -479,11 +396,10 @@ impl SparkStore {
     ///
     /// Returns `true` if a checkpoint was popped and the rewind ran,
     /// `false` if the checkpoint stack was already empty (nothing to
-    /// rewind — i.e. a reorg reaching deeper than the retained stack;
-    /// the stack IS now restart-durable, so this no longer fires merely
-    /// because the node restarted). The chain reorg path treats `false`
-    /// as a signal that the store could not be rolled back and the
-    /// operator must be warned, matching the `ShieldedStore` contract.
+    /// rewind — e.g. after a restart, since the stack is not
+    /// persisted). The chain reorg path treats `false` as a signal
+    /// that the store could not be rolled back and the operator must
+    /// be warned, matching the `ShieldedStore` contract.
     pub fn rewind(&self) -> bool {
         let mut checkpoints = self.checkpoints.write();
         // Pop the checkpoint guarding the block being disconnected.
@@ -575,11 +491,6 @@ impl SparkStore {
                 );
             }
         }
-
-        // Persist the popped stack so the restart-durable copy matches
-        // the rewound in-memory state (otherwise a reopen would restore
-        // the pre-rewind depth). Still under the `checkpoints` lock.
-        self.persist_checkpoint_stack(&checkpoints);
 
         true
     }
@@ -706,6 +617,37 @@ mod tests {
         assert!(store.rewind());
         assert_eq!(store.size(), size_after_1, "coin count restored");
         assert_eq!(store.current_root(), root_after_1, "root restored");
+    }
+
+    #[test]
+    fn clear_wipes_memory_stack_and_persisted_state() {
+        // #369/#373: the chain rebuilds every Phase-2 store from the committed
+        // chain on restart (`rebuild_phase2_stores`), which requires `clear()` to
+        // reset in-memory coins + spent serials + root + checkpoint stack AND the
+        // persisted trees — so a reopen after a clear starts empty and no stale,
+        // ahead-of-tip coin/serial survives to desync this store from its rebuilt
+        // siblings.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+        let empty_root = {
+            let store = SparkStore::open_with_db(&db).unwrap();
+            let empty_root = store.current_root();
+            apply_block(&store, 1, &[coin(0, 1, 0xA1)], &[[0x11; 32]]);
+            apply_block(&store, 2, &[coin(1, 2, 0xB1)], &[[0x22; 32]]);
+            assert!(store.size() > 0 && store.checkpoint_count() > 0, "non-empty before clear");
+            store.clear().unwrap();
+            assert_eq!(store.size(), 0, "in-memory coins wiped");
+            assert_eq!(store.checkpoint_count(), 0, "checkpoint stack wiped");
+            assert!(!store.is_serial_spent(&[0x11; 32]), "spent serials wiped");
+            assert_eq!(store.current_root(), empty_root, "root reset to empty");
+            empty_root
+        };
+        // Persisted coins + serials cleared too: a reopen sees nothing.
+        let reopened = SparkStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.size(), 0, "persisted coins cleared across reopen");
+        assert!(!reopened.is_serial_spent(&[0x22; 32]), "persisted serials cleared");
+        assert_eq!(reopened.current_root(), empty_root);
     }
 
     #[test]
@@ -896,51 +838,6 @@ mod tests {
             reopened.is_serial_spent(&[0x11; 32]),
             "block-1 serial survives the reorg + restart"
         );
-    }
-
-    #[test]
-    fn checkpoint_stack_survives_reopen_and_rewinds_past_restart() {
-        // The #369/#373 durability fix: the reorg checkpoint stack is
-        // persisted, so a node that RESTARTS can still rewind blocks
-        // applied before the restart. Pre-fix, open_with_db reset the
-        // stack to empty and rewind() returned false past the restart,
-        // stranding the pool (and the non-monotonic re-checkpoint that
-        // followed logged R-67).
-        use crate::db::Database;
-        let dir = tempfile::tempdir().unwrap();
-        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
-
-        let (root_after_1, size_after_1) = {
-            let store = SparkStore::open_with_db(&db).unwrap();
-            apply_block(&store, 1, &[coin(0, 1, 0xA1)], &[[0x11; 32]]);
-            let snap = (store.current_root(), store.size());
-            apply_block(&store, 2, &[coin(1, 2, 0xB1)], &[[0x22; 32]]);
-            apply_block(&store, 3, &[coin(2, 3, 0xC1)], &[[0x33; 32]]);
-            assert_eq!(store.checkpoints.read().len(), 3);
-            snap
-        }; // drop == restart
-
-        // Reopen: the stack must come back, not reset to empty.
-        let reopened = SparkStore::open_with_db(&db).unwrap();
-        assert_eq!(
-            reopened.checkpoints.read().len(),
-            3,
-            "checkpoint stack restored across restart (pre-fix: 0)"
-        );
-        // A 2-deep reorg reaching PAST the restart must now succeed.
-        assert!(reopened.rewind(), "disconnect block 3 after restart");
-        assert!(reopened.rewind(), "disconnect block 2 after restart");
-        assert_eq!(reopened.current_root(), root_after_1, "back to block 1");
-        assert_eq!(reopened.size(), size_after_1);
-        assert!(!reopened.is_serial_spent(&[0x22; 32]));
-        assert!(!reopened.is_serial_spent(&[0x33; 32]));
-        assert!(reopened.is_serial_spent(&[0x11; 32]), "block-1 serial survives");
-
-        // The rewound state is itself durable across a second restart.
-        let reopened2 = SparkStore::open_with_db(&db).unwrap();
-        assert_eq!(reopened2.checkpoints.read().len(), 1, "rewind persisted");
-        assert_eq!(reopened2.size(), size_after_1);
-        assert_eq!(reopened2.current_root(), root_after_1);
     }
 
     /// Hand-rolled aggressive op-sequence fuzzer. Drives the store
