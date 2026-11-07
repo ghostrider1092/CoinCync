@@ -205,6 +205,64 @@ pub struct NoteCommitmentEntry {
 struct ShieldedPersistence {
     entries: shim::Tree,
     nullifiers: shim::Tree,
+    /// Restart-durable copy of the side-table reorg checkpoint stack,
+    /// persisted as one atomic blob under `CKPT_STACK_KEY`. On
+    /// `open_with_db` the side table is reloaded AND the BridgeTree's
+    /// own internal checkpoints are reconstructed from it (replaying
+    /// leaves in segments split at each recorded `entries_len`), so a
+    /// restarted node can `rewind` past the restart point exactly as it
+    /// could before — the #369/#373 durability fix. Without the tree
+    /// reconstruction, reloading only the side table would desync it
+    /// from the freshly-replayed (checkpoint-less) BridgeTree.
+    checkpoints: shim::Tree,
+}
+
+/// Single key under which the whole checkpoint stack blob lives.
+const CKPT_STACK_KEY: &[u8] = b"__ckpt_stack__";
+
+/// Encode the side-table checkpoint stack as `count:u32 LE` then
+/// `(height:u64 LE, entries_len:u64 LE)` per entry — `entries_len` is
+/// `usize` in memory, persisted as `u64` for a platform-independent
+/// on-disk format.
+fn encode_ckpt_stack(cps: &[ShieldedCheckpoint]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + cps.len() * 16);
+    out.extend_from_slice(&(cps.len() as u32).to_le_bytes());
+    for cp in cps {
+        out.extend_from_slice(&cp.height.to_le_bytes());
+        out.extend_from_slice(&(cp.entries_len as u64).to_le_bytes());
+    }
+    out
+}
+
+/// Decode a stack blob written by [`encode_ckpt_stack`]. Errors (never
+/// a partial stack) on any length/format mismatch so a corrupt blob
+/// fails the open loudly rather than restoring a half stack.
+fn decode_ckpt_stack(bytes: &[u8]) -> Result<Vec<ShieldedCheckpoint>> {
+    if bytes.len() < 4 {
+        return Err(Error::SerializationError(
+            "shielded checkpoint stack blob shorter than its length prefix".into(),
+        ));
+    }
+    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let expected = 4 + count * 16;
+    if bytes.len() != expected {
+        return Err(Error::SerializationError(format!(
+            "shielded checkpoint stack blob is {} bytes, expected {} for {} entries",
+            bytes.len(),
+            expected,
+            count
+        )));
+    }
+    let mut cps = Vec::with_capacity(count);
+    let mut off = 4;
+    for _ in 0..count {
+        let height = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
+        let entries_len =
+            u64::from_le_bytes(bytes[off + 8..off + 16].try_into().unwrap()) as usize;
+        cps.push(ShieldedCheckpoint { height, entries_len });
+        off += 16;
+    }
+    Ok(cps)
 }
 
 /// One entry in the side-table reorg checkpoint stack. The
@@ -240,9 +298,12 @@ pub struct ShieldedStore {
     /// Reorg checkpoint stack for the side tables, kept in lock-step
     /// with the `BridgeTree`'s internal checkpoint stack (one push per
     /// `checkpoint_at_height`, one pop per `rewind`, both capped at
-    /// `MAX_CHECKPOINTS`). In-memory only — not persisted — so a
-    /// restarted node cannot rewind past the restart point, matching
-    /// the `BridgeTree` and the `SparkStore` / `KernelStore` stacks.
+    /// `MAX_CHECKPOINTS`). When persistent, it is mirrored to disk
+    /// (`ShieldedPersistence::checkpoints`) on every push/pop; on
+    /// `open_with_db` it is restored AND the `BridgeTree`'s internal
+    /// checkpoints are reconstructed from it, so a restarted node CAN
+    /// rewind past the restart point, in lock-step with the
+    /// `SparkStore` / `KernelStore` stacks.
     checkpoints: RwLock<Vec<ShieldedCheckpoint>>,
     /// RocksDB-backed persistence. `None` for in-memory tests.
     persistence: Option<ShieldedPersistence>,
@@ -268,6 +329,7 @@ impl ShieldedStore {
     pub fn open_with_db(database: &Database) -> Result<Self> {
         let entries_tree = database.open_tree("shielded_entries")?;
         let nullifiers_tree = database.open_tree("shielded_nullifiers")?;
+        let checkpoints_tree = database.open_tree("shielded_checkpoints")?;
 
         // Collect stored entries, sort by position, replay into a
         // fresh BridgeTree.
@@ -286,12 +348,69 @@ impl ShieldedStore {
         }
         loaded.sort_by_key(|(p, _)| *p);
 
+        // Restore the side-table checkpoint stack from disk. Corrupt
+        // blob → fail the open; absent key (legacy db) → empty. The
+        // stack is in push order: heights strictly ascending,
+        // `entries_len` non-decreasing (a checkpoint records the leaf
+        // count BEFORE its block applied).
+        let checkpoints = match checkpoints_tree
+            .get(CKPT_STACK_KEY)
+            .map_err(|e| Error::DatabaseError(format!("shielded checkpoints read: {e}")))?
+        {
+            Some(blob) => decode_ckpt_stack(blob.as_ref())?,
+            None => Vec::new(),
+        };
+
+        // Replay leaves into a fresh BridgeTree, RECONSTRUCTING its
+        // internal checkpoints at the recorded boundaries. Before
+        // appending the leaf that would take the count past a
+        // checkpoint's `entries_len`, take that checkpoint at its
+        // height (several checkpoints can share one `entries_len` when
+        // intervening blocks added no shielded leaves — drain them all).
+        // Heights are strictly ascending, so `BridgeTree::checkpoint`
+        // never declines here; a decline means the persisted stack is
+        // inconsistent with the leaves, so fail the open loudly.
         let mut tree: BridgeTree<ShieldedHash, u64, SHIELDED_TREE_DEPTH> =
             BridgeTree::new(MAX_CHECKPOINTS);
         let mut entries_map = HashMap::with_capacity(loaded.len());
+        let mut ci = 0usize;
+        let mut appended = 0usize;
+        let take_ckpt = |tree: &mut BridgeTree<ShieldedHash, u64, SHIELDED_TREE_DEPTH>,
+                         height: u64|
+         -> Result<()> {
+            if !tree.checkpoint(height) {
+                return Err(Error::DatabaseError(format!(
+                    "shielded checkpoint reconstruction: BridgeTree declined checkpoint at \
+                     height {height} while restoring the persisted stack — the saved \
+                     checkpoint stack is inconsistent with the stored leaves. Reindex required."
+                )));
+            }
+            Ok(())
+        };
         for (position, entry) in loaded {
+            while ci < checkpoints.len() && checkpoints[ci].entries_len == appended {
+                take_ckpt(&mut tree, checkpoints[ci].height)?;
+                ci += 1;
+            }
             tree.append(ShieldedHash::from_bytes(entry.commitment));
+            appended += 1;
             entries_map.insert(position, entry);
+        }
+        // Any checkpoints anchored at the final leaf count (boundary ==
+        // total leaves, e.g. the most recent block added no leaves).
+        while ci < checkpoints.len() && checkpoints[ci].entries_len == appended {
+            take_ckpt(&mut tree, checkpoints[ci].height)?;
+            ci += 1;
+        }
+        if ci != checkpoints.len() {
+            return Err(Error::DatabaseError(format!(
+                "shielded checkpoint reconstruction: {} of {} checkpoints reference leaf \
+                 boundaries beyond the {} stored leaves — persisted stack is inconsistent \
+                 with the stored entries. Reindex required.",
+                checkpoints.len() - ci,
+                checkpoints.len(),
+                appended
+            )));
         }
 
         let mut nullifiers_map = HashMap::new();
@@ -307,20 +426,54 @@ impl ShieldedStore {
             nullifiers_map.insert(nf, u64::from_le_bytes(height_bytes));
         }
 
+        tracing::info!(
+            target: "storage::shielded",
+            depth = checkpoints.len(),
+            "ShieldedStore: restored {} reorg checkpoint(s) from disk and reconstructed the \
+             BridgeTree's internal checkpoints (restart-durable rewind active)",
+            checkpoints.len()
+        );
+
         Ok(Self {
             tree: RwLock::new(tree),
             entries: RwLock::new(entries_map),
             nullifiers: RwLock::new(nullifiers_map),
-            // The checkpoint stack is in-memory only and starts empty
-            // on open: it is rebuilt as the node applies blocks. The
-            // replayed `BridgeTree` likewise starts with no
-            // checkpoints, so the two remain in lock-step.
-            checkpoints: RwLock::new(Vec::new()),
+            // Side table restored from disk, with the BridgeTree's
+            // internal checkpoints reconstructed above to match — so
+            // the two stacks are back in lock-step and a reorg reaching
+            // past the restart can rewind.
+            checkpoints: RwLock::new(checkpoints),
             persistence: Some(ShieldedPersistence {
                 entries: entries_tree,
                 nullifiers: nullifiers_tree,
+                checkpoints: checkpoints_tree,
             }),
         })
+    }
+
+    /// Persist the current side-table checkpoint stack as one atomic
+    /// blob. Called from `checkpoint_at_height` and `rewind` under the
+    /// `checkpoints` write lock, so disk and memory stay in step. No-op
+    /// in-memory.
+    ///
+    /// R-61 CLASS: a write failure means restart-durable rewind can no
+    /// longer be guaranteed, so it halts (SIGTERM flushes cleanly),
+    /// matching the entry/nullifier write-failure policy.
+    fn persist_checkpoint_stack(&self, cps: &[ShieldedCheckpoint]) {
+        if let Some(p) = &self.persistence {
+            if let Err(e) = p.checkpoints.insert(CKPT_STACK_KEY, encode_ckpt_stack(cps)) {
+                tracing::error!(
+                    target: "storage::shielded::R61",
+                    error = %e,
+                    depth = cps.len(),
+                    "R-61: shielded_checkpoints write failed (stack depth {}). \
+                     Restart-durable rewind can no longer be guaranteed. \
+                     Halting to preserve on-disk state; SIGTERM flushes cleanly.",
+                    cps.len()
+                );
+                panic!("R-61: shielded_checkpoints write failed: {e}");
+            }
+        }
     }
 
     /// Append a note commitment to the tree. Returns the leaf position
@@ -458,6 +611,10 @@ impl ShieldedStore {
                 cps.first().map_or(0, |c| c.height)
             );
         }
+        // Persist the updated side table so a restart can reconstruct
+        // this checkpoint and rewind past it — still under the `cps`
+        // write lock, so disk and memory stay in step.
+        self.persist_checkpoint_stack(&cps);
     }
 
     /// Number of checkpoints currently in the side-table rollback
@@ -487,10 +644,12 @@ impl ShieldedStore {
     ///
     /// Returns `true` if a checkpoint was popped and the rewind ran,
     /// `false` if the checkpoint stack was already empty (nothing to
-    /// rewind — e.g. after a restart, since the stack is not
-    /// persisted). The chain reorg path treats `false` as a signal
-    /// that the store could not be rolled back and the operator must
-    /// be warned.
+    /// rewind — a reorg deeper than the retained stack; the stack IS
+    /// now restart-durable and the tree's checkpoints are reconstructed
+    /// on open, so this no longer fires merely because the node
+    /// restarted). The chain reorg path treats `false` as a signal that
+    /// the store could not be rolled back and the operator must be
+    /// warned.
     pub fn rewind(&self) -> bool {
         // Pop the side-table checkpoint guarding the block being
         // disconnected. Empty stack → nothing to rewind.
@@ -591,6 +750,11 @@ impl ShieldedStore {
                 );
             }
         }
+
+        // Persist the popped side table so the restart-durable copy
+        // matches the rewound state (otherwise a reopen would restore
+        // the pre-rewind depth and reconstruct a stale tree checkpoint).
+        self.persist_checkpoint_stack(&self.checkpoints.read());
 
         tree_rewound
     }
@@ -771,6 +935,55 @@ mod tests {
     fn rewind_on_empty_stack_returns_false() {
         let store = ShieldedStore::new();
         assert!(!store.rewind(), "nothing checkpointed — rewind must no-op");
+    }
+
+    #[test]
+    fn checkpoint_stack_survives_reopen_and_rewinds_past_restart() {
+        // #369/#373 durability fix (shielded store — the hard one): the
+        // side-table stack is persisted AND the BridgeTree's internal
+        // checkpoints are reconstructed on open (segmented replay), so a
+        // restarted node can rewind past the restart and the recomputed
+        // roots match. Block 3 adds NO commitments, exercising the
+        // same-`entries_len` reconstruction edge (its checkpoint sits at
+        // the final leaf count). Pre-fix, open_with_db reset the stack
+        // to empty and rewind returned false past the restart.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+
+        let (root_after_1, size_after_1) = {
+            let store = ShieldedStore::open_with_db(&db).unwrap();
+            apply_block(&store, 1, &[[0xA1; 32]], &[[0x11; 32]]);
+            let snap = (store.current_root(), store.tree_size());
+            apply_block(&store, 2, &[[0xB1; 32], [0xB2; 32]], &[[0x22; 32]]);
+            apply_block(&store, 3, &[], &[[0x33; 32]]); // no commitments
+            assert_eq!(store.checkpoint_count(), 3);
+            snap
+        }; // drop == restart
+
+        // Reopen: side table restored AND tree checkpoints reconstructed.
+        let reopened = ShieldedStore::open_with_db(&db).unwrap();
+        assert_eq!(
+            reopened.checkpoint_count(),
+            3,
+            "shielded checkpoint stack restored across restart (pre-fix: 0)"
+        );
+        // A 2-deep reorg past the restart must succeed AND the tree must
+        // actually rewind (reconstructed internal checkpoints), so the
+        // recomputed root matches the pre-block-2 root.
+        assert!(reopened.rewind(), "disconnect block 3 after restart");
+        assert!(reopened.rewind(), "disconnect block 2 after restart");
+        assert_eq!(reopened.tree_size(), size_after_1, "tree rewound to block 1");
+        assert_eq!(reopened.current_root(), root_after_1, "root back to block 1");
+        assert!(!reopened.is_nullifier_spent(&[0x22; 32]));
+        assert!(!reopened.is_nullifier_spent(&[0x33; 32]));
+        assert!(reopened.is_nullifier_spent(&[0x11; 32]), "block-1 nullifier survives");
+
+        // Rewound state durable across a second restart.
+        let reopened2 = ShieldedStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened2.checkpoint_count(), 1, "rewind persisted");
+        assert_eq!(reopened2.tree_size(), size_after_1);
+        assert_eq!(reopened2.current_root(), root_after_1);
     }
 
     #[test]
