@@ -959,6 +959,11 @@ impl Blockchain {
         };
         let backend = spark_connector::ffi::LibsparkBackend;
         let mut seen_tags: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        // #380: content hashes of mint coins seen in this block, to reject the same
+        // coin bytes minted twice within one block (the pool-presence check only
+        // catches a replay against ALREADY-committed coins).
+        let mut seen_mint_content: std::collections::HashSet<[u8; 32]> =
+            std::collections::HashSet::new();
         // Collected for the BATCHED proof verify after the per-tx cheap checks:
         // (payload, tx.fee) per spend-bearing tx, plus its tx index for errors.
         let mut items: Vec<(crate::consensus::spark_payload::SparkPayload, u64)> = Vec::new();
@@ -1098,12 +1103,38 @@ impl Blockchain {
                     .collect();
                 let (_total, coins) = spark_connector::ffi::verify_mint_bundle(mint)
                     .ok_or_else(|| format!("spark v2 tx {idx}: mint bundle unparseable"))?;
-                for i in 0..coins.len() {
+                for (i, coin) in coins.iter().enumerate() {
                     let op = crate::consensus::spark_payload::derive_outpoint(&input_outpoints, i as u32);
                     if store.index_of(&op).is_some() {
                         return Err(format!(
                             "spark v2 tx {idx}: mint coin outpoint already in the pool \
                              (already-confirmed shield-in re-proposed)"
+                        ));
+                    }
+                    // #380 CONTENT BINDING. Apply keys a mint coin by its
+                    // tx-derived outpoint (`derive_outpoint(tx.inputs, i)`), NOT by
+                    // its content, so the SAME mint bundle re-wrapped under
+                    // different inputs produces fresh outpoints — the outpoint check
+                    // above misses it, the copies re-enter the pool, and
+                    // `apply_value_balance` credits the turnstile again for coins
+                    // whose serial context no longer matches (unspendable, dead).
+                    // `pool_value` then counts value that can never leave. Reject a
+                    // mint coin whose libspark bytes are already pooled (from an
+                    // earlier mint OR a spend output — the spend feed is already
+                    // content-addressed), and reject a duplicate WITHIN this block.
+                    // A libspark coin commits to a random serial, so identical bytes
+                    // are a replay, never two honest coins. Fail-closed.
+                    let content = *blake3::hash(&coin.0).as_bytes();
+                    if store.coin_content_present(&content) {
+                        return Err(format!(
+                            "spark v2 tx {idx}: mint coin already in the pool by content \
+                             (mint bundle replayed under different inputs)"
+                        ));
+                    }
+                    if !seen_mint_content.insert(content) {
+                        return Err(format!(
+                            "spark v2 tx {idx}: duplicate mint coin within block \
+                             (same coin bytes minted twice)"
                         ));
                     }
                 }
@@ -6175,6 +6206,104 @@ mod tests {
             values.len(),
             "authenticated mint bundle fed all coins into the pool"
         );
+    }
+
+    /// #380 — a mint bundle re-wrapped under a DIFFERENT (non-empty) tx input set
+    /// mints coins whose tx-derived outpoints differ from the originals, so the
+    /// apply-mirroring outpoint-dup check in the block gate MISSES them. Without a
+    /// content check the dead copies (their serial context no longer matches, so
+    /// they are unspendable) re-enter the pool and `apply_value_balance` inflates
+    /// `pool_value` by the replay's amount — value that can never leave. The gate
+    /// now rejects a mint coin whose libspark bytes are already pooled. Regtest
+    /// opens the shield bridge at any height, so the transparent replay input is
+    /// admissible and the gate reaches the mint branch; the synthetic input's
+    /// pseudo-output commitment is `commit(Σv, 0)`, which the value bridge accepts
+    /// as backing `value_balance = −Σv` at fee 0.
+    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+    #[test]
+    fn spark_v2_replayed_mint_bundle_rejected_by_content() {
+        use crate::consensus::spark_payload::{derive_outpoint, SparkPayload, SPARK_PAYLOAD_VERSION};
+        use crate::crypto::{BlindingFactor, ClsagSignature, KeyImage, PedersenCommitment, PublicPoint};
+        use crate::storage::spark_pool::SparkPoolStore;
+        use crate::transaction::{Transaction, TxInput, TxType};
+        use spark_connector::ffi::{build_mint_bundle, serial_context};
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new_with_network(NetworkType::Regtest);
+        chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
+        let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
+
+        let seed = b"replayed-mint-380";
+        let values = [1_000u64, 2_000, 3_000];
+        let sum: u64 = values.iter().sum();
+        let mint_ctx = serial_context(&derive_outpoint(&[], 0)).unwrap();
+        let bundle = build_mint_bundle(seed, &values, &mint_ctx).unwrap();
+
+        // First carriage: EMPTY inputs, APPLIED to the pool at h1 (apply has no
+        // block gate), so the coins + their content keys are now pooled.
+        let first_tx = Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: SparkPayload {
+                version: SPARK_PAYLOAD_VERSION,
+                mint: Some(bundle.clone()),
+                outputs: vec![],
+                spend: None,
+                value_balance: -(sum as i64),
+            }
+            .encode(),
+        };
+        chain.apply_spark_v2_txs(std::slice::from_ref(&first_tx), 1);
+        assert_eq!(store.coin_count(), values.len(), "first mint pooled all coins");
+
+        // Replay: the SAME bundle under a DIFFERENT non-empty input set. The gate's
+        // outpoint check derives `derive_outpoint(&[key_image], i)` ≠ the pooled
+        // `derive_outpoint(&[], i)`, so it MISSES — only the content check catches it.
+        // (TxInput.key_image is the primitives newtype; the CLSAG key_image is the
+        // curve type — distinct.)
+        let clsag_ki = KeyImage::from_bytes(PublicPoint::identity().to_bytes())
+            .expect("identity is a valid curve point");
+        let replay_tx = Transaction {
+            version: 1,
+            tx_type: TxType::Shielded,
+            inputs: vec![TxInput {
+                key_image: crate::primitives::KeyImage::from_bytes([7u8; 32]),
+                ring_members: vec![],
+                signature: ClsagSignature {
+                    key_image: clsag_ki,
+                    commitment_image: PublicPoint::identity(),
+                    c1: [0u8; 32],
+                    responses: vec![],
+                },
+                pseudo_output_commitment: PedersenCommitment::commit(sum, &BlindingFactor::zero())
+                    .to_bytes(),
+            }],
+            outputs: vec![],
+            fee: crate::primitives::Amount::from_atomic(0),
+            range_proof: vec![],
+            extra: SparkPayload {
+                version: SPARK_PAYLOAD_VERSION,
+                mint: Some(bundle),
+                outputs: vec![],
+                spend: None,
+                value_balance: -(sum as i64),
+            }
+            .encode(),
+        };
+
+        let err = chain
+            .verify_block_spark_v2_at_height(std::slice::from_ref(&replay_tx), 1)
+            .expect_err("replayed mint bundle must be rejected by the content check");
+        assert!(
+            err.contains("already in the pool by content"),
+            "expected content-replay rejection, got: {err}"
+        );
+        // The pool was not inflated: the replay never applied.
+        assert_eq!(store.coin_count(), values.len(), "replay left the pool unchanged");
     }
 
     // ─── count_signaling_blocks_in_window — BIP-9 helper ───────────────────
