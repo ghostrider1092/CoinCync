@@ -176,7 +176,6 @@ pub fn verify_spark_payloads_batch<B: SparkBackend>(
                 .push(i);
         }
     }
-    let spent = store.spent_tags();
     for ((cover_set_id, anchor_height), idxs) in groups {
         let cover = store.cover_set_at(cover_set_id, anchor_height);
         // Mirror verify_spark_payload's #258 trust-boundary guard: a spend MUST
@@ -206,7 +205,7 @@ pub fn verify_spark_payloads_batch<B: SparkBackend>(
         for (slot, &i) in idxs.iter().enumerate() {
             let tags = &group_tags[slot];
             for t in tags {
-                if spent.contains(t) {
+                if store.is_tag_spent(t) {
                     return Err(Error::CryptoError(
                         "spark v2 batch: linking tag already spent (coin is not unspent)".into(),
                     ));
