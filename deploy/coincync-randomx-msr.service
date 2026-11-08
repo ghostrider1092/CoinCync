@@ -1,0 +1,22 @@
+[Unit]
+Description=CoinCync RandomX MSR boost (AMD Zen) — apply before mining
+Documentation=file:/usr/local/bin/randomx-msr-boost.sh
+# MSR writes do not survive a reboot, so reapply them on each boot, before the
+# miner starts, so the first dataset epoch already runs boosted.
+Before=coincync-baseline-miner.service coincync-fullmem-miner.service
+# Bare-metal only: inside a container MSRs aren't ours to write. (In a VM the
+# script's wrmsr just fails gracefully and the miner still runs, unboosted.)
+ConditionVirtualization=!container
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/randomx-msr-boost.sh apply
+# Never block the miner over this host tweak: `apply` exits 0 on an
+# unrecognised CPU and 1 only if wrmsr itself fails (e.g. a VM / locked-down
+# kernel). Treat both as success for ordering purposes.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target
