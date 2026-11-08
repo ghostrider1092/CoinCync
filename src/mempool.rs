@@ -1760,7 +1760,9 @@ impl SharedMempool {
                     "transaction consumed before mempool admission completed".into(),
                 )));
             };
-            let validation = chain.validate_transaction(tx);
+            let validation = chain
+                .validate_transaction(tx)
+                .and_then(|()| chain.check_shielded_minable(tx));
 
             // Do not acquire the chain lock while holding the mempool lock.
             // The final generation check is atomic and remains under this write
@@ -2296,6 +2298,71 @@ mod shielded_mempool_admission_172 {
             mp.add(tx).is_err(),
             "undecodable shielded payload rejected at admission"
         );
+    }
+
+    /// A spend the block gate refuses must be refused at admission too.
+    /// Admission ran only the structural check, so a confirmed spend
+    /// rebroadcast under a new hash sat in every template, every block built
+    /// from such a template failed the gate, and nothing evicted it until
+    /// some other block got accepted.
+    #[test]
+    fn spend_the_block_gate_refuses_is_refused_at_admission() {
+        use crate::chain::Blockchain;
+        use crate::config::NetworkType;
+        use std::sync::Arc;
+
+        let chain = Arc::new(Blockchain::new_with_network(NetworkType::Regtest));
+        let act = crate::constants::shielded_activation_height(NetworkType::Regtest);
+        chain.seed_linear_chain_for_testing(act, 3600);
+        let store = chain.spark_pool_store.as_ref().expect("pool store");
+
+        // A shield-in of eight coins, applied to the chain's pool the way a
+        // mined block does it.
+        let seed = b"mempool-admission-gate";
+        let inputs = vec![vec![0x5Au8; 36]];
+        let values: Vec<u64> = (0..8u64).map(|i| 10_000_000 + i).collect();
+        let (mint_payload, contexts) = build_mint_payload(seed, &values, &inputs).unwrap();
+        let (_t, coins) =
+            spark_connector::ffi::verify_mint_bundle(mint_payload.mint.as_ref().unwrap()).unwrap();
+        for (i, coin) in (0u32..).zip(&coins) {
+            let op = derive_outpoint(&inputs, i);
+            store
+                .add_coin(op, coin.clone(), contexts[0].clone(), 1)
+                .unwrap();
+        }
+        store
+            .apply_value_balance(mint_payload.value_balance)
+            .unwrap();
+
+        // A transfer of coin #2 shaped like the wallet builds it: no transparent
+        // side, the miner fee carried as the bundle fee, value_balance and tx.fee
+        // equal to it.
+        let op2 = derive_outpoint(&inputs, 2);
+        let mut payload = build_spend_payload(seed, store, &op2, 3_000, 0, 1).unwrap();
+        let bundle = &payload.spend.as_ref().unwrap().bundle;
+        let fee = spark_connector::ffi::spend_fee(bundle).unwrap();
+        payload.value_balance = i64::try_from(fee).unwrap();
+        let mut spend = mk_shielded_tx(payload.encode());
+        spend.fee = Amount::from_atomic(fee);
+
+        let mempool = SharedMempool::new();
+        let hash = mempool
+            .add_with_chain(spend.clone(), &chain)
+            .expect("a spend the gate accepts is admitted");
+        mempool.write().remove(&hash);
+
+        // A block mined the spend, so its tag is spent in the pool. The same
+        // spend with a new hash is what a rebroadcast looks like.
+        let tag = Mempool::shielded_linking_tags(&spend).unwrap().remove(0);
+        assert!(store.mark_tag_spent(&spark_connector::Nullifier(tag), act + 1));
+        let mut replay = spend;
+        replay.range_proof = vec![1];
+        let replay_hash = replay.hash();
+        let err = mempool
+            .add_with_chain(replay, &chain)
+            .expect_err("a spend the gate refuses is refused at admission");
+        assert!(err.to_string().contains("already spent"), "{err}");
+        assert!(!mempool.contains(&replay_hash));
     }
 }
 
