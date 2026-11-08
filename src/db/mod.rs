@@ -1640,6 +1640,114 @@ mod tests {
         assert_eq!(db.get_tx_location(&tx_hash), Some((h, 0)));
     }
 
+    /// Atomic Phase-2 commit: `commit_block_atomic_with_phase2` applies the extra
+    /// Phase-2 writes INSIDE the same batch as the transparent tip, so the pool's
+    /// coins/tags/pool-value land together with the block — the window where the
+    /// pool could persist one block ahead of the chain is gone.
+    #[test]
+    fn commit_block_atomic_with_phase2_lands_extra_writes_in_the_same_batch() {
+        let db = Database::open_temp().unwrap();
+        let h = 7u64;
+        let blk_hash = [0xCDu8; 32];
+        let stealth = [0x44u8; 32];
+        let entry = OutputIndexEntry {
+            commitment: [0x55u8; 32],
+            height: h,
+            is_coinbase: false,
+            lock_height: None,
+        };
+        let tx_hash = [0x66u8; 32];
+        let state = ChainStateData {
+            tip_hash: Hash::from_bytes(blk_hash),
+            height: h,
+            total_difficulty: 1,
+            total_supply: 1,
+            total_burned: 0,
+            last_checkpoint: 0,
+        };
+
+        // An extra Phase-2 column family with one staged put (a pool coin).
+        let pool = db.open_tree("test_phase2_pool").unwrap();
+        let extra_trees: Vec<&shim::Tree> = vec![&pool];
+        let extra_ops: Vec<(usize, Vec<u8>, Option<Vec<u8>>)> =
+            vec![(0usize, b"coin:0".to_vec(), Some(vec![0xEEu8; 8]))];
+
+        db.commit_block_atomic_with_phase2(
+            &[(stealth, serialize(&entry).unwrap())],
+            (h, blk_hash),
+            &[(tx_hash, h, 0u32)],
+            &serialize(&state).unwrap(),
+            &extra_trees,
+            &extra_ops,
+        )
+        .unwrap();
+
+        // Core transparent trees committed...
+        assert_eq!(db.state.get_state().unwrap().unwrap().height, h);
+        assert_eq!(db.get_tx_location(&tx_hash), Some((h, 0)));
+        // ...AND the Phase-2 extra write landed in the SAME batch.
+        assert_eq!(
+            pool.get(b"coin:0").unwrap().as_deref(),
+            Some(&[0xEEu8; 8][..]),
+            "pool coin committed atomically with the block"
+        );
+    }
+
+    /// Atomic Phase-2 commit on the reorg path: `apply_reorg_atomic_with_phase2`
+    /// applies the pool's staged PUTS and DELETES (a disconnect rewind + a fork
+    /// connect) inside the same reorg batch, so the pool switches forks atomically
+    /// with the transparent tip.
+    #[test]
+    fn apply_reorg_atomic_with_phase2_lands_puts_and_deletes_atomically() {
+        let db = Database::open_temp().unwrap();
+        let pool = db.open_tree("test_phase2_pool").unwrap();
+        // Pre-seed a coin the reorg will disconnect (delete).
+        pool.insert(b"coin:old", vec![0x01u8; 8].as_slice()).unwrap();
+
+        let h = 9u64;
+        let blk_hash = [0x77u8; 32];
+        let state = ChainStateData {
+            tip_hash: Hash::from_bytes(blk_hash),
+            height: h,
+            total_difficulty: 2,
+            total_supply: 2,
+            total_burned: 0,
+            last_checkpoint: 0,
+        };
+        let extra_trees: Vec<&shim::Tree> = vec![&pool];
+        // Reorg pool delta: delete the disconnected coin, add the fork's new one.
+        let extra_ops: Vec<(usize, Vec<u8>, Option<Vec<u8>>)> = vec![
+            (0usize, b"coin:old".to_vec(), None),
+            (0usize, b"coin:new".to_vec(), Some(vec![0x02u8; 8])),
+        ];
+
+        db.apply_reorg_atomic_with_phase2(
+            &[],              // oi_removals
+            &[],              // oi_additions
+            &[(h, blk_hash)], // height_sets
+            &[],              // height_removals
+            &serialize(&state).unwrap(),
+            &[], // ti_adds
+            &[], // ti_removes
+            &extra_trees,
+            &extra_ops,
+        )
+        .unwrap();
+
+        // The reorg's transparent state committed...
+        assert_eq!(db.state.get_state().unwrap().unwrap().height, h);
+        // ...and atomically with it: old pool coin deleted, new one added.
+        assert!(
+            pool.get(b"coin:old").unwrap().is_none(),
+            "disconnected pool coin deleted in the reorg batch"
+        );
+        assert_eq!(
+            pool.get(b"coin:new").unwrap().as_deref(),
+            Some(&[0x02u8; 8][..]),
+            "fork pool coin added in the reorg batch"
+        );
+    }
+
     /// The db/blocks.rs:227 invariant stated as an assertion: after every
     /// commit_block_atomic, the height index maps state.height -> state.tip_hash
     /// and NO height entry exists above state.height. Pre-fix (separate

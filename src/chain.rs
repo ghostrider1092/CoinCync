@@ -3044,6 +3044,21 @@ impl Blockchain {
                 };
                 let pre_reorg_stats = self.stats();
 
+                // ATOMIC PHASE-2 COMMIT (reorg): stage the shielded pool's writes
+                // across the ENTIRE reorg — the main-chain disconnect rewinds below,
+                // the fork-block connects, and the triggering-block connect — so
+                // they flush into the ONE `apply_reorg_atomic` batch on success and
+                // commit atomically with the transparent reorg. On a FAILED reorg
+                // (either rollback path) 4186 is never reached, so nothing is
+                // drained or committed and the in-memory rewinds revert the pool;
+                // the next block's `begin_staging` resets this buffer, so a rolled-
+                // back reorg leaves neither disk nor the next block's staging dirty.
+                // Inert for an in-memory pool (its writes don't touch persistence).
+                #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                if let Some(s) = &self.spark_pool_store {
+                    s.begin_staging();
+                }
+
                 // SECURITY (CC-002): Rewind main chain UTXO state to the fork point
                 let mut disconnected_blocks: u64 = 0;
                 let mut disconnected_txs: u64 = 0;
@@ -4183,7 +4198,43 @@ impl Blockchain {
                         let state_bytes = crate::db::serialize(&new_state)?;
 
                         // 5. Apply everything atomically
-                        db.apply_reorg_atomic(
+                        // ATOMIC PHASE-2 COMMIT (reorg): drain the pool's writes
+                        // staged across this whole reorg (disconnect rewinds + fork
+                        // and triggering connects) and commit them INSIDE the reorg
+                        // batch, so the shielded pool switches forks atomically with
+                        // the transparent tip — never persisted ahead of it. Inert /
+                        // empty in a non-gk build or without the pool store, where
+                        // this is exactly the former `apply_reorg_atomic`.
+                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                        let pool_staged = self
+                            .spark_pool_store
+                            .as_ref()
+                            .map(|s| s.take_staged_ops())
+                            .unwrap_or_default();
+                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                        let pool_writes =
+                            crate::storage::spark_pool::SparkPoolStore::staged_ops_to_writes(
+                                &pool_staged,
+                            );
+                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                        let pool_trees: Vec<&crate::db::shim::Tree> = self
+                            .spark_pool_store
+                            .as_ref()
+                            .and_then(|s| s.staging_trees())
+                            .map(|t| t.to_vec())
+                            .unwrap_or_default();
+                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                        let (extra_trees, extra_ops): (
+                            &[&crate::db::shim::Tree],
+                            &[(usize, Vec<u8>, Option<Vec<u8>>)],
+                        ) = (&pool_trees, &pool_writes);
+                        #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
+                        let (extra_trees, extra_ops): (
+                            &[&crate::db::shim::Tree],
+                            &[(usize, Vec<u8>, Option<Vec<u8>>)],
+                        ) = (&[], &[]);
+
+                        db.apply_reorg_atomic_with_phase2(
                             &oi_removals,
                             &oi_additions,
                             &height_sets,
@@ -4191,6 +4242,8 @@ impl Blockchain {
                             &state_bytes,
                             &ti_adds,
                             &ti_removes,
+                            extra_trees,
+                            extra_ops,
                         )?;
 
                         tracing::info!(
