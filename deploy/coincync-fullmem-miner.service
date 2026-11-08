@@ -25,6 +25,9 @@ RestartSec=3
 TimeoutStartSec=180
 TimeoutStopSec=30
 # Full-mem RandomX mlocks the dataset / uses hugepages when reserved.
+# Reserve them once per box (~2x hashrate): install deploy/60-coincync-hugepages.conf
+#   sudo cp deploy/60-coincync-hugepages.conf /etc/sysctl.d/ && sudo sysctl --system
+# Without it the miner still runs, just on 4 KB pages (slower) — never a hard fail.
 LimitMEMLOCK=infinity
 
 NoNewPrivileges=true
