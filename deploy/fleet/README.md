@@ -63,6 +63,23 @@ bash deploy/fleet/install-watchdog.sh 2.29.34.197 37.27.185.37 77.42.64.199 89.1
 Check it: `systemctl list-timers coincync-sync-watchdog.timer` and
 `journalctl -t coincync-watchdog`.
 
+### 3. Miner boxes — reserve huge pages (~2x hashrate)
+
+Full-mem miner boxes (`coincync-fullmem-miner.service` / `coincync-rig run-solo`,
+e.g. the rig `62.238.121.186`) run the ~2.3 GB RandomX dataset. On 4 KB pages
+that thrashes the TLB — the ~2x gap a tester measured vs XMRig. Reserve 2 MB huge
+pages once per miner box (persists across reboot):
+
+```bash
+sudo cp deploy/60-coincync-hugepages.conf /etc/sysctl.d/ && sudo sysctl --system
+grep HugePages /proc/meminfo   # expect HugePages_Total: 1280
+```
+
+Then install the rig binary (built `--features testnet`, full-mem) and restart
+`coincync-fullmem-miner`. The rig **requests** huge pages and falls back to 4 KB
+with a loud warning if none are reserved — it never hard-fails, just mines slower.
+Light-mode validating nodes don't build the dataset, so this is a miner-only step.
+
 ## Still the operator's job
 
 - **One driver at a time.** The lock stops *accidental* concurrency; it is not a
