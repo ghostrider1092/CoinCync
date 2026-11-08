@@ -697,7 +697,7 @@ mod randomx_cache {
                 // Drop the stale VM before building the new one so
                 // peak memory during epoch flip is one VM, not two.
                 *guard = None;
-                let vm = RandomXVM::new(flags, Some(cache.clone()), dataset.clone())
+                let vm = new_vm_lp_fallback(flags, &cache, &dataset)
                     .map_err(|e| crate::error::Error::Internal(
                         format!("per-thread RandomX VM init: {}", e)
                     ))?;
@@ -769,7 +769,7 @@ mod randomx_cache {
             };
             if needs_new {
                 *guard = None;
-                let vm = RandomXVM::new(flags, Some(cache.clone()), dataset.clone())
+                let vm = new_vm_lp_fallback(flags, &cache, &dataset)
                     .map_err(|e| crate::error::Error::Internal(
                         format!("per-thread RandomX VM init: {}", e)
                     ))?;
@@ -1002,16 +1002,37 @@ mod randomx_cache {
         // Used only when this process is mining and full-mem wasn't opted out.
         if !use_light {
             let full_flags = recommended | RandomXFlag::FLAG_FULL_MEM | secure;
+            // HUGE PAGES: the 2 GB dataset is read at random every hash, so on 4 KB
+            // pages it thrashes the TLB — huge pages are a ~1.5-2x hashrate win (the
+            // gap vs XMRig when the operator has huge pages reserved but the miner
+            // never requested them). Try them first; fall back to 4 KB pages if the
+            // OS has none reserved (the alloc fails otherwise). ALLOCATION ONLY —
+            // RandomX guarantees a byte-identical hash across every flag set
+            // (fast_light_equivalence), so this is consensus-neutral. The flags are
+            // stored on the entry, so each thread's VM scratchpad also gets huge
+            // pages (with a per-thread fallback in `new_vm_lp_fallback`).
+            let large_flags = full_flags | RandomXFlag::FLAG_LARGE_PAGES;
             tracing::info!(
-                "Building RandomX dataset (mode: full-mem): active={:?}, key={}... \
+                "Building RandomX dataset (mode: full-mem, huge pages): active={:?}, key={}... \
                  (one-time ~30-60s build per epoch; subsequent thread VMs are ~ms)",
-                full_flags,
+                large_flags,
                 hex::encode(&seed[..4])
             );
-            let built = try_build_entry(full_flags, seed).or_else(|e| {
-                tracing::warn!("RandomX full-mem build failed ({}), retrying once", e);
-                try_build_entry(full_flags, seed)
-            });
+            let built = try_build_entry(large_flags, seed)
+                .or_else(|e| {
+                    tracing::warn!(
+                        "RandomX huge-page dataset build failed ({}); huge pages are likely \
+                         not reserved. Falling back to 4 KB pages — expect ~2x lower hashrate. \
+                         For full speed reserve huge pages (Linux: `sysctl -w vm.nr_hugepages=1280`; \
+                         Windows: enable the 'Lock pages in memory' privilege).",
+                        e
+                    );
+                    try_build_entry(full_flags, seed)
+                })
+                .or_else(|e| {
+                    tracing::warn!("RandomX full-mem build failed ({}), retrying once", e);
+                    try_build_entry(full_flags, seed)
+                });
             match built {
                 Ok(entry) => {
                     tracing::info!(
@@ -1121,6 +1142,36 @@ mod randomx_cache {
                 )))
             }
         }
+    }
+
+    /// Build a per-thread RandomX VM, falling back to 4 KB pages if a huge-page
+    /// scratchpad can't be allocated. The dataset (built once) carries the big
+    /// huge-page win; a thread whose 2 MB scratchpad can't get a huge page —
+    /// e.g. the reserve was sized for the dataset only — still mines, just with a
+    /// 4 KB-page scratchpad. ALLOCATION ONLY: the hash is byte-identical, so
+    /// dropping `FLAG_LARGE_PAGES` here is consensus-neutral.
+    fn new_vm_lp_fallback(
+        flags: RandomXFlag,
+        cache: &RandomXCache,
+        dataset: &Option<RandomXDataset>,
+    ) -> std::result::Result<RandomXVM, String> {
+        match RandomXVM::new(flags, Some(cache.clone()), dataset.clone()) {
+            Ok(vm) => return Ok(vm),
+            Err(e) if flags.contains(RandomXFlag::FLAG_LARGE_PAGES) => {
+                tracing::warn!(
+                    "per-thread RandomX VM huge-page scratchpad alloc failed ({}); this \
+                     thread falls back to 4 KB pages (hash unchanged, marginally slower)",
+                    e
+                );
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+        RandomXVM::new(
+            flags & !RandomXFlag::FLAG_LARGE_PAGES,
+            Some(cache.clone()),
+            dataset.clone(),
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// Build a `DatasetEntry` for the given flag set. Returns Err
