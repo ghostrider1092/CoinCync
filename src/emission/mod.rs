@@ -7,6 +7,21 @@
 //! With 30% fee burn, the chain becomes deflationary when fees exceed
 //! ~2 CYNC/block.
 //!
+//! ## The S.A.M. model
+//!
+//! This curve is branded the **S.A.M.** emission — a **S**mooth **A**symptotic
+//! **M**odel — documented for readers in `docs/src/protocol/emission.md`. It runs
+//! in two deterministic stages:
+//!   - **C.O.R.E.** (Continuous Output-Reduction Emission) — Stage 1, the main
+//!     curve `(100M·COIN − already_mined) / EMISSION_DIVISOR`, decaying 50 → 0.6 CYNC.
+//!   - **D.E.M.** (Deterministic Emission Minimum) — Stage 2, the perpetual
+//!     `TAIL_EMISSION` (0.6 CYNC/block) floor the `max(…)` holds the reward at.
+//!
+//! These names are DESCRIPTIVE ONLY — the reward math is unchanged and depends on
+//! nothing but cumulative mined supply (proven by the `kani_proofs` harnesses).
+//! They are deliberately NOT the adaptive / hashrate- or utility-driven
+//! "S.A.M. 2.0" variants, which CoinCync does not implement.
+//!
 //! ## Audit map
 //! Each `§` is a code section below; it states the INVARIANT it guarantees, the
 //! THREAT it defends, and the TESTS that prove it. (Renders in `cargo doc`.)
