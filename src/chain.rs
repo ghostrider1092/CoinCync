@@ -2488,6 +2488,18 @@ impl Blockchain {
                     self.apply_shielded_txs(&block.transactions, block.header.height.as_u64());
                     // Feed the libspark v2 pool (add_coin per mint, mark_tag_spent
                     // per spend). Inert unless both features + the pool store.
+                    //
+                    // ATOMIC PHASE-2 COMMIT: stage the pool's persistence instead of
+                    // writing it immediately, so it lands in the SAME WriteBatch as
+                    // the transparent tip below (commit_block_atomic_with_phase2) —
+                    // the block commits pool + tip together or neither, so the pool
+                    // can never be left one block ahead of the committed chain. In-
+                    // memory mutations still happen eagerly here. `begin_staging`
+                    // also resets any buffer a prior early-return left behind.
+                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                    if let Some(s) = &self.spark_pool_store {
+                        s.begin_staging();
+                    }
                     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
                     self.apply_spark_v2_txs(&block.transactions, block.header.height.as_u64());
 
@@ -2645,11 +2657,50 @@ impl Blockchain {
                     // panic to let the SIGTERM flush + restart re-sync this one
                     // block from peers. (Rollback-instead-of-halt is a separable,
                     // reviewer-gated enhancement.)
-                    db.commit_block_atomic(
+                    //
+                    // ATOMIC PHASE-2 COMMIT: drain the shielded pool's writes
+                    // staged during `apply_spark_v2_txs` and commit them INSIDE
+                    // this same batch, so the pool's coins/tags/pool-value land
+                    // atomically with the tip — never one block ahead of (or
+                    // behind) the committed chain. Empty / inert in a non-gk build
+                    // or when the pool store is absent, where this is exactly the
+                    // former `commit_block_atomic`.
+                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                    let pool_staged = self
+                        .spark_pool_store
+                        .as_ref()
+                        .map(|s| s.take_staged_ops())
+                        .unwrap_or_default();
+                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                    let pool_writes =
+                        crate::storage::spark_pool::SparkPoolStore::staged_ops_to_writes(
+                            &pool_staged,
+                        );
+                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                    let pool_trees: Vec<&crate::db::shim::Tree> = self
+                        .spark_pool_store
+                        .as_ref()
+                        .and_then(|s| s.staging_trees())
+                        .map(|t| t.to_vec())
+                        .unwrap_or_default();
+                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                    let (extra_trees, extra_ops): (
+                        &[&crate::db::shim::Tree],
+                        &[(usize, Vec<u8>, Option<Vec<u8>>)],
+                    ) = (&pool_trees, &pool_writes);
+                    #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
+                    let (extra_trees, extra_ops): (
+                        &[&crate::db::shim::Tree],
+                        &[(usize, Vec<u8>, Option<Vec<u8>>)],
+                    ) = (&[], &[]);
+
+                    db.commit_block_atomic_with_phase2(
                         &output_additions,
                         (block.header.height.as_u64(), *hash.as_bytes()),
                         &tx_index_adds,
                         &state_bytes,
+                        extra_trees,
+                        extra_ops,
                     )
                     .unwrap_or_else(|e| {
                         panic!(

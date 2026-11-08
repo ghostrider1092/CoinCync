@@ -974,6 +974,63 @@ impl Database {
     /// worth doing, but the immediate correctness gap is closed.
     pub fn apply_reorg_atomic(
         &self,
+        output_removals: &[[u8; 32]],
+        output_additions: &[([u8; 32], Vec<u8>)],
+        height_sets: &[(u64, [u8; 32])],
+        height_removals: &[u64],
+        new_state: &[u8],
+        tx_index_adds: &[([u8; 32], u64, u32)],
+        tx_index_removes: &[[u8; 32]],
+    ) -> Result<()> {
+        // No Phase-2 extra writes — delegates to the shared implementation.
+        self.apply_reorg_atomic_inner(
+            output_removals,
+            output_additions,
+            height_sets,
+            height_removals,
+            new_state,
+            tx_index_adds,
+            tx_index_removes,
+            &[],
+            &[],
+        )
+    }
+
+    /// Like [`apply_reorg_atomic`](Self::apply_reorg_atomic), but also applies a
+    /// set of Phase-2 store writes INSIDE the same reorg `WriteBatch`, so the
+    /// shielded pool's rewind (coin/tag deletes, pool-value restore) and the
+    /// re-applied fork blocks' pool writes commit atomically with the transparent
+    /// reorg — the switch is all-or-nothing across both. Same `extra_trees` /
+    /// `extra_ops` contract as [`commit_block_atomic_with_phase2`](Self::commit_block_atomic_with_phase2).
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_reorg_atomic_with_phase2(
+        &self,
+        output_removals: &[[u8; 32]],
+        output_additions: &[([u8; 32], Vec<u8>)],
+        height_sets: &[(u64, [u8; 32])],
+        height_removals: &[u64],
+        new_state: &[u8],
+        tx_index_adds: &[([u8; 32], u64, u32)],
+        tx_index_removes: &[[u8; 32]],
+        extra_trees: &[&shim::Tree],
+        extra_ops: &[(usize, Vec<u8>, Option<Vec<u8>>)],
+    ) -> Result<()> {
+        self.apply_reorg_atomic_inner(
+            output_removals,
+            output_additions,
+            height_sets,
+            height_removals,
+            new_state,
+            tx_index_adds,
+            tx_index_removes,
+            extra_trees,
+            extra_ops,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_reorg_atomic_inner(
+        &self,
         // Output index entries to remove (disconnected blocks' output stealth keys)
         output_removals: &[[u8; 32]],
         // Output index entries to add (fork blocks' outputs): (stealth, serialized_entry)
@@ -988,6 +1045,10 @@ impl Database {
         tx_index_adds: &[([u8; 32], u64, u32)],
         // Tx index removals: tx_hash bytes
         tx_index_removes: &[[u8; 32]],
+        // Phase-2 column families joined into the SAME batch (empty = plain path).
+        extra_trees: &[&shim::Tree],
+        // Phase-2 writes: (index into extra_trees, key, Some(value)|None=delete).
+        extra_ops: &[(usize, Vec<u8>, Option<Vec<u8>>)],
     ) -> Result<()> {
         use shim::transaction::Transactional;
 
@@ -1028,14 +1089,19 @@ impl Database {
             }
         }
 
-        let trees: &[&shim::Tree] = &[
+        // Core transparent trees, then the Phase-2 extra trees appended so they
+        // share the one atomic reorg WriteBatch. The closure indexes an extra op's
+        // tree at `4 + idx`.
+        let mut all_trees: Vec<&shim::Tree> = vec![
             &self.output_index.tree,
             &self.blocks.height_index,
             &self.state.state,
             &self.tx_index,
         ];
+        all_trees.extend_from_slice(extra_trees);
 
-        trees
+        all_trees
+            .as_slice()
             .transaction(|tx_trees| {
                 let oi_tree = &tx_trees[0];
                 let hi_tree = &tx_trees[1];
@@ -1076,6 +1142,23 @@ impl Database {
                     ti_tree.insert(hash.as_slice(), &value)?;
                 }
 
+                // 7. Phase-2 store writes (shielded pool rewind deletes + the
+                //    re-applied fork blocks' coins/tags/pool-value) into the SAME
+                //    batch, so the pool switches forks atomically with the tip.
+                //    `idx` selects the extra tree (after the 4 core ones); `None`
+                //    is a delete, `Some(v)` a put.
+                for (idx, key, value) in extra_ops {
+                    let t = &tx_trees[4 + *idx];
+                    match value {
+                        Some(v) => {
+                            t.insert(key.as_slice(), v.as_slice())?;
+                        }
+                        None => {
+                            t.remove(key.as_slice())?;
+                        }
+                    }
+                }
+
                 Ok(())
             })
             .map_err(|e: shim::transaction::TransactionError| {
@@ -1114,6 +1197,45 @@ impl Database {
     /// the pending batch).
     pub fn commit_block_atomic(
         &self,
+        output_additions: &[([u8; 32], Vec<u8>)],
+        height_set: (u64, [u8; 32]),
+        tx_index_adds: &[([u8; 32], u64, u32)],
+        new_state: &[u8],
+    ) -> Result<()> {
+        // No Phase-2 extra writes — delegates to the shared implementation.
+        self.commit_block_atomic_inner(output_additions, height_set, tx_index_adds, new_state, &[], &[])
+    }
+
+    /// Like [`commit_block_atomic`](Self::commit_block_atomic), but also applies a
+    /// set of Phase-2 store writes INSIDE the same `WriteBatch`, so the shielded
+    /// pool's coins / spent tags / pool-value land atomically with the transparent
+    /// tip — the block commits all of it or none. This closes the window where the
+    /// pool, persisted via immediate writes during apply, could be left one block
+    /// AHEAD of the committed chain after a crash (the wedge `rebuild_spark_pool`
+    /// otherwise repairs). `extra_trees` are the Phase-2 column families; each
+    /// `extra_ops` tuple is `(index into extra_trees, key, Some(value)=put |
+    /// None=delete)`.
+    pub fn commit_block_atomic_with_phase2(
+        &self,
+        output_additions: &[([u8; 32], Vec<u8>)],
+        height_set: (u64, [u8; 32]),
+        tx_index_adds: &[([u8; 32], u64, u32)],
+        new_state: &[u8],
+        extra_trees: &[&shim::Tree],
+        extra_ops: &[(usize, Vec<u8>, Option<Vec<u8>>)],
+    ) -> Result<()> {
+        self.commit_block_atomic_inner(
+            output_additions,
+            height_set,
+            tx_index_adds,
+            new_state,
+            extra_trees,
+            extra_ops,
+        )
+    }
+
+    fn commit_block_atomic_inner(
+        &self,
         // Output index additions: (stealth_address, serialized OutputIndexEntry)
         output_additions: &[([u8; 32], Vec<u8>)],
         // The (height, block_hash) mapping for the newly connected tip.
@@ -1122,6 +1244,10 @@ impl Database {
         tx_index_adds: &[([u8; 32], u64, u32)],
         // New chain state (serialized ChainStateData).
         new_state: &[u8],
+        // Phase-2 column families joined into the SAME batch (empty = plain path).
+        extra_trees: &[&shim::Tree],
+        // Phase-2 writes: (index into extra_trees, key, Some(value)|None=delete).
+        extra_ops: &[(usize, Vec<u8>, Option<Vec<u8>>)],
     ) -> Result<()> {
         use shim::transaction::Transactional;
 
@@ -1141,14 +1267,19 @@ impl Database {
             }
         }
 
-        let trees: &[&shim::Tree] = &[
+        // Core transparent trees, then the Phase-2 extra trees appended so they
+        // share the one atomic WriteBatch. The closure indexes an extra op's tree
+        // at `4 + idx`.
+        let mut all_trees: Vec<&shim::Tree> = vec![
             &self.output_index.tree,
             &self.blocks.height_index,
             &self.state.state,
             &self.tx_index,
         ];
+        all_trees.extend_from_slice(extra_trees);
 
-        trees
+        all_trees
+            .as_slice()
             .transaction(|tx_trees| {
                 let oi_tree = &tx_trees[0];
                 let hi_tree = &tx_trees[1];
@@ -1173,6 +1304,22 @@ impl Database {
                     value[..8].copy_from_slice(&height.to_le_bytes());
                     value[8..].copy_from_slice(&tx_idx.to_le_bytes());
                     ti_tree.insert(hash.as_slice(), &value)?;
+                }
+
+                // 5. Phase-2 store writes (shielded pool coins / tags / pool-value)
+                //    into the SAME batch, so they commit atomically with the tip.
+                //    `idx` selects the extra tree (appended after the 4 core ones);
+                //    `None` is a delete (a reorg rewind), `Some(v)` a put.
+                for (idx, key, value) in extra_ops {
+                    let t = &tx_trees[4 + *idx];
+                    match value {
+                        Some(v) => {
+                            t.insert(key.as_slice(), v.as_slice())?;
+                        }
+                        None => {
+                            t.remove(key.as_slice())?;
+                        }
+                    }
                 }
 
                 Ok(())

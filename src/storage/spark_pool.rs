@@ -122,6 +122,26 @@ struct PoolCheckpoint {
     pool_value: i128,
 }
 
+/// One staged persistence op for the pool's RocksDB trees. When a block's apply
+/// is staging (`begin_staging`), the pool's write methods buffer these instead
+/// of writing immediately, so the chain can flush them into the SAME atomic
+/// `WriteBatch` as the transparent block commit — pool state then lands together
+/// with the committed tip (all-or-nothing) and can never be left one block ahead
+/// of (or behind) the chain. The variant selects which tree the op targets.
+#[derive(Clone, Debug)]
+pub enum StagedPoolOp {
+    /// `coins` tree: `cover_index` (BE) → serialized `PersistedCoin`.
+    CoinInsert { cover_index: u64, value: Vec<u8> },
+    /// `coins` tree: delete `cover_index` (BE) — a reorg rewind.
+    CoinRemove { cover_index: u64 },
+    /// `tags` tree: tag bytes → spend height (LE).
+    TagInsert { tag: Vec<u8>, height: u64 },
+    /// `tags` tree: delete a tag — a reorg rewind.
+    TagRemove { tag: Vec<u8> },
+    /// `meta` tree: a fixed key → value (today only the running pool value).
+    MetaInsert { key: Vec<u8>, value: Vec<u8> },
+}
+
 /// The libspark-aligned Spark pool store. RocksDB-backed when opened via
 /// [`SparkPoolStore::open_with_db`] (coins, spent tags, pool value, and the
 /// reorg checkpoint stack all persist + replay); a plain `new()` is in-memory
@@ -149,6 +169,12 @@ pub struct SparkPoolStore {
     pool_value: RwLock<i128>,
     /// RocksDB-backed persistence. `None` for in-memory tests.
     persistence: Option<SparkPoolPersistence>,
+    /// Block-apply staging buffer. `None` = persist immediately (the default,
+    /// and what tests / `rebuild_phase2_stores` use). `Some(buf)` = defer every
+    /// persist op into `buf` for the chain to flush into the block's atomic
+    /// commit batch (see `begin_staging` / `take_staged_ops` and `StagedPoolOp`).
+    /// In-memory mutations still happen eagerly; only durability is deferred.
+    staging: RwLock<Option<Vec<StagedPoolOp>>>,
 }
 
 impl SparkPoolStore {
@@ -163,6 +189,7 @@ impl SparkPoolStore {
             max_spent_tag_height: RwLock::new(None),
             pool_value: RwLock::new(0),
             persistence: None,
+            staging: RwLock::new(None),
         }
     }
 
@@ -253,7 +280,111 @@ impl SparkPoolStore {
                 tags: tags_tree,
                 meta: meta_tree,
             }),
+            staging: RwLock::new(None),
         })
+    }
+
+    /// Begin staging this block's persistence into a buffer instead of writing
+    /// it immediately, so the chain can flush it into the block's atomic commit
+    /// batch (`commit_block_atomic`). Call BEFORE the block's apply; pair with
+    /// [`take_staged_ops`](Self::take_staged_ops) after the commit. In-memory
+    /// mutations still happen eagerly (they compute the staged key/values); only
+    /// durability is deferred, so a crash before the batch commits leaves the
+    /// pool exactly in sync with the (also-uncommitted) tip. A no-op on an
+    /// in-memory store (nothing to persist). Re-entrancy: block apply is
+    /// serialized by the chain's apply lock, so at most one block stages at once.
+    pub fn begin_staging(&self) {
+        *self.staging.write() = Some(Vec::new());
+    }
+
+    /// Stop staging and drain the ops accumulated since [`begin_staging`]. The
+    /// chain flushes these into the block's `WriteBatch`; on a commit failure it
+    /// discards them and rewinds the in-memory apply. Empty if staging was not
+    /// active. Always call this once per `begin_staging`, even on the error path,
+    /// so staging never leaks into the next block.
+    pub fn take_staged_ops(&self) -> Vec<StagedPoolOp> {
+        self.staging.write().take().unwrap_or_default()
+    }
+
+    /// The pool's three persistence column families in the fixed order
+    /// `[coins, tags, meta]`, for joining into the block's atomic commit batch via
+    /// `Database::commit_block_atomic_with_phase2`. `None` for an in-memory store
+    /// (nothing to persist).
+    pub(crate) fn staging_trees(&self) -> Option<[&shim::Tree; 3]> {
+        self.persistence.as_ref().map(|p| [&p.coins, &p.tags, &p.meta])
+    }
+
+    /// Translate staged ops into `(tree_index, key, value-or-delete)` tuples keyed
+    /// to [`staging_trees`](Self::staging_trees)'s order — `0 = coins`, `1 = tags`,
+    /// `2 = meta` — ready to pass as the `extra_ops` of
+    /// `commit_block_atomic_with_phase2` / `apply_reorg_atomic_with_phase2`. A
+    /// `None` value is a delete (a reorg rewind), `Some(v)` a put.
+    pub(crate) fn staged_ops_to_writes(
+        ops: &[StagedPoolOp],
+    ) -> Vec<(usize, Vec<u8>, Option<Vec<u8>>)> {
+        ops.iter()
+            .map(|op| match op {
+                StagedPoolOp::CoinInsert { cover_index, value } => {
+                    (0usize, cover_index.to_be_bytes().to_vec(), Some(value.clone()))
+                }
+                StagedPoolOp::CoinRemove { cover_index } => {
+                    (0usize, cover_index.to_be_bytes().to_vec(), None)
+                }
+                StagedPoolOp::TagInsert { tag, height } => {
+                    (1usize, tag.clone(), Some(height.to_le_bytes().to_vec()))
+                }
+                StagedPoolOp::TagRemove { tag } => (1usize, tag.clone(), None),
+                StagedPoolOp::MetaInsert { key, value } => {
+                    (2usize, key.clone(), Some(value.clone()))
+                }
+            })
+            .collect()
+    }
+
+    /// Route a persist op: buffer it when a block is staging, otherwise write it
+    /// to RocksDB immediately (the pre-atomic-commit behavior, kept for tests,
+    /// `rebuild_phase2_stores`, and any non-block-apply mutation). The immediate
+    /// path is R-61 CLASS — a persistence failure on consensus pool state halts,
+    /// never continues in-memory-only, since that would diverge the replayed
+    /// store after a restart.
+    fn apply_pool_write(&self, op: StagedPoolOp) {
+        if let Some(buf) = self.staging.write().as_mut() {
+            buf.push(op);
+            return;
+        }
+        let p = match &self.persistence {
+            Some(p) => p,
+            None => return,
+        };
+        match op {
+            StagedPoolOp::CoinInsert { cover_index, value } => {
+                if let Err(e) = p.coins.insert(cover_index.to_be_bytes(), value) {
+                    panic!("R-61: spark_pool_coins write failed at cover_index {cover_index}: {e}");
+                }
+            }
+            StagedPoolOp::CoinRemove { cover_index } => {
+                if let Err(e) = p.coins.remove(cover_index.to_be_bytes()) {
+                    panic!(
+                        "R-61: spark_pool coin rewind-remove failed at cover_index {cover_index}: {e}"
+                    );
+                }
+            }
+            StagedPoolOp::TagInsert { tag, height } => {
+                if let Err(e) = p.tags.insert(&tag, height.to_le_bytes()) {
+                    panic!("R-61: spark_pool_tags write failed at height {height}: {e}");
+                }
+            }
+            StagedPoolOp::TagRemove { tag } => {
+                if let Err(e) = p.tags.remove(tag.as_slice()) {
+                    panic!("R-61: spark_pool tag rewind-remove failed: {e}");
+                }
+            }
+            StagedPoolOp::MetaInsert { key, value } => {
+                if let Err(e) = p.meta.insert(&key, value) {
+                    panic!("R-61: spark_pool meta write failed: {e}");
+                }
+            }
+        }
     }
 
     /// Append a minted coin at `outpoint` (with its libspark bytes, its
@@ -280,10 +411,10 @@ impl SparkPoolStore {
             height,
             cover_index,
         };
-        // R-61 CLASS site: a persistence failure on a consensus coin must halt,
-        // not continue in-memory-only (would diverge the replayed store after
-        // restart). Mirrors `SparkStore`/`ShieldedStore`.
-        if let Some(p) = &self.persistence {
+        // Persist (immediately) or stage (for the block's atomic batch) the coin.
+        // Only serialize when a write will actually be used — an in-memory-only
+        // store (tests) has no persistence and never stages, so it skips this.
+        if self.persistence.is_some() {
             let persisted = PersistedCoin {
                 outpoint: entry.outpoint.clone(),
                 coin: entry.coin.0.clone(),
@@ -294,9 +425,7 @@ impl SparkPoolStore {
             let value = borsh::to_vec(&persisted).unwrap_or_else(|e| {
                 panic!("R-61: SparkPoolCoin borsh serialize failed at cover_index {cover_index}: {e}")
             });
-            if let Err(e) = p.coins.insert(cover_index.to_be_bytes(), value) {
-                panic!("R-61: spark_pool_coins write failed at cover_index {cover_index}: {e}");
-            }
+            self.apply_pool_write(StagedPoolOp::CoinInsert { cover_index, value });
         }
         by_op.insert(outpoint, cover_index);
         coins.push(entry);
@@ -413,11 +542,9 @@ impl SparkPoolStore {
         if tags.contains_key(&tag.0) {
             return false;
         }
-        // R-61 CLASS site: halt on a persistence failure for a consensus tag.
-        if let Some(p) = &self.persistence {
-            if let Err(e) = p.tags.insert(&tag.0, height.to_le_bytes()) {
-                panic!("R-61: spark_pool_tags write failed at height {height}: {e}");
-            }
+        // Persist immediately or stage for the block's atomic batch.
+        if self.persistence.is_some() {
+            self.apply_pool_write(StagedPoolOp::TagInsert { tag: tag.0.clone(), height });
         }
         tags.insert(tag.0.clone(), height);
         // O(1) guard maintenance.
@@ -513,14 +640,14 @@ impl SparkPoolStore {
             )));
         }
         *pv = after;
-        if let Some(p) = &self.persistence {
-            // R-61 CLASS site: the pool value is a consensus quantity (the "no
-            // inflation across the veil" gate). A silent persist failure would
-            // let a restart reload a STALE value while coins/tags did persist —
-            // diverging the replayed store. Halt, like add_coin/mark_tag_spent.
-            if let Err(e) = p.meta.insert(POOL_VALUE_KEY, after.to_le_bytes()) {
-                panic!("R-61: spark_pool pool_value write failed: {e}");
-            }
+        // The pool value is a consensus quantity (the "no inflation across the
+        // veil" gate); persist it immediately or stage it for the block's atomic
+        // batch, together with the coins/tags of the same block.
+        if self.persistence.is_some() {
+            self.apply_pool_write(StagedPoolOp::MetaInsert {
+                key: POOL_VALUE_KEY.to_vec(),
+                value: after.to_le_bytes().to_vec(),
+            });
         }
         Ok(())
     }
@@ -619,22 +746,15 @@ impl SparkPoolStore {
         };
 
         // Clean persistence so a future `open_with_db` replay reconstructs the
-        // rewound state instead of resurrecting the disconnected block.
-        if let Some(p) = &self.persistence {
-            // R-61 CLASS site: a rewind must leave on-disk state consistent with
-            // memory. A silent remove failure would resurrect a disconnected
-            // block's coin/tag on the next open_with_db replay, diverging the
-            // store. Halt on failure, symmetric with the add_coin/mark_tag_spent
-            // inserts.
+        // rewound state instead of resurrecting the disconnected block. Routed
+        // through `apply_pool_write`, so during a staged reorg these removes land
+        // in the same atomic batch as the reorg's transparent commit.
+        if self.persistence.is_some() {
             for idx in &removed_indices {
-                if let Err(e) = p.coins.remove(idx.to_be_bytes()) {
-                    panic!("R-61: spark_pool coin rewind-remove failed at cover_index {idx}: {e}");
-                }
+                self.apply_pool_write(StagedPoolOp::CoinRemove { cover_index: *idx });
             }
             for t in &removed_tags {
-                if let Err(e) = p.tags.remove(t.as_slice()) {
-                    panic!("R-61: spark_pool tag rewind-remove failed: {e}");
-                }
+                self.apply_pool_write(StagedPoolOp::TagRemove { tag: t.clone() });
             }
         }
 
@@ -646,12 +766,11 @@ impl SparkPoolStore {
         // Restore the pool value to the disconnected block's pre-apply boundary
         // and mirror it to disk, so a reorg (and a later replay) is exact.
         *self.pool_value.write() = restore.pool_value;
-        if let Some(p) = &self.persistence {
-            // R-61 CLASS site (see apply_value_balance): halt on a persist
-            // failure of the restored pool value.
-            if let Err(e) = p.meta.insert(POOL_VALUE_KEY, restore.pool_value.to_le_bytes()) {
-                panic!("R-61: spark_pool pool_value rewind-restore write failed: {e}");
-            }
+        if self.persistence.is_some() {
+            self.apply_pool_write(StagedPoolOp::MetaInsert {
+                key: POOL_VALUE_KEY.to_vec(),
+                value: restore.pool_value.to_le_bytes().to_vec(),
+            });
         }
         // The checkpoint stack is session-local (in-memory); nothing to persist.
         // The pop above already shortened it, and coins/tags/pool_value are
@@ -913,6 +1032,66 @@ mod tests {
         assert!(s2.is_tag_spent(&nf(0x55)));
         // A fresh append continues the dense index.
         assert_eq!(s2.add_coin(b"op:2".to_vec(), coin(3), b"ctx2".to_vec(), 3), Some(2));
+    }
+
+    #[test]
+    fn staging_defers_persistence_and_collects_ops() {
+        // Atomic Phase-2 commit (A): under `begin_staging`, a block's pool writes
+        // mutate in-memory immediately but their DURABILITY is deferred into a
+        // buffer the chain flushes into the block's atomic WriteBatch. So mid-block
+        // (before the chain commits) NOTHING is on disk — the pool can't be left
+        // ahead of the tip. The staged ops carry exactly the writes to flush.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+
+        let ops = {
+            let s = SparkPoolStore::open_with_db(&db).unwrap();
+            s.begin_staging();
+            s.add_coin(b"op:0".to_vec(), coin(1), b"ctx0".to_vec(), 1).unwrap();
+            s.add_coin(b"op:1".to_vec(), coin(2), b"ctx1".to_vec(), 1).unwrap();
+            assert!(s.mark_tag_spent(&nf(0x55), 1));
+            s.apply_value_balance(-100).unwrap(); // pool 0 → 100
+
+            // In-memory reflects the writes immediately...
+            assert_eq!(s.coin_count(), 2);
+            assert_eq!(s.pool_value(), 100);
+            assert!(s.is_tag_spent(&nf(0x55)));
+
+            // ...but nothing is persisted yet — staging deferred every write.
+            s.take_staged_ops()
+        };
+        // Reopen WITHOUT the chain having flushed the staged ops: disk is empty,
+        // proving staging truly deferred all durability (no ahead-of-commit write).
+        let reopened = SparkPoolStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.coin_count(), 0, "staged coins were not persisted");
+        assert_eq!(reopened.pool_value(), 0, "staged pool value not persisted");
+        assert!(!reopened.is_tag_spent(&nf(0x55)), "staged tag not persisted");
+
+        // The staged ops are exactly the writes the chain flushes into the block's
+        // atomic batch: 2 coin inserts, 1 tag insert, 1 pool-value meta.
+        let coins = ops.iter().filter(|o| matches!(o, StagedPoolOp::CoinInsert { .. })).count();
+        let tags = ops.iter().filter(|o| matches!(o, StagedPoolOp::TagInsert { .. })).count();
+        let metas = ops.iter().filter(|o| matches!(o, StagedPoolOp::MetaInsert { .. })).count();
+        assert_eq!((ops.len(), coins, tags, metas), (4, 2, 1, 1));
+    }
+
+    #[test]
+    fn immediate_persist_unchanged_when_not_staging() {
+        // Without `begin_staging`, writes persist immediately — the pre-A default
+        // path, unchanged, so tests / rebuild / any non-block mutation still work.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+        {
+            let s = SparkPoolStore::open_with_db(&db).unwrap();
+            s.add_coin(b"op:0".to_vec(), coin(1), b"ctx0".to_vec(), 1).unwrap();
+            s.apply_value_balance(-50).unwrap();
+            assert!(s.take_staged_ops().is_empty(), "no staging active → nothing buffered");
+        }
+        let reopened = SparkPoolStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.coin_count(), 1, "immediate-mode write persisted");
+        assert_eq!(reopened.pool_value(), 50);
     }
 
     #[test]
