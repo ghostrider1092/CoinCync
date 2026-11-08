@@ -1748,6 +1748,142 @@ mod tests {
         );
     }
 
+    /// Atomic Phase-2 commit across MULTIPLE extra trees at once: the pool store
+    /// plus the three sibling stores (shielded entries/nullifiers, spark
+    /// coins/serials, MW kernels) each contribute their own column families to one
+    /// `commit_block_atomic_with_phase2` call, with op indices offset into the one
+    /// combined `extra_trees` exactly as `Blockchain::drain_phase2_staged` builds
+    /// them. Every put lands atomically with the transparent tip.
+    #[test]
+    fn commit_block_atomic_with_phase2_lands_multiple_extra_trees() {
+        let db = Database::open_temp().unwrap();
+        let h = 11u64;
+        let blk_hash = [0xABu8; 32];
+        let state = ChainStateData {
+            tip_hash: Hash::from_bytes(blk_hash),
+            height: h,
+            total_difficulty: 3,
+            total_supply: 3,
+            total_burned: 0,
+            last_checkpoint: 0,
+        };
+
+        // Seven column families, mirroring the fixed drain order: pool(coins,tags,
+        // meta)=0..3, shielded(entries,nullifiers)=3..5, spark(coins,serials)=5..7,
+        // kernels=7. (The DB method appends these after its 4 core trees and indexes
+        // an op's tree at `4 + idx`.)
+        let pool_coins = db.open_tree("t_pool_coins").unwrap();
+        let pool_tags = db.open_tree("t_pool_tags").unwrap();
+        let pool_meta = db.open_tree("t_pool_meta").unwrap();
+        let sh_entries = db.open_tree("t_sh_entries").unwrap();
+        let sh_nulls = db.open_tree("t_sh_nulls").unwrap();
+        let sp_coins = db.open_tree("t_sp_coins").unwrap();
+        let sp_serials = db.open_tree("t_sp_serials").unwrap();
+        let kernels = db.open_tree("t_kernels").unwrap();
+        let extra_trees: Vec<&shim::Tree> = vec![
+            &pool_coins,
+            &pool_tags,
+            &pool_meta,
+            &sh_entries,
+            &sh_nulls,
+            &sp_coins,
+            &sp_serials,
+            &kernels,
+        ];
+        // One put into each family, each tagged with its combined tree index.
+        let extra_ops: Vec<(usize, Vec<u8>, Option<Vec<u8>>)> = vec![
+            (0, b"c0".to_vec(), Some(vec![0x00; 4])),
+            (1, b"tag0".to_vec(), Some(vec![0x11; 8])),
+            (2, b"pool_value".to_vec(), Some(vec![0x22; 16])),
+            (3, b"e0".to_vec(), Some(vec![0x33; 4])),
+            (4, b"nf0".to_vec(), Some(vec![0x44; 8])),
+            (5, b"spc0".to_vec(), Some(vec![0x55; 4])),
+            (6, b"ser0".to_vec(), Some(vec![0x66; 8])),
+            (7, b"k0".to_vec(), Some(vec![0x77; 4])),
+        ];
+
+        db.commit_block_atomic_with_phase2(
+            &[],
+            (h, blk_hash),
+            &[],
+            &serialize(&state).unwrap(),
+            &extra_trees,
+            &extra_ops,
+        )
+        .unwrap();
+
+        // Transparent tip committed...
+        assert_eq!(db.state.get_state().unwrap().unwrap().height, h);
+        // ...and every Phase-2 family's write landed in the SAME batch.
+        assert_eq!(pool_coins.get(b"c0").unwrap().as_deref(), Some(&[0x00u8; 4][..]));
+        assert_eq!(pool_tags.get(b"tag0").unwrap().as_deref(), Some(&[0x11u8; 8][..]));
+        assert_eq!(pool_meta.get(b"pool_value").unwrap().as_deref(), Some(&[0x22u8; 16][..]));
+        assert_eq!(sh_entries.get(b"e0").unwrap().as_deref(), Some(&[0x33u8; 4][..]));
+        assert_eq!(sh_nulls.get(b"nf0").unwrap().as_deref(), Some(&[0x44u8; 8][..]));
+        assert_eq!(sp_coins.get(b"spc0").unwrap().as_deref(), Some(&[0x55u8; 4][..]));
+        assert_eq!(sp_serials.get(b"ser0").unwrap().as_deref(), Some(&[0x66u8; 8][..]));
+        assert_eq!(kernels.get(b"k0").unwrap().as_deref(), Some(&[0x77u8; 4][..]));
+    }
+
+    /// Atomic Phase-2 reorg across MULTIPLE sibling trees: a reorg batch that
+    /// carries the shielded + spark + kernel stores' staged PUTS (fork re-connects)
+    /// and DELETES (disconnect rewinds) all at once lands them atomically with the
+    /// transparent reorg — the sibling stores switch forks together with the tip.
+    #[test]
+    fn apply_reorg_atomic_with_phase2_lands_multiple_sibling_trees() {
+        let db = Database::open_temp().unwrap();
+        let sh_entries = db.open_tree("t_sh_entries").unwrap();
+        let sp_coins = db.open_tree("t_sp_coins").unwrap();
+        let kernels = db.open_tree("t_kernels").unwrap();
+        // Pre-seed one row in each the reorg will disconnect (delete).
+        sh_entries.insert(b"e_old", vec![0x01u8; 4].as_slice()).unwrap();
+        sp_coins.insert(b"c_old", vec![0x02u8; 4].as_slice()).unwrap();
+        kernels.insert(b"k_old", vec![0x03u8; 4].as_slice()).unwrap();
+
+        let h = 13u64;
+        let blk_hash = [0xCDu8; 32];
+        let state = ChainStateData {
+            tip_hash: Hash::from_bytes(blk_hash),
+            height: h,
+            total_difficulty: 4,
+            total_supply: 4,
+            total_burned: 0,
+            last_checkpoint: 0,
+        };
+        let extra_trees: Vec<&shim::Tree> = vec![&sh_entries, &sp_coins, &kernels];
+        // Each sibling: delete the disconnected row, add the fork's new one.
+        let extra_ops: Vec<(usize, Vec<u8>, Option<Vec<u8>>)> = vec![
+            (0, b"e_old".to_vec(), None),
+            (0, b"e_new".to_vec(), Some(vec![0x11; 4])),
+            (1, b"c_old".to_vec(), None),
+            (1, b"c_new".to_vec(), Some(vec![0x22; 4])),
+            (2, b"k_old".to_vec(), None),
+            (2, b"k_new".to_vec(), Some(vec![0x33; 4])),
+        ];
+
+        db.apply_reorg_atomic_with_phase2(
+            &[],
+            &[],
+            &[(h, blk_hash)],
+            &[],
+            &serialize(&state).unwrap(),
+            &[],
+            &[],
+            &extra_trees,
+            &extra_ops,
+        )
+        .unwrap();
+
+        assert_eq!(db.state.get_state().unwrap().unwrap().height, h);
+        // Every sibling's old row deleted and new row added, atomically.
+        assert!(sh_entries.get(b"e_old").unwrap().is_none());
+        assert_eq!(sh_entries.get(b"e_new").unwrap().as_deref(), Some(&[0x11u8; 4][..]));
+        assert!(sp_coins.get(b"c_old").unwrap().is_none());
+        assert_eq!(sp_coins.get(b"c_new").unwrap().as_deref(), Some(&[0x22u8; 4][..]));
+        assert!(kernels.get(b"k_old").unwrap().is_none());
+        assert_eq!(kernels.get(b"k_new").unwrap().as_deref(), Some(&[0x33u8; 4][..]));
+    }
+
     /// The db/blocks.rs:227 invariant stated as an assertion: after every
     /// commit_block_atomic, the height index maps state.height -> state.tip_hash
     /// and NO height entry exists above state.height. Pre-fix (separate
