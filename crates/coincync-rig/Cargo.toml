@@ -72,3 +72,9 @@ crossterm = "0.29"
 # System info for the startup banner (CPU model + total/used RAM). Default
 # features only; we just read CPU brand + memory, no process/network probing.
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+
+# Mining performance: pin each worker thread to a core (core_affinity) and
+# default the auto thread count to PHYSICAL cores (num_cpus). Both are
+# miner-side only — the per-nonce hash is unchanged, so consensus is untouched.
+core_affinity = "0.8"
+num_cpus = "1"

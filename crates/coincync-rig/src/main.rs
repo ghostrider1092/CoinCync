@@ -25,6 +25,7 @@ use clap::{Parser, Subcommand};
 use coincync::primitives::Hash;
 use tracing::info;
 
+mod affinity;
 mod daemon;
 mod hasher;
 mod metrics;
@@ -852,21 +853,7 @@ fn decode_nonce(s: &str) -> Result<u64> {
 
 fn run_bench(threads: usize, duration_secs: u64) -> Result<()> {
     activate_full_mem_hashing(); // #145 — bench must measure full-mem hashrate
-    let n_threads = if threads == 0 {
-        match std::thread::available_parallelism() {
-            Ok(n) => n.get(),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "available_parallelism() failed; falling back to 1 mining thread — \
-                     pass --threads N explicitly to override",
-                );
-                1
-            }
-        }
-    } else {
-        threads
-    };
+    let n_threads = affinity::resolve_thread_count(threads);
     println!("Benchmarking with {n_threads} thread(s) for {duration_secs} seconds...");
     println!("(RandomX VM warmup is included in the duration — first 1-2s is 0 H/s)");
     println!();
@@ -889,6 +876,7 @@ fn run_bench(threads: usize, duration_secs: u64) -> Result<()> {
         let counter = total_hashes.clone();
         let stop = stop_flag.clone();
         handles.push(std::thread::spawn(move || {
+            affinity::pin_current_thread(tid);
             let hasher = Hasher::new();
             // Each thread starts from a different nonce slice so we
             // never have two threads hashing the same (input, nonce).
@@ -998,21 +986,7 @@ fn run_solo_cli(
             coincync::consensus::fork_signal::SignalBits::new(raw)
         }
     };
-    let n_threads = if threads == 0 {
-        match std::thread::available_parallelism() {
-            Ok(n) => n.get(),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "available_parallelism() failed; falling back to 1 mining thread — \
-                     pass --threads N explicitly to override",
-                );
-                1
-            }
-        }
-    } else {
-        threads
-    };
+    let n_threads = affinity::resolve_thread_count(threads);
     // Multi-thread runtime here (vs current_thread for `info`) because
     // the orchestrator spawns helper tasks (auto-reconnect + the
     // Prometheus /metrics accept loop).

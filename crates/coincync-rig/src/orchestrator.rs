@@ -990,6 +990,9 @@ async fn mine_parallel(
             ((tid + 1) as u64).saturating_mul(slice)
         };
         handles.push(std::thread::spawn(move || {
+            // Pin this worker to a core before it builds its VM, so the
+            // scheduler stops migrating it and the scratchpad stays core-local.
+            crate::affinity::pin_current_thread(tid);
             // Hash nonces in small batches through the pipelined RandomX
             // path (`hash_batch`), which overlaps VM execution of one input
             // with the next input's setup. BATCH is kept small so the
