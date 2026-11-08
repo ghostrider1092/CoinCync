@@ -218,6 +218,31 @@ impl SparkStore {
         })
     }
 
+    /// Reset the store to empty — in-memory coins, spent serials, root, the reorg
+    /// checkpoint stack, and the persisted `spark_coins` / `spark_serials` trees —
+    /// so the chain can rebuild it deterministically from committed blocks on
+    /// restart (see `Blockchain::rebuild_phase2_stores`). Every Phase-2 store
+    /// persists its data via immediate writes OUTSIDE the block's atomic
+    /// `commit_block_atomic`, so after an ill-timed crash a store can be one block
+    /// AHEAD of the committed tip; clearing and replaying from the committed chain
+    /// is the uniform repair that keeps all four stores in lock-step with data
+    /// matching the committed tip. Mirrors `SparkPoolStore::clear`.
+    pub fn clear(&self) -> Result<()> {
+        self.coins.write().clear();
+        self.spent_serials.write().clear();
+        *self.root.write() = Self::compute_root(&[]);
+        self.checkpoints.write().clear();
+        if let Some(p) = &self.persistence {
+            p.coins
+                .clear()
+                .map_err(|e| Error::DatabaseError(format!("spark store coins clear: {e}")))?;
+            p.serials
+                .clear()
+                .map_err(|e| Error::DatabaseError(format!("spark store serials clear: {e}")))?;
+        }
+        Ok(())
+    }
+
     /// Add a newly-minted Spark coin to the accumulator.
     ///
     /// R-61 CLASS site (2026-07-03).
@@ -592,6 +617,37 @@ mod tests {
         assert!(store.rewind());
         assert_eq!(store.size(), size_after_1, "coin count restored");
         assert_eq!(store.current_root(), root_after_1, "root restored");
+    }
+
+    #[test]
+    fn clear_wipes_memory_stack_and_persisted_state() {
+        // #369/#373: the chain rebuilds every Phase-2 store from the committed
+        // chain on restart (`rebuild_phase2_stores`), which requires `clear()` to
+        // reset in-memory coins + spent serials + root + checkpoint stack AND the
+        // persisted trees — so a reopen after a clear starts empty and no stale,
+        // ahead-of-tip coin/serial survives to desync this store from its rebuilt
+        // siblings.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+        let empty_root = {
+            let store = SparkStore::open_with_db(&db).unwrap();
+            let empty_root = store.current_root();
+            apply_block(&store, 1, &[coin(0, 1, 0xA1)], &[[0x11; 32]]);
+            apply_block(&store, 2, &[coin(1, 2, 0xB1)], &[[0x22; 32]]);
+            assert!(store.size() > 0 && store.checkpoint_count() > 0, "non-empty before clear");
+            store.clear().unwrap();
+            assert_eq!(store.size(), 0, "in-memory coins wiped");
+            assert_eq!(store.checkpoint_count(), 0, "checkpoint stack wiped");
+            assert!(!store.is_serial_spent(&[0x11; 32]), "spent serials wiped");
+            assert_eq!(store.current_root(), empty_root, "root reset to empty");
+            empty_root
+        };
+        // Persisted coins + serials cleared too: a reopen sees nothing.
+        let reopened = SparkStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.size(), 0, "persisted coins cleared across reopen");
+        assert!(!reopened.is_serial_spent(&[0x22; 32]), "persisted serials cleared");
+        assert_eq!(reopened.current_root(), empty_root);
     }
 
     #[test]

@@ -163,6 +163,27 @@ impl KernelStore {
         })
     }
 
+    /// Reset the store to empty — in-memory kernels, root, the reorg checkpoint
+    /// stack, and the persisted `mw_kernels` tree — so the chain can rebuild it
+    /// deterministically from committed blocks on restart (see
+    /// `Blockchain::rebuild_phase2_stores`). Every Phase-2 store persists its data
+    /// via immediate writes OUTSIDE the block's atomic `commit_block_atomic`, so
+    /// after an ill-timed crash a store can be one block AHEAD of the committed
+    /// tip; clearing and replaying from the committed chain is the uniform repair
+    /// that brings all four stores back at matching depth, in lock-step, with data
+    /// matching the committed tip. Mirrors `SparkPoolStore::clear`.
+    pub fn clear(&self) -> Result<()> {
+        self.kernels.write().clear();
+        *self.root.write() = Self::compute_root(&[]);
+        self.checkpoints.write().clear();
+        if let Some(p) = &self.persistence {
+            p.kernels
+                .clear()
+                .map_err(|e| Error::DatabaseError(format!("kernel store clear: {e}")))?;
+        }
+        Ok(())
+    }
+
     /// Append a kernel that has survived cut-through pruning.
     ///
     /// AUDIT (R-61 CLASS site, 2026-07-03): the previous `.expect()`
@@ -436,6 +457,34 @@ mod tests {
         assert!(store.rewind());
         assert_eq!(store.len(), len_after_1, "kernel count restored");
         assert_eq!(store.current_root(), root_after_1, "root restored");
+    }
+
+    #[test]
+    fn clear_wipes_memory_stack_and_persisted_state() {
+        // #369/#373: the chain rebuilds every Phase-2 store from the committed
+        // chain on restart (`rebuild_phase2_stores`), which requires `clear()` to
+        // reset the in-memory kernels + root + checkpoint stack AND the persisted
+        // tree — so a reopen after a clear starts empty and no stale, ahead-of-tip
+        // kernel survives to desync this store from its rebuilt siblings.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+        let empty_root = {
+            let store = KernelStore::open_with_db(&db).unwrap();
+            let empty_root = store.current_root();
+            apply_block(&store, 1, &[kernel(0xA1, 1)]);
+            apply_block(&store, 2, &[kernel(0xB1, 2)]);
+            assert!(store.len() > 0 && store.checkpoint_count() > 0, "non-empty before clear");
+            store.clear().unwrap();
+            assert_eq!(store.len(), 0, "in-memory kernels wiped");
+            assert_eq!(store.checkpoint_count(), 0, "checkpoint stack wiped");
+            assert_eq!(store.current_root(), empty_root, "root reset to empty");
+            empty_root
+        };
+        // Persisted state cleared too: a reopen sees nothing.
+        let reopened = KernelStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.len(), 0, "persisted kernels cleared across reopen");
+        assert_eq!(reopened.current_root(), empty_root);
     }
 
     #[test]

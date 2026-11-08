@@ -323,6 +323,34 @@ impl ShieldedStore {
         })
     }
 
+    /// Reset the store to empty — the `BridgeTree`, the side tables (entries,
+    /// nullifiers), the reorg checkpoint stack, and the persisted
+    /// `shielded_entries` / `shielded_nullifiers` trees — so the chain can rebuild
+    /// it deterministically from committed blocks on restart (see
+    /// `Blockchain::rebuild_phase2_stores`). Every Phase-2 store persists its data
+    /// via immediate writes OUTSIDE the block's atomic `commit_block_atomic`, so
+    /// after an ill-timed crash a store can be one block AHEAD of the committed
+    /// tip; clearing and replaying from the committed chain is the uniform repair
+    /// that keeps all four stores in lock-step with data matching the committed
+    /// tip. Replacing the tree with a fresh `BridgeTree::new(MAX_CHECKPOINTS)`
+    /// restores the empty-root / empty-checkpoint state `new()` starts from.
+    /// Mirrors `SparkPoolStore::clear`.
+    pub fn clear(&self) -> Result<()> {
+        *self.tree.write() = BridgeTree::new(MAX_CHECKPOINTS);
+        self.entries.write().clear();
+        self.nullifiers.write().clear();
+        self.checkpoints.write().clear();
+        if let Some(p) = &self.persistence {
+            p.entries
+                .clear()
+                .map_err(|e| Error::DatabaseError(format!("shielded store entries clear: {e}")))?;
+            p.nullifiers
+                .clear()
+                .map_err(|e| Error::DatabaseError(format!("shielded store nullifiers clear: {e}")))?;
+        }
+        Ok(())
+    }
+
     /// Append a note commitment to the tree. Returns the leaf position
     /// it was assigned. Panics only if the tree is full (1 << 32 leaves),
     /// which we treat as a consensus-level abort.
@@ -771,6 +799,37 @@ mod tests {
     fn rewind_on_empty_stack_returns_false() {
         let store = ShieldedStore::new();
         assert!(!store.rewind(), "nothing checkpointed — rewind must no-op");
+    }
+
+    #[test]
+    fn clear_wipes_tree_sidetables_stack_and_persisted_state() {
+        // #369/#373: the chain rebuilds every Phase-2 store from the committed
+        // chain on restart (`rebuild_phase2_stores`), which requires `clear()` to
+        // reset the BridgeTree + entries + nullifiers + checkpoint stack AND the
+        // persisted trees — so a reopen after a clear starts empty (root back to
+        // the empty-tree root) and no stale, ahead-of-tip note survives to desync
+        // this store from its rebuilt siblings.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+        let empty_root = {
+            let store = ShieldedStore::open_with_db(&db).unwrap();
+            let empty_root = store.current_root();
+            apply_block(&store, 1, &[[0xA1; 32]], &[[0x11; 32]]);
+            apply_block(&store, 2, &[[0xB1; 32], [0xB2; 32]], &[[0x22; 32]]);
+            assert!(store.tree_size() > 0 && store.checkpoint_count() > 0, "non-empty before clear");
+            store.clear().unwrap();
+            assert_eq!(store.tree_size(), 0, "tree wiped");
+            assert_eq!(store.checkpoint_count(), 0, "checkpoint stack wiped");
+            assert!(!store.is_nullifier_spent(&[0x11; 32]), "nullifiers wiped");
+            assert_eq!(store.current_root(), empty_root, "root reset to empty-tree root");
+            empty_root
+        };
+        // Persisted entries + nullifiers cleared too: a reopen sees nothing.
+        let reopened = ShieldedStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.tree_size(), 0, "persisted entries cleared across reopen");
+        assert!(!reopened.is_nullifier_spent(&[0x22; 32]), "persisted nullifiers cleared");
+        assert_eq!(reopened.current_root(), empty_root);
     }
 
     #[test]

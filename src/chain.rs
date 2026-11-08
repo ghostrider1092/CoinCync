@@ -498,6 +498,38 @@ fn inner_stats_for_log(inner: &RwLock<BlockchainInner>) -> (u128, String) {
     )
 }
 
+thread_local! {
+    /// Set while `rebuild_phase2_stores` replays the committed chain to
+    /// reconstruct the Phase-2 stores (shielded tree, spark accumulator, MW
+    /// kernels, spark pool) after a restart. The replay walks committed state that
+    /// is consistent at each block boundary, but the post-apply security sweep's
+    /// Phase-2 lock-step guard must not HALT on any transient mid-replay state — it
+    /// is suppressed while this is set, and the stores sweep normally on the first
+    /// real block applied after the rebuild completes. Startup is single-threaded,
+    /// so a thread-local is sufficient and avoids a chain-wide field.
+    static PHASE2_REBUILD_IN_PROGRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard: marks a Phase-2 store rebuild in progress for the current thread
+/// and clears the flag on drop (even on an early `?`/panic unwind).
+struct Phase2RebuildGuard;
+impl Phase2RebuildGuard {
+    fn new() -> Self {
+        PHASE2_REBUILD_IN_PROGRESS.with(|f| f.set(true));
+        Phase2RebuildGuard
+    }
+}
+impl Drop for Phase2RebuildGuard {
+    fn drop(&mut self) {
+        PHASE2_REBUILD_IN_PROGRESS.with(|f| f.set(false));
+    }
+}
+
+/// Whether a Phase-2 store rebuild replay is in progress on this thread.
+fn phase2_rebuild_in_progress() -> bool {
+    PHASE2_REBUILD_IN_PROGRESS.with(|f| f.get())
+}
+
 impl Blockchain {
     /// Create new blockchain with network type
     pub fn new() -> Self {
@@ -1328,7 +1360,13 @@ impl Blockchain {
         // state an honest node can never reach — HALT to preserve on-disk state
         // (defense-in-depth, mirroring the R-61 persistence halts). Operational
         // anomalies never reach here (they page, they don't halt).
-        {
+        //
+        // Skipped while a Phase-2 store rebuild replay is in progress: the stores
+        // are being reconstructed from committed blocks, and a transient
+        // mid-replay state must never HALT recovery. After the rebuild completes
+        // the four stacks are equal and consistent, and the first real block
+        // applied after it sweeps normally — halting on any residual mismatch.
+        if !phase2_rebuild_in_progress() {
             // Unified post-apply sweep (pool + Phase-2 lock-step). Record every
             // alert to the console's incident log + tracing so the operator sees
             // them, then halt only on a consensus-critical.

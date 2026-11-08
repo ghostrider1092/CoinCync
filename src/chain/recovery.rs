@@ -311,18 +311,17 @@ impl Blockchain {
                     // checks and decoy selection work immediately after restart.
                     self.rebuild_utxo_set(state.height)?;
 
-                    // Rebuild the shielded (Spark) pool from the committed chain
-                    // too. The pool persists its coins/tags/pool_value via
-                    // immediate writes during apply, OUTSIDE the block's atomic
-                    // commit, so a crash in that window can leave it one block
-                    // AHEAD of the committed chain tip — on restart the node
-                    // re-syncs the uncommitted block and verify_block_spark_v2
-                    // rejects it ("mint coin outpoint already in the pool"),
-                    // wedging the node. Clearing + replaying up to the committed
-                    // tip makes the pool a deterministic function of the chain,
-                    // exactly like rebuild_utxo_set above. No-op without the
-                    // shielded features / when the pool store is absent.
-                    self.rebuild_spark_pool(state.height)?;
+                    // Rebuild EVERY initialized Phase-2 store (shielded tree,
+                    // spark accumulator, MW kernels, spark pool) from the committed
+                    // chain too. They persist their data via immediate writes
+                    // during apply, OUTSIDE the block's atomic commit, so a crash
+                    // in that window can leave any of them one block AHEAD of the
+                    // committed tip (and its checkpoint stack one deeper). Clearing
+                    // + replaying all four up to the committed tip makes them a
+                    // deterministic function of the chain, back in four-way
+                    // lock-step, exactly like rebuild_utxo_set above. No-op without
+                    // the shielded features / when no store is initialized.
+                    self.rebuild_phase2_stores(state.height)?;
 
                     // Rebuild tx index if empty (migration for existing chains)
                     if let Some(ref db) = self.db {
@@ -409,31 +408,73 @@ impl Blockchain {
     /// (key images, outputs, height index) is fully populated. Without this,
     /// `validate_transaction()` would miss pre-restart key images, allowing
     /// double-spends during the window before re-sync completes.
-    /// Rebuild the shielded (Spark) pool deterministically from the committed
-    /// chain, mirroring [`Self::rebuild_utxo_set`]. See [`SparkPoolStore::clear`]
-    /// for the crash-window divergence this repairs: the pool persists outside the
-    /// block's atomic commit, so after an ill-timed crash it can be AHEAD of the
-    /// committed chain tip. Clear it, then replay block apply up to `tip_height`
-    /// so every coin/tag/pool-value re-derives from committed blocks only. Inert
-    /// unless both shielded features are on AND the pool store is initialized.
+    /// Rebuild EVERY initialized Phase-2 store deterministically from the
+    /// committed chain, mirroring [`Self::rebuild_utxo_set`]. All four stores
+    /// (shielded note tree, spark accumulator, MW kernels, spark pool) persist
+    /// their data via immediate writes DURING block apply, OUTSIDE the block's
+    /// atomic `commit_block_atomic`, so after an ill-timed crash any of them can be
+    /// one block AHEAD of the committed tip — and its reorg checkpoint stack one
+    /// deeper. The fix is uniform construction: clear all four, then replay
+    /// committed block apply so each re-derives from committed blocks only. This is
+    /// the only restart path that brings the four back at IDENTICAL checkpoint
+    /// depth, in lock-step, with data matching the committed tip — persisting and
+    /// restoring each store's stack instead (an earlier approach) could restore an
+    /// ahead store while a sibling rebuilt to the committed tip, desyncing the
+    /// stack depths and tripping the lock-step guard (or leaving an accumulator
+    /// carrying an uncommitted block's notes). Inert when no store is initialized
+    /// (e.g. the three siblings before their post-audit activation).
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-    fn rebuild_spark_pool(&self, tip_height: u64) -> Result<()> {
-        match &self.spark_pool_store {
-            Some(store) => store.clear()?,
-            None => return Ok(()),
+    fn rebuild_phase2_stores(&self, tip_height: u64) -> Result<()> {
+        if self.spark_pool_store.is_none()
+            && self.shielded_store.is_none()
+            && self.spark_store.is_none()
+            && self.kernel_store.is_none()
+        {
+            return Ok(());
         }
+        // Clear every initialized store: in-memory state, checkpoint stack, and
+        // persisted trees, so a store left ahead of the committed tip is wiped
+        // before the replay re-derives it.
+        if let Some(s) = &self.spark_pool_store {
+            s.clear()?;
+        }
+        if let Some(s) = &self.shielded_store {
+            s.clear()?;
+        }
+        if let Some(s) = &self.spark_store {
+            s.clear()?;
+        }
+        if let Some(s) = &self.kernel_store {
+            s.clear()?;
+        }
+        // Suppress the per-block post-apply lock-step HALT for the duration of the
+        // replay (defensive: the reconstruction walks committed state that is
+        // consistent at each block boundary, but a transient mid-replay state must
+        // never halt recovery). The first real block applied after the rebuild
+        // sweeps normally. See `Phase2RebuildGuard`.
+        let _guard = super::Phase2RebuildGuard::new();
         for h in 0..=tip_height {
             if let Some(block) = self.get_block_by_height(h) {
+                // Mirror the live block-apply order EXACTLY: checkpoint every
+                // Phase-2 store BEFORE the block (genesis excepted, matching the
+                // live `checkpoint_phase2_stores` call), then feed the stores. This
+                // reconstructs each store's checkpoint stack identically to live,
+                // and because `checkpoint_phase2_stores` checkpoints all four
+                // together they climb from empty in lock-step.
+                if h > 0 {
+                    self.checkpoint_phase2_stores(h);
+                }
+                self.apply_shielded_txs(&block.transactions, h);
                 self.apply_spark_v2_txs(&block.transactions, h);
             }
         }
         Ok(())
     }
 
-    /// Default-build no-op: the Spark pool does not exist without the shielded
+    /// Default-build no-op: the Phase-2 stores do not exist without the shielded
     /// features, so there is nothing to rebuild.
     #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
-    fn rebuild_spark_pool(&self, _tip_height: u64) -> Result<()> {
+    fn rebuild_phase2_stores(&self, _tip_height: u64) -> Result<()> {
         Ok(())
     }
 
