@@ -2,6 +2,15 @@
 
 The amount of CYNC paid out per block as the coinbase reward, as a function of cumulative mined supply. This is the **only** way new coins enter circulation — there is no premine, no founder allocation, no ICO, no airdrop, no dev tax. These properties are locked by [Article I (Transparent Emission)](../governance/constitution.md#article-i--transparent-emission-no-hidden-inflation) and [Article II (No Pre-mine, No Developer Tax)](../governance/constitution.md#article-ii--no-pre-mine-no-developer-tax) of the Constitution.
 
+## The S.A.M. model
+
+CoinCync's emission is the **S.A.M.** curve — a **S**mooth **A**symptotic **M**odel. It is a Monero-style geometric decay (reward proportional to the *remaining* supply) with a perpetual fixed tail, and it runs in two deterministic stages:
+
+- **C.O.R.E. — Continuous Output-Reduction Emission** (Stage 1): the main curve, `reward = (100,000,000·COIN − already_mined) / 2,000,000`, falling smoothly from 50 CYNC toward the tail with no halvings, eras, or activation heights.
+- **D.E.M. — Deterministic Emission Minimum** (Stage 2): the perpetual **0.6 CYNC / block** tail floor that the `max(…)` holds the reward at once the curve would drop below it.
+
+The names describe the model's actual behaviour — deterministic, smooth, fixed tail. They are **not** the adaptive, hashrate- or utility-driven "S.A.M. 2.0" variants some designs propose: CoinCync's emission depends on nothing but cumulative mined supply, so every node computes it identically and the supply stays fully auditable (see [Verifying the curve](#verifying-the-curve) and the Kani proofs in `src/emission/`).
+
 ## Parameters
 
 | Parameter | Value | Source |
