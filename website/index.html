@@ -743,7 +743,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
   <div class="section-header">
     <div class="section-num">&sect; 04</div>
     <h2 class="section-title">Sound money.<br>Provable <em>scarcity</em>.</h2>
-    <p class="section-desc">An asymptotic emission curve with tail emission and fee burn creates a self-sustaining, naturally deflationary currency.</p>
+    <p class="section-desc">CoinCync runs the <strong>S.A.M.</strong> emission &mdash; a <em>Smooth Asymptotic Model</em>: a continuous decay curve with a perpetual tail and fee burn, for a self-sustaining, naturally deflationary currency.</p>
   </div>
   <div class="ledger reveal">
     <div class="ledger-row"><span class="ledger-label">Supply cap</span><span class="ledger-value">100,000,000 <span class="unit">CYNC</span></span></div>
@@ -788,6 +788,24 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
       <text x="315" y="200" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="8" fill="#5d5953" letter-spacing=".5">YEARS SINCE GENESIS</text>
     </svg>
     <div style="font-size:12px;color:var(--t3);margin-top:12px;line-height:1.6">No halvings. No cliffs. Smooth asymptotic decay to 0.6 CYNC/block tail emission &mdash; sustaining miners forever while keeping supply capped at 100M.</div>
+  </div>
+
+  <!-- Emission model: S.A.M. (Smooth Asymptotic Model) -->
+  <div class="reveal" style="margin-top:40px;border-top:1px solid var(--b);padding-top:28px">
+    <div style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.12em;text-transform:uppercase;margin-bottom:6px">The S.A.M. model</div>
+    <div style="font-size:13px;color:var(--t2);margin-bottom:20px"><strong>S</strong>mooth <strong>A</strong>symptotic <strong>M</strong>odel &mdash; two deterministic stages, no adaptivity, nothing to game.</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px">
+      <div style="border:1px solid var(--b);padding:18px">
+        <div style="font-family:var(--mono);font-size:12px;color:var(--ac);letter-spacing:.08em;margin-bottom:6px">C.O.R.E. &middot; Stage 1</div>
+        <div style="font-size:13px;color:var(--t2);font-weight:500;margin-bottom:6px">Continuous Output-Reduction Emission</div>
+        <div style="font-size:12px;color:var(--t3);line-height:1.6">The main curve: reward = (100M &minus; mined) / 2M, falling smoothly block-by-block from ~50 to 0.6 CYNC. Fully deterministic &mdash; no halvings, no cliffs, no eras.</div>
+      </div>
+      <div style="border:1px solid var(--b);padding:18px">
+        <div style="font-family:var(--mono);font-size:12px;color:var(--ac);letter-spacing:.08em;margin-bottom:6px">D.E.M. &middot; Stage 2</div>
+        <div style="font-size:13px;color:var(--t2);font-weight:500;margin-bottom:6px">Deterministic Emission Minimum</div>
+        <div style="font-size:12px;color:var(--t3);line-height:1.6">The tail: a perpetual 0.6 CYNC/block floor, fixed forever. With the 30% fee burn, the chain turns net-deflationary once fees exceed ~2 CYNC/block.</div>
+      </div>
+    </div>
   </div>
 
   <!-- Fee Burn Visual -->
