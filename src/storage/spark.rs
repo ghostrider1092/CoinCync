@@ -117,6 +117,28 @@ struct SparkCheckpoint {
     coins_len: usize,
 }
 
+/// One staged persistence op for the Spark accumulator's RocksDB trees. When a
+/// block's apply is staging ([`SparkStore::begin_staging`]), the store's write
+/// methods buffer these instead of writing immediately, so the chain can flush
+/// them into the SAME atomic `WriteBatch` as the transparent block commit — the
+/// accumulator's coins/serials then land together with the committed tip (all-
+/// or-nothing) and can never be left one block ahead of (or behind) the chain,
+/// closing the crash window the `open_with_db` replay otherwise repairs after
+/// the fact. The variant selects which column family the op targets. Mirrors
+/// `spark_pool::StagedPoolOp` / `shielded::StagedShieldedOp` /
+/// `kernels::StagedKernelOp`.
+#[derive(Clone, Debug)]
+pub enum StagedSparkOp {
+    /// `spark_coins` tree: `coin_id` (BE) → serialized `SparkCoinEntry`.
+    CoinInsert { coin_id: u64, value: Vec<u8> },
+    /// `spark_coins` tree: delete `coin_id` (BE) — a reorg rewind.
+    CoinRemove { coin_id: u64 },
+    /// `spark_serials` tree: serial bytes → spend height (LE).
+    SerialInsert { serial: [u8; 32], height: u64 },
+    /// `spark_serials` tree: delete a serial — a reorg rewind.
+    SerialRemove { serial: [u8; 32] },
+}
+
 /// Spark accumulator store with optional RocksDB persistence.
 pub struct SparkStore {
     coins: RwLock<Vec<SparkCoinEntry>>,
@@ -130,6 +152,13 @@ pub struct SparkStore {
     /// does not survive a restart — see `rewind` docs.
     checkpoints: RwLock<Vec<SparkCheckpoint>>,
     persistence: Option<SparkPersistence>,
+    /// Block-apply staging buffer. `None` = persist immediately (the default,
+    /// and what tests / `open_with_db` replay use). `Some(buf)` = defer every
+    /// persist op into `buf` for the chain to flush into the block's atomic
+    /// commit batch (see `begin_staging` / `take_staged_ops` and `StagedSparkOp`).
+    /// The in-memory coin vector / serial set still mutate eagerly; only
+    /// durability is deferred.
+    staging: RwLock<Option<Vec<StagedSparkOp>>>,
 }
 
 impl SparkStore {
@@ -157,12 +186,20 @@ impl SparkStore {
             root: RwLock::new(Self::compute_root(&[])),
             checkpoints: RwLock::new(Vec::new()),
             persistence: None,
+            staging: RwLock::new(None),
         }
     }
 
     /// Open a persistent Spark store. Replays coins by `coin_id` and
     /// loads spent serials from disk, then recomputes the accumulator
     /// root from the replayed coin vector.
+    ///
+    /// DEFENSE-IN-DEPTH (atomic Phase-2 commit): the coin/serial rows now persist
+    /// INSIDE the block's atomic `WriteBatch` (staged via `begin_staging` and
+    /// flushed by `Blockchain::drain_phase2_staged`), so a crash can never leave
+    /// the accumulator one block ahead of (or behind) the committed tip. This
+    /// replay is no longer a correctness crutch for that window — it stays as
+    /// defense-in-depth against a damaged column family.
     pub fn open_with_db(database: &Database) -> Result<Self> {
         let coins_tree = database.open_tree("spark_coins")?;
         let serials_tree = database.open_tree("spark_serials")?;
@@ -215,45 +252,169 @@ impl SparkStore {
                 coins: coins_tree,
                 serials: serials_tree,
             }),
+            staging: RwLock::new(None),
         })
+    }
+
+    /// Begin staging this block's persistence into a buffer instead of writing
+    /// it immediately, so the chain can flush it into the block's atomic commit
+    /// batch (`commit_block_atomic_with_phase2` / `apply_reorg_atomic_with_phase2`).
+    /// Call BEFORE the block's apply (and once at the start of a reorg, covering
+    /// the disconnect rewinds + fork re-applies); pair with
+    /// [`take_staged_ops`](Self::take_staged_ops) at the commit site. The in-
+    /// memory coin vector / serial set still mutate eagerly; only durability is
+    /// deferred, so a crash before the batch commits leaves the store exactly in
+    /// sync with the (also-uncommitted) tip. A no-op on an in-memory store (its
+    /// write methods only touch persistence when backed by a DB). RESETS any
+    /// buffer a prior early-return left behind.
+    pub fn begin_staging(&self) {
+        *self.staging.write() = Some(Vec::new());
+    }
+
+    /// Stop staging and drain the ops accumulated since [`begin_staging`]. The
+    /// chain flushes these into the block's `WriteBatch`; on a commit failure the
+    /// node halts (restart replays from committed blocks). Empty if staging was
+    /// not active. Always call this once per `begin_staging`.
+    pub fn take_staged_ops(&self) -> Vec<StagedSparkOp> {
+        self.staging.write().take().unwrap_or_default()
+    }
+
+    /// The store's two persistence column families in the fixed order
+    /// `[coins, serials]`, for joining into the block's atomic commit batch via
+    /// `Database::commit_block_atomic_with_phase2`. `None` for an in-memory store.
+    pub(crate) fn staging_trees(&self) -> Option<[&shim::Tree; 2]> {
+        self.persistence.as_ref().map(|p| [&p.coins, &p.serials])
+    }
+
+    /// Translate staged ops into `(tree_index, key, value-or-delete)` tuples keyed
+    /// to [`staging_trees`](Self::staging_trees)'s order — `0 = coins`,
+    /// `1 = serials` — ready to pass (with the chain's running tree-index offset
+    /// added) as the `extra_ops` of the atomic batch variants. A `None` value is a
+    /// delete (a reorg rewind), `Some(v)` a put.
+    pub(crate) fn staged_ops_to_writes(
+        ops: &[StagedSparkOp],
+    ) -> Vec<(usize, Vec<u8>, Option<Vec<u8>>)> {
+        ops.iter()
+            .map(|op| match op {
+                StagedSparkOp::CoinInsert { coin_id, value } => {
+                    (0usize, coin_id.to_be_bytes().to_vec(), Some(value.clone()))
+                }
+                StagedSparkOp::CoinRemove { coin_id } => {
+                    (0usize, coin_id.to_be_bytes().to_vec(), None)
+                }
+                StagedSparkOp::SerialInsert { serial, height } => {
+                    (1usize, serial.to_vec(), Some(height.to_le_bytes().to_vec()))
+                }
+                StagedSparkOp::SerialRemove { serial } => (1usize, serial.to_vec(), None),
+            })
+            .collect()
+    }
+
+    /// Route a persist op: buffer it when a block is staging (the chain flushes
+    /// it into the block's atomic commit batch), otherwise write it to RocksDB
+    /// immediately — the pre-atomic-commit behavior, kept for tests,
+    /// `open_with_db` replay, and any non-block mutation. Inserts are R-61 CLASS
+    /// (a write failure on consensus spark state HALTS); removes are R-63 CLASS (a
+    /// rewind delete failure is logged loudly and counted, never panics). Returns
+    /// `true` on success or when buffered, `false` when an immediate remove failed
+    /// (so `rewind` can keep its failure tally). A no-op (`true`) for an in-memory
+    /// store.
+    fn apply_spark_write(&self, op: StagedSparkOp) -> bool {
+        if let Some(buf) = self.staging.write().as_mut() {
+            buf.push(op);
+            return true;
+        }
+        let p = match &self.persistence {
+            Some(p) => p,
+            None => return true,
+        };
+        match op {
+            StagedSparkOp::CoinInsert { coin_id, value } => {
+                if let Err(e) = p.coins.insert(coin_id.to_be_bytes(), value) {
+                    tracing::error!(
+                        target: "storage::spark::R61",
+                        error = %e,
+                        coin_id = coin_id,
+                        "R-61: spark_coins write failed at coin_id {}. \
+                         Consensus storage is unavailable. Halting.",
+                        coin_id
+                    );
+                    panic!("R-61: spark_coins write failed at coin_id {}: {}", coin_id, e);
+                }
+                true
+            }
+            StagedSparkOp::SerialInsert { serial, height } => {
+                if let Err(e) = p.serials.insert(serial, height.to_le_bytes()) {
+                    tracing::error!(
+                        target: "storage::spark::R61",
+                        error = %e,
+                        serial = hex::encode(serial),
+                        height = height,
+                        "R-61: spark_serials write failed at height {}. \
+                         Consensus storage is unavailable. Halting.",
+                        height
+                    );
+                    panic!("R-61: spark_serials write failed at height {}: {}", height, e);
+                }
+                true
+            }
+            StagedSparkOp::CoinRemove { coin_id } => {
+                if let Err(e) = p.coins.remove(coin_id.to_be_bytes()) {
+                    tracing::error!(
+                        target: "storage::spark",
+                        coin_id = coin_id,
+                        error = %e,
+                        "R-63: rewind failed to remove on-disk spark coin {} — disk \
+                         may replay an orphan coin on next open, corrupting the \
+                         committed spark root. Reindex required.",
+                        coin_id
+                    );
+                    return false;
+                }
+                true
+            }
+            StagedSparkOp::SerialRemove { serial } => {
+                if let Err(e) = p.serials.remove(serial) {
+                    tracing::error!(
+                        target: "storage::spark",
+                        error = %e,
+                        "R-63: rewind failed to remove an on-disk spark serial — a \
+                         resurrected serial on next open can freeze a live coin. \
+                         Reindex required."
+                    );
+                    return false;
+                }
+                true
+            }
+        }
     }
 
     /// Add a newly-minted Spark coin to the accumulator.
     ///
-    /// R-61 CLASS site (2026-07-03).
+    /// R-61 CLASS site (2026-07-03). The entry is serialized eagerly here (a
+    /// serialize failure still HALTS), but its DURABILITY is routed through
+    /// `apply_spark_write`, so during a block's apply it is staged for the block's
+    /// atomic commit batch instead of written one block ahead of the tip.
     pub fn add_coin(&self, entry: SparkCoinEntry) {
-        if let Some(p) = &self.persistence {
-            let key = entry.coin_id.to_be_bytes();
+        if self.persistence.is_some() {
+            let coin_id = entry.coin_id;
             let value = match borsh::to_vec(&entry) {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!(
                         target: "storage::spark::R61",
                         error = %e,
-                        coin_id = entry.coin_id,
+                        coin_id = coin_id,
                         "R-61: SparkCoinEntry borsh serialize failed at coin_id {}. Halting.",
-                        entry.coin_id
+                        coin_id
                     );
                     panic!(
                         "R-61: SparkCoinEntry borsh serialize failed at coin_id {}: {}",
-                        entry.coin_id, e
+                        coin_id, e
                     );
                 }
             };
-            if let Err(e) = p.coins.insert(key, value) {
-                tracing::error!(
-                    target: "storage::spark::R61",
-                    error = %e,
-                    coin_id = entry.coin_id,
-                    "R-61: spark_coins write failed at coin_id {}. \
-                     Consensus storage is unavailable. Halting.",
-                    entry.coin_id
-                );
-                panic!(
-                    "R-61: spark_coins write failed at coin_id {}: {}",
-                    entry.coin_id, e
-                );
-            }
+            self.apply_spark_write(StagedSparkOp::CoinInsert { coin_id, value });
         }
         let mut coins = self.coins.write();
         coins.push(entry);
@@ -263,25 +424,13 @@ impl SparkStore {
 
     /// Record that a serial tag has been spent.
     ///
-    /// R-61 CLASS site (2026-07-03).
+    /// R-61 CLASS site (2026-07-03). Routed through `apply_spark_write`, so during
+    /// a block's apply the serial row is staged for the block's atomic commit
+    /// batch; outside staging it writes immediately (R-61 halt on failure).
     pub fn mark_serial_spent(&self, serial: [u8; 32], height: u64) {
         self.spent_serials.write().insert(serial, height);
-        if let Some(p) = &self.persistence {
-            if let Err(e) = p.serials.insert(serial, height.to_le_bytes()) {
-                tracing::error!(
-                    target: "storage::spark::R61",
-                    error = %e,
-                    serial = hex::encode(serial),
-                    height = height,
-                    "R-61: spark_serials write failed at height {}. \
-                     Consensus storage is unavailable. Halting.",
-                    height
-                );
-                panic!(
-                    "R-61: spark_serials write failed at height {}: {}",
-                    height, e
-                );
-            }
+        if self.persistence.is_some() {
+            self.apply_spark_write(StagedSparkOp::SerialInsert { serial, height });
         }
     }
 
@@ -421,10 +570,14 @@ impl SparkStore {
         // store that reached this coin set by forward appends.
         *self.root.write() = Self::compute_root(&coins);
 
-        // Clean the backing column families so a future
-        // `open_with_db` replay reconstructs the rewound state rather
-        // than resurrecting the disconnected block's coins/serials.
-        if let Some(p) = &self.persistence {
+        // Clean the backing column families so a future `open_with_db` replay
+        // reconstructs the rewound state rather than resurrecting the disconnected
+        // block's coins/serials. Routed through `apply_spark_write`, so during a
+        // STAGED reorg these removes land in the same atomic batch as the reorg's
+        // transparent commit; outside staging they delete immediately with the
+        // same R-63 loud-log-and-count behavior as before (the helper emits each
+        // per-item error and returns false, which we tally below).
+        if self.persistence.is_some() {
             // R-63 parity (was silent `let _ = remove()`): a swallowed delete
             // failure here lets `open_with_db` resurrect the disconnected block's
             // coins/serials, diverging the committed spark root or freezing a live
@@ -432,29 +585,13 @@ impl SparkStore {
             // the operator knows a reindex is required.
             let mut remove_failures = 0usize;
             for c in &removed_coins {
-                if let Err(e) = p.coins.remove(c.coin_id.to_be_bytes()) {
+                if !self.apply_spark_write(StagedSparkOp::CoinRemove { coin_id: c.coin_id }) {
                     remove_failures += 1;
-                    tracing::error!(
-                        target: "storage::spark",
-                        coin_id = c.coin_id,
-                        error = %e,
-                        "R-63: rewind failed to remove on-disk spark coin {} — disk \
-                         may replay an orphan coin on next open, corrupting the \
-                         committed spark root. Reindex required.",
-                        c.coin_id
-                    );
                 }
             }
             for s in &removed_serials {
-                if let Err(e) = p.serials.remove(s) {
+                if !self.apply_spark_write(StagedSparkOp::SerialRemove { serial: *s }) {
                     remove_failures += 1;
-                    tracing::error!(
-                        target: "storage::spark",
-                        error = %e,
-                        "R-63: rewind failed to remove an on-disk spark serial — a \
-                         resurrected serial on next open can freeze a live coin. \
-                         Reindex required."
-                    );
                 }
             }
             if remove_failures > 0 {
@@ -549,6 +686,79 @@ mod tests {
             commitment: [commitment_byte; 32],
             height,
         }
+    }
+
+    #[test]
+    fn staging_defers_persistence_and_collects_ops() {
+        // Atomic Phase-2 commit: under `begin_staging`, a block's spark writes
+        // mutate the in-memory coin vector / serial set immediately but DEFER
+        // durability into a buffer the chain flushes into the block's atomic
+        // WriteBatch. So mid-block (before the chain commits) NOTHING is on disk —
+        // the accumulator can't be left one block ahead of the tip.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+
+        let ops = {
+            let s = SparkStore::open_with_db(&db).unwrap();
+            s.begin_staging();
+            s.add_coin(coin(0, 1, 0xA1));
+            s.add_coin(coin(1, 1, 0xA2));
+            s.mark_serial_spent([0x55; 32], 1);
+
+            // In-memory reflects the writes immediately...
+            assert_eq!(s.coins.read().len(), 2);
+            assert!(s.is_serial_spent(&[0x55; 32]));
+
+            // ...but nothing is persisted yet — staging deferred every write.
+            s.take_staged_ops()
+        };
+        // Reopen WITHOUT the chain having flushed the staged ops: disk is empty.
+        let reopened = SparkStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.coins.read().len(), 0, "staged coins were not persisted");
+        assert!(
+            !reopened.is_serial_spent(&[0x55; 32]),
+            "staged serial not persisted"
+        );
+
+        // Exactly 2 coin inserts + 1 serial insert, mapped to trees coins→0,
+        // serials→1.
+        let coins = ops
+            .iter()
+            .filter(|o| matches!(o, StagedSparkOp::CoinInsert { .. }))
+            .count();
+        let serials = ops
+            .iter()
+            .filter(|o| matches!(o, StagedSparkOp::SerialInsert { .. }))
+            .count();
+        assert_eq!((ops.len(), coins, serials), (3, 2, 1));
+        let writes = SparkStore::staged_ops_to_writes(&ops);
+        assert_eq!(writes.iter().filter(|(t, _, v)| *t == 0 && v.is_some()).count(), 2);
+        assert_eq!(writes.iter().filter(|(t, _, v)| *t == 1 && v.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn immediate_persist_unchanged_when_not_staging() {
+        // Without `begin_staging`, writes persist immediately — the pre-atomic
+        // default path, unchanged.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+        {
+            let s = SparkStore::open_with_db(&db).unwrap();
+            s.add_coin(coin(0, 1, 0xA1));
+            s.mark_serial_spent([0x55; 32], 1);
+            assert!(
+                s.take_staged_ops().is_empty(),
+                "no staging active → nothing buffered"
+            );
+        }
+        let reopened = SparkStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.coins.read().len(), 1, "immediate-mode coin persisted");
+        assert!(
+            reopened.is_serial_spent(&[0x55; 32]),
+            "immediate-mode serial persisted"
+        );
     }
 
     /// Apply one block the way `chain::Blockchain` will under the

@@ -227,6 +227,33 @@ struct ShieldedCheckpoint {
     entries_len: usize,
 }
 
+/// One staged persistence op for the shielded store's RocksDB trees. When a
+/// block's apply is staging ([`ShieldedStore::begin_staging`]), the store's
+/// write methods buffer these instead of writing immediately, so the chain can
+/// flush them into the SAME atomic `WriteBatch` as the transparent block commit
+/// — the tree's entries/nullifiers then land together with the committed tip
+/// (all-or-nothing) and can never be left one block ahead of (or behind) the
+/// chain, closing the crash window the `open_with_db` replay otherwise repairs
+/// after the fact. The variant selects which column family the op targets.
+///
+/// Mirrors `spark_pool::StagedPoolOp` (and `spark::StagedSparkOp` /
+/// `kernels::StagedKernelOp`). The BridgeTree mutation itself (append / rewind)
+/// stays eager — only the DEFERRED-PERSIST half (the entry blob + nullifier
+/// rows) is staged here, since the leaf position is computed from the in-memory
+/// tree before the row is serialized.
+#[derive(Clone, Debug)]
+pub enum StagedShieldedOp {
+    /// `shielded_entries` tree: leaf `position` (BE) → serialized
+    /// `NoteCommitmentEntry`.
+    EntryInsert { position: u64, value: Vec<u8> },
+    /// `shielded_entries` tree: delete `position` (BE) — a reorg rewind.
+    EntryRemove { position: u64 },
+    /// `shielded_nullifiers` tree: nullifier bytes → spend height (LE).
+    NullifierInsert { nullifier: [u8; 32], height: u64 },
+    /// `shielded_nullifiers` tree: delete a nullifier — a reorg rewind.
+    NullifierRemove { nullifier: [u8; 32] },
+}
+
 /// Persistent store for the shielded pool.
 pub struct ShieldedStore {
     /// The real Merkle tree. Protected by RwLock because `append`
@@ -246,6 +273,13 @@ pub struct ShieldedStore {
     checkpoints: RwLock<Vec<ShieldedCheckpoint>>,
     /// RocksDB-backed persistence. `None` for in-memory tests.
     persistence: Option<ShieldedPersistence>,
+    /// Block-apply staging buffer. `None` = persist immediately (the default,
+    /// and what tests / `open_with_db` replay use). `Some(buf)` = defer every
+    /// persist op into `buf` for the chain to flush into the block's atomic
+    /// commit batch (see `begin_staging` / `take_staged_ops` and
+    /// `StagedShieldedOp`). The in-memory tree/side-tables still mutate eagerly;
+    /// only durability is deferred.
+    staging: RwLock<Option<Vec<StagedShieldedOp>>>,
 }
 
 impl ShieldedStore {
@@ -258,6 +292,7 @@ impl ShieldedStore {
             nullifiers: RwLock::new(HashMap::new()),
             checkpoints: RwLock::new(Vec::new()),
             persistence: None,
+            staging: RwLock::new(None),
         }
     }
 
@@ -265,6 +300,14 @@ impl ShieldedStore {
     /// the BridgeTree by replaying stored commitments in position order
     /// and populates the nullifier set from the `shielded_nullifiers`
     /// column family.
+    ///
+    /// DEFENSE-IN-DEPTH (atomic Phase-2 commit): the entry/nullifier rows now
+    /// persist INSIDE the block's atomic `WriteBatch` (staged via `begin_staging`
+    /// and flushed by `Blockchain::drain_phase2_staged` into
+    /// `commit_block_atomic_with_phase2` / `apply_reorg_atomic_with_phase2`), so a
+    /// crash can never leave the store one block ahead of (or behind) the
+    /// committed tip. This replay is therefore no longer a correctness crutch for
+    /// that window — it stays as defense-in-depth against a damaged column family.
     pub fn open_with_db(database: &Database) -> Result<Self> {
         let entries_tree = database.open_tree("shielded_entries")?;
         let nullifiers_tree = database.open_tree("shielded_nullifiers")?;
@@ -320,7 +363,158 @@ impl ShieldedStore {
                 entries: entries_tree,
                 nullifiers: nullifiers_tree,
             }),
+            staging: RwLock::new(None),
         })
+    }
+
+    /// Begin staging this block's persistence into a buffer instead of writing
+    /// it immediately, so the chain can flush it into the block's atomic commit
+    /// batch (`commit_block_atomic_with_phase2` / `apply_reorg_atomic_with_phase2`).
+    /// Call BEFORE the block's apply (and once at the start of a reorg, covering
+    /// the disconnect rewinds + fork re-applies); pair with
+    /// [`take_staged_ops`](Self::take_staged_ops) at the commit site. The in-
+    /// memory tree / side tables still mutate eagerly (they compute the staged
+    /// key/values); only durability is deferred, so a crash before the batch
+    /// commits leaves the store exactly in sync with the (also-uncommitted) tip.
+    /// A no-op on an in-memory store (its write methods only touch persistence
+    /// when backed by a DB, so nothing is ever buffered). Re-entrancy: block
+    /// apply is serialized by the chain's write lock, so at most one block stages
+    /// at once, and this also RESETS any buffer a prior early-return left behind.
+    pub fn begin_staging(&self) {
+        *self.staging.write() = Some(Vec::new());
+    }
+
+    /// Stop staging and drain the ops accumulated since [`begin_staging`]. The
+    /// chain flushes these into the block's `WriteBatch`; on a commit failure it
+    /// discards them and the node halts (restart replays from committed blocks).
+    /// Empty if staging was not active. Always call this once per `begin_staging`.
+    pub fn take_staged_ops(&self) -> Vec<StagedShieldedOp> {
+        self.staging.write().take().unwrap_or_default()
+    }
+
+    /// The store's two persistence column families in the fixed order
+    /// `[entries, nullifiers]`, for joining into the block's atomic commit batch
+    /// via `Database::commit_block_atomic_with_phase2`. `None` for an in-memory
+    /// store (nothing to persist).
+    pub(crate) fn staging_trees(&self) -> Option<[&shim::Tree; 2]> {
+        self.persistence
+            .as_ref()
+            .map(|p| [&p.entries, &p.nullifiers])
+    }
+
+    /// Translate staged ops into `(tree_index, key, value-or-delete)` tuples keyed
+    /// to [`staging_trees`](Self::staging_trees)'s order — `0 = entries`,
+    /// `1 = nullifiers` — ready to pass (with the chain's running tree-index
+    /// offset added) as the `extra_ops` of `commit_block_atomic_with_phase2` /
+    /// `apply_reorg_atomic_with_phase2`. A `None` value is a delete (a reorg
+    /// rewind), `Some(v)` a put.
+    pub(crate) fn staged_ops_to_writes(
+        ops: &[StagedShieldedOp],
+    ) -> Vec<(usize, Vec<u8>, Option<Vec<u8>>)> {
+        ops.iter()
+            .map(|op| match op {
+                StagedShieldedOp::EntryInsert { position, value } => {
+                    (0usize, position.to_be_bytes().to_vec(), Some(value.clone()))
+                }
+                StagedShieldedOp::EntryRemove { position } => {
+                    (0usize, position.to_be_bytes().to_vec(), None)
+                }
+                StagedShieldedOp::NullifierInsert { nullifier, height } => {
+                    (1usize, nullifier.to_vec(), Some(height.to_le_bytes().to_vec()))
+                }
+                StagedShieldedOp::NullifierRemove { nullifier } => {
+                    (1usize, nullifier.to_vec(), None)
+                }
+            })
+            .collect()
+    }
+
+    /// Route a persist op: buffer it when a block is staging (the chain flushes
+    /// it into the block's atomic commit batch), otherwise write it to RocksDB
+    /// immediately — the pre-atomic-commit behavior, kept for tests,
+    /// `open_with_db` replay, and any non-block mutation. Inserts are R-61 CLASS
+    /// (a write failure on consensus shielded state HALTS, never continues in-
+    /// memory-only, which would diverge the replayed tree after a restart);
+    /// removes are R-63 CLASS (a rewind delete failure is logged loudly and
+    /// counted, never panics, since the in-memory state is already rewound and
+    /// rejecting the caller would be a worse divergence). Returns `true` on
+    /// success or when buffered, `false` when an immediate remove failed (so
+    /// `rewind` can keep its failure tally). A no-op (`true`) for an in-memory
+    /// store.
+    fn apply_shielded_write(&self, op: StagedShieldedOp) -> bool {
+        if let Some(buf) = self.staging.write().as_mut() {
+            buf.push(op);
+            return true;
+        }
+        let p = match &self.persistence {
+            Some(p) => p,
+            None => return true,
+        };
+        match op {
+            StagedShieldedOp::EntryInsert { position, value } => {
+                if let Err(e) = p.entries.insert(position.to_be_bytes(), value) {
+                    tracing::error!(
+                        target: "storage::shielded::R61",
+                        error = %e,
+                        position = position,
+                        "R-61: shielded_entries write failed at position {}. \
+                         Consensus storage is unavailable. Halting.",
+                        position
+                    );
+                    panic!(
+                        "R-61: shielded_entries write failed at position {}: {}",
+                        position, e
+                    );
+                }
+                true
+            }
+            StagedShieldedOp::NullifierInsert { nullifier, height } => {
+                if let Err(e) = p.nullifiers.insert(nullifier, height.to_le_bytes()) {
+                    tracing::error!(
+                        target: "storage::shielded::R61",
+                        error = %e,
+                        nullifier = hex::encode(nullifier),
+                        height = height,
+                        "R-61: shielded_nullifiers write failed at height {}. \
+                         Consensus storage is unavailable. Halting.",
+                        height
+                    );
+                    panic!(
+                        "R-61: shielded_nullifiers write failed at height {}: {}",
+                        height, e
+                    );
+                }
+                true
+            }
+            StagedShieldedOp::EntryRemove { position } => {
+                if let Err(e) = p.entries.remove(position.to_be_bytes()) {
+                    tracing::error!(
+                        target: "storage::shielded",
+                        position = position,
+                        error = %e,
+                        "R-63: rewind failed to remove on-disk shielded entry {} — \
+                         disk may replay an orphan commitment on next open, \
+                         corrupting the shielded anchor. Reindex required.",
+                        position
+                    );
+                    return false;
+                }
+                true
+            }
+            StagedShieldedOp::NullifierRemove { nullifier } => {
+                if let Err(e) = p.nullifiers.remove(nullifier) {
+                    tracing::error!(
+                        target: "storage::shielded",
+                        error = %e,
+                        "R-63: rewind failed to remove an on-disk shielded nullifier \
+                         — a resurrected nullifier on next open can freeze a live \
+                         note. Reindex required."
+                    );
+                    return false;
+                }
+                true
+            }
+        }
     }
 
     /// Append a note commitment to the tree. Returns the leaf position
@@ -339,10 +533,14 @@ impl ShieldedStore {
             pos
         };
         entry.position = position;
-        // R-61 CLASS site (2026-07-03): see kernels.rs::append
-        // audit note for the class rationale. Same pattern here.
-        if let Some(p) = &self.persistence {
-            let key = position.to_be_bytes();
+        // R-61 CLASS site (2026-07-03): see kernels.rs::append audit note for the
+        // class rationale. The entry blob is serialized eagerly here (a serialize
+        // failure still HALTS), but its DURABILITY is routed through
+        // `apply_shielded_write`, so during a block's apply it is staged for the
+        // block's atomic commit batch instead of written one block ahead of the
+        // tip. Only serialize when a write will actually be used — an in-memory
+        // store (tests) never persists or stages, so it skips this.
+        if self.persistence.is_some() {
             let value = match borsh::to_vec(&entry) {
                 Ok(v) => v,
                 Err(e) => {
@@ -360,20 +558,7 @@ impl ShieldedStore {
                     );
                 }
             };
-            if let Err(e) = p.entries.insert(key, value) {
-                tracing::error!(
-                    target: "storage::shielded::R61",
-                    error = %e,
-                    position = position,
-                    "R-61: shielded_entries write failed at position {}. \
-                     Consensus storage is unavailable. Halting.",
-                    position
-                );
-                panic!(
-                    "R-61: shielded_entries write failed at position {}: {}",
-                    position, e
-                );
-            }
+            self.apply_shielded_write(StagedShieldedOp::EntryInsert { position, value });
         }
         self.entries.write().insert(position, entry);
         position
@@ -546,10 +731,14 @@ impl ShieldedStore {
             removed
         };
 
-        // Clean persistence so a future `open_with_db` replay
-        // reconstructs the rewound state instead of resurrecting the
-        // disconnected block's commitments and nullifiers.
-        if let Some(p) = &self.persistence {
+        // Clean persistence so a future `open_with_db` replay reconstructs the
+        // rewound state instead of resurrecting the disconnected block's
+        // commitments and nullifiers. Routed through `apply_shielded_write`, so
+        // during a STAGED reorg these removes land in the same atomic batch as the
+        // reorg's transparent commit; outside staging they delete immediately with
+        // the same R-63 loud-log-and-count behavior as before (the helper emits
+        // each per-item error and returns false, which we tally below).
+        if self.persistence.is_some() {
             // R-63 parity (was silent `let _ = remove()`): a swallowed delete
             // failure lets `open_with_db` resurrect the disconnected block's
             // commitments/nullifiers, diverging the shielded anchor or freezing a
@@ -557,29 +746,13 @@ impl ShieldedStore {
             // loudly so the operator knows a reindex is required.
             let mut remove_failures = 0usize;
             for pos in &removed_positions {
-                if let Err(e) = p.entries.remove(pos.to_be_bytes()) {
+                if !self.apply_shielded_write(StagedShieldedOp::EntryRemove { position: *pos }) {
                     remove_failures += 1;
-                    tracing::error!(
-                        target: "storage::shielded",
-                        position = pos,
-                        error = %e,
-                        "R-63: rewind failed to remove on-disk shielded entry {} — \
-                         disk may replay an orphan commitment on next open, \
-                         corrupting the shielded anchor. Reindex required.",
-                        pos
-                    );
                 }
             }
             for nf in &removed_nullifiers {
-                if let Err(e) = p.nullifiers.remove(nf) {
+                if !self.apply_shielded_write(StagedShieldedOp::NullifierRemove { nullifier: *nf }) {
                     remove_failures += 1;
-                    tracing::error!(
-                        target: "storage::shielded",
-                        error = %e,
-                        "R-63: rewind failed to remove an on-disk shielded nullifier \
-                         — a resurrected nullifier on next open can freeze a live \
-                         note. Reindex required."
-                    );
                 }
             }
             if remove_failures > 0 {
@@ -603,23 +776,12 @@ impl ShieldedStore {
             return false;
         }
         nfs.insert(nullifier, height);
-        // R-61 CLASS site (2026-07-03).
-        if let Some(p) = &self.persistence {
-            if let Err(e) = p.nullifiers.insert(nullifier, height.to_le_bytes()) {
-                tracing::error!(
-                    target: "storage::shielded::R61",
-                    error = %e,
-                    nullifier = hex::encode(nullifier),
-                    height = height,
-                    "R-61: shielded_nullifiers write failed at height {}. \
-                     Consensus storage is unavailable. Halting.",
-                    height
-                );
-                panic!(
-                    "R-61: shielded_nullifiers write failed at height {}: {}",
-                    height, e
-                );
-            }
+        // R-61 CLASS site (2026-07-03). Routed through `apply_shielded_write`, so
+        // during a block's apply the nullifier row is staged for the block's
+        // atomic commit batch; outside staging it writes immediately (R-61 halt
+        // on failure, unchanged).
+        if self.persistence.is_some() {
+            self.apply_shielded_write(StagedShieldedOp::NullifierInsert { nullifier, height });
         }
         true
     }
@@ -695,6 +857,91 @@ mod tests {
         let s1 = ShieldedStore::new();
         let s2 = ShieldedStore::new();
         assert_eq!(s1.current_root(), s2.current_root());
+    }
+
+    #[test]
+    fn staging_defers_persistence_and_collects_ops() {
+        // Atomic Phase-2 commit: under `begin_staging`, a block's shielded writes
+        // mutate the in-memory tree / side tables immediately but DEFER their
+        // durability into a buffer the chain flushes into the block's atomic
+        // WriteBatch. So mid-block (before the chain commits) NOTHING is on disk —
+        // the store can't be left one block ahead of the tip. The staged ops carry
+        // exactly the entry/nullifier rows to flush.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+
+        let ops = {
+            let s = ShieldedStore::open_with_db(&db).unwrap();
+            s.begin_staging();
+            let p0 = s.append_commitment(entry([0xA1; 32], 1));
+            let p1 = s.append_commitment(entry([0xA2; 32], 1));
+            assert_eq!((p0, p1), (0, 1));
+            assert!(s.mark_nullifier_spent([0x55; 32], 1));
+
+            // In-memory reflects the writes immediately...
+            assert_eq!(s.tree_size(), 2);
+            assert!(s.is_nullifier_spent(&[0x55; 32]));
+
+            // ...but nothing is persisted yet — staging deferred every write.
+            s.take_staged_ops()
+        };
+        // Reopen WITHOUT the chain having flushed the staged ops: disk is empty,
+        // proving staging truly deferred all durability (no ahead-of-commit write).
+        let reopened = ShieldedStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.tree_size(), 0, "staged entries were not persisted");
+        assert!(
+            !reopened.is_nullifier_spent(&[0x55; 32]),
+            "staged nullifier not persisted"
+        );
+
+        // The staged ops are exactly the writes the chain flushes into the block's
+        // atomic batch: 2 entry inserts, 1 nullifier insert.
+        let entries = ops
+            .iter()
+            .filter(|o| matches!(o, StagedShieldedOp::EntryInsert { .. }))
+            .count();
+        let nulls = ops
+            .iter()
+            .filter(|o| matches!(o, StagedShieldedOp::NullifierInsert { .. }))
+            .count();
+        assert_eq!((ops.len(), entries, nulls), (3, 2, 1));
+
+        // staged_ops_to_writes maps them to the right trees: entries→0, nulls→1.
+        let writes = ShieldedStore::staged_ops_to_writes(&ops);
+        assert_eq!(
+            writes.iter().filter(|(t, _, v)| *t == 0 && v.is_some()).count(),
+            2
+        );
+        assert_eq!(
+            writes.iter().filter(|(t, _, v)| *t == 1 && v.is_some()).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn immediate_persist_unchanged_when_not_staging() {
+        // Without `begin_staging`, writes persist immediately — the pre-atomic
+        // default path, unchanged, so tests / replay / any non-block mutation
+        // still work.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+        {
+            let s = ShieldedStore::open_with_db(&db).unwrap();
+            s.append_commitment(entry([0xA1; 32], 1));
+            assert!(s.mark_nullifier_spent([0x55; 32], 1));
+            assert!(
+                s.take_staged_ops().is_empty(),
+                "no staging active → nothing buffered"
+            );
+        }
+        let reopened = ShieldedStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.tree_size(), 1, "immediate-mode entry persisted");
+        assert!(
+            reopened.is_nullifier_spent(&[0x55; 32]),
+            "immediate-mode nullifier persisted"
+        );
     }
 
     #[test]

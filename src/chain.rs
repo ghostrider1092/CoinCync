@@ -763,6 +763,87 @@ impl Blockchain {
         v
     }
 
+    /// Drain every initialized Phase-2 store's staged persistence into the
+    /// `(extra_trees, extra_ops)` pair that `commit_block_atomic_with_phase2` /
+    /// `apply_reorg_atomic_with_phase2` apply INSIDE the block's atomic batch, so
+    /// the Phase-2 stores commit together with the transparent tip (all-or-
+    /// nothing) and can never be left one block ahead of (or behind) the committed
+    /// chain. Called at the single commit site of the extend path AND the reorg
+    /// path, after the block's apply (which staged every write under each store's
+    /// `begin_staging`).
+    ///
+    /// Each store contributes its own column families, appended to `trees` in a
+    /// fixed order (gated pool first, then shielded / spark / kernel); an op's
+    /// tree index is offset by the running tree count (`base`) so every op indexes
+    /// into the one combined `trees`, matching the `4 + idx` indexing the DB batch
+    /// methods use after the four core transparent trees. A store that is absent,
+    /// or in-memory (`staging_trees() == None`), contributes nothing — so in the
+    /// current testnet (siblings None, pool gated off) this returns empty and the
+    /// commit is exactly the former `commit_block_atomic` / `apply_reorg_atomic`.
+    /// Draining (`take_staged_ops`) also clears each store's buffer so it never
+    /// leaks into the next block.
+    fn drain_phase2_staged(
+        &self,
+    ) -> (
+        Vec<&crate::db::shim::Tree>,
+        Vec<(usize, Vec<u8>, Option<Vec<u8>>)>,
+    ) {
+        let mut trees: Vec<&crate::db::shim::Tree> = Vec::new();
+        let mut ops: Vec<(usize, Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+
+        // The gated libspark pool store first (indices 0..), then the three always-
+        // compiled sibling stores after it. Each block appends the store's trees
+        // and offsets its ops by the running tree count.
+        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+        if let Some(s) = &self.spark_pool_store {
+            if let Some(t) = s.staging_trees() {
+                let base = trees.len();
+                trees.extend_from_slice(&t);
+                for (i, k, v) in
+                    crate::storage::spark_pool::SparkPoolStore::staged_ops_to_writes(
+                        &s.take_staged_ops(),
+                    )
+                {
+                    ops.push((base + i, k, v));
+                }
+            }
+        }
+        if let Some(s) = &self.shielded_store {
+            if let Some(t) = s.staging_trees() {
+                let base = trees.len();
+                trees.extend_from_slice(&t);
+                for (i, k, v) in
+                    crate::storage::ShieldedStore::staged_ops_to_writes(&s.take_staged_ops())
+                {
+                    ops.push((base + i, k, v));
+                }
+            }
+        }
+        if let Some(s) = &self.spark_store {
+            if let Some(t) = s.staging_trees() {
+                let base = trees.len();
+                trees.extend_from_slice(&t);
+                for (i, k, v) in
+                    crate::storage::SparkStore::staged_ops_to_writes(&s.take_staged_ops())
+                {
+                    ops.push((base + i, k, v));
+                }
+            }
+        }
+        if let Some(s) = &self.kernel_store {
+            if let Some(t) = s.staging_trees() {
+                let base = trees.len();
+                trees.extend_from_slice(&t);
+                for (i, k, v) in
+                    crate::storage::KernelStore::staged_ops_to_writes(&s.take_staged_ops())
+                {
+                    ops.push((base + i, k, v));
+                }
+            }
+        }
+        (trees, ops)
+    }
+
     /// The anchored shielded (Spark) cover set for a REMOTE wallet: `(outpoint,
     /// coin, serial_context, height)` per coin, in the canonical order a spend
     /// proof anchored at `(cover_set_id, anchor_height)` is built and verified
@@ -2483,6 +2564,27 @@ impl Blockchain {
                     let batch = UtxoSet::batch_from_block(block.header.height.as_u64(), &block.transactions);
                     inner.utxos.apply_batch(batch);
 
+                    // ATOMIC PHASE-2 COMMIT (siblings): stage each initialized
+                    // sibling store's persistence (shielded tree / spark
+                    // accumulator / MW kernels) BEFORE their apply feed runs, so
+                    // their writes land in the SAME WriteBatch as the transparent
+                    // tip below (commit_block_atomic_with_phase2) rather than one
+                    // block ahead of it. `apply_shielded_txs` is the shielded
+                    // store's feed, so begin_staging must precede it. In-memory
+                    // mutations still happen eagerly; `begin_staging` also resets
+                    // any buffer a prior early-return left behind. Inert while the
+                    // stores are None (current testnet) — begin_staging only buffers
+                    // writes that touch persistence.
+                    if let Some(s) = &self.shielded_store {
+                        s.begin_staging();
+                    }
+                    if let Some(s) = &self.spark_store {
+                        s.begin_staging();
+                    }
+                    if let Some(s) = &self.kernel_store {
+                        s.begin_staging();
+                    }
+
                     // Shielded (Spark) apply: serial-tag double-spend + accumulator
                     // append into the ShieldedStore (inert while None / gated off).
                     self.apply_shielded_txs(&block.transactions, block.header.height.as_u64());
@@ -2658,49 +2760,27 @@ impl Blockchain {
                     // block from peers. (Rollback-instead-of-halt is a separable,
                     // reviewer-gated enhancement.)
                     //
-                    // ATOMIC PHASE-2 COMMIT: drain the shielded pool's writes
-                    // staged during `apply_spark_v2_txs` and commit them INSIDE
-                    // this same batch, so the pool's coins/tags/pool-value land
-                    // atomically with the tip — never one block ahead of (or
-                    // behind) the committed chain. Empty / inert in a non-gk build
-                    // or when the pool store is absent, where this is exactly the
-                    // former `commit_block_atomic`.
-                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                    let pool_staged = self
-                        .spark_pool_store
-                        .as_ref()
-                        .map(|s| s.take_staged_ops())
-                        .unwrap_or_default();
-                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                    let pool_writes =
-                        crate::storage::spark_pool::SparkPoolStore::staged_ops_to_writes(
-                            &pool_staged,
-                        );
-                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                    let pool_trees: Vec<&crate::db::shim::Tree> = self
-                        .spark_pool_store
-                        .as_ref()
-                        .and_then(|s| s.staging_trees())
-                        .map(|t| t.to_vec())
-                        .unwrap_or_default();
-                    #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                    let (extra_trees, extra_ops): (
-                        &[&crate::db::shim::Tree],
-                        &[(usize, Vec<u8>, Option<Vec<u8>>)],
-                    ) = (&pool_trees, &pool_writes);
-                    #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
-                    let (extra_trees, extra_ops): (
-                        &[&crate::db::shim::Tree],
-                        &[(usize, Vec<u8>, Option<Vec<u8>>)],
-                    ) = (&[], &[]);
+                    // ATOMIC PHASE-2 COMMIT: drain every Phase-2 store's writes
+                    // staged during this block's apply and commit them INSIDE this
+                    // same batch, so the shielded pool (gated) AND the three sibling
+                    // stores (shielded tree / spark accumulator / MW kernels) land
+                    // atomically with the tip — never one block ahead of (or behind)
+                    // the committed chain. Each store contributes its own column
+                    // families appended to `p2_trees`; an op's tree index is offset
+                    // by the running tree count (`base`) so every op indexes into the
+                    // one combined `p2_trees`. Empty / inert when a store is absent
+                    // (the current testnet wires the siblings as None and the pool is
+                    // gated off), where this is exactly the former
+                    // `commit_block_atomic`.
+                    let (p2_trees, p2_ops) = self.drain_phase2_staged();
 
                     db.commit_block_atomic_with_phase2(
                         &output_additions,
                         (block.header.height.as_u64(), *hash.as_bytes()),
                         &tx_index_adds,
                         &state_bytes,
-                        extra_trees,
-                        extra_ops,
+                        &p2_trees,
+                        &p2_ops,
                     )
                     .unwrap_or_else(|e| {
                         panic!(
@@ -3056,6 +3136,22 @@ impl Blockchain {
                 // Inert for an in-memory pool (its writes don't touch persistence).
                 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
                 if let Some(s) = &self.spark_pool_store {
+                    s.begin_staging();
+                }
+                // Same for the three sibling stores: one `begin_staging` at the
+                // reorg start covers the disconnect rewinds (buffered as deletes),
+                // the fork-block re-connects, and the triggering-block connect, so
+                // every sibling mutation across the whole reorg flushes into the ONE
+                // `apply_reorg_atomic_with_phase2` batch on success. A failed reorg
+                // never reaches that drain, so nothing commits and the next block's
+                // `begin_staging` resets the buffer. Inert while the stores are None.
+                if let Some(s) = &self.shielded_store {
+                    s.begin_staging();
+                }
+                if let Some(s) = &self.spark_store {
+                    s.begin_staging();
+                }
+                if let Some(s) = &self.kernel_store {
                     s.begin_staging();
                 }
 
@@ -4198,41 +4294,15 @@ impl Blockchain {
                         let state_bytes = crate::db::serialize(&new_state)?;
 
                         // 5. Apply everything atomically
-                        // ATOMIC PHASE-2 COMMIT (reorg): drain the pool's writes
-                        // staged across this whole reorg (disconnect rewinds + fork
-                        // and triggering connects) and commit them INSIDE the reorg
-                        // batch, so the shielded pool switches forks atomically with
-                        // the transparent tip — never persisted ahead of it. Inert /
-                        // empty in a non-gk build or without the pool store, where
-                        // this is exactly the former `apply_reorg_atomic`.
-                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                        let pool_staged = self
-                            .spark_pool_store
-                            .as_ref()
-                            .map(|s| s.take_staged_ops())
-                            .unwrap_or_default();
-                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                        let pool_writes =
-                            crate::storage::spark_pool::SparkPoolStore::staged_ops_to_writes(
-                                &pool_staged,
-                            );
-                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                        let pool_trees: Vec<&crate::db::shim::Tree> = self
-                            .spark_pool_store
-                            .as_ref()
-                            .and_then(|s| s.staging_trees())
-                            .map(|t| t.to_vec())
-                            .unwrap_or_default();
-                        #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                        let (extra_trees, extra_ops): (
-                            &[&crate::db::shim::Tree],
-                            &[(usize, Vec<u8>, Option<Vec<u8>>)],
-                        ) = (&pool_trees, &pool_writes);
-                        #[cfg(not(all(feature = "sketch-gk-proof", feature = "libspark-ffi")))]
-                        let (extra_trees, extra_ops): (
-                            &[&crate::db::shim::Tree],
-                            &[(usize, Vec<u8>, Option<Vec<u8>>)],
-                        ) = (&[], &[]);
+                        // ATOMIC PHASE-2 COMMIT (reorg): drain every Phase-2 store's
+                        // writes staged across this whole reorg (disconnect rewinds +
+                        // fork and triggering connects) and commit them INSIDE the
+                        // reorg batch, so the shielded pool (gated) AND the three
+                        // sibling stores switch forks atomically with the transparent
+                        // tip — never persisted ahead of it. Inert / empty when a
+                        // store is absent (siblings None, pool gated off), where this
+                        // is exactly the former `apply_reorg_atomic`.
+                        let (p2_trees, p2_ops) = self.drain_phase2_staged();
 
                         db.apply_reorg_atomic_with_phase2(
                             &oi_removals,
@@ -4242,8 +4312,8 @@ impl Blockchain {
                             &state_bytes,
                             &ti_adds,
                             &ti_removes,
-                            extra_trees,
-                            extra_ops,
+                            &p2_trees,
+                            &p2_ops,
                         )?;
 
                         tracing::info!(

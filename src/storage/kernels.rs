@@ -89,6 +89,23 @@ struct KernelCheckpoint {
     kernels_len: usize,
 }
 
+/// One staged persistence op for the kernel store's RocksDB tree. When a
+/// block's apply is staging ([`KernelStore::begin_staging`]), the store's write
+/// methods buffer these instead of writing immediately, so the chain can flush
+/// them into the SAME atomic `WriteBatch` as the transparent block commit — the
+/// kernels then land together with the committed tip (all-or-nothing) and can
+/// never be left one block ahead of (or behind) the chain, closing the crash
+/// window the `open_with_db` replay otherwise repairs after the fact. Mirrors
+/// `spark_pool::StagedPoolOp` / `shielded::StagedShieldedOp` /
+/// `spark::StagedSparkOp`.
+#[derive(Clone, Debug)]
+pub enum StagedKernelOp {
+    /// `mw_kernels` tree: vector index `idx` (BE) → serialized `MwKernel`.
+    KernelInsert { idx: u64, value: Vec<u8> },
+    /// `mw_kernels` tree: delete `idx` (BE) — a reorg rewind.
+    KernelRemove { idx: u64 },
+}
+
 pub struct KernelStore {
     kernels: RwLock<Vec<MwKernel>>,
     root: RwLock<[u8; 32]>,
@@ -98,6 +115,13 @@ pub struct KernelStore {
     /// and `SparkStore` checkpoint discipline.
     checkpoints: RwLock<Vec<KernelCheckpoint>>,
     persistence: Option<KernelPersistence>,
+    /// Block-apply staging buffer. `None` = persist immediately (the default,
+    /// and what tests / `open_with_db` replay use). `Some(buf)` = defer every
+    /// persist op into `buf` for the chain to flush into the block's atomic
+    /// commit batch (see `begin_staging` / `take_staged_ops` and `StagedKernelOp`).
+    /// The in-memory kernel vector still mutates eagerly; only durability is
+    /// deferred.
+    staging: RwLock<Option<Vec<StagedKernelOp>>>,
 }
 
 impl KernelStore {
@@ -124,12 +148,20 @@ impl KernelStore {
             root: RwLock::new(Self::compute_root(&[])),
             checkpoints: RwLock::new(Vec::new()),
             persistence: None,
+            staging: RwLock::new(None),
         }
     }
 
     /// Open a persistent kernel store. Replays stored kernels in key
     /// order (BE u64 index) and recomputes the root from the loaded
     /// vector.
+    ///
+    /// DEFENSE-IN-DEPTH (atomic Phase-2 commit): the kernel rows now persist
+    /// INSIDE the block's atomic `WriteBatch` (staged via `begin_staging` and
+    /// flushed by `Blockchain::drain_phase2_staged`), so a crash can never leave
+    /// the kernel set one block ahead of (or behind) the committed tip. This
+    /// replay is no longer a correctness crutch for that window — it stays as
+    /// defense-in-depth against a damaged column family.
     pub fn open_with_db(database: &Database) -> Result<Self> {
         let kernels_tree = database.open_tree("mw_kernels")?;
 
@@ -160,7 +192,109 @@ impl KernelStore {
             persistence: Some(KernelPersistence {
                 kernels: kernels_tree,
             }),
+            staging: RwLock::new(None),
         })
+    }
+
+    /// Begin staging this block's persistence into a buffer instead of writing
+    /// it immediately, so the chain can flush it into the block's atomic commit
+    /// batch (`commit_block_atomic_with_phase2` / `apply_reorg_atomic_with_phase2`).
+    /// Call BEFORE the block's apply (and once at the start of a reorg, covering
+    /// the disconnect rewinds + fork re-applies); pair with
+    /// [`take_staged_ops`](Self::take_staged_ops) at the commit site. The in-
+    /// memory kernel vector still mutates eagerly; only durability is deferred, so
+    /// a crash before the batch commits leaves the store exactly in sync with the
+    /// (also-uncommitted) tip. A no-op on an in-memory store. RESETS any buffer a
+    /// prior early-return left behind.
+    pub fn begin_staging(&self) {
+        *self.staging.write() = Some(Vec::new());
+    }
+
+    /// Stop staging and drain the ops accumulated since [`begin_staging`]. The
+    /// chain flushes these into the block's `WriteBatch`; on a commit failure the
+    /// node halts (restart replays from committed blocks). Empty if staging was
+    /// not active. Always call this once per `begin_staging`.
+    pub fn take_staged_ops(&self) -> Vec<StagedKernelOp> {
+        self.staging.write().take().unwrap_or_default()
+    }
+
+    /// The store's single persistence column family `[kernels]`, for joining into
+    /// the block's atomic commit batch via
+    /// `Database::commit_block_atomic_with_phase2`. `None` for an in-memory store.
+    pub(crate) fn staging_trees(&self) -> Option<[&shim::Tree; 1]> {
+        self.persistence.as_ref().map(|p| [&p.kernels])
+    }
+
+    /// Translate staged ops into `(tree_index, key, value-or-delete)` tuples keyed
+    /// to [`staging_trees`](Self::staging_trees)'s order — `0 = kernels` — ready
+    /// to pass (with the chain's running tree-index offset added) as the
+    /// `extra_ops` of the atomic batch variants. A `None` value is a delete (a
+    /// reorg rewind), `Some(v)` a put.
+    pub(crate) fn staged_ops_to_writes(
+        ops: &[StagedKernelOp],
+    ) -> Vec<(usize, Vec<u8>, Option<Vec<u8>>)> {
+        ops.iter()
+            .map(|op| match op {
+                StagedKernelOp::KernelInsert { idx, value } => {
+                    (0usize, idx.to_be_bytes().to_vec(), Some(value.clone()))
+                }
+                StagedKernelOp::KernelRemove { idx } => (0usize, idx.to_be_bytes().to_vec(), None),
+            })
+            .collect()
+    }
+
+    /// Route a persist op: buffer it when a block is staging (the chain flushes
+    /// it into the block's atomic commit batch), otherwise write it to RocksDB
+    /// immediately — the pre-atomic-commit behavior, kept for tests,
+    /// `open_with_db` replay, and any non-block mutation. Inserts are R-61 CLASS
+    /// (a write failure on consensus kernel state HALTS); removes are R-63 CLASS
+    /// (a rewind delete failure is logged loudly and counted, never panics).
+    /// Returns `true` on success or when buffered, `false` when an immediate
+    /// remove failed (so `rewind` can keep its failure tally). A no-op (`true`)
+    /// for an in-memory store.
+    fn apply_kernel_write(&self, op: StagedKernelOp) -> bool {
+        if let Some(buf) = self.staging.write().as_mut() {
+            buf.push(op);
+            return true;
+        }
+        let p = match &self.persistence {
+            Some(p) => p,
+            None => return true,
+        };
+        match op {
+            StagedKernelOp::KernelInsert { idx, value } => {
+                if let Err(e) = p.kernels.insert(idx.to_be_bytes(), value) {
+                    tracing::error!(
+                        target: "storage::kernels::R61",
+                        error = %e,
+                        kernel_idx = idx,
+                        "R-61: mw_kernels write failed at idx {}. Consensus \
+                         storage is unavailable — likely disk full, WAL \
+                         corruption, or RocksDB open state issue. Halting to \
+                         preserve on-disk state; SIGTERM handler will flush \
+                         cleanly. Investigate disk + RocksDB state before restart.",
+                        idx
+                    );
+                    panic!("R-61: mw_kernels write failed at idx {}: {}", idx, e);
+                }
+                true
+            }
+            StagedKernelOp::KernelRemove { idx } => {
+                if let Err(e) = p.kernels.remove(idx.to_be_bytes()) {
+                    tracing::error!(
+                        target: "storage::kernels",
+                        idx = idx,
+                        error = %e,
+                        "R-63: rewind failed to remove on-disk kernel {} — \
+                         disk may replay orphan kernel on next open, \
+                         corrupting committed root. Reindex required.",
+                        idx
+                    );
+                    return false;
+                }
+                true
+            }
+        }
     }
 
     /// Append a kernel that has survived cut-through pruning.
@@ -185,8 +319,11 @@ impl KernelStore {
     pub fn append(&self, kernel: MwKernel) {
         let mut kernels = self.kernels.write();
         let idx = kernels.len() as u64;
-        if let Some(p) = &self.persistence {
-            let key = idx.to_be_bytes();
+        // The kernel is serialized eagerly here (a serialize failure still HALTS),
+        // but its DURABILITY is routed through `apply_kernel_write`, so during a
+        // block's apply it is staged for the block's atomic commit batch instead
+        // of written one block ahead of the tip.
+        if self.persistence.is_some() {
             let value = match borsh::to_vec(&kernel) {
                 Ok(v) => v,
                 Err(e) => {
@@ -206,20 +343,7 @@ impl KernelStore {
                     );
                 }
             };
-            if let Err(e) = p.kernels.insert(key, value) {
-                tracing::error!(
-                    target: "storage::kernels::R61",
-                    error = %e,
-                    kernel_idx = idx,
-                    "R-61: mw_kernels write failed at idx {}. Consensus \
-                     storage is unavailable — likely disk full, WAL \
-                     corruption, or RocksDB open state issue. Halting to \
-                     preserve on-disk state; SIGTERM handler will flush \
-                     cleanly. Investigate disk + RocksDB state before restart.",
-                    idx
-                );
-                panic!("R-61: mw_kernels write failed at idx {}: {}", idx, e);
-            }
+            self.apply_kernel_write(StagedKernelOp::KernelInsert { idx, value });
         }
         kernels.push(kernel);
         *self.root.write() = Self::compute_root(&kernels);
@@ -331,20 +455,16 @@ impl KernelStore {
         // state IS correctly rewound and rejecting the caller
         // would produce a worse divergence (in-memory rolled back,
         // caller thinks it wasn't).
-        if let Some(p) = &self.persistence {
+        // Routed through `apply_kernel_write`, so during a STAGED reorg these
+        // removes land in the same atomic batch as the reorg's transparent
+        // commit; outside staging they delete immediately with the same R-63
+        // loud-log-and-count behavior as before (the helper emits each per-item
+        // error and returns false, which we tally below).
+        if self.persistence.is_some() {
             let mut remove_failures = 0usize;
             for idx in split_at..old_len {
-                if let Err(e) = p.kernels.remove((idx as u64).to_be_bytes()) {
+                if !self.apply_kernel_write(StagedKernelOp::KernelRemove { idx: idx as u64 }) {
                     remove_failures += 1;
-                    tracing::error!(
-                        target: "storage::kernels",
-                        idx = idx,
-                        error = %e,
-                        "R-63: rewind failed to remove on-disk kernel {} — \
-                         disk may replay orphan kernel on next open, \
-                         corrupting committed root. Reindex required.",
-                        idx
-                    );
                 }
             }
             if remove_failures > 0 {
@@ -413,6 +533,58 @@ mod tests {
         for k in kernels {
             store.append(k.clone());
         }
+    }
+
+    #[test]
+    fn staging_defers_persistence_and_collects_ops() {
+        // Atomic Phase-2 commit: under `begin_staging`, a block's kernel appends
+        // mutate the in-memory vector immediately but DEFER durability into a
+        // buffer the chain flushes into the block's atomic WriteBatch. So mid-
+        // block (before the chain commits) NOTHING is on disk — the kernel set
+        // can't be left one block ahead of the tip.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+
+        let ops = {
+            let s = KernelStore::open_with_db(&db).unwrap();
+            s.begin_staging();
+            s.append(kernel(0xA1, 1));
+            s.append(kernel(0xA2, 1));
+            assert_eq!(s.len(), 2, "in-memory reflects appends immediately");
+            s.take_staged_ops()
+        };
+        // Reopen WITHOUT the chain having flushed the staged ops: disk is empty.
+        let reopened = KernelStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.len(), 0, "staged kernels were not persisted");
+
+        // Exactly 2 kernel inserts, all mapped to tree 0.
+        let inserts = ops
+            .iter()
+            .filter(|o| matches!(o, StagedKernelOp::KernelInsert { .. }))
+            .count();
+        assert_eq!((ops.len(), inserts), (2, 2));
+        let writes = KernelStore::staged_ops_to_writes(&ops);
+        assert_eq!(writes.iter().filter(|(t, _, v)| *t == 0 && v.is_some()).count(), 2);
+    }
+
+    #[test]
+    fn immediate_persist_unchanged_when_not_staging() {
+        // Without `begin_staging`, appends persist immediately — the pre-atomic
+        // default path, unchanged.
+        use crate::db::Database;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+        {
+            let s = KernelStore::open_with_db(&db).unwrap();
+            s.append(kernel(0xA1, 1));
+            assert!(
+                s.take_staged_ops().is_empty(),
+                "no staging active → nothing buffered"
+            );
+        }
+        let reopened = KernelStore::open_with_db(&db).unwrap();
+        assert_eq!(reopened.len(), 1, "immediate-mode kernel persisted");
     }
 
     #[test]

@@ -410,12 +410,23 @@ impl Blockchain {
     /// `validate_transaction()` would miss pre-restart key images, allowing
     /// double-spends during the window before re-sync completes.
     /// Rebuild the shielded (Spark) pool deterministically from the committed
-    /// chain, mirroring [`Self::rebuild_utxo_set`]. See [`SparkPoolStore::clear`]
-    /// for the crash-window divergence this repairs: the pool persists outside the
-    /// block's atomic commit, so after an ill-timed crash it can be AHEAD of the
-    /// committed chain tip. Clear it, then replay block apply up to `tip_height`
-    /// so every coin/tag/pool-value re-derives from committed blocks only. Inert
-    /// unless both shielded features are on AND the pool store is initialized.
+    /// chain, mirroring [`Self::rebuild_utxo_set`]. Clear it, then replay block
+    /// apply up to `tip_height` so every coin/tag/pool-value re-derives from
+    /// committed blocks only. Inert unless both shielded features are on AND the
+    /// pool store is initialized.
+    ///
+    /// DEFENSE-IN-DEPTH (as of the atomic Phase-2 commit, PR #384 + this change):
+    /// the pool's coins/tags/pool-value now persist INSIDE the block's atomic
+    /// `WriteBatch` (`commit_block_atomic_with_phase2` /
+    /// `apply_reorg_atomic_with_phase2`, fed by `begin_staging` /
+    /// `Blockchain::drain_phase2_staged`), so the pool commits together with the
+    /// transparent tip — all-or-nothing — and can no longer be left one block
+    /// AHEAD of (or behind) the committed chain after a crash. This rebuild is
+    /// therefore no longer a CORRECTNESS crutch for that window; it stays only as
+    /// defense-in-depth (e.g. recovery from a damaged column family or an
+    /// out-of-band divergence). The same now holds for the three sibling stores
+    /// (shielded / spark / kernel), whose `open_with_db` replay is their
+    /// equivalent defense-in-depth rebuild.
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
     fn rebuild_spark_pool(&self, tip_height: u64) -> Result<()> {
         match &self.spark_pool_store {
