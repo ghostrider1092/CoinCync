@@ -80,6 +80,13 @@ metrics = []
 # gated follow-up). Gated so production builds are unaffected; lets the rule be
 # built, modelled, and reviewed ahead of any activation decision.
 fee-reservoir = []
+# CIP-StateRoot SPIKE: the pure rolling state-accumulator rule in
+# `crypto::state_accumulator` (ECMH over Ristretto). Off by default — NOT wired
+# into the header, block validation, apply, or reorg (that is the coordinated-
+# fork follow-up). Gated so production builds are byte-identical and no
+# consensus-locked file changes; lets the accumulator be built, reviewed, and
+# measured ahead of any activation decision.
+state-accumulator = []
 # CIP-Cross-Chain-Onramp: the peg-in turnstile SEAM (design scaffold only —
 # PegAttestation type + PegAttestor trait + FailClosedAttestor). Off by default,
 # fail-closed, nothing wired. Lets the interfaces be reviewed ahead of the
@@ -179,6 +186,10 @@ merlin                 = "3"
 
 # â”€â”€ Hashing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 blake3 = "1"
+# Uncompressed tar (de)archiving for the `--fast-sync` snapshot bootstrap
+# (network::snapshot_fetch). Pure-Rust, no_std-friendly; `unpack` guards against
+# zip-slip path traversal.
+tar = "0.4"
 sha3   = "0.12"
 sha2   = "0.10"
 hmac   = "0.12"
