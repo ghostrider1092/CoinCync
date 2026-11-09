@@ -544,20 +544,10 @@ async fn main() {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
-            // Consensus checkpoints baked into this binary. The snapshot's DB
-            // must match them at every checkpoint height or the import is
-            // refused — this defeats a fabricated / wrong-fork snapshot from an
-            // untrusted source. Always includes genesis, so it's never empty.
-            let checkpoints: Vec<(u64, coincync::primitives::Hash)> = match network {
-                Network::Mainnet => coincync::mainnet::mainnet_checkpoints()
-                    .into_iter()
-                    .map(|c| (c.height, c.hash))
-                    .collect(),
-                _ => coincync::testnet::testnet_checkpoints()
-                    .into_iter()
-                    .map(|c| (c.height, c.hash))
-                    .collect(),
-            };
+            // Checkpoints the snapshot's DB must match (consensus checkpoints +
+            // the snapshot-only re-anchor) — defeats a fabricated / wrong-fork
+            // snapshot from an untrusted source. Always includes genesis.
+            let checkpoints = snapshot_import_checkpoints(network);
             // Trusted-source gate — FAIL-CLOSED by default. Shared with the
             // `--fast-sync` path via resolve_snapshot_signers so the signer
             // policy and its env overrides can never drift between the two.
@@ -1128,6 +1118,33 @@ async fn show_status(network: Network, data_dir: &PathBuf) {
 /// overrides and logging used by both `snapshot-import` and `--fast-sync`, so
 /// the fail-closed signer policy cannot drift between the two paths. Returns
 /// `(trusted_signers, allow_unsigned)`.
+/// Checkpoint set the snapshot importer verifies a downloaded DB against: the
+/// network's consensus checkpoints PLUS, on testnet, the snapshot re-anchor(s).
+/// The re-anchors are deliberately kept out of the consensus checkpoint list (so
+/// they never move `consensus_fingerprint`), but must still be enforced on import
+/// so an untrusted snapshot's DB has to match canonical hashes up to the anchor
+/// height. Always includes genesis, so it is never empty.
+fn snapshot_import_checkpoints(network: Network) -> Vec<(u64, coincync::primitives::Hash)> {
+    let mut cps: Vec<(u64, coincync::primitives::Hash)> = match network {
+        Network::Mainnet => coincync::mainnet::mainnet_checkpoints()
+            .into_iter()
+            .map(|c| (c.height, c.hash))
+            .collect(),
+        _ => coincync::testnet::testnet_checkpoints()
+            .into_iter()
+            .map(|c| (c.height, c.hash))
+            .collect(),
+    };
+    if !matches!(network, Network::Mainnet) {
+        cps.extend(
+            coincync::testnet::testnet_snapshot_reanchor_checkpoints()
+                .into_iter()
+                .map(|c| (c.height, c.hash)),
+        );
+    }
+    cps
+}
+
 fn resolve_snapshot_signers(network: Network) -> (Vec<String>, bool) {
     let network_subdir = match network {
         Network::Mainnet => "mainnet",
@@ -1219,16 +1236,7 @@ fn fast_sync_bootstrap(network: Network, data_dir: &std::path::Path) -> Option<u
         Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
         _ => coincync::testnet::expected_genesis_hash(),
     };
-    let checkpoints: Vec<(u64, coincync::primitives::Hash)> = match network {
-        Network::Mainnet => coincync::mainnet::mainnet_checkpoints()
-            .into_iter()
-            .map(|c| (c.height, c.hash))
-            .collect(),
-        _ => coincync::testnet::testnet_checkpoints()
-            .into_iter()
-            .map(|c| (c.height, c.hash))
-            .collect(),
-    };
+    let checkpoints = snapshot_import_checkpoints(network);
     let (trusted_signers, _allow) = resolve_snapshot_signers(network);
     let backup_stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

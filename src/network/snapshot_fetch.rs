@@ -62,7 +62,7 @@ pub const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 /// `peer_snapshot`'s `latest-<network>.json`.
 pub fn default_pointer_url(network: NetworkType) -> String {
     format!(
-        "https://coincync.network/bootstrap/snapshot-latest-{}.json",
+        "https://github.com/ghostrider1092/CoinCync/releases/download/bootstrap-snapshots/snapshot-latest-{}.json",
         net_str(network)
     )
 }
