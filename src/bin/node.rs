@@ -88,6 +88,15 @@ struct Cli {
     #[arg(long)]
     no_peers: bool,
 
+    /// Fast-sync: on a FRESH datadir, fetch a signed chaindata snapshot and
+    /// import it before IBD so the node resumes near the tip instead of
+    /// RandomX-verifying every block from genesis. Opt-in. The snapshot must be
+    /// signed by a trusted signer baked into this binary or it is refused
+    /// (fail-closed); any fetch/download error falls back to full IBD. Override
+    /// the pointer URL with COINCYNC_FAST_SYNC_POINTER_URL.
+    #[arg(long)]
+    fast_sync: bool,
+
     /// SOCKS5 proxy address (e.g. `127.0.0.1:9050` for a local Tor
     /// daemon). When set, P2P connections AND DNS-seed queries route
     /// through the proxy. DNS uses DNS-over-TCP via the proxy (default
@@ -549,72 +558,10 @@ async fn main() {
                     .map(|c| (c.height, c.hash))
                     .collect(),
             };
-            // Trusted-source gate — FAIL-CLOSED by default. The snapshot's
-            // `manifest.sig` must be signed by one of the trusted signers, which
-            // default to the keys baked into this binary for the network. This is
-            // what makes a user-downloaded snapshot safe: checkpoints prove it is
-            // our chain, the signature proves it came from a source we trust.
-            // Overrides:
-            //   • COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS=<hex,hex> — replace the baked
-            //     signer set (a private fleet using its own key).
-            //   • COINCYNC_SNAPSHOT_ALLOW_UNSIGNED=1 — waive the requirement
-            //     entirely (INSECURE; only for importing a snapshot you produced
-            //     yourself). Checkpoints + genesis are still enforced either way.
-            let baked_signers: Vec<String> = match network {
-                Network::Testnet => coincync::testnet::TESTNET_SNAPSHOT_SIGNERS,
-                Network::Mainnet => coincync::mainnet::MAINNET_SNAPSHOT_SIGNERS,
-                // regtest/beta are local dev networks — no baked signer.
-                _ => &[],
-            }
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-            let allow_unsigned = std::env::var("COINCYNC_SNAPSHOT_ALLOW_UNSIGNED")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-
-            let trusted_signers: Vec<String> = if allow_unsigned {
-                tracing::warn!(
-                    "COINCYNC_SNAPSHOT_ALLOW_UNSIGNED set — importing WITHOUT a signature \
-                     requirement. INSECURE; only do this for a snapshot you produced yourself. \
-                     Checkpoints + genesis are still enforced."
-                );
-                Vec::new()
-            } else {
-                match std::env::var("COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS") {
-                    Ok(v) => {
-                        let overridden: Vec<String> = v
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        info!(
-                            "Snapshot trusted signers overridden via env: {} key(s)",
-                            overridden.len()
-                        );
-                        overridden
-                    }
-                    Err(_) => baked_signers,
-                }
-            };
-
-            if !trusted_signers.is_empty() {
-                info!(
-                    "Snapshot signature required: {} trusted signer(s)",
-                    trusted_signers.len()
-                );
-            } else if !allow_unsigned && matches!(network, Network::Testnet | Network::Mainnet) {
-                // No baked signer for this network (e.g. mainnet before a key is
-                // minted) and no override — a signature cannot be required, which
-                // on a public network is a trust downgrade. Make it loud.
-                tracing::warn!(
-                    "No trusted snapshot signer configured for {} — importing a snapshot here \
-                     trusts its source. Set COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS or ship a baked \
-                     signer key.",
-                    network_subdir
-                );
-            }
+            // Trusted-source gate — FAIL-CLOSED by default. Shared with the
+            // `--fast-sync` path via resolve_snapshot_signers so the signer
+            // policy and its env overrides can never drift between the two.
+            let (trusted_signers, _allow_unsigned) = resolve_snapshot_signers(network);
             let policy = coincync::snapshot::ImportPolicy {
                 network,
                 expected_genesis: &genesis,
@@ -758,6 +705,7 @@ async fn main() {
                 cli.allow_solo_mine,
                 cli.max_connections_per_ip,
                 cli.verbose,
+                cli.fast_sync,
             )
             .await
             {
@@ -1176,6 +1124,136 @@ async fn show_status(network: Network, data_dir: &PathBuf) {
     }
 }
 
+/// Resolve the trusted snapshot-manifest signers for `network`, with the same
+/// overrides and logging used by both `snapshot-import` and `--fast-sync`, so
+/// the fail-closed signer policy cannot drift between the two paths. Returns
+/// `(trusted_signers, allow_unsigned)`.
+fn resolve_snapshot_signers(network: Network) -> (Vec<String>, bool) {
+    let network_subdir = match network {
+        Network::Mainnet => "mainnet",
+        Network::Testnet => "testnet",
+        Network::Regtest => "regtest",
+        Network::Beta => "beta",
+    };
+    let baked: Vec<String> = match network {
+        Network::Testnet => coincync::testnet::TESTNET_SNAPSHOT_SIGNERS,
+        Network::Mainnet => coincync::mainnet::MAINNET_SNAPSHOT_SIGNERS,
+        // regtest/beta are local dev networks — no baked signer.
+        _ => &[],
+    }
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    let allow_unsigned = std::env::var("COINCYNC_SNAPSHOT_ALLOW_UNSIGNED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let trusted_signers: Vec<String> = if allow_unsigned {
+        tracing::warn!(
+            "COINCYNC_SNAPSHOT_ALLOW_UNSIGNED set — snapshot imported WITHOUT a signature \
+             requirement. INSECURE; only for a snapshot you produced yourself. Checkpoints + \
+             genesis are still enforced."
+        );
+        Vec::new()
+    } else {
+        match std::env::var("COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS") {
+            Ok(v) => {
+                let overridden: Vec<String> = v
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                info!(
+                    "Snapshot trusted signers overridden via env: {} key(s)",
+                    overridden.len()
+                );
+                overridden
+            }
+            Err(_) => baked,
+        }
+    };
+
+    if !trusted_signers.is_empty() {
+        info!(
+            "Snapshot signature required: {} trusted signer(s)",
+            trusted_signers.len()
+        );
+    } else if !allow_unsigned && matches!(network, Network::Testnet | Network::Mainnet) {
+        tracing::warn!(
+            "No trusted snapshot signer configured for {} — importing a snapshot here trusts its \
+             source. Set COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS or ship a baked signer key.",
+            network_subdir
+        );
+    }
+    (trusted_signers, allow_unsigned)
+}
+
+/// Blocking `--fast-sync` bootstrap: fetch a signed chaindata snapshot and
+/// import it so a fresh node resumes near the tip instead of grinding IBD.
+/// Returns `Some(height)` on a successful import, `None` if it fell back to IBD
+/// (already logged). Never installs an unverified snapshot — the signature and
+/// checkpoint binding are enforced by `snapshot::import`. Synchronous (blocking
+/// HTTP + RocksDB I/O); the async caller runs it via `spawn_blocking`.
+fn fast_sync_bootstrap(network: Network, data_dir: &std::path::Path) -> Option<u64> {
+    use coincync::network::snapshot_fetch;
+    let network_subdir = match network {
+        Network::Mainnet => "mainnet",
+        Network::Testnet => "testnet",
+        Network::Regtest => "regtest",
+        Network::Beta => "beta",
+    };
+    let staging = data_dir.join(".fast-sync-staging");
+    let _ = std::fs::remove_dir_all(&staging);
+
+    let staged = match snapshot_fetch::fetch_and_stage(network, &staging) {
+        Ok(p) => p,
+        Err(e) => {
+            snapshot_fetch::log_fallback(&e);
+            let _ = std::fs::remove_dir_all(&staging);
+            return None;
+        }
+    };
+
+    let genesis = match network {
+        Network::Mainnet => coincync::mainnet::expected_genesis_hash(),
+        _ => coincync::testnet::expected_genesis_hash(),
+    };
+    let checkpoints: Vec<(u64, coincync::primitives::Hash)> = match network {
+        Network::Mainnet => coincync::mainnet::mainnet_checkpoints()
+            .into_iter()
+            .map(|c| (c.height, c.hash))
+            .collect(),
+        _ => coincync::testnet::testnet_checkpoints()
+            .into_iter()
+            .map(|c| (c.height, c.hash))
+            .collect(),
+    };
+    let (trusted_signers, _allow) = resolve_snapshot_signers(network);
+    let backup_stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let chaindata_path = data_dir.join(network_subdir);
+    let policy = coincync::snapshot::ImportPolicy {
+        network,
+        expected_genesis: &genesis,
+        checkpoints: &checkpoints,
+        trusted_signers: &trusted_signers,
+        backup_stamp,
+    };
+
+    let result = match coincync::snapshot::import(&staged, &chaindata_path, &policy) {
+        Ok(m) => Some(m.height),
+        Err(e) => {
+            snapshot_fetch::log_fallback(&format!("snapshot rejected: {e}"));
+            None
+        }
+    };
+    let _ = std::fs::remove_dir_all(&staging);
+    result
+}
+
 async fn start_node(
     network: Network,
     data_dir: PathBuf,
@@ -1197,6 +1275,7 @@ async fn start_node(
     allow_solo_mine: bool,
     max_connections_per_ip: usize,
     verbose: bool,
+    fast_sync: bool,
 ) -> coincync::Result<()> {
     info!("CoinCync 1.0 node starting");
     info!("Network:  {:?}", network);
@@ -1229,6 +1308,31 @@ async fn start_node(
 
     // Ensure data dir exists
     std::fs::create_dir_all(&data_dir).ok();
+
+    // --fast-sync: on a FRESH datadir, fetch + import a signed snapshot before
+    // IBD so the node resumes near tip instead of RandomX-verifying from
+    // genesis. Opt-in; fail-OPEN on fetch (falls back to IBD), fail-CLOSED on
+    // trust (snapshot::import refuses an unsigned/untrusted/wrong-fork
+    // snapshot). Runs on a blocking thread — blocking HTTP + RocksDB I/O must
+    // not run on a tokio worker.
+    if fast_sync {
+        if coincync::network::snapshot_fetch::is_fresh_datadir(&data_dir, network) {
+            let dd = data_dir.clone();
+            match tokio::task::spawn_blocking(move || fast_sync_bootstrap(network, &dd)).await {
+                Ok(Some(h)) => {
+                    info!("--fast-sync: imported snapshot at height {h}; resuming sync from there")
+                }
+                Ok(None) => {} // fell back to IBD; already logged
+                Err(e) => coincync::network::snapshot_fetch::log_fallback(&format!(
+                    "fast-sync task failed: {e}"
+                )),
+            }
+        } else {
+            info!(
+                "--fast-sync requested but datadir already has chain data — skipping (normal start)"
+            );
+        }
+    }
 
     // Runtime deadlock watchdog. Arm BEFORE any tokio work so the
     // startup phase (RandomX dataset build, DB open, etc.) is

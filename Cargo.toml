@@ -179,6 +179,10 @@ merlin                 = "3"
 
 # â”€â”€ Hashing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 blake3 = "1"
+# Uncompressed tar (de)archiving for the `--fast-sync` snapshot bootstrap
+# (network::snapshot_fetch). Pure-Rust, no_std-friendly; `unpack` guards against
+# zip-slip path traversal.
+tar = "0.4"
 sha3   = "0.12"
 sha2   = "0.10"
 hmac   = "0.12"

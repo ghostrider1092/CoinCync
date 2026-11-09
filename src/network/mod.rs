@@ -2,6 +2,7 @@
 pub mod bootstrap;
 pub mod dns_seeds;
 pub mod peer_snapshot;
+pub mod snapshot_fetch;
 pub mod socks_dns;
 // Generic maintainer-signed registry — infrastructure for Fort-Knox
 // items 2 (faucet decentralization), 3 (FROST-coord decentralization),
