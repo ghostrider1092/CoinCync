@@ -52,12 +52,13 @@ use coincync::wallet::send::SpendContext;
 
 #[test]
 fn regression_finding_01_mempool_calls_full_validator_at_admission() {
-    // The fix is: add_with_chain calls `chain.validate_transaction(&tx)`
-    // BEFORE the inner `add`. Without this, height-gated rules are
-    // missed at admission and the tx is silently evicted later.
-    // Generation-aware admission may check the chain generation and the
-    // validation result before insertion. Pin both operations to
-    // add_with_chain and verify that full validation still precedes add.
+    // The fix is: add_with_chain runs full chain validation BEFORE the
+    // inner `add`. Without this, height-gated rules are missed at
+    // admission and the tx is silently evicted later. Since #372 the
+    // validation call is chained inside the generation-aware
+    // `retry_stable_admission` closure (`<gen-scoped>.validate_transaction(tx)`,
+    // not literally `chain.validate_transaction(...)`), so we match the
+    // method-call suffix and verify it still precedes the `add`.
     let mempool_rs = include_str!("../src/mempool.rs");
     let add_with_chain = mempool_rs
         .split_once("pub fn add_with_chain(")
@@ -68,7 +69,7 @@ fn regression_finding_01_mempool_calls_full_validator_at_admission() {
         })
         .expect("SharedMempool::add_with_chain source must remain present");
     let validation = add_with_chain
-        .find("chain.validate_transaction(tx)")
+        .find(".validate_transaction(tx)")
         .expect("add_with_chain must run full chain validation");
     let insertion = add_with_chain
         .find("mempool.add(tx)")
