@@ -410,19 +410,26 @@ impl Blockchain {
     /// double-spends during the window before re-sync completes.
     /// Rebuild EVERY initialized Phase-2 store deterministically from the
     /// committed chain, mirroring [`Self::rebuild_utxo_set`]. All four stores
-    /// (shielded note tree, spark accumulator, MW kernels, spark pool) persist
-    /// their data via immediate writes DURING block apply, OUTSIDE the block's
-    /// atomic `commit_block_atomic`, so after an ill-timed crash any of them can be
-    /// one block AHEAD of the committed tip — and its reorg checkpoint stack one
-    /// deeper. The fix is uniform construction: clear all four, then replay
-    /// committed block apply so each re-derives from committed blocks only. This is
-    /// the only restart path that brings the four back at IDENTICAL checkpoint
-    /// depth, in lock-step, with data matching the committed tip — persisting and
-    /// restoring each store's stack instead (an earlier approach) could restore an
-    /// ahead store while a sibling rebuilt to the committed tip, desyncing the
-    /// stack depths and tripping the lock-step guard (or leaving an accumulator
-    /// carrying an uncommitted block's notes). Inert when no store is initialized
-    /// (e.g. the three siblings before their post-audit activation).
+    /// (shielded note tree, spark accumulator, MW kernels, spark pool) are cleared
+    /// and re-derived by replaying committed block apply up to `tip_height`, so
+    /// each comes back from committed blocks only. This is the only restart path
+    /// that brings the four back at IDENTICAL checkpoint depth, in lock-step, with
+    /// data matching the committed tip — persisting and restoring each store's
+    /// stack instead (an earlier approach) could restore an ahead store while a
+    /// sibling rebuilt to the committed tip, desyncing the stack depths and
+    /// tripping the lock-step guard (or leaving an accumulator carrying an
+    /// uncommitted block's notes). Inert when no store is initialized (e.g. the
+    /// three siblings before their post-audit activation).
+    ///
+    /// DEFENSE-IN-DEPTH (as of the atomic Phase-2 commit, PR #384 + this change):
+    /// all four stores now persist INSIDE the block's atomic `WriteBatch`
+    /// (`commit_block_atomic_with_phase2` / `apply_reorg_atomic_with_phase2`, fed
+    /// by `begin_staging` / `Blockchain::drain_phase2_staged`), so each commits
+    /// together with the transparent tip — all-or-nothing — and can no longer be
+    /// left one block AHEAD of (or behind) the committed chain after a crash. This
+    /// rebuild is therefore no longer a CORRECTNESS crutch for that window; it
+    /// stays only as defense-in-depth (e.g. recovery from a damaged column family
+    /// or an out-of-band divergence).
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
     fn rebuild_phase2_stores(&self, tip_height: u64) -> Result<()> {
         if self.spark_pool_store.is_none()
