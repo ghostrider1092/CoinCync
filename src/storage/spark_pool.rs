@@ -131,6 +131,16 @@ pub struct SparkPoolStore {
     coins: RwLock<Vec<SparkPoolCoin>>,
     /// `outpoint -> cover_index`, so a coin is locatable by its chain identity.
     by_outpoint: RwLock<HashMap<Vec<u8>, u64>>,
+    /// `blake3(coin bytes) -> cover_index` content index, maintained for EVERY
+    /// pooled coin (mint feed and spend outputs alike). A mint coin is keyed in
+    /// `by_outpoint` by its tx-derived outpoint, so the SAME mint bundle replayed
+    /// under different tx inputs yields fresh outpoints and would re-enter the
+    /// pool, inflating `pool_value` with coins no one can spend (#380). This index
+    /// lets the block gate reject a coin whose libspark bytes are already pooled.
+    /// A libspark coin commits to a random serial, so identical bytes mean a
+    /// replay, never two honest coins — it is a presence check, exact in the
+    /// absence of content duplicates (which the gate now forbids going forward).
+    by_coin: RwLock<HashMap<[u8; 32], u64>>,
     /// Spent VRF-tag set: tag bytes -> spend height.
     spent_tags: RwLock<HashMap<Vec<u8>, u64>>,
     /// Reorg checkpoint stack (in lock-step with the block-apply path), capped
@@ -159,6 +169,7 @@ impl SparkPoolStore {
         Self {
             coins: RwLock::new(Vec::new()),
             by_outpoint: RwLock::new(HashMap::new()),
+            by_coin: RwLock::new(HashMap::new()),
             spent_tags: RwLock::new(HashMap::new()),
             checkpoints: RwLock::new(Vec::new()),
             max_coin_height: RwLock::new(None),
@@ -193,8 +204,10 @@ impl SparkPoolStore {
 
         let mut coins = Vec::with_capacity(loaded.len());
         let mut by_outpoint = HashMap::with_capacity(loaded.len());
+        let mut by_coin: HashMap<[u8; 32], u64> = HashMap::with_capacity(loaded.len());
         for (cover_index, p) in loaded {
             by_outpoint.insert(p.outpoint.clone(), cover_index);
+            by_coin.insert(*blake3::hash(&p.coin).as_bytes(), cover_index);
             coins.push(SparkPoolCoin {
                 outpoint: p.outpoint,
                 coin: CoinBytes(p.coin),
@@ -243,6 +256,7 @@ impl SparkPoolStore {
         Ok(Self {
             coins: RwLock::new(coins),
             by_outpoint: RwLock::new(by_outpoint),
+            by_coin: RwLock::new(by_coin),
             spent_tags: RwLock::new(spent_tags),
             checkpoints: RwLock::new(checkpoints),
             max_coin_height: RwLock::new(max_coin_height),
@@ -298,6 +312,11 @@ impl SparkPoolStore {
                 panic!("R-61: spark_pool_coins write failed at cover_index {cover_index}: {e}");
             }
         }
+        // Content index (#380): key this coin by its libspark bytes so the block
+        // gate can reject a replayed mint bundle whose coins are already pooled.
+        self.by_coin
+            .write()
+            .insert(*blake3::hash(&entry.coin.0).as_bytes(), cover_index);
         by_op.insert(outpoint, cover_index);
         coins.push(entry);
         // O(1) guard maintenance.
@@ -392,6 +411,15 @@ impl SparkPoolStore {
         self.by_outpoint.read().get(outpoint).copied()
     }
 
+    /// Whether a coin with these exact libspark bytes is already pooled (#380).
+    /// `content` is `blake3(coin bytes)`. Used by the block gate to reject a mint
+    /// bundle replayed under fresh tx inputs: the replay's coins carry identical
+    /// bytes, so this returns `true` and the gate rejects before the dead copies
+    /// can re-enter the pool and inflate `pool_value`.
+    pub fn coin_content_present(&self, content: &[u8; 32]) -> bool {
+        self.by_coin.read().contains_key(content)
+    }
+
     /// The coin at a cover-set index, if present.
     pub fn coin_at(&self, cover_index: u64) -> Option<SparkPoolCoin> {
         self.coins.read().get(cover_index as usize).cloned()
@@ -464,6 +492,7 @@ impl SparkPoolStore {
     pub fn clear(&self) -> Result<()> {
         self.coins.write().clear();
         self.by_outpoint.write().clear();
+        self.by_coin.write().clear();
         self.spent_tags.write().clear();
         self.checkpoints.write().clear();
         *self.max_coin_height.write() = None;
@@ -582,22 +611,31 @@ impl SparkPoolStore {
 
     /// Rewind one checkpoint — disconnect the most recently applied block:
     /// truncate the cover set to the checkpoint's `coins_len` (dropping the
-    /// disconnected block's coins and their `by_outpoint` entries) and drop
-    /// every tag spent at `height >= restore.height`. Returns `false` if the
-    /// checkpoint stack was empty.
+    /// disconnected block's coins and their `by_outpoint` + `by_coin` index
+    /// entries) and drop every tag spent at `height >= restore.height`. Returns
+    /// `false` if the checkpoint stack was empty.
     pub fn rewind(&self) -> bool {
         let restore = match self.checkpoints.write().pop() {
             Some(cp) => cp,
             None => return false,
         };
 
-        // Drop coins at or past the boundary, and their outpoint index entries.
+        // Drop coins at or past the boundary, and their index entries.
         let removed_indices: Vec<u64> = {
             let mut coins = self.coins.write();
             let mut by_op = self.by_outpoint.write();
+            let mut by_coin = self.by_coin.write();
             let removed: Vec<u64> = (restore.coins_len as u64..coins.len() as u64).collect();
             for c in coins.iter().skip(restore.coins_len) {
                 by_op.remove(&c.outpoint);
+                // Only drop the content key if it still points at the coin being
+                // removed: the gate forbids content duplicates going forward, so
+                // this is exact; guarding by index keeps a pre-fix duplicate from
+                // erasing a surviving lower-index coin's entry.
+                let content = *blake3::hash(&c.coin.0).as_bytes();
+                if by_coin.get(&content) == Some(&c.cover_index) {
+                    by_coin.remove(&content);
+                }
             }
             coins.truncate(restore.coins_len);
             removed
@@ -716,6 +754,32 @@ mod tests {
         assert_eq!(s.context_for(b"tx1:1").as_deref(), Some(&b"ctx2"[..]));
         assert_eq!(s.coin_at(0).unwrap().outpoint, b"tx1:0");
         assert!(s.index_of(b"nope").is_none());
+    }
+
+    #[test]
+    fn coin_content_index_tracks_adds_and_rewind() {
+        // #380 — the content index reports a coin's libspark bytes as pooled
+        // regardless of its outpoint key, and a rewind that truncates a coin drops
+        // its content entry (so an honest re-mint is not later falsely rejected)
+        // while a surviving coin keeps its entry.
+        let s = SparkPoolStore::new();
+        let h = |c: &CoinBytes| *blake3::hash(&c.0).as_bytes();
+
+        s.add_coin(b"op:0".to_vec(), coin(1), b"ctx".to_vec(), 5).unwrap();
+        // Boundary taken BEFORE the block that mints coin(2), mirroring apply.
+        s.checkpoint_at_height(6);
+        s.add_coin(b"op:1".to_vec(), coin(2), b"ctx".to_vec(), 6).unwrap();
+
+        assert!(s.coin_content_present(&h(&coin(1))), "coin(1) present by content");
+        assert!(s.coin_content_present(&h(&coin(2))), "coin(2) present by content");
+        assert!(!s.coin_content_present(&h(&coin(9))), "unpooled content absent");
+
+        // Reorg out the block that minted coin(2): its content key is dropped, the
+        // surviving coin(1) keeps its entry.
+        assert!(s.rewind());
+        assert_eq!(s.coin_count(), 1);
+        assert!(s.coin_content_present(&h(&coin(1))), "coin(1) survives rewind");
+        assert!(!s.coin_content_present(&h(&coin(2))), "coin(2) content gone after rewind");
     }
 
     #[test]
@@ -917,6 +981,11 @@ mod tests {
         assert!(s2.is_tag_spent(&nf(0x55)));
         // A fresh append continues the dense index.
         assert_eq!(s2.add_coin(b"op:2".to_vec(), coin(3), b"ctx2".to_vec(), 3), Some(2));
+        // #380 — the content index is rebuilt from the persisted coins on reopen.
+        let h = |c: &CoinBytes| *blake3::hash(&c.0).as_bytes();
+        assert!(s2.coin_content_present(&h(&coin(1))), "coin(1) content rebuilt on open");
+        assert!(s2.coin_content_present(&h(&coin(2))), "coin(2) content rebuilt on open");
+        assert!(!s2.coin_content_present(&h(&coin(8))), "unpooled content absent after open");
     }
 
     #[test]
