@@ -21,6 +21,7 @@ use crate::error::{Error, Result};
 use borsh::{BorshDeserialize, BorshSerialize};
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::traits::VartimeMultiscalarMul;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256, Sha3_512};
@@ -51,6 +52,84 @@ fn commit_gen(
     value_gen * b + blind_gen * r
 }
 
+/// At or above this many points, the Fiat-Shamir transcript compresses the
+/// statement points in parallel. Ristretto `compress()` costs an inverse square
+/// root per point (not batchable), it is the dominant verify cost at large anon
+/// sets, and the compressions are mutually independent — so computing them with
+/// rayon and then absorbing the bytes in the SAME order yields a byte-identical
+/// transcript (hence an identical challenge). Below the threshold, rayon's
+/// fork/join overhead outweighs the work, so stay serial (mirrors
+/// `stealth::scan_outputs`' `PARALLEL_SCAN_THRESHOLD`).
+const FS_PARALLEL_THRESHOLD: usize = 256;
+
+/// Compress `points` to their 32-byte canonical encodings, in parallel above
+/// [`FS_PARALLEL_THRESHOLD`]. Order-preserving and byte-for-byte identical to
+/// `points.iter().map(|p| p.compress().to_bytes())`, so feeding the result into
+/// a hash reproduces the serial transcript exactly — a verify-cost optimization
+/// only, never a consensus change.
+fn compress_points_for_transcript(points: &[RistrettoPoint]) -> Vec<[u8; 32]> {
+    if points.len() >= FS_PARALLEL_THRESHOLD {
+        use rayon::prelude::*;
+        points.par_iter().map(|p| p.compress().to_bytes()).collect()
+    } else {
+        points.iter().map(|p| p.compress().to_bytes()).collect()
+    }
+}
+
+/// Build the one-of-many polynomial products
+/// `prod[i] = ∏_j (f_j if bit_j(i)==1 else x − f_j)` for `i` in `0..2^m`, the
+/// per-member coefficients of the Groth-Kohlweiss verification equation. The
+/// naïve form is `N·m` scalar multiplications; this computes the IDENTICAL
+/// vector in ~`2N` multiplications by recursive doubling — each index's product
+/// extends its lower-bit prefix by exactly one factor. Output is bit-identical
+/// to the naïve loop (locked by `coeff_products_doubling_equals_naive`), so it
+/// never changes the accept/reject decision — a verify-cost optimization only.
+fn coeff_products(f_scalars: &[Scalar], x: Scalar) -> Vec<Scalar> {
+    let m = f_scalars.len();
+    let n = 1usize << m;
+    let mut prods = vec![Scalar::ONE; n];
+    for (j, f_j) in f_scalars.iter().enumerate() {
+        let hi = *f_j; // factor when bit j = 1
+        let lo = x - f_j; // factor when bit j = 0
+        let half = 1usize << j;
+        for i in 0..half {
+            let base = prods[i];
+            prods[i] = base * lo; // bit j = 0
+            prods[i + half] = base * hi; // bit j = 1
+        }
+    }
+    prods
+}
+
+/// At or above this many terms, the one-of-many multi-exponentiation
+/// `Σ sᵢ·Pᵢ` is split across rayon threads and recombined by point addition.
+/// Group addition is exact and associative, so the recombined result is
+/// bit-identical to a single `RistrettoPoint::vartime_multiscalar_mul` (locked
+/// by `parallel_msm_equals_single`) — a verify-cost optimization, never a
+/// consensus change. Below the threshold a single MSM wins (fork/join overhead).
+const MSM_PARALLEL_THRESHOLD: usize = 1024;
+
+/// Multi-exponentiation `Σ sᵢ·Pᵢ`, parallelized above [`MSM_PARALLEL_THRESHOLD`].
+/// `scalars` and `points` must have equal length. `vartime_` is sound here:
+/// every scalar and point in a one-of-many statement is public.
+fn parallel_multiscalar_mul(scalars: &[Scalar], points: &[RistrettoPoint]) -> RistrettoPoint {
+    debug_assert_eq!(scalars.len(), points.len(), "MSM scalar/point length mismatch");
+    let n = scalars.len();
+    if n < MSM_PARALLEL_THRESHOLD {
+        return RistrettoPoint::vartime_multiscalar_mul(scalars.iter(), points.iter());
+    }
+    use rayon::prelude::*;
+    // One chunk per thread, but each chunk kept large enough to amortize
+    // fork/join. Partials summed → identical group element regardless of split.
+    let threads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(threads).max(MSM_PARALLEL_THRESHOLD / 2);
+    scalars
+        .par_chunks(chunk)
+        .zip(points.par_chunks(chunk))
+        .map(|(s, p)| RistrettoPoint::vartime_multiscalar_mul(s.iter(), p.iter()))
+        .reduce(RistrettoPoint::default, |a, b| a + b)
+}
+
 /// Fiat-Shamir challenge over an optional caller `context` + the full statement
 /// + round-1 transcript. Derived deterministically by both prover and verifier
 /// (a self-computed reduction, so `from_bytes_mod_order_wide` is correct here —
@@ -70,8 +149,8 @@ fn challenge(
     // Length-prefixed context so it cannot blur into the commitment bytes.
     h.update((context.len() as u64).to_le_bytes());
     h.update(context);
-    for c in commitments {
-        h.update(c.compress().as_bytes());
+    for c in compress_points_for_transcript(commitments) {
+        h.update(c);
     }
     for v in [cl, ca, cb, gk] {
         for p in v {
@@ -302,20 +381,26 @@ pub fn verify_one_of_many_gen_ctx(
     // One-of-many equation:
     //   Σ_i (∏_j (f_j if i_j=1 else x−f_j))·c_i − Σ_k x^k·G_k == z_d·K
     let f_scalars: Vec<Scalar> = d.f.iter().map(|s| *s.as_scalar()).collect();
-    let mut lhs = RistrettoPoint::default();
-    for (i, c_i) in commitments.iter().enumerate() {
-        let mut prod = Scalar::ONE;
-        for (j, f_j) in f_scalars.iter().enumerate() {
-            let factor = if (i >> j) & 1 == 1 { *f_j } else { x - f_j };
-            prod *= factor;
-        }
-        lhs += c_i * prod;
-    }
+    // One-of-many LHS as a single multi-exponentiation:
+    //   lhs = Σ_i prod_i·c_i  +  Σ_j (−x^j)·gk_j
+    // This is the SAME linear combination as a per-member `lhs += c_i·prod_i`
+    // accumulation (see `gk_one_of_many_lhs_naive` in tests), but a Pippenger/
+    // Straus MSM (parallelized above a threshold) is sublinear per term, which
+    // is the anon-set verify-cost win at large N (see the anon-set bench). The
+    // coefficient products are built by recursive doubling (~2N mults vs N·m).
+    // Result is bit-identical, so the accept/reject set — and thus consensus —
+    // is unchanged.
+    let mut scalars = coeff_products(&f_scalars, x); // n products, ~2N mults
+    scalars.reserve(m);
     let mut x_pow = Scalar::ONE;
-    for j in 0..m {
-        lhs -= *d.gk[j].as_point() * x_pow;
+    for _j in 0..m {
+        scalars.push(-x_pow);
         x_pow *= x;
     }
+    let mut points: Vec<RistrettoPoint> = Vec::with_capacity(n + m);
+    points.extend_from_slice(commitments);
+    points.extend((0..m).map(|j| *d.gk[j].as_point()));
+    let lhs = parallel_multiscalar_mul(&scalars, &points);
     if lhs != k_gen * *d.zd.as_scalar() {
         return Err(Error::SparkVerifyFailed);
     }
@@ -352,11 +437,11 @@ fn challenge_ki(
     h.update(b"COINCYNC_GK_KI_FS_v1");
     h.update((context.len() as u64).to_le_bytes());
     h.update(context);
-    for c in commitments {
-        h.update(c.compress().as_bytes());
+    for c in compress_points_for_transcript(commitments) {
+        h.update(c);
     }
-    for p in pubkeys {
-        h.update(p.compress().as_bytes());
+    for p in compress_points_for_transcript(pubkeys) {
+        h.update(p);
     }
     h.update(ki_gen.compress().as_bytes());
     h.update(tag);
@@ -594,29 +679,35 @@ pub fn verify_one_of_many_ki_gen_ctx(
     // value and the public-key accumulators. This sharing is exactly why the
     // value-index and the key-image-index cannot differ (l == l').
     let f_scalars: Vec<Scalar> = d.f.iter().map(|s| *s.as_scalar()).collect();
-    let mut prods = Vec::with_capacity(n);
-    for i in 0..n {
-        let mut prod = Scalar::ONE;
-        for (j, f_j) in f_scalars.iter().enumerate() {
-            let factor = if (i >> j) & 1 == 1 { *f_j } else { x - f_j };
-            prod *= factor;
-        }
-        prods.push(prod);
-    }
-
-    let mut lhs_c = RistrettoPoint::default();
-    let mut lhs_p = RistrettoPoint::default();
-    for ((c_i, p_i), prod) in commitments.iter().zip(pubkeys.iter()).zip(&prods) {
-        lhs_c += c_i * prod;
-        lhs_p += p_i * prod;
-    }
+    // Shared polynomial products, by recursive doubling (~2N mults vs N·m).
+    let prods = coeff_products(&f_scalars, x);
+    // The −x^k tail is shared by both accumulators.
+    let mut neg_x_pows = Vec::with_capacity(m);
     let mut x_pow = Scalar::ONE;
-    for k in 0..m {
-        lhs_c -= *d.gk[k].as_point() * x_pow;
-        lhs_p -= gkp[k] * x_pow;
+    for _k in 0..m {
+        neg_x_pows.push(-x_pow);
         x_pow *= x;
     }
-    // x_pow == x^m
+    // x_pow == x^m (reused by the tag equation below)
+
+    // Both accumulators as single (parallelized) MSMs, identical to the former
+    // per-member `lhs += P_i·prod_i` accumulations:
+    //   lhs_c = Σ_i P_i(x)·C_i − Σ_k x^k·gk_k
+    //   lhs_p = Σ_i P_i(x)·P_i − Σ_k x^k·gkp_k
+    let mut c_scalars = prods.clone();
+    c_scalars.extend_from_slice(&neg_x_pows);
+    let mut c_points: Vec<RistrettoPoint> = Vec::with_capacity(n + m);
+    c_points.extend_from_slice(commitments);
+    c_points.extend((0..m).map(|j| *d.gk[j].as_point()));
+    let lhs_c = parallel_multiscalar_mul(&c_scalars, &c_points);
+
+    let mut p_scalars = prods;
+    p_scalars.extend_from_slice(&neg_x_pows);
+    let mut p_points: Vec<RistrettoPoint> = Vec::with_capacity(n + m);
+    p_points.extend_from_slice(pubkeys);
+    p_points.extend_from_slice(&gkp);
+    let lhs_p = parallel_multiscalar_mul(&p_scalars, &p_points);
+
     // (value/membership) Σ_i P_i(x)·C_i − Σ_k x^k·gk_k == z_d·blind_gen
     if lhs_c != k_gen * *d.zd.as_scalar() {
         return Err(Error::SparkVerifyFailed);
@@ -1659,8 +1750,8 @@ fn challenge_spark(
     h.update(b"COINCYNC_SPARK_SPEND_V6_FS_v1");
     h.update((context.len() as u64).to_le_bytes());
     h.update(context);
-    for c in shifted {
-        h.update(c.compress().as_bytes());
+    for c in compress_points_for_transcript(shifted) {
+        h.update(c);
     }
     h.update(nullifier);
     for v in [cl, ca, cb, gk, gkt] {
@@ -1859,25 +1950,25 @@ pub fn verify_spend_spark(
         }
     }
 
-    let mut prods = Vec::with_capacity(n);
-    for i in 0..n {
-        let mut prod = Scalar::ONE;
-        for (j, f_j) in f.iter().enumerate() {
-            let factor = if (i >> j) & 1 == 1 { *f_j } else { x - f_j };
-            prod *= factor;
-        }
-        prods.push(prod);
-    }
-    let mut lhs_w = RistrettoPoint::default();
-    for (w_i, prod) in shifted.iter().zip(&prods) {
-        lhs_w += w_i * prod;
-    }
+    // Value/membership LHS as a single (parallelized) multi-exponentiation:
+    //   lhs_w = Σ_i P_i(x)·W_i − Σ_k x^k·gk_k
+    // identical to the former per-member `lhs_w += W_i·prod_i` accumulation, but
+    // the coefficient products are built by recursive doubling (~2N mults vs
+    // N·m) and the Σ is a batched MSM, sublinear per term — the anon-set
+    // verify-cost win on the live spend path. Bit-identical ⇒ consensus
+    // unchanged.
+    let mut scalars = coeff_products(&f, x); // n products, ~2N mults
+    scalars.reserve(m);
     let mut x_pow = Scalar::ONE;
-    for k in 0..m {
-        lhs_w -= gk[k] * x_pow;
+    for _k in 0..m {
+        scalars.push(-x_pow);
         x_pow *= x;
     }
-    // x_pow == x^m
+    // x_pow == x^m (reused by the tag equation below)
+    let mut points: Vec<RistrettoPoint> = Vec::with_capacity(n + m);
+    points.extend_from_slice(&shifted);
+    points.extend_from_slice(&gk);
+    let lhs_w = parallel_multiscalar_mul(&scalars, &points);
     // (value, ⟨H,K⟩): Σ_i P_i(x)·W_i − Σ_k x^k·gk_k == z_dh·H + z_dk·K
     if lhs_w != gen_h() * zdh + k_gen * zdk {
         return Err(Error::SparkVerifyFailed);
@@ -2046,6 +2137,266 @@ mod tests {
     /// A bound coin `C = v·Gv + h·H + r·K`.
     fn bound(v: u64, h: &Scalar, r: &Scalar) -> RistrettoPoint {
         gen_gv() * Scalar::from(v) + gen_h() * h + gen_k() * r
+    }
+
+    /// Equivalence lock for the batched one-of-many verifier: the exact
+    /// substitution it makes — `Σ coeff_i·P_i` via a Pippenger/Straus MSM in
+    /// place of a per-term `acc += P_i·coeff_i` loop — must yield the identical
+    /// point at every size. Same point ⇒ same accept/reject ⇒ no consensus
+    /// change; the MSM is purely a verify-cost optimization. If this ever fails,
+    /// the fast anon-set verify path is NOT equivalent and must not ship.
+    #[test]
+    fn msm_equals_naive_accumulation() {
+        let mut rng = ChaCha20Rng::seed_from_u64(9001);
+        for &n in &[1usize, 2, 8, 64, 1024, 4096] {
+            let pts: Vec<RistrettoPoint> =
+                (0..n).map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng)).collect();
+            let coeffs: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+            let mut naive = RistrettoPoint::default();
+            for (c, p) in coeffs.iter().zip(pts.iter()) {
+                naive += p * c;
+            }
+            let batched = RistrettoPoint::vartime_multiscalar_mul(coeffs.iter(), pts.iter());
+            assert_eq!(naive, batched, "MSM must equal naive accumulation at n={n}");
+        }
+    }
+
+    /// Measurement (ignored; run with `--ignored --nocapture`): the anon-set
+    /// verify-cost win at production size. Times the dominant point operation of
+    /// the one-of-many verify — `Σ coeffᵢ·Cᵢ` over N members — the naïve
+    /// per-member way vs the batched MSM the verifier now uses. The coefficient
+    /// math is identical in both paths, so this isolates the change. N=32768
+    /// matches the audited Firo/Lelantus-Spark anon set and the earlier bench's
+    /// ~3,324 ms naïve baseline.
+    #[test]
+    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
+    fn bench_anonset_msm_vs_naive() {
+        use std::time::Instant;
+        let mut rng = ChaCha20Rng::seed_from_u64(32768);
+
+        // (1) The dominant point operation of the verify — Σ coeffᵢ·Cᵢ over N
+        //     members — naïve per-member vs the batched MSM now in production.
+        let mut sigma_delta_32768 = 0.0f64;
+        for &n in &[4096usize, 16384, 32768] {
+            let pts: Vec<RistrettoPoint> =
+                (0..n).map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng)).collect();
+            let coeffs: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+
+            let t0 = Instant::now();
+            let mut naive = RistrettoPoint::default();
+            for (c, p) in coeffs.iter().zip(pts.iter()) {
+                naive += p * c;
+            }
+            let naive_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+            let t1 = Instant::now();
+            let batched = RistrettoPoint::vartime_multiscalar_mul(coeffs.iter(), pts.iter());
+            let msm_ms = t1.elapsed().as_secs_f64() * 1e3;
+
+            assert_eq!(naive, batched, "equivalence must hold at the benchmarked size");
+            println!(
+                "[Σ only]     N={n:>6}  naive Σcᵢ·Cᵢ = {naive_ms:>8.1} ms   batched MSM = {msm_ms:>7.1} ms   {:.1}×",
+                naive_ms / msm_ms
+            );
+            if n == 32768 {
+                sigma_delta_32768 = naive_ms - msm_ms;
+            }
+        }
+
+        // (2) Full one-of-many verify at N=32768. The batched path is what ships;
+        //     the naïve verify differs ONLY in the Σ method, so the implied naïve
+        //     full time = batched full + (naïveΣ − msmΣ) measured in (1). This is
+        //     the HONEST end-to-end number — it includes the coefficient products
+        //     and the Fiat-Shamir challenge over all 32768 members, which this
+        //     change does NOT touch.
+        let n = 32768usize;
+        let l = 20_000usize;
+        let r = Scalar::random(&mut rng);
+        let mut comms: Vec<RistrettoPoint> = (0..n).map(|s| filler(s as u64)).collect();
+        comms[l] = zero_commitment(&r);
+        let proof = prove_one_of_many_ctx(&comms, l, &r, b"bench", &mut rng).unwrap();
+        let t = Instant::now();
+        verify_one_of_many_ctx(&comms, &proof, b"bench").expect("valid proof must verify");
+        let full_ms = t.elapsed().as_secs_f64() * 1e3;
+        let implied_naive = full_ms + sigma_delta_32768;
+        println!(
+            "[full verify] N={n}  batched = {full_ms:.1} ms   implied naïve = {implied_naive:.1} ms   end-to-end {:.2}×",
+            implied_naive / full_ms
+        );
+    }
+
+    /// Decomposition (ignored): where the time in the *batched* one-of-many
+    /// verify at N=32768 actually goes, so the next optimization targets the real
+    /// bottleneck rather than a guessed one. Splits the verify into its three
+    /// cost centers — the Fiat-Shamir `challenge` (N Ristretto compressions +
+    /// SHA3 over the whole statement), the coefficient-product double loop
+    /// (N·m scalar multiplications building the MSM scalars), and the MSM itself.
+    /// Measures nothing that ships differently; purely diagnostic.
+    #[test]
+    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
+    fn bench_verify_decomposition_32768() {
+        use std::time::Instant;
+        let mut rng = ChaCha20Rng::seed_from_u64(32768);
+        let n = 32768usize;
+        let m = n.trailing_zeros() as usize;
+        let l = 20_000usize;
+        let r = Scalar::random(&mut rng);
+        let mut comms: Vec<RistrettoPoint> = (0..n).map(|s| filler(s as u64)).collect();
+        comms[l] = zero_commitment(&r);
+        let proof = prove_one_of_many_ctx(&comms, l, &r, b"bench", &mut rng).unwrap();
+        let d = proof.decode().unwrap();
+
+        // (a) Fiat-Shamir challenge: the N point compressions + SHA3.
+        let reps = 3;
+        let mut x = Scalar::ONE;
+        let ta = Instant::now();
+        for _ in 0..reps {
+            x = challenge(b"bench", &comms, &proof.cl, &proof.ca, &proof.cb, &proof.gk);
+        }
+        let challenge_ms = ta.elapsed().as_secs_f64() * 1e3 / reps as f64;
+
+        // (b) Coefficient products: the naïve N·m double loop vs the
+        //     recursive-doubling `coeff_products` (~2N mults) now in production.
+        let f_scalars: Vec<Scalar> = d.f.iter().map(|s| *s.as_scalar()).collect();
+        let tb0 = Instant::now();
+        let mut coeff_naive: Vec<Scalar> = Vec::with_capacity(n);
+        for _ in 0..reps {
+            coeff_naive.clear();
+            for i in 0..n {
+                let mut prod = Scalar::ONE;
+                for (j, f_j) in f_scalars.iter().enumerate() {
+                    let factor = if (i >> j) & 1 == 1 { *f_j } else { x - f_j };
+                    prod *= factor;
+                }
+                coeff_naive.push(prod);
+            }
+        }
+        let coeff_naive_ms = tb0.elapsed().as_secs_f64() * 1e3 / reps as f64;
+        let tb1 = Instant::now();
+        let mut scalars = coeff_products(&f_scalars, x);
+        for _ in 1..reps {
+            scalars = coeff_products(&f_scalars, x);
+        }
+        let coeff_ms = tb1.elapsed().as_secs_f64() * 1e3 / reps as f64;
+        assert_eq!(scalars, coeff_naive, "coeff_products must equal naive");
+        let mut x_pow = Scalar::ONE;
+        for _j in 0..m {
+            scalars.push(-x_pow);
+            x_pow *= x;
+        }
+
+        // (c) The one-of-many MSM: a single `vartime_multiscalar_mul` vs the
+        //     chunked parallel MSM now in production.
+        let mut points: Vec<RistrettoPoint> = Vec::with_capacity(n + m);
+        points.extend_from_slice(&comms);
+        points.extend((0..m).map(|j| *d.gk[j].as_point()));
+        let tc0 = Instant::now();
+        let mut single = RistrettoPoint::default();
+        for _ in 0..reps {
+            single = RistrettoPoint::vartime_multiscalar_mul(scalars.iter(), points.iter());
+        }
+        let msm_single_ms = tc0.elapsed().as_secs_f64() * 1e3 / reps as f64;
+        let tc1 = Instant::now();
+        let mut lhs = RistrettoPoint::default();
+        for _ in 0..reps {
+            lhs = parallel_multiscalar_mul(&scalars, &points);
+        }
+        let msm_ms = tc1.elapsed().as_secs_f64() * 1e3 / reps as f64;
+        assert_eq!(lhs, single, "parallel MSM must equal single MSM");
+
+        let total = challenge_ms + coeff_ms + msm_ms;
+        println!("[decomp] N={n}  (avg of {reps} reps) — production path");
+        println!("  (a) challenge (Fiat-Shamir, parallel compress + SHA3) = {challenge_ms:>7.1} ms  {:>4.0}%", 100.0 * challenge_ms / total);
+        println!("  (b) coefficient products (recursive doubling)         = {coeff_ms:>7.1} ms  {:>4.0}%  (naïve N·m was {coeff_naive_ms:>6.1} ms)", 100.0 * coeff_ms / total);
+        println!("  (c) MSM (chunked parallel)                            = {msm_ms:>7.1} ms  {:>4.0}%  (single MSM was {msm_single_ms:>6.1} ms)", 100.0 * msm_ms / total);
+        println!("  sum of parts                                          = {total:>7.1} ms");
+    }
+
+    /// Consensus lock for the parallelized Fiat-Shamir transcript: the parallel
+    /// compression path (N ≥ `FS_PARALLEL_THRESHOLD`) MUST be byte-identical and
+    /// order-preserving vs the serial `compress().to_bytes()` map. Every
+    /// challenge fn (`challenge`, `challenge_ki`, `challenge_spark`) routes its
+    /// point compressions through `compress_points_for_transcript`, so this
+    /// single equality is what makes all three challenges bit-for-bit unchanged
+    /// — i.e. the parallelization is a verify-cost optimization, never a
+    /// consensus change. Checked just below, at, and well above the threshold.
+    #[test]
+    fn compress_for_transcript_parallel_equals_serial() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0xC0FFEE);
+        for &n in &[1usize, 255, 256, 257, 1024, 4096] {
+            let pts: Vec<RistrettoPoint> =
+                (0..n).map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng)).collect();
+            let got = compress_points_for_transcript(&pts);
+            let want: Vec<[u8; 32]> = pts.iter().map(|p| p.compress().to_bytes()).collect();
+            assert_eq!(got, want, "parallel compression must equal serial at n={n}");
+        }
+    }
+
+    /// End-to-end exercise of the parallel transcript path on the live shielded
+    /// spend verifier: an anon set of 512 (≥ the threshold) forces
+    /// `challenge_spark` through the parallel compressions on BOTH prove and
+    /// verify. An honest spend must still verify (prover and verifier reproduce
+    /// the identical challenge), and a tampered member must still be rejected.
+    #[test]
+    fn spend_spark_v6_parallel_transcript_round_trip() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0x5151_5151);
+        let (m, l) = (9usize, 300usize); // n = 512 ≥ FS_PARALLEL_THRESHOLD
+        let n = 1usize << m;
+        let value = 7777u64;
+        let serial = Scalar::random(&mut rng);
+        let blinding = Scalar::random(&mut rng);
+        let value_blinding = Scalar::random(&mut rng);
+        let mut coins: Vec<RistrettoPoint> = (0..n).map(|i| filler(i as u64 + 9000)).collect();
+        coins[l] = gen_gv() * Scalar::from(value) + gen_h() * serial + gen_k() * blinding;
+        let msg = [7u8; 32];
+        let proof = prove_spend_spark(&coins, l, value, &serial, &blinding, &value_blinding, &msg, &mut rng)
+            .expect("honest large-set spend proves");
+        verify_spend_spark(&coins, &proof, &msg).expect("honest large-set spend verifies");
+        let mut bad = coins.clone();
+        bad[(l + 1) % n] += gen_k() * Scalar::from(1u64);
+        assert!(verify_spend_spark(&bad, &proof, &msg).is_err(), "tampered member must reject");
+    }
+
+    /// Lock for the recursive-doubling coefficient products: the ~2N-mult
+    /// `coeff_products` MUST equal the naïve N·m double loop, index for index,
+    /// at every size. Same scalars ⇒ same verification equation ⇒ no consensus
+    /// change.
+    #[test]
+    fn coeff_products_doubling_equals_naive() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0xD00D);
+        for m in [1usize, 2, 3, 9, 12] {
+            let n = 1usize << m;
+            let f: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut rng)).collect();
+            let x = Scalar::random(&mut rng);
+            let fast = coeff_products(&f, x);
+            let mut naive = Vec::with_capacity(n);
+            for i in 0..n {
+                let mut prod = Scalar::ONE;
+                for (j, f_j) in f.iter().enumerate() {
+                    let factor = if (i >> j) & 1 == 1 { *f_j } else { x - f_j };
+                    prod *= factor;
+                }
+                naive.push(prod);
+            }
+            assert_eq!(fast, naive, "coeff doubling must equal naive at m={m}");
+        }
+    }
+
+    /// Lock for the parallel multi-exponentiation: the chunked-and-summed MSM
+    /// MUST equal a single `vartime_multiscalar_mul` at every size — below, at,
+    /// and well above the parallel threshold. Bit-identical point ⇒ identical
+    /// accept/reject ⇒ no consensus change.
+    #[test]
+    fn parallel_msm_equals_single() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0xBEEF);
+        for &n in &[1usize, 100, 1023, 1024, 1025, 4096, 32768] {
+            let pts: Vec<RistrettoPoint> =
+                (0..n).map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng)).collect();
+            let scs: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+            let single = RistrettoPoint::vartime_multiscalar_mul(scs.iter(), pts.iter());
+            let par = parallel_multiscalar_mul(&scs, &pts);
+            assert_eq!(single, par, "parallel MSM must equal single at n={n}");
+        }
     }
 
     #[test]
