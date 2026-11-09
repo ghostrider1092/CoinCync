@@ -73,6 +73,12 @@ pub mod spark_balance; // CIP-Shielded (value-balance / excess proof)
 pub mod spark_range; // CIP-Shielded (value range binding via BP+)
 #[cfg(feature = "sketch-gk-proof")]
 pub mod spark_turnstile; // CIP-Shielded (transparent⇄shielded value turnstile)
+
+/// Rolling state-accumulator SPIKE (ECMH over Ristretto). Gated OFF and inert —
+/// the pure commitment rule only, NOT wired into the header/validation/apply
+/// (that is the coordinated-fork follow-up). See the module header. CIP-StateRoot.
+#[cfg(feature = "state-accumulator")]
+pub mod state_accumulator;
 #[cfg(feature = "sketch-gk-proof")]
 pub mod spark_note; // CIP-Shielded (Note Connector: stealth⇄bound-coin detect/recover)
 pub mod range_verify_strategy; // verification-strategy slot for block range proofs
