@@ -433,13 +433,24 @@ pub fn validate_block_ctx(
                 // gated solely on `fast_sync` (requested AND the feature enabled);
                 // every other path runs the full check below.
                 if fast_sync_requested {
-                    tracing::warn!(
-                        "Checkpoint crypto skip requested at height {} but this build \
-                         does not have the insecure-fast-sync feature — running full \
-                         verification. Rebuild with `--features insecure-fast-sync` \
-                         only for explicitly trusted dev/testnet bootstrap flows.",
-                        block.height()
-                    );
+                    // Below a checkpoint, but this is a normal production build
+                    // (no insecure-fast-sync feature) so PoW/crypto is STILL fully
+                    // verified below. Log once per process — a fresh IBD past a
+                    // checkpoint at height N would otherwise emit N identical lines
+                    // (one per below-checkpoint block). Security behaviour (full
+                    // verification) is unchanged; this only de-spams the notice.
+                    static WARNED_FULL_VERIFY_BELOW_CHECKPOINT: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !WARNED_FULL_VERIFY_BELOW_CHECKPOINT
+                        .swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        tracing::info!(
+                            "Below checkpoint {} and built without the insecure-fast-sync \
+                             feature — running FULL PoW/crypto verification for every \
+                             below-checkpoint block (the safe default; logged once).",
+                            checkpoint_height.unwrap_or(0)
+                        );
+                    }
                 }
                 // Full PoW verification including VDF anchor recomputation.
                 // TEST-ONLY: the `test-fast-pow` feature (INSECURE, off by

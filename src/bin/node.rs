@@ -549,23 +549,70 @@ async fn main() {
                     .map(|c| (c.height, c.hash))
                     .collect(),
             };
-            // Optional trusted-source gate. If COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS
-            // is set (comma-separated hex Ed25519 keys), the snapshot must carry
-            // a `manifest.sig` signed by one of them. Unset (the private-fleet
-            // default) means signatures are not required.
-            let trusted_signers: Vec<String> = std::env::var("COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS")
-                .ok()
-                .map(|v| {
-                    v.split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Trusted-source gate — FAIL-CLOSED by default. The snapshot's
+            // `manifest.sig` must be signed by one of the trusted signers, which
+            // default to the keys baked into this binary for the network. This is
+            // what makes a user-downloaded snapshot safe: checkpoints prove it is
+            // our chain, the signature proves it came from a source we trust.
+            // Overrides:
+            //   • COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS=<hex,hex> — replace the baked
+            //     signer set (a private fleet using its own key).
+            //   • COINCYNC_SNAPSHOT_ALLOW_UNSIGNED=1 — waive the requirement
+            //     entirely (INSECURE; only for importing a snapshot you produced
+            //     yourself). Checkpoints + genesis are still enforced either way.
+            let baked_signers: Vec<String> = match network {
+                Network::Testnet => coincync::testnet::TESTNET_SNAPSHOT_SIGNERS,
+                Network::Mainnet => coincync::mainnet::MAINNET_SNAPSHOT_SIGNERS,
+                // regtest/beta are local dev networks — no baked signer.
+                _ => &[],
+            }
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+            let allow_unsigned = std::env::var("COINCYNC_SNAPSHOT_ALLOW_UNSIGNED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
+            let trusted_signers: Vec<String> = if allow_unsigned {
+                tracing::warn!(
+                    "COINCYNC_SNAPSHOT_ALLOW_UNSIGNED set — importing WITHOUT a signature \
+                     requirement. INSECURE; only do this for a snapshot you produced yourself. \
+                     Checkpoints + genesis are still enforced."
+                );
+                Vec::new()
+            } else {
+                match std::env::var("COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS") {
+                    Ok(v) => {
+                        let overridden: Vec<String> = v
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        info!(
+                            "Snapshot trusted signers overridden via env: {} key(s)",
+                            overridden.len()
+                        );
+                        overridden
+                    }
+                    Err(_) => baked_signers,
+                }
+            };
+
             if !trusted_signers.is_empty() {
                 info!(
-                    "Snapshot signature required: {} trusted signer(s) configured",
+                    "Snapshot signature required: {} trusted signer(s)",
                     trusted_signers.len()
+                );
+            } else if !allow_unsigned && matches!(network, Network::Testnet | Network::Mainnet) {
+                // No baked signer for this network (e.g. mainnet before a key is
+                // minted) and no override — a signature cannot be required, which
+                // on a public network is a trust downgrade. Make it loud.
+                tracing::warn!(
+                    "No trusted snapshot signer configured for {} — importing a snapshot here \
+                     trusts its source. Set COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS or ship a baked \
+                     signer key.",
+                    network_subdir
                 );
             }
             let policy = coincync::snapshot::ImportPolicy {

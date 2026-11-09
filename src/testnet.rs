@@ -140,6 +140,33 @@ pub const TESTNET_CHECKPOINT_LIST: &[(u64, &str)] = &[
     // the pre-wipe chain; it was cleared at the 2026-06-04 wipe, re-seeded with
     // the single h=10000 anchor on 2026-10-02, and cleared again here for the
     // consensus relaunch.
+    //
+    // ── 2026-11-08 RE-ANCHOR: the relaunched chain now has real depth (tip
+    // >24000), so a recent anchor is re-added per the note above. h=12000 sits
+    // ~12k blocks below tip (final; no reorg risk at 120s block time). The hash
+    // was read from the live relaunched chain and cross-checked against block
+    // 12001's prev_hash (e9aac949… == 12001.prev_hash). This restores the
+    // long-range-attack defence AND lets `snapshot-import` verify an untrusted
+    // snapshot's state up to this height. Confirmed against two independent
+    // synced fleet nodes (hel2 + seed) on 2026-11-08: both return this hash at
+    // height 12000.
+    (12000, "e9aac9499b2942fdef3e8593236e11938505604cc585cd29681fe9b594615d6f"),
+];
+
+/// Default trusted snapshot-manifest signer public keys for testnet (hex
+/// Ed25519, 32 bytes each). `snapshot-import` requires a `manifest.sig` signed
+/// by one of these by default — the fail-closed "trusted source" gate for a
+/// user-downloaded fast-sync snapshot: checkpoints prove the snapshot *is our
+/// chain*, this signature proves it came from a source we *trust*.
+///
+/// A list so keys rotate or co-sign without a flag day: add the new key, ship a
+/// release, retire the old one a release later. Operators override with
+/// `COINCYNC_SNAPSHOT_TRUSTED_PUBKEYS`, or (private fleet, INSECURE) waive the
+/// requirement with `COINCYNC_SNAPSHOT_ALLOW_UNSIGNED=1`.
+pub const TESTNET_SNAPSHOT_SIGNERS: &[&str] = &[
+    // 2026-11-08: initial maintainer snapshot-signing key. The seed is custodied
+    // off-machine by the maintainer; only this public half lives in the binary.
+    "51a6f0ec688a716a6ab866b8e5e54dac3d81f0e0544695a8c2e2bf5840e20e96",
 ];
 
 pub fn highest_checkpoint_height() -> u64 {
@@ -369,18 +396,14 @@ mod tests {
     fn test_checkpoints_populated() {
         // Heights not in the list return None (no opinion).
         assert_eq!(verify_hardcoded_checkpoint(999_999, &Hash::zero()), None);
-        // 2026-10-06 CONSENSUS RELAUNCH: TESTNET_CHECKPOINT_LIST is INTENTIONALLY
-        // EMPTY. The prior h=10000 anchor pinned the OLD chain (mined under the
-        // pre-#191 difficulty rule), which the current rules reject at height 4;
-        // pinning it would make the relaunched chain fail its own checkpoint at
-        // 10000. The list stays empty until a recent anchor is read from the
-        // relaunched chain's live seed and re-added. A syncing node verifies
-        // from genesis meanwhile (fine while the new chain is short).
+        // 2026-11-08 RE-ANCHOR: a recent checkpoint (h=12000) was re-added now
+        // that the relaunched chain has real depth. The hash was read from the
+        // live chain and cross-checked against block 12001's prev_hash. If you
+        // add a newer anchor, bump this expected height to the new maximum.
         let h = highest_checkpoint_height();
-        assert_eq!(h, 0,
-            "checkpoint list expected EMPTY (highest_checkpoint_height()==0) for the \
-             2026-10-06 relaunch, but highest is {h}; re-adding an anchor is fine — \
-             update this assertion when you do");
+        assert_eq!(h, 12000,
+            "highest checkpoint expected 12000 (the 2026-11-08 re-anchor), but got \
+             {h}; update this assertion when you add a newer anchor");
         // List must be strictly monotonic in height — accidental duplicates
         // or out-of-order entries break the long-range-attack defence.
         let heights: Vec<u64> = TESTNET_CHECKPOINT_LIST.iter().map(|(h, _)| *h).collect();
@@ -409,6 +432,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_snapshot_signers_are_valid_ed25519_pubkeys() {
+        // Each baked snapshot-signer pubkey must be 64 hex chars (32 bytes) and a
+        // valid Ed25519 verifying key — a malformed const would silently break
+        // every snapshot-import's fail-closed trust gate.
+        assert!(
+            !TESTNET_SNAPSHOT_SIGNERS.is_empty(),
+            "testnet must ship at least one trusted snapshot signer (fail-closed import)"
+        );
+        for pk in TESTNET_SNAPSHOT_SIGNERS {
+            assert_eq!(pk.len(), 64, "signer pubkey wrong length: {pk}");
+            let mut bytes = [0u8; 32];
+            hex::decode_to_slice(pk, &mut bytes)
+                .unwrap_or_else(|_| panic!("signer pubkey is not valid hex: {pk}"));
+            ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+                .unwrap_or_else(|e| panic!("signer pubkey not a valid Ed25519 key {pk}: {e}"));
+        }
+    }
+
+    #[test]
+    fn test_reanchor_checkpoint_present() {
+        // The 2026-11-08 re-anchor must resolve through the same public API that
+        // snapshot-import binds a snapshot's state against.
+        let cps = testnet_checkpoints();
+        let anchor = cps
+            .iter()
+            .find(|c| c.height == 12000)
+            .expect("h=12000 re-anchor must be present in testnet_checkpoints()");
+        let mut expect = [0u8; 32];
+        hex::decode_to_slice(
+            "e9aac9499b2942fdef3e8593236e11938505604cc585cd29681fe9b594615d6f",
+            &mut expect,
+        )
+        .unwrap();
+        assert_eq!(anchor.hash, Hash::from_bytes(expect));
     }
 
     #[test]

@@ -192,6 +192,14 @@ pub struct Checkpoint {
     pub hash: Hash,
 }
 
+/// Default trusted snapshot-manifest signer public keys for mainnet (hex
+/// Ed25519). EMPTY until a dedicated mainnet snapshot-signing key is minted at
+/// mainnet launch — deliberately distinct from the testnet key. While empty,
+/// `snapshot-import` on mainnet cannot require a signature (it warns loudly);
+/// mainnet snapshot distribution must wait for a key here. See
+/// [`crate::testnet::TESTNET_SNAPSHOT_SIGNERS`].
+pub const MAINNET_SNAPSHOT_SIGNERS: &[&str] = &[];
+
 /// Mainnet checkpoints for fast sync
 pub fn mainnet_checkpoints() -> Vec<Checkpoint> {
     vec![
