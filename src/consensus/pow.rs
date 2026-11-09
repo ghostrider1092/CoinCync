@@ -1227,11 +1227,26 @@ mod randomx_cache {
         }
     }
 
-    /// Hash a few fixed probes on the new entry and on a light VM over an
-    /// INDEPENDENTLY built cache for the same key. A dataset that came out
-    /// wrong (#235: a whole epoch of rejected blocks) fails here and gets
-    /// rebuilt instead of being mined on. Light entries are skipped: they are
-    /// cheap and a wrong one shows up at once as rejected blocks.
+    /// Number of probe hashes `self_check_entry` compares between the full-mem
+    /// dataset and an independent light build.
+    ///
+    /// #235: 4 was too few. A dataset that disagreed with light only on items
+    /// those 4 fixed probes never read PASSED the check at build, at promotion,
+    /// AND on every post-rejection recheck (which reuses this same function) —
+    /// so the auto-rebuild never fired and the rig mined ~87%-rejected blocks
+    /// for 10.5 h until a manual restart. 64 varied probes drive 64 distinct
+    /// RandomX programs over the dataset, so a disagreeing dataset is caught at
+    /// build and, crucially, on the first rejected block (it then rebuilds
+    /// instead of mining on for hours). ~2048 dataset reads per probe, so this
+    /// is a wide, cheap sample; it is a strong detector, not a byte-for-byte
+    /// proof of a 2 GB dataset (that would mean rebuilding it).
+    const SELF_CHECK_PROBES: u64 = 64;
+
+    /// Hash `SELF_CHECK_PROBES` probes on the new entry and on a light VM over
+    /// an INDEPENDENTLY built cache for the same key, and compare. A full-mem
+    /// dataset that disagrees with light (#235) fails here and gets rebuilt
+    /// instead of being mined on. Light entries are skipped: they ARE the
+    /// reference, and a wrong light cache shows up at once as rejected blocks.
     fn self_check_entry(entry: &DatasetEntry) -> std::result::Result<(), String> {
         if !entry.flags.contains(RandomXFlag::FLAG_FULL_MEM) {
             return Ok(());
@@ -1245,7 +1260,7 @@ mod randomx_cache {
             .map_err(|e| format!("self-check light VM: {}", e))?;
         let vm = RandomXVM::new(entry.flags, Some(entry.cache.clone()), entry.dataset.clone())
             .map_err(|e| format!("self-check VM: {}", e))?;
-        for i in 0..4u64 {
+        for i in 0..SELF_CHECK_PROBES {
             let mut probe = [0u8; 40];
             probe[..32].copy_from_slice(&entry.key);
             probe[32..].copy_from_slice(&i.to_le_bytes());
@@ -1480,6 +1495,21 @@ mod randomx_cache {
             assert!(DATASET_CACHE.read().is_none());
             assert!(DATASET_GENERATION.load(std::sync::atomic::Ordering::Acquire) > gen_before);
             assert!(!recheck_live_entry());
+        }
+
+        /// #235 regression (runs in the normal, light-mode suite — no 2 GB build).
+        /// The self-check must stay a WIDE sample. With only 4 probes, a dataset
+        /// that disagreed with light on items those 4 never read passed the check
+        /// at build, at promotion, AND on every post-rejection recheck (which
+        /// reuses `self_check_entry`), so the auto-rebuild never fired and the rig
+        /// mined ~87%-rejected blocks for 10.5 h. Keep the sample wide.
+        #[test]
+        fn self_check_probe_count_is_wide_enough() {
+            assert!(
+                SELF_CHECK_PROBES >= 32,
+                "#235: too few self-check probes ({SELF_CHECK_PROBES}) — a partially-wrong \
+                 dataset can slip past build/promotion/recheck and mine for hours"
+            );
         }
 
         #[test]
