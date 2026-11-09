@@ -2949,6 +2949,59 @@ async fn cmd_shielded_unshield(
     }
 }
 
+/// Fetch the whole set of UNAVAILABLE pool linking tags (spent on-chain OR on a
+/// pending mempool spend), so a wallet can test its own notes LOCALLY instead of
+/// asking the node about each owned tag one at a time. The per-tag probe
+/// (`is_spark_pool_tag_spent`) revealed the linking tags of a wallet's
+/// still-unspent notes to the node before they were ever spent (#378); this set
+/// is public data, so fetching it whole reveals nothing about which coins the
+/// wallet owns.
+///
+/// The RPC is PAGINATED (`[offset, limit]`, response carries `total`): the set
+/// is GLOBAL (every group's spends), not bounded by the single cover-set group
+/// the wallet scans, so it can outgrow one response. We page until we have all
+/// `total` tags. Returns an error (rather than an empty/partial set) if the node
+/// cannot be reached, so callers STOP instead of assuming everything is unspent.
+#[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+async fn fetch_spent_tag_set(node: &str) -> Result<std::collections::HashSet<Vec<u8>>, String> {
+    // Matches the node's MAX_PAGE cap; a smaller value just means more round
+    // trips. On current testnet the whole set fits in the first page.
+    const PAGE: u64 = 50_000;
+    let mut set = std::collections::HashSet::new();
+    let mut offset: u64 = 0;
+    loop {
+        let resp = rpc_call(node, "get_spark_spent_tags", serde_json::json!([offset, PAGE]))
+            .await
+            .map_err(|e| {
+                format!(
+                    "get_spark_spent_tags: {e} (the node must be a sketch-gk-proof build exposing \
+                     this RPC)"
+                )
+            })?;
+        let total = resp
+            .get("total")
+            .and_then(|v| v.as_u64())
+            .ok_or("get_spark_spent_tags response missing total")?;
+        let arr = resp
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .ok_or("get_spark_spent_tags response missing tags array")?;
+        let got = arr.len() as u64;
+        for t in arr {
+            let hexs = t.as_str().ok_or("spent tag entry not a string")?;
+            set.insert(hex::decode(hexs).map_err(|e| format!("bad spent tag hex: {e}"))?);
+        }
+        offset += got;
+        // Done once we've pulled the whole set. The `got == 0` guard stops a
+        // stuck loop if the node ever reports more remaining than it returns
+        // (e.g. `total` shrank mid-paging after a reorg) rather than spinning.
+        if offset >= total || got == 0 {
+            break;
+        }
+    }
+    Ok(set)
+}
+
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
 async fn scan_live_cover_set(
     seed: &[u8],
@@ -2965,21 +3018,21 @@ async fn scan_live_cover_set(
     // balance from double-counting a spent note (e.g. a transfer's funding note
     // after it is spent) and stops `shielded-send` from picking a spent one.
     let backend = LibsparkBackend;
+    // Fetch the whole "unavailable" tag set (spent on-chain OR pending in the
+    // mempool) in ONE call and test owned notes against it LOCALLY. This
+    // replaces a per-coin `is_spark_pool_tag_spent` probe, which told the node
+    // the linking tag of every still-unspent note this wallet owns before it was
+    // ever spent (#378). A fetch error STOPS here (via `?`) rather than silently
+    // treating notes as unspent the way the old `unwrap_or(false)` did — that
+    // gave a wrong balance and let `shielded-send` pick an already-spent note
+    // whenever the node was flaky.
+    let spent_tags = fetch_spent_tag_set(node).await?;
     let mut owned: Vec<(usize, u64, Vec<u8>)> = Vec::new(); // (spend_index, value, ctx)
     for (pos, (_, coin, ctx)) in entries.iter().enumerate() {
         if let Ok(Some(id)) = backend.identify(seed, &CoinBytes(coin.clone()), ctx) {
-            // Exclude if this note's linking tag is already spent on-chain.
+            // Exclude if this note's linking tag is already spent or pending.
             if let Some(tag) = spark_connector::ffi::coin_ltag(seed, &CoinBytes(coin.clone()), ctx) {
-                let spent = rpc_call(
-                    node,
-                    "is_spark_pool_tag_spent",
-                    serde_json::json!([hex::encode(&tag.0)]),
-                )
-                .await
-                .ok()
-                .and_then(|r| r.get("spent").and_then(|v| v.as_bool()))
-                .unwrap_or(false);
-                if spent {
+                if spent_tags.contains(&tag.0) {
                     continue;
                 }
             }

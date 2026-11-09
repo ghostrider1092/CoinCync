@@ -1187,6 +1187,16 @@ impl Mempool {
         self.linking_tags.contains(tag)
     }
 
+    /// A snapshot of every shielded linking tag on a pending mempool spend. A
+    /// wallet fetches this whole set once (folded into `get_spark_spent_tags`)
+    /// and tests its owned notes LOCALLY, instead of asking the node about each
+    /// tag one at a time — the per-tag query leaks the tags of a wallet's
+    /// still-unspent notes to the node before they are ever spent (#378). Always
+    /// empty in the default (non-shielded) build (`linking_tags` stays empty).
+    pub fn linking_tags_snapshot(&self) -> Vec<Vec<u8>> {
+        self.linking_tags.iter().cloned().collect()
+    }
+
     /// Whether any mempool tx is shielded. A shielded tx's consensus validity can
     /// change under a NEW BLOCK without a key-image collision (its tag gets spent,
     /// or its mint's coins land in the pool, e.g. after Dandelion fluff re-adds a
@@ -1885,6 +1895,12 @@ impl SharedMempool {
         self.read_lock().contains_linking_tag(tag)
     }
 
+    /// A snapshot of all pending mempool linking tags
+    /// (see `Mempool::linking_tags_snapshot`).
+    pub fn linking_tags_snapshot(&self) -> Vec<Vec<u8>> {
+        self.read_lock().linking_tags_snapshot()
+    }
+
     pub fn set_height(&self, height: u64) {
         self.write_lock().set_height(height)
     }
@@ -2282,6 +2298,17 @@ mod shielded_mempool_admission_172 {
         // A spend of a DIFFERENT coin is admitted.
         let h3 = mp.add(tx_3).expect("different-coin spend admitted");
         assert!(mp.contains(&h3));
+        // #378: the bulk snapshot a wallet fetches (so it need not probe the node
+        // per owned tag) carries EXACTLY the pending spends' tags — coin #2's and
+        // coin #3's, no more — so a local membership test matches the old per-tag
+        // `contains_linking_tag` result for every tag.
+        let snap: std::collections::HashSet<Vec<u8>> =
+            mp.linking_tags_snapshot().into_iter().collect();
+        assert_eq!(snap.len(), 2, "two pending spends → two pending tags");
+        for t in tag_2a.iter().chain(tag_3.iter()) {
+            assert!(snap.contains(t), "pending tag present in snapshot");
+            assert!(mp.contains_linking_tag(t), "snapshot agrees with per-tag query");
+        }
         // Removing the first frees its tag → the previously-conflicting spend admits.
         mp.remove(&h2a);
         let h2b = mp.add(tx_2b).expect("tag freed after removal → re-admit");
