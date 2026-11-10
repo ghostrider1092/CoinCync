@@ -155,6 +155,59 @@ fn churn_log_path() -> Option<PathBuf> {
     Some(p.join("cynchub-churn.log"))
 }
 
+// ── TOTP 2FA (app-access gate) ─────────────────────────────────────
+// CyncHub persists only the shared secret; the 6-digit codes are produced by
+// the user's authenticator and VERIFIED in the webview (WebCrypto HMAC-SHA1).
+// This gates the APP, never the funds: the 24-word seed restores the wallet in
+// any client, so a lost authenticator can never lock anyone out of their money.
+fn totp_secret_path() -> Option<PathBuf> {
+    let p = dirs_next::config_dir()?.join("coincync");
+    let _ = std::fs::create_dir_all(&p);
+    Some(p.join("cynchub-2fa.json"))
+}
+
+#[derive(Serialize)]
+struct TotpStatus {
+    enabled: bool,
+}
+
+#[tauri::command]
+fn totp_status() -> TotpStatus {
+    let enabled = totp_secret_path().map(|p| p.exists()).unwrap_or(false);
+    TotpStatus { enabled }
+}
+
+/// Return the stored base32 secret (for in-webview verification). Only present
+/// after the user has enabled 2FA; None otherwise.
+#[tauri::command]
+fn totp_get() -> Option<String> {
+    let p = totp_secret_path()?;
+    let raw = std::fs::read_to_string(&p).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v["secret"].as_str().map(|s| s.to_string())
+}
+
+#[tauri::command]
+fn totp_set(secret: String) -> Result<(), String> {
+    let s = secret.trim().to_uppercase();
+    if s.len() < 16 {
+        return Err("2FA secret too short".into());
+    }
+    let p = totp_secret_path().ok_or("no config dir")?;
+    let body = serde_json::json!({ "secret": s }).to_string();
+    std::fs::write(&p, body).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn totp_disable() -> Result<(), String> {
+    if let Some(p) = totp_secret_path() {
+        if p.exists() {
+            std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 // ── child-process reaping across a crash/force-kill ─────────────────
 // Rust's Drop kills child miner/node/churn processes on a clean exit, but NOT
 // on a crash or a force-kill (SIGKILL/TerminateProcess) — those orphan the
@@ -1825,7 +1878,11 @@ fn main() {
             unshield_funds,
             start_churn,
             stop_churn,
-            churn_status
+            churn_status,
+            totp_status,
+            totp_get,
+            totp_set,
+            totp_disable
         ])
         .run(tauri::generate_context!())
         .expect("error while running CyncHub");

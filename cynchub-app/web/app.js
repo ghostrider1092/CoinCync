@@ -605,6 +605,12 @@ async function openSendReview(d){
   if (!known) warns.push("First time sending to this address — check it character-by-character against your source.");
   if (S.transparent > 0 && d.amt > S.transparent * 0.5) warns.push(`This is ${Math.round(d.amt / S.transparent * 100)}% of your spendable balance.`);
 
+  // 2FA gate — opt-in, and only for a LARGE send (over half of spendable, or
+  // when spendable is unknown). Small sends stay frictionless.
+  let needTotp = false, totpSecret = null;
+  const isLarge = !(S.transparent > 0) || d.amt > S.transparent * 0.5;
+  try { const st = await invoke("totp_status"); if (st && st.enabled && isLarge){ needTotp = true; totpSecret = await invoke("totp_get"); } } catch {}
+
   const remaining = Math.max(0, S.transparent - d.amt);
   const canSend = blocks.length === 0;
   const row = (k, v) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
@@ -622,6 +628,7 @@ async function openSendReview(d){
       ${row("Spendable now", `${f(S.transparent)} ${S.unit}`)}
       ${row("Balance after", `~${f(remaining)} ${S.unit} <span class="note" style="display:inline;color:var(--text-tertiary)">(before fee)</span>`)}
       ${(blocks.length || warns.length) ? `<div style="margin-top:10px">${blockHtml}${warnHtml}</div>` : ""}
+      ${needTotp ? `<div class="at-field" style="margin-top:12px"><div class="fl">2FA code — required for a large send</div><input class="at-input" id="svCode" inputmode="numeric" maxlength="6" placeholder="6-digit authenticator code" autocomplete="one-time-code"></div>` : ""}
       <button class="cta" id="svConfirm" style="width:100%;margin-top:12px" ${canSend ? "" : "disabled"}>${canSend ? `Confirm — send ${d.amt} ${S.unit}` : "Resolve the blockers above to send"}</button>
       <div class="note" id="svOut" style="margin-top:10px;display:none"></div>
       <p class="note" style="margin-top:10px">Transfers are private and <b>irreversible</b> — once submitted they can't be recalled. The recipient address is re-checked here to catch clipboard tampering.</p>
@@ -630,8 +637,16 @@ async function openSendReview(d){
   ov.onclick = (e) => { if (e.target === ov) ov.style.display = "none"; };
   const conf = ov.querySelector("#svConfirm");
   if (conf && canSend) conf.onclick = async () => {
-    conf.disabled = true; conf.textContent = "Sending…";
     const svOut = ov.querySelector("#svOut");
+    // Large-send 2FA check before anything is submitted.
+    if (needTotp){
+      const code = (ov.querySelector("#svCode") && ov.querySelector("#svCode").value || "").trim();
+      if (!totpSecret || !(await totpVerify(totpSecret, code))){
+        if (svOut){ svOut.style.display = "block"; svOut.style.color = "var(--red)"; svOut.textContent = "Enter a valid 2FA code to confirm this large send."; }
+        return;
+      }
+    }
+    conf.disabled = true; conf.textContent = "Sending…";
     try {
       const txid = await invoke("send_transaction", { address: d.addr, amount: d.amt, memo: d.memo || null, feeMultiplier: d.fee });
       recordSend({ txid, address: d.addr, amount: d.amt, memo: d.memo, ts: Date.now(), height: S.tip || 0 });
@@ -1347,6 +1362,9 @@ function settings(){
       <p class="note" style="margin-top:6px">A hard ceiling on any single send — the review step blocks anything above it. Blank = no cap.</p>
       <div style="margin-top:14px"><button class="ghost" id="lockBtn">Lock now</button></div>
     </div>
+    <div class="panel" style="margin-top:16px"><div class="plabel">Two-factor (authenticator)</div>
+      <div id="twofaBox"><div class="note">Checking…</div></div>
+    </div>
     ${backupPanel()}
     <div class="panel" style="margin-top:16px"><div class="plabel">Privacy · ghost mode</div>
       <div class="kv"><span class="k">Auto-churn</span>
@@ -1373,6 +1391,7 @@ function wireSettings(){
     const v = raw === "" ? 0 : (parseFloat(raw) || 0);
     setSendCap(v); capSave.textContent = "Saved ✓"; setTimeout(()=>capSave.textContent="Set", 1400);
   };
+  render2fa();
   view.querySelectorAll("[data-theme-set]").forEach(b => b.onclick = () => { setTheme(b.dataset.themeSet); render("settings"); });
   view.querySelectorAll("[data-accent-set]").forEach(b => b.onclick = () => { setAccent(b.dataset.accentSet); render("settings"); });
   const ac = document.getElementById("accentCustom");
@@ -1540,6 +1559,84 @@ document.querySelectorAll(".nav[data-screen]").forEach(n => n.onclick = () => re
 // ── auth gate: unlock / create / restore (desktop app only) ─────────
 const authEl = (() => { const d = document.createElement("div"); d.className = "auth"; d.style.display = "none"; document.body.appendChild(d); return d; })();
 const authLogo = `<div class="auth-logo">C</div>`;
+// ── TOTP 2FA (RFC 6238, verified in-webview via WebCrypto HMAC-SHA1) ─
+// Gates the APP, never the funds: the 24-word seed restores the wallet in any
+// client, so a lost authenticator can never lock anyone out of their money.
+const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+function b32encode(bytes){ let bits=0,val=0,out=""; for(const b of bytes){ val=(val<<8)|b; bits+=8; while(bits>=5){ out+=B32[(val>>>(bits-5))&31]; bits-=5; } } if(bits>0) out+=B32[(val<<(5-bits))&31]; return out; }
+function b32decode(str){ const s=(str||"").toUpperCase().replace(/[\s=]/g,""); let bits=0,val=0; const out=[]; for(const c of s){ const i=B32.indexOf(c); if(i<0) continue; val=(val<<5)|i; bits+=5; if(bits>=8){ out.push((val>>>(bits-8))&0xff); bits-=8; } } return new Uint8Array(out); }
+function newTotpSecret(){ const r=new Uint8Array(20); crypto.getRandomValues(r); return b32encode(r); }
+function totpUri(secret, label){ return `otpauth://totp/CyncHub:${encodeURIComponent(label||"wallet")}?secret=${secret}&issuer=CyncHub&digits=6&period=30&algorithm=SHA1`; }
+async function totpCode(secret, forTimeSec){
+  const key = b32decode(secret);
+  const counter = Math.floor((forTimeSec==null ? Date.now()/1000 : forTimeSec) / 30);
+  const buf = new ArrayBuffer(8), dv = new DataView(buf);
+  dv.setUint32(0, Math.floor(counter / 0x100000000)); dv.setUint32(4, counter >>> 0);
+  const ck = await crypto.subtle.importKey("raw", key, { name:"HMAC", hash:"SHA-1" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", ck, buf));
+  const off = mac[mac.length-1] & 0xf;
+  const bin = ((mac[off]&0x7f)<<24) | ((mac[off+1]&0xff)<<16) | ((mac[off+2]&0xff)<<8) | (mac[off+3]&0xff);
+  return String(bin % 1000000).padStart(6, "0");
+}
+async function totpVerify(secret, code){
+  const c = (code||"").replace(/\D/g,"");
+  if (!/^\d{6}$/.test(c) || !secret) return false;
+  const now = Date.now()/1000;
+  for (const w of [-1,0,1]){ try { if (await totpCode(secret, now + w*30) === c) return true; } catch { return false; } }
+  return false;
+}
+function totpAvailable(){ return !!(window.crypto && crypto.subtle && crypto.getRandomValues); }
+// After a correct password, require the 2FA code if 2FA is enabled.
+async function afterUnlock(){
+  try { const st = await invoke("totp_status"); if (st && st.enabled){ showAuth("totp"); return; } } catch {}
+  enterApp();
+}
+// Settings → Two-factor panel: enable (scan + confirm a code) or disable (code).
+async function render2fa(){
+  const box = document.getElementById("twofaBox"); if (!box) return;
+  if (!totpAvailable()){ box.innerHTML = `<div class="note" style="color:var(--amber)">This build can't run 2FA (no secure crypto available in the webview).</div>`; return; }
+  let enabled = false; try { const st = await invoke("totp_status"); enabled = !!(st && st.enabled); } catch {}
+  const msgFn = () => { const m = document.getElementById("twofaMsg"); return (t,c)=>{ if(m){ m.style.display="block"; m.style.color=c; m.textContent=t; } }; };
+  if (enabled){
+    box.innerHTML = `<div class="kv"><span class="k">Status</span><span class="v g">● enabled</span></div>
+      <p class="note" style="margin-top:8px">A 6-digit code is required to unlock CyncHub and to confirm a <b>large</b> send (over half your spendable balance).</p>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center"><input class="at-input" id="twofaOff" inputmode="numeric" maxlength="6" placeholder="code to disable" style="max-width:150px;padding:7px 11px"><button class="seg" id="twofaDisable">Disable 2FA</button></div>
+      <div class="note" id="twofaMsg" style="margin-top:8px;display:none"></div>`;
+    const btn = document.getElementById("twofaDisable");
+    if (btn) btn.onclick = async () => {
+      const show = msgFn();
+      const code = (document.getElementById("twofaOff").value || "").trim();
+      let secret = null; try { secret = await invoke("totp_get"); } catch {}
+      if (!secret || !(await totpVerify(secret, code))){ show("Enter a current code to disable 2FA.", "var(--red)"); return; }
+      try { await invoke("totp_disable"); render2fa(); } catch(e){ show(String((e&&e.message)||e), "var(--red)"); }
+    };
+    return;
+  }
+  box.innerHTML = `<p class="note">Add a second factor with any authenticator app (Google Authenticator, Authy…). Codes are generated on your phone and verified on this device — no server, no email or phone number. It gates the app, not your funds; your seed always restores the wallet.</p>
+    <button class="seg" id="twofaStart" style="margin-top:10px">Set up 2FA</button>`;
+  const start = document.getElementById("twofaStart");
+  if (start) start.onclick = async () => {
+    const secret = newTotpSecret();
+    const uri = totpUri(secret, (S.network || "testnet"));
+    let qr = ""; try { qr = await invoke("generate_qr_svg", { payload: uri }); } catch {}
+    box.innerHTML = `
+      <p class="note">Scan this in your authenticator app (or type the secret in by hand), then enter the 6-digit code it shows to confirm.</p>
+      ${qr?`<div style="display:flex;justify-content:center;margin:12px 0"><div style="width:168px;height:168px;background:#fff;border-radius:8px;padding:8px;box-sizing:border-box">${qr}</div></div>`:""}
+      <div class="kv"><span class="k">Secret</span><span class="v mono" style="font-size:11px;word-break:break-all">${secret}</span></div>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center"><input class="at-input" id="twofaCode" inputmode="numeric" maxlength="6" placeholder="6-digit code" style="max-width:150px;padding:7px 11px"><button class="cta" id="twofaConfirm" style="padding:8px 16px">Confirm &amp; enable</button></div>
+      <div class="note" id="twofaMsg" style="margin-top:8px;display:none"></div>
+      <p class="note" style="margin-top:10px">Keep this secret and your 24-word seed safe. Lose the authenticator → restore the wallet from seed in a fresh install.</p>`;
+    const conf = document.getElementById("twofaConfirm");
+    if (conf) conf.onclick = async () => {
+      const show = msgFn();
+      const code = (document.getElementById("twofaCode").value || "").trim();
+      if (!(await totpVerify(secret, code))){ show("That code didn't match — check your authenticator and try again.", "var(--red)"); return; }
+      try { await invoke("totp_set", { secret }); show("2FA enabled ✓", "var(--green)"); setTimeout(render2fa, 900); }
+      catch(e){ show(String((e&&e.message)||e), "var(--red)"); }
+    };
+  };
+}
+
 function aerr(m){ const e = document.getElementById("aerr"); if (e) e.textContent = m || ""; }
 function showAuth(mode, data){ authEl.style.display = "grid"; authEl.innerHTML = authHtml(mode, data); wireAuth(mode); const i = authEl.querySelector("input,textarea"); if (i) i.focus(); }
 function hideAuth(){ authEl.style.display = "none"; authEl.innerHTML = ""; }
@@ -1592,6 +1689,11 @@ function authHtml(mode, data){
     ${grid}
     <button class="auth-btn" id="adone">I've written it down → verify</button></div>`;
   }
+  if (mode === "totp") return `<div class="auth-card">${authLogo}<div class="auth-eyebrow">Two-factor</div><div class="auth-title">Enter your code</div>
+    <div class="auth-err" id="aerr"></div>
+    <input class="auth-input" id="a2fa" inputmode="numeric" maxlength="6" placeholder="6-digit authenticator code" autocomplete="one-time-code">
+    <button class="auth-btn" id="abtn">Verify</button>
+    <div class="auth-foot">Lost your authenticator? Your 24-word seed restores this wallet in a fresh install — your funds are safe.</div></div>`;
   if (mode === "verify"){
     const v = verifyState || { positions:[], options:{} };
     const blocks = v.positions.map(pos => `
@@ -1612,9 +1714,20 @@ function authHtml(mode, data){
 function wireAuth(mode){
   if (mode === "unlock"){
     const go = async () => { const pw = document.getElementById("apw").value; if (!pw){ aerr("enter your password"); return; }
-      aerr(""); try { await invoke("unlock_wallet", { password: pw }); enterApp(); } catch(e){ aerr("invalid password"); } };
+      aerr(""); try { await invoke("unlock_wallet", { password: pw }); afterUnlock(); } catch(e){ aerr("invalid password"); } };
     document.getElementById("abtn").onclick = go;
     document.getElementById("apw").onkeydown = e => { if (e.key === "Enter") go(); };
+  } else if (mode === "totp"){
+    const go = async () => {
+      const code = (document.getElementById("a2fa").value || "").trim();
+      aerr("");
+      let secret = null; try { secret = await invoke("totp_get"); } catch {}
+      if (!secret){ enterApp(); return; } // 2FA secret gone → never lock the user out
+      if (await totpVerify(secret, code)) enterApp();
+      else aerr("that code isn't valid — check your authenticator");
+    };
+    document.getElementById("abtn").onclick = go;
+    document.getElementById("a2fa").onkeydown = e => { if (e.key === "Enter") go(); };
   } else if (mode === "onboard"){
     document.getElementById("acreate").onclick = () => showAuth("create");
     document.getElementById("arestore").onclick = () => showAuth("restore");
