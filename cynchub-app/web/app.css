@@ -15,6 +15,27 @@
   --text-primary:#1b1a16; --text-secondary:#53524c; --text-tertiary:#86857d; --text-quaternary:#a6a59c;
   --gold:#a9772e; --gold-200:#8a5f1f; --green:#1f9d57; --amber:#b5811b; --red:#c23b3b; --violet:#6b5ad6;
 }
+/* Midnight — deep blue dark, same gold accent. */
+:root[data-theme="midnight"]{
+  --bg-base:#0a0e18; --bg-panel:rgba(130,160,255,0.045); --bg-panel-2:rgba(130,160,255,0.08);
+  --border:rgba(150,180,255,0.11); --border-strong:rgba(150,180,255,0.2);
+  --text-primary:#e9eefb; --text-secondary:#a6b1ca; --text-tertiary:#6c7689; --text-quaternary:#4d5568;
+  --gold:#d8ab63; --gold-200:#eccf95; --green:#39e08d; --amber:#ffcf6b; --red:#ff6b6b; --violet:#a596ff;
+}
+/* Slate — cool neutral dark. */
+:root[data-theme="slate"]{
+  --bg-base:#14171c; --bg-panel:rgba(200,214,230,0.035); --bg-panel-2:rgba(200,214,230,0.06);
+  --border:rgba(200,214,230,0.1); --border-strong:rgba(200,214,230,0.18);
+  --text-primary:#e7eaee; --text-secondary:#a3abb5; --text-tertiary:#6e767f; --text-quaternary:#4f565f;
+  --gold:#d4a059; --gold-200:#e8c88f; --green:#34e388; --amber:#ffc960; --red:#ff6b6b; --violet:#9b8cff;
+}
+/* Sepia — warm parchment light, bronze accent. */
+:root[data-theme="sepia"]{
+  --bg-base:#f1e9da; --bg-panel:rgba(60,40,20,0.03); --bg-panel-2:rgba(60,40,20,0.06);
+  --border:rgba(60,40,20,0.13); --border-strong:rgba(60,40,20,0.22);
+  --text-primary:#2a2015; --text-secondary:#5c4e3c; --text-tertiary:#8a7a64; --text-quaternary:#ab9c86;
+  --gold:#9a6b24; --gold-200:#7c5318; --green:#2f7d3f; --amber:#a9781a; --red:#b23a2f; --violet:#6a52c0;
+}
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{background:var(--bg-base);color:var(--text-primary);font-family:var(--sans);-webkit-font-smoothing:antialiased;font-size:14px;line-height:1.4}
@@ -67,7 +88,8 @@ body{background:var(--bg-base);color:var(--text-primary);font-family:var(--sans)
 .seg{background:transparent;border:1px solid var(--border);color:var(--text-secondary);border-radius:var(--r-sm);font-family:var(--mono);font-size:11.5px;padding:5px 11px;cursor:pointer}
 .seg:hover{border-color:var(--border-strong);color:var(--text-primary)}
 .seg.on{background:var(--gold);border-color:var(--gold);color:#0b0b0b;font-weight:700}
-:root[data-theme="light"] .seg.on,:root[data-theme="light"] .cta{color:#f6f5f1}
+:root[data-theme="light"] .seg.on,:root[data-theme="light"] .cta,
+:root[data-theme="sepia"] .seg.on,:root[data-theme="sepia"] .cta{color:#f6f5f1}
 /* Receive QR: force the rendered SVG to fit its 180px white card (the qrcode
    crate emits a 200–400px SVG that otherwise overflows onto the address). */
 #rQr svg{width:100%;height:100%;display:block}

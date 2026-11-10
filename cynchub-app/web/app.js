@@ -93,9 +93,17 @@ const num = n => (n == null ? "—" : Number(n).toLocaleString());
 // ── theme + auto-lock (persisted per-device in localStorage) ─────────
 function lsGet(k, d){ try { const v = localStorage.getItem(k); return v==null ? d : v; } catch { return d; } }
 function lsSet(k, v){ try { localStorage.setItem(k, String(v)); } catch {} }
-function getTheme(){ return lsGet("cynchub.theme","dark") === "light" ? "light" : "dark"; }
-function applyTheme(t){ document.documentElement.setAttribute("data-theme", t === "light" ? "light" : "dark"); }
-function setTheme(t){ t = t==="light"?"light":"dark"; lsSet("cynchub.theme", t); applyTheme(t); }
+const THEMES = [
+  { id:"dark", label:"Dark" },
+  { id:"light", label:"Light" },
+  { id:"midnight", label:"Midnight" },
+  { id:"slate", label:"Slate" },
+  { id:"sepia", label:"Sepia" },
+];
+const THEME_IDS = THEMES.map(t => t.id);
+function getTheme(){ const t = lsGet("cynchub.theme","dark"); return THEME_IDS.includes(t) ? t : "dark"; }
+function applyTheme(t){ if (!THEME_IDS.includes(t)) t = "dark"; document.documentElement.setAttribute("data-theme", t); }
+function setTheme(t){ if (!THEME_IDS.includes(t)) t = "dark"; lsSet("cynchub.theme", t); applyTheme(t); }
 function getAutoLock(){ const n = parseInt(lsGet("cynchub.autolock","15"),10); return Number.isFinite(n) && n>=0 ? n : 15; } // minutes; 0 = off
 function setAutoLock(m){ lsSet("cynchub.autolock", m); armIdleLock(); }
 applyTheme(getTheme());
@@ -499,8 +507,11 @@ function attest(){
   const isBal = atKind === "balance";
   const toVal = atFill.to != null ? atFill.to : (S.tip||0);
   const cfg = isBal ? `
-    <div class="at-field"><div class="fl">Prove this output is worth at least (CYNC)</div><input class="at-input" id="atThr" value="${atFill.thr||"1000"}"></div>
-    <div class="at-field"><div class="fl">Output to prove (optional)</div><input class="at-input" id="atUtxo" placeholder="TXID:VOUT — or leave blank"></div>
+    <div class="at-field"><div class="fl">Prove one of your outputs is worth at least (CYNC)</div><input class="at-input" id="atThr" value="${atFill.thr||"1000"}"></div>
+    <div class="at-field"><div class="fl">Which output to prove</div>
+      <select class="at-input" id="atUtxoSel"><option value="">loading your outputs…</option></select>
+      <div class="note" id="atUtxoNote" style="margin-top:7px">A balance proof reveals that one received output is worth at least your threshold — never the exact amount.</div>
+    </div>
   ` : `
     <div class="at-field"><div class="fl" style="display:flex;gap:16px"><span style="flex:1">From height</span><span style="flex:1">To height</span></div>
       <div style="display:flex;gap:12px"><input class="at-input" id="atFrom" value="${atFill.from||0}"><input class="at-input" id="atTo" value="${toVal}"></div></div>
@@ -524,8 +535,33 @@ function attest(){
     </div>
   `;
 }
+// Load the user's unspent outputs into the balance-proof picker, or guide them
+// to get funds first if they have none (a balance proof needs a real output).
+async function loadAtBalanceOutputs(){
+  const sel = document.getElementById("atUtxoSel");
+  const note = document.getElementById("atUtxoNote");
+  const gen = document.getElementById("atGen");
+  if (!sel) return;
+  if (!IS_TAURI){ sel.innerHTML = `<option value="0">demo output · 49.0000 ${S.unit}</option>`; return; }
+  try {
+    const rows = await invoke("list_received");
+    const unspent = (rows || []).filter(r => !r.spent);
+    if (!unspent.length){
+      sel.innerHTML = `<option value="">— no outputs yet —</option>`; sel.disabled = true;
+      if (note){ note.innerHTML = `You have no received outputs yet — a balance proof needs at least one. <b style="color:var(--gold-200)">Receive</b> or <b style="color:var(--gold-200)">mine</b> some ${S.unit} first, then come back.`; }
+      if (gen){ gen.disabled = true; gen.textContent = "No outputs to prove"; }
+      return;
+    }
+    unspent.sort((a,b) => b.amount - a.amount); // largest first (most likely to clear a threshold)
+    sel.disabled = false;
+    sel.innerHTML = unspent.map(r => `<option value="${r.idx}">${Number(r.amount).toFixed(4)} ${S.unit} · block ${Number(r.height).toLocaleString()}</option>`).join("");
+    if (note){ note.innerHTML = `A balance proof reveals that this output is worth at least your threshold — never the exact amount. Pick one that clears it.`; }
+    if (gen){ gen.disabled = false; gen.textContent = "Generate proof"; }
+  } catch(e){ /* leave placeholder; generate surfaces a clean error */ }
+}
 function wireAttest(){
   document.querySelectorAll("[data-atk]").forEach(b => b.onclick = () => { atKind = b.dataset.atk; render("attest"); });
+  if (atKind === "balance") loadAtBalanceOutputs();
   // one-click presets: set the disclosure kind + prefill its fields
   document.querySelectorAll("[data-atp]").forEach(b => b.onclick = () => {
     const p = AT_PRESETS[b.dataset.atp]; if (!p) return;
@@ -541,9 +577,11 @@ function wireAttest(){
     let res;
     try {
       if (atKind === "balance") {
-        res = await invoke("disclose_balance", { threshold: ($("#atThr").value || "1000").trim() });
-      } else {
         // Tauri v2 exposes Rust snake_case args as camelCase to JS.
+        const sel = $("#atUtxoSel");
+        const ui = sel && sel.value !== "" ? (parseInt(sel.value, 10) || 0) : 0;
+        res = await invoke("disclose_balance", { threshold: ($("#atThr").value || "1000").trim(), utxoIndex: ui });
+      } else {
         res = await invoke("disclose_scoped_view_key", {
           fromHeight: parseInt($("#atFrom").value || "0", 10) || 0,
           toHeight: parseInt($("#atTo").value || "0", 10) || 0,
@@ -551,7 +589,7 @@ function wireAttest(){
       }
     } catch (e) {
       const msg = (e && (e.message || e.toString())) || "could not generate";
-      out.innerHTML = `<div class="note" style="color:var(--red);line-height:1.6"><b>Couldn't generate</b> — ${String(msg)}${IS_TAURI ? " (unlock your wallet first, and make sure it's scanned)." : ""}</div>`;
+      out.innerHTML = `<div class="note" style="color:var(--red);line-height:1.6"><b>Couldn't generate</b> — ${String(msg)}</div>`;
       gen.disabled = false;
       return;
     }
@@ -814,10 +852,9 @@ function settings(){
   return `
     <div class="pageh"><div class="h1">Settings</div><div class="sub">CyncHub · on the CoinCync network</div></div>
     <div class="panel"><div class="plabel">Appearance</div>
-      <div class="kv"><span class="k">Theme</span>
-        <span class="v" style="display:flex;gap:8px">
-          <button class="seg ${theme==='dark'?'on':''}" data-theme-set="dark">Dark</button>
-          <button class="seg ${theme==='light'?'on':''}" data-theme-set="light">Light</button>
+      <div class="kv" style="align-items:flex-start"><span class="k">Theme</span>
+        <span class="v" style="display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end;max-width:360px">
+          ${THEMES.map(t => `<button class="seg ${theme===t.id?'on':''}" data-theme-set="${t.id}">${t.label}</button>`).join("")}
         </span></div>
     </div>
     <div class="panel" style="margin-top:16px"><div class="plabel">Security</div>

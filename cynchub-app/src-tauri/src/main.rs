@@ -270,6 +270,63 @@ fn rpc_call(method: &str, params: serde_json::Value) -> Result<serde_json::Value
     Ok(json.get("result").cloned().unwrap_or(json))
 }
 
+/// Strip ANSI escape sequences (the CLI colorizes its tracing output).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // skip until the terminating 'm' of a CSI sequence
+            while let Some(&n) = chars.peek() {
+                chars.next();
+                if n == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Turn raw CLI stdout+stderr (which mixes tracing log lines — ISO timestamps,
+/// WARN/INFO noise, the misleading "--password visible" warning) into a single
+/// clean, human sentence for the UI. Keeps real ERROR text and non-log lines.
+fn clean_cli_error(raw: &str) -> String {
+    let mut msgs: Vec<String> = Vec::new();
+    for line in strip_ansi(raw).lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // tracing line looks like "2026-11-10T18:45:16.765637Z LEVEL message"
+        let b = t.as_bytes();
+        let is_log = t.len() > 20
+            && b[0].is_ascii_digit()
+            && b.get(4) == Some(&b'-')
+            && t.contains('T')
+            && t.contains('Z');
+        if is_log {
+            // keep only ERROR messages (drop WARN/INFO/DEBUG/TRACE entirely)
+            if let Some(idx) = t.find("ERROR") {
+                let msg = t[idx + 5..].trim();
+                if !msg.is_empty() {
+                    msgs.push(msg.to_string());
+                }
+            }
+            continue;
+        }
+        msgs.push(t.to_string());
+    }
+    let joined = msgs.join(" — ").trim().to_string();
+    if joined.is_empty() {
+        raw.trim().to_string()
+    } else {
+        joined
+    }
+}
+
 fn wallet_cli(bin: &str, args: &[&str], password: &str) -> Result<String, String> {
     let mut cmd = Command::new(bin);
     cmd.args(args)
@@ -290,7 +347,11 @@ fn wallet_cli(bin: &str, args: &[&str], password: &str) -> Result<String, String
     let out = cmd.output().map_err(|e| format!("CLI failed: {}", e))?;
     let s = String::from_utf8_lossy(&out.stdout).to_string();
     if !out.status.success() {
-        return Err(format!("{}{}", s, String::from_utf8_lossy(&out.stderr)));
+        return Err(clean_cli_error(&format!(
+            "{}\n{}",
+            s,
+            String::from_utf8_lossy(&out.stderr)
+        )));
     }
     Ok(s)
 }
@@ -537,7 +598,11 @@ fn json_blob(out: &str) -> Option<String> {
 }
 
 #[tauri::command]
-fn disclose_balance(threshold: String, state: tauri::State<'_, State>) -> Result<Disclosure, String> {
+fn disclose_balance(
+    threshold: String,
+    utxo_index: Option<u64>,
+    state: tauri::State<'_, State>,
+) -> Result<Disclosure, String> {
     let (bin, path, mut pw) = {
         let s = state.lock().map_err(|e| e.to_string())?;
         if !s.unlocked {
@@ -550,9 +615,10 @@ fn disclose_balance(threshold: String, state: tauri::State<'_, State>) -> Result
         return Err("threshold must be positive".into());
     }
     let atomic = (cync * 1e12) as u64;
+    let idx = utxo_index.unwrap_or(0).to_string();
     let out = wallet_cli(
         &bin,
-        &["--wallet", &path, "disclose", "balance", "--threshold", &atomic.to_string(), "--utxo-index", "0"],
+        &["--wallet", &path, "disclose", "balance", "--threshold", &atomic.to_string(), "--utxo-index", &idx],
         &pw,
     );
     pw.zeroize();
@@ -710,6 +776,8 @@ fn integrated_address(state: tauri::State<'_, State>) -> Result<String, String> 
 
 #[derive(Serialize)]
 struct UtxoRow {
+    /// positional index in the wallet's unspent list (for `disclose --utxo-index`)
+    idx: u64,
     amount: f64,
     height: u64,
     #[serde(rename = "txOut")]
@@ -738,8 +806,11 @@ fn list_received(state: tauri::State<'_, State>) -> Result<Vec<UtxoRow>, String>
         // data row: idx amount height subaddr spent tx:out [payment_id]
         // (the CLI prints the spent column as "yes"/"no", not "true"/"false")
         if f.len() >= 6 && f[0].parse::<u64>().is_ok() {
-            if let (Ok(amount), Ok(height)) = (f[1].parse::<f64>(), f[2].parse::<u64>()) {
+            if let (Ok(idx), Ok(amount), Ok(height)) =
+                (f[0].parse::<u64>(), f[1].parse::<f64>(), f[2].parse::<u64>())
+            {
                 rows.push(UtxoRow {
+                    idx,
                     amount,
                     height,
                     tx_out: f[5].to_string(),
