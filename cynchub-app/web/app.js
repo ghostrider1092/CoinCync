@@ -1315,7 +1315,7 @@ function wireDiagnostics(){
   // refresh ghost-mode state each visit/poll (cheap, never re-renders)
   if (IS_TAURI) invoke("churn_status").then(st => { if (st) S.churnOn = !!st.running; }).catch(()=>{});
   // refresh the integrity snapshot each visit (one get_info; node may have restarted)
-  if (IS_TAURI) invoke("integrity_check").then(x => { if (x){ IX = x; if (current==="diagnostics") render("diagnostics"); } }).catch(()=>{});
+  refreshIntegrity();
   if (DX) return; // app_health loaded once per session; periodic render reuses it
   if (!IS_TAURI){ DX = { nodeBin:true, walletBin:true, rigBin:true, rpcKey:true, walletExists:true, dataDir:"%APPDATA%/coincync/cynchub-node", version:"0.1.0" }; return; }
   invoke("app_health").then(d => { if (d){ DX = d; if (current==="diagnostics") render("diagnostics"); } }).catch(()=>{});
@@ -1783,7 +1783,7 @@ function wireAuth(mode){
   }
 }
 
-function lockApp(){ if (pollTimer){ clearInterval(pollTimer); pollTimer = null; } stopMiningPoll(); stopNodesPoll(); stopMetricsPoll(); bkWords = null; bkMode = "idle"; if (idleTimer){ clearTimeout(idleTimer); idleTimer = null; } document.body.dataset.locked = "1"; invoke("lock_wallet").catch(()=>{}); S.scanned=false; S.balBaseline=false; S.total=S.transparent=S.shielded=0; document.body.classList.remove("reveal"); showAuth("unlock"); }
+function lockApp(){ if (pollTimer){ clearInterval(pollTimer); pollTimer = null; } stopMiningPoll(); stopNodesPoll(); stopMetricsPoll(); bkWords = null; bkMode = "idle"; if (idleTimer){ clearTimeout(idleTimer); idleTimer = null; } document.body.dataset.locked = "1"; invoke("lock_wallet").catch(()=>{}); S.scanned=false; S.balBaseline=false; S.total=S.transparent=S.shielded=0; IX = null; updateIntegrityBanner(); document.body.classList.remove("reveal"); showAuth("unlock"); }
 
 // Pull public chain state from the node (works before/without a wallet).
 async function pollChain(){
@@ -1845,13 +1845,32 @@ function startPolling(){
     await pollChain();
     // re-scan the wallet every ~25s so the balance stays live + receipts alert
     walletPollTick = (walletPollTick + 1) % 5;
-    if (walletPollTick === 0 && S.scanned){
-      await pollWallet();
-      if (current === "vault") render("vault");
+    if (walletPollTick === 0){
+      refreshIntegrity(); // re-check the node's fingerprint every ~25s
+      if (S.scanned){
+        await pollWallet();
+        if (current === "vault") render("vault");
+      }
     }
     // only re-render the live network screens so we don't disturb inputs
     if (["lens","nodes","diagnostics","vault","settings"].includes(current)) render(current);
   }, 5000);
+}
+
+// App-wide integrity banner — screams on a consensus-fingerprint mismatch from
+// every screen, not just Diagnostics (a forked/tampered node = funds unsafe).
+const integrityBar = (() => { const d = document.createElement("div"); d.id = "integrityBar"; d.className = "ibar"; d.style.display = "none"; document.body.appendChild(d); return d; })();
+function updateIntegrityBanner(){
+  const bad = !!(IX && IX.connected && IX.checkable && !IX.fingerprintMatch);
+  if (!bad){ integrityBar.style.display = "none"; integrityBar.innerHTML = ""; document.body.classList.remove("has-ibar"); return; }
+  document.body.classList.add("has-ibar");
+  integrityBar.style.display = "flex";
+  integrityBar.innerHTML = `<span>⚠ <b>Node integrity warning</b> — your node reports different consensus rules than the live network. It may be stale, swapped, or tampered — <b>don't trust balances and don't send funds.</b></span><button class="ibar-x" id="ibarDiag">Open Diagnostics</button>`;
+  const b = document.getElementById("ibarDiag"); if (b) b.onclick = () => render("diagnostics");
+}
+async function refreshIntegrity(){
+  if (!IS_TAURI) return;
+  try { const x = await invoke("integrity_check"); if (x){ IX = x; updateIntegrityBanner(); if (current === "diagnostics") render("diagnostics"); } } catch {}
 }
 
 async function enterApp(){
@@ -1863,6 +1882,7 @@ async function enterApp(){
   await pollChain();
   render("vault");
   startPolling();
+  refreshIntegrity();
   bindIdleReset(); armIdleLock();
   // reflect a churn process that's already running (e.g. after unlock)
   invoke("churn_status").then(st => { if (st) S.churnOn = !!st.running; }).catch(()=>{});
