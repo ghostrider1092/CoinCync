@@ -191,3 +191,11 @@ body:not(.reveal) .amt{filter:blur(9px);user-select:none}
 .toast.out{animation:toastOut .3s ease forwards}
 @keyframes toastIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @keyframes toastOut{to{opacity:0;transform:translateY(8px)}}
+/* transaction-history overlay */
+.hist-ov{position:fixed;inset:0;z-index:60;background:rgba(5,6,8,.72);backdrop-filter:blur(3px);display:none;place-items:start center;padding:48px 16px;overflow:auto}
+.hist-card{width:100%;max-width:620px;background:var(--bg-base);border:1px solid var(--border-strong);border-radius:var(--r-lg);padding:20px 20px 16px;box-shadow:0 24px 60px rgba(0,0,0,.5);animation:toastIn .22s ease}
+.hist-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.hist-head .h1{margin:0}
+.hist-filters{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.hist-list{max-height:52vh;overflow:auto;margin:0 -4px 4px;padding:0 4px}
+.hist-vall{color:var(--gold);cursor:pointer;font-size:12px;display:block;text-align:center;padding:10px 0 2px}

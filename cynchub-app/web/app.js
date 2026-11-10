@@ -348,30 +348,75 @@ function wireVault(){
       render("vault");
     }
   });
-  // Unified Activity: on-chain received outputs + CyncHub's own sent-log.
+  // Unified Activity preview (top 8); "View all" opens the full history overlay.
   (async () => {
     const el = $("#vAct"); if (!el) return;
-    let recv = [];
-    if (IS_TAURI){ try { recv = (await invoke("list_received")) || []; } catch(e){} }
-    const sent = getSentLog();
-    const items = [
-      ...sent.map(s => ({ kind:"sent", amount:s.amount, height:s.height||0,
-        sub:`to ${(s.address||"").slice(0,14)}…${s.memo?` · "${s.memo}"`:""} · ${new Date(s.ts).toLocaleDateString()}` })),
-      ...recv.map(r => ({ kind:"recv", amount:r.amount, height:r.height||0, spent:r.spent,
-        sub:`block ${Number(r.height).toLocaleString()} · ${r.txOut}` })),
-    ];
+    const items = await loadHistoryItems();
     if (!items.length){
       el.innerHTML = `<div class="at-empty" style="padding:28px 8px">${I.clock}<p>No activity yet. Your sends and received payments appear here.</p></div>`;
       return;
     }
-    items.sort((a,b) => (b.height||0) - (a.height||0));
-    el.innerHTML = items.slice(0, 10).map(it => `
-      <div class="act">
-        <div class="ai ${it.kind==="recv"?"in":""}">${it.kind==="recv"?I.down:I.up}</div>
-        <div><div class="al">${it.kind==="recv"?"Received":"Sent"}${it.spent?` <span class="atag">spent</span>`:""}</div><div class="am">${it.sub}</div></div>
-        <div><div class="av ${it.kind==="recv"?"in":""}"><span class="amt">${it.kind==="recv"?"+":"−"}${Number(it.amount).toFixed(6)}</span></div><div class="at">${it.kind==="recv"?(it.spent?"spent":"confirmed"):"sent"}</div></div>
-      </div>`).join("");
+    el.innerHTML = items.slice(0, 8).map(histRow).join("")
+      + (items.length > 8 ? `<a class="hist-vall" id="vAll">View all ${items.length} transactions →</a>` : "");
+    const va = $("#vAll"); if (va) va.onclick = openHistory;
   })();
+}
+
+// ── Transaction history (shared model + full overlay) ──────────────
+async function loadHistoryItems(){
+  let recv = [];
+  if (IS_TAURI){ try { recv = (await invoke("list_received")) || []; } catch(e){} }
+  const sent = getSentLog();
+  const items = [
+    ...sent.map(s => ({ kind:"sent", amount:s.amount, height:s.height||0,
+      sub:`to ${(s.address||"").slice(0,14)}…${s.memo?` · "${s.memo}"`:""} · ${new Date(s.ts).toLocaleDateString()}` })),
+    ...recv.map(r => ({ kind:"recv", amount:r.amount, height:r.height||0, spent:r.spent,
+      sub:`block ${Number(r.height).toLocaleString()} · ${r.txOut}` })),
+  ];
+  items.sort((a,b) => (b.height||0) - (a.height||0));
+  return items;
+}
+function histRow(it){
+  return `
+    <div class="act">
+      <div class="ai ${it.kind==="recv"?"in":""}">${it.kind==="recv"?I.down:I.up}</div>
+      <div><div class="al">${it.kind==="recv"?"Received":"Sent"}${it.spent?` <span class="atag">spent</span>`:""}</div><div class="am">${it.sub}</div></div>
+      <div><div class="av ${it.kind==="recv"?"in":""}"><span class="amt">${it.kind==="recv"?"+":"−"}${Number(it.amount).toFixed(6)}</span></div><div class="at">${it.kind==="recv"?(it.spent?"spent":"confirmed"):"sent"}</div></div>
+    </div>`;
+}
+let histFilter = "all";
+async function openHistory(){
+  let ov = document.getElementById("histOv");
+  if (!ov){
+    ov = document.createElement("div"); ov.id = "histOv"; ov.className = "hist-ov"; ov.tabIndex = -1;
+    ov.onkeydown = (e) => { if (e.key === "Escape") ov.style.display = "none"; };
+    document.body.appendChild(ov);
+  }
+  ov.style.display = "grid";
+  ov.innerHTML = `<div class="hist-card"><div class="at-empty" style="padding:30px 8px">${I.clock}<p>Reading your transaction history…</p></div></div>`;
+  ov.focus();
+  const items = await loadHistoryItems();
+  renderHistory(ov, items);
+}
+function renderHistory(ov, items){
+  const recvN = items.filter(i => i.kind === "recv").length;
+  const sentN = items.filter(i => i.kind === "sent").length;
+  const filt = histFilter === "all" ? items : items.filter(i => i.kind === (histFilter === "sent" ? "sent" : "recv"));
+  const list = filt.length ? filt.map(histRow).join("")
+    : `<div class="at-empty" style="padding:30px 8px">${I.clock}<p>No ${histFilter === "all" ? "" : histFilter + " "}transactions yet.</p></div>`;
+  const chips = [["all","All",items.length],["recv","Received",recvN],["sent","Sent",sentN]]
+    .map(([k,l,n]) => `<button class="seg ${histFilter===k?'on':''}" data-hf="${k}">${l} · ${n}</button>`).join("");
+  ov.innerHTML = `
+    <div class="hist-card">
+      <div class="hist-head"><div class="h1">Transaction history</div><button class="seg" id="histClose">Close</button></div>
+      <div class="hist-filters">${chips}<a id="histCsv" style="margin-left:auto;color:var(--gold);cursor:pointer;font-size:12px">Export CSV</a></div>
+      <div class="hist-list">${list}</div>
+      <p class="note">Received outputs are read live from your wallet (every incoming output, spent or not). Sent entries are transfers made in CyncHub — CoinCync's mandatory privacy means there is no global "sent" list on-chain to reconstruct.</p>
+    </div>`;
+  ov.querySelector("#histClose").onclick = () => { ov.style.display = "none"; };
+  ov.querySelectorAll("[data-hf]").forEach(b => b.onclick = () => { histFilter = b.dataset.hf; renderHistory(ov, items); });
+  const csv = ov.querySelector("#histCsv"); if (csv) csv.onclick = exportHistoryCsv;
+  ov.onclick = (e) => { if (e.target === ov) ov.style.display = "none"; };
 }
 
 // ── Send ───────────────────────────────────────────────────────────
@@ -387,7 +432,7 @@ function send(){
     <div class="pageh"><div class="h1">Send</div><div class="sub">Private by default — ring signatures + stealth addresses hide sender, recipient &amp; amount${forkLive?"":" · Spark shielding unlocks at h"+FORK.toLocaleString()}</div></div>
     <div class="panel" style="max-width:640px">
       <div class="plabel">Transfer</div>
-      <div class="at-field"><div class="fl">Recipient address</div><input class="at-input" id="sAddr" placeholder="tCYNC… · standard, subaddress or integrated"><div class="note" id="sAddrInfo" style="margin-top:6px;display:none"></div></div>
+      <div class="at-field"><div class="fl" style="display:flex;justify-content:space-between;align-items:center"><span>Recipient address</span><a id="sPaste" style="color:var(--gold);cursor:pointer;font-size:11px;text-transform:none;letter-spacing:0">Paste</a></div><input class="at-input" id="sAddr" placeholder="tCYNC… · address or coincync: request"><div class="note" id="sAddrInfo" style="margin-top:6px;display:none"></div></div>
       <div id="sContacts" style="margin:-4px 0 12px"></div>
       <div class="at-field"><div class="fl" style="display:flex;justify-content:space-between;align-items:center"><span>Amount (${S.unit})</span><a id="sMax" style="color:var(--gold);cursor:pointer;font-size:11px;text-transform:none;letter-spacing:0">Max</a></div><input class="at-input" id="sAmt" inputmode="decimal" placeholder="0.00"></div>
       <div class="at-field"><div class="fl">Memo — optional, encrypted to the recipient</div><input class="at-input" id="sMemo" placeholder="note…"></div>
@@ -395,6 +440,7 @@ function send(){
       <div class="kv"><span class="k">Fee / priority</span><span class="v" style="display:flex;gap:6px">
         <button class="seg ${sendFee===1?'on':''}" data-fee="1">Normal</button>
         <button class="seg ${sendFee===2?'on':''}" data-fee="2">Priority</button></span></div>
+      <div class="note" style="margin-top:6px">Priority raises the fee multiplier so your transaction is picked up sooner. The exact fee is computed from the transaction's size when it's built — CyncHub never shows an estimated number.</div>
       <button class="cta" id="sSend" style="width:100%;margin-top:10px">Review &amp; send</button>
       <div class="note" id="sOut" style="margin-top:12px;display:none"></div>
     </div>
@@ -420,8 +466,38 @@ function renderSendContacts(){
     addContact(label, addr); const l = $("#sCLabel"); if (l) l.value = ""; renderSendContacts();
   };
 }
+// CyncHub payment-request URI: coincync:<address>?amount=<x>&memo=<y>.
+// A CyncHub convention (CoinCync has no on-chain URI standard) so a request
+// made on Receive prefills the sender's Send fields.
+function parsePayReq(text){
+  if (!/^coincync:/i.test(text||"")) return null;
+  try{
+    const rest = text.slice(text.indexOf(":")+1);
+    const qi = rest.indexOf("?");
+    const addr = decodeURIComponent((qi<0?rest:rest.slice(0,qi)).trim());
+    const out = { address: addr };
+    if (qi>=0) rest.slice(qi+1).split("&").forEach(kv=>{ const i=kv.indexOf("="); if(i<0) return;
+      const k=kv.slice(0,i), v=decodeURIComponent(kv.slice(i+1)); if(k==="amount") out.amount=v; if(k==="memo") out.memo=v; });
+    return addr ? out : null;
+  }catch{ return null; }
+}
+function applyToSend(text){
+  const t = (text||"").trim(); if (!t) return;
+  const req = parsePayReq(t), a = $("#sAddr");
+  if (req){
+    if (a) a.value = req.address;
+    if (req.amount){ const am=$("#sAmt"); if(am) am.value=req.amount; }
+    if (req.memo){ const mm=$("#sMemo"); if(mm) mm.value=req.memo; }
+  } else if (a){ a.value = t; }
+  if (a) a.dispatchEvent(new Event("input"));
+}
 function wireSend(){
   renderSendContacts();
+  const paste = $("#sPaste");
+  if (paste) paste.onclick = async () => {
+    try { const t = await navigator.clipboard.readText(); applyToSend(t); }
+    catch(e){ showOut($("#sOut"),"err","Couldn't read the clipboard — paste directly into the field instead."); }
+  };
   const btn = $("#sSend"), out = $("#sOut");
   if (!btn) return;
   let confirming = false;
@@ -457,6 +533,18 @@ function wireSend(){
   view.querySelectorAll("[data-fee]").forEach(b => b.onclick = () => { sendFee = parseInt(b.dataset.fee,10)===2?2:1; view.querySelectorAll("[data-fee]").forEach(x=>x.classList.toggle("on", x===b)); });
   // Live recipient-address validation (debounced)
   const addrEl = $("#sAddr"), info = $("#sAddrInfo");
+  // Expand a pasted/typed coincync: request URI into the address + amount + memo
+  // (runs before the validation listener below, so validation sees the address).
+  if (addrEl) addrEl.addEventListener("input", () => {
+    const raw = (addrEl.value||"").trim();
+    if (!/^coincync:/i.test(raw)) return;
+    const req = parsePayReq(raw);
+    if (req && req.address !== raw){
+      addrEl.value = req.address;
+      if (req.amount){ const am=$("#sAmt"); if(am && !am.value) am.value=req.amount; }
+      if (req.memo){ const mm=$("#sMemo"); if(mm && !mm.value) mm.value=req.memo; }
+    }
+  });
   let vTimer = null;
   const showAddrInfo = (ok, html) => { if (!info) return; info.style.display="block"; info.style.color = ok?"var(--green)":"var(--red)"; info.innerHTML = html; };
   if (addrEl) addrEl.addEventListener("input", () => {
@@ -498,7 +586,8 @@ function receive(){
       <div class="panel">
         <div class="plabel">Address options</div>
         <p class="note" style="margin-bottom:14px">A <b>fresh private address</b> is best — a new, unlinkable one per sender. An <b>integrated address</b> adds a payment ID so you can match an incoming payment to an invoice. Your <b>main address</b> is fine for a one-off or a public tip jar, but reusing it lets a sender recognize you again.</p>
-        <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="ghost" id="rInt">Integrated address</button><button class="ghost" id="rMain">Show main address</button></div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="ghost" id="rReq">Request a payment</button><button class="ghost" id="rInt">Integrated address</button><button class="ghost" id="rMain">Show main address</button></div>
+        <div id="rReqBox" style="margin-top:14px;display:none"></div>
         <div class="note" id="rMore" style="margin-top:16px;display:none"></div>
       </div>
     </section>
@@ -533,6 +622,39 @@ function wireReceive(){
   const neu = $("#rNew"); if (neu) neu.onclick = async () => { neu.disabled=true; neu.textContent="Generating…"; try{ const a = await invoke("new_subaddress"); await setReceiveAddr(a, "private"); info(`Fresh unlinkable address ready — share it with just this one sender.`); }catch(e){ errMore(e); } neu.disabled=false; neu.textContent="New private address"; };
   const int = $("#rInt"); if (int) int.onclick = async () => { int.disabled=true; try{ const a = await invoke("integrated_address"); await setReceiveAddr(a, "integrated"); info(`Integrated address — carries a payment ID so you can match the incoming payment to an invoice.`); }catch(e){ errMore(e); } int.disabled=false; };
   const main = $("#rMain"); if (main) main.onclick = async () => { main.disabled=true; try{ const a = await invoke("get_wallet_address"); await setReceiveAddr(a, "main"); info(`This is your main address. Fine for a one-off, but reusing it lets senders link your payments — prefer a fresh private address.`); }catch(e){ errMore(e); } main.disabled=false; };
+  const reqBtn = $("#rReq");
+  if (reqBtn) reqBtn.onclick = () => {
+    const box = $("#rReqBox"); if (!box) return;
+    if (box.style.display === "block"){ box.style.display = "none"; box.innerHTML = ""; return; }
+    box.style.display = "block";
+    box.innerHTML = `
+      <div class="at-field"><div class="fl">Request amount (${S.unit}) — optional</div><input class="at-input" id="rqAmt" inputmode="decimal" placeholder="0.00"></div>
+      <div class="at-field"><div class="fl">Note / memo — optional</div><input class="at-input" id="rqMemo" placeholder="what's it for"></div>
+      <button class="cta" id="rqMake" style="width:100%">Make request</button>
+      <div id="rqOut" style="margin-top:12px;display:none"></div>`;
+    const make = $("#rqMake");
+    if (make) make.onclick = async () => {
+      const addr = S.address || "";
+      if (!addr){ info("Generate a receiving address first."); return; }
+      const amt = ($("#rqAmt").value||"").trim();
+      const memo = ($("#rqMemo").value||"").trim();
+      const q = [];
+      if (amt && parseFloat(amt) > 0) q.push("amount=" + encodeURIComponent(amt));
+      if (memo) q.push("memo=" + encodeURIComponent(memo));
+      const uri = "coincync:" + addr + (q.length ? ("?" + q.join("&")) : "");
+      const out = $("#rqOut"); if (!out) return;
+      out.style.display = "block";
+      let qr = "";
+      try { qr = await invoke("generate_qr_svg", { payload: uri }); } catch {}
+      out.innerHTML = `
+        ${qr?`<div style="display:flex;justify-content:center;margin-bottom:10px"><div style="width:150px;height:150px;background:#fff;border-radius:8px;padding:7px;box-sizing:border-box">${qr}</div></div>`:""}
+        <div class="mono" style="font-size:11px;word-break:break-all;color:var(--text-secondary);margin-bottom:8px">${uri}</div>
+        <button class="seg" id="rqCopy">Copy request</button>
+        <p class="note" style="margin-top:10px">${amt&&parseFloat(amt)>0?`Requesting <b>${amt} ${S.unit}</b>. `:""}The payer pastes this into CyncHub's Send to prefill the address${amt?", amount":""}${memo?" and memo":""}. It's a CyncHub convention — other wallets read only the plain address.</p>`;
+      const cp = $("#rqCopy");
+      if (cp) cp.onclick = async () => { try{ await navigator.clipboard.writeText(uri); }catch{} cp.textContent = "Copied ✓"; setTimeout(()=>cp.textContent = "Copy request", 1400); };
+    };
+  };
 }
 
 // ── Shield / Unshield (Spark pool · activates at h29000) ────────────
@@ -951,6 +1073,7 @@ function nodes(){
         <div class="pbar" style="height:7px;border-radius:4px;background:rgba(255,255,255,.07);overflow:hidden">
           <div id="nBar" style="height:100%;width:${synced?100:pct}%;background:var(--gold);transition:width .4s ease"></div>
         </div>
+        <div class="note" id="nSyncEta" style="margin-top:7px;display:none"></div>
       </div>
       <div style="margin-top:18px;display:flex;gap:10px">
         <button class="cta" id="nStart" ${canStart?"":"disabled"} style="${running?"display:none":""}">Start node</button>
@@ -958,6 +1081,7 @@ function nodes(){
       </div>
       ${(!n.binAvailable)?`<div class="note" style="margin-top:12px">The node binary isn't bundled with this build.</div>`:""}
       ${(running&&!canStop)?`<div class="note" style="margin-top:12px">This node is running outside CyncHub, so CyncHub won't stop it.</div>`:""}
+      ${(!running&&n.managed)?`<div class="note" style="margin-top:12px;color:var(--amber)">The node stopped unexpectedly — click Start to relaunch it.</div>`:""}
       <div class="note" id="nErr" style="margin-top:12px;color:var(--red);display:none"></div>
     </div>
     <p class="note" style="margin-top:16px">The node is bundled with CyncHub — no separate install. First start bootstraps from the signed snapshot (fast-sync) to reach the tip in seconds, then stays current. Logs: <code>%APPDATA%/coincync/cynchub-node.log</code>.</p>
@@ -976,13 +1100,32 @@ function patchNodes(){
   set("nPeers", running?num(n.peers!=null?n.peers:S.peers):"—");
   const ph = document.getElementById("nPhase"); if (ph){ ph.textContent = running?(n.phase||"—"):"—"; ph.className = "v "+(synced?"g":""); }
   const bar = document.getElementById("nBar"); if (bar) bar.style.width = (synced?100:pct)+"%";
+  const eta = document.getElementById("nSyncEta");
+  if (eta){
+    if (running && !synced && (n.targetHeight||0) > (n.height||0)){
+      const togo = n.targetHeight - n.height;
+      let t = `${num(togo)} block${togo===1?"":"s"} to go`;
+      if (syncRate > 0) t += ` · ~${num(Math.round(syncRate))} blk/s · ETA ${fmtAge(togo/syncRate)}`;
+      eta.textContent = t; eta.style.display = "";
+    } else { eta.style.display = "none"; }
+  }
   // flip controls without a full re-render unless running-state changed
   const start = document.getElementById("nStart"), stop = document.getElementById("nStop");
   if (start) start.style.display = running?"none":"";
   if (stop) stop.style.display = (running&&n.managed)?"":"none";
 }
+let syncSample = null; // { h, t } last height/time while syncing
+let syncRate = 0;      // measured blocks/sec (EMA of real deltas — never fabricated)
 async function refreshNodes(){
   try { const st = await invoke("node_status"); if (st) S.node = st; } catch(e){}
+  const n = S.node, now = Date.now();
+  if (n && (n.running || S.connected) && !(n.isSynced || S.status==="synced") && (n.targetHeight||0) > (n.height||0)){
+    if (syncSample && now > syncSample.t){
+      const dh = (n.height||0) - syncSample.h, dt = (now - syncSample.t)/1000;
+      if (dh > 0 && dt > 0){ const r = dh/dt; syncRate = syncRate>0 ? syncRate*0.6 + r*0.4 : r; }
+    }
+    syncSample = { h: n.height||0, t: now };
+  } else { syncSample = null; syncRate = 0; }
   if (current === "nodes") patchNodes();
 }
 function wireNodes(){

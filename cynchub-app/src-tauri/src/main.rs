@@ -1139,6 +1139,22 @@ fn start_churn(state: tauri::State<'_, State>) -> Result<ChurnStatus, String> {
     let mut cmd = Command::new(&bin);
     cmd.args(["--wallet", &path, "--node", &node, "auto-churn"])
         .env("COINCYNC_WALLET_PASSWORD", &pw);
+    // Optional interval / percentage overrides (read from this process's env).
+    // Unset = the CLI's defaults (1800-7200s, 10-50%). Lets a power user — or a
+    // demo — churn more frequently than the half-hour-to-two-hour default.
+    for (var, flag) in [
+        ("COINCYNC_CHURN_MIN", "--min-interval"),
+        ("COINCYNC_CHURN_MAX", "--max-interval"),
+        ("COINCYNC_CHURN_MIN_PCT", "--min-pct"),
+        ("COINCYNC_CHURN_MAX_PCT", "--max-pct"),
+    ] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                cmd.args([flag, &v]);
+            }
+        }
+    }
     // Log churn output to a file so "is it actually churning?" is observable
     // (self-send attempts, skips when balance is too low, errors) instead of
     // vanishing into a null sink.
