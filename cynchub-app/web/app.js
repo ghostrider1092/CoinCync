@@ -1255,6 +1255,7 @@ function wireNodes(){
 }
 function stopNodesPoll(){ if (nodesTimer){ clearInterval(nodesTimer); nodesTimer = null; } }
 let DX = null; // app_health snapshot
+let IX = null; // integrity_check snapshot (consensus fingerprint + build provenance)
 function dcheck(label, status, detail){
   const c = status==="ok"?"var(--green)":status==="warn"?"var(--amber)":status==="fail"?"var(--red)":"var(--text-tertiary)";
   const dot = status==="ok"?"●":status==="warn"?"▲":status==="fail"?"✕":"○";
@@ -1265,9 +1266,11 @@ function diagnostics(){
   const toFork = S.tip == null ? null : Math.max(0, FORK - S.tip);
   const synced = S.status==="synced" || (S.tip!=null && S.target!=null && S.tip>=S.target);
   const d = DX;
-  // overall verdict
+  const ix = IX;
+  const fpBad = !!(ix && ix.connected && ix.checkable && !ix.fingerprintMatch);
+  // overall verdict — a fingerprint mismatch is the most serious (money unsafe).
   const fails = [S.connected, d?d.nodeBin:true, d?d.walletBin:true, d?d.rigBin:true].filter(x=>x===false).length;
-  const verdict = !S.connected ? {t:"Node offline",c:"var(--red)"} : fails? {t:"Issues found",c:"var(--amber)"} : synced ? {t:"All systems go",c:"var(--green)"} : {t:"Syncing",c:"var(--amber)"};
+  const verdict = fpBad ? {t:"Integrity warning",c:"var(--red)"} : !S.connected ? {t:"Node offline",c:"var(--red)"} : fails? {t:"Issues found",c:"var(--amber)"} : synced ? {t:"All systems go",c:"var(--green)"} : {t:"Syncing",c:"var(--amber)"};
   return `
     <div class="pageh"><div class="h1">Diagnostics</div><div class="sub">Live health checks · <span style="color:${verdict.c}">${verdict.t}</span></div></div>
     <section class="grid2">
@@ -1295,12 +1298,24 @@ function diagnostics(){
       ${dcheck("App version", "info", d?("CyncHub "+d.version):"CyncHub")}
       ${dcheck("Node data dir", "info", d?`<span class="mono" style="font-size:10.5px">${d.dataDir}</span>`:"—")}
     </div>
+    <div class="panel" style="margin-top:16px"><div class="plabel">Build integrity · supply chain</div>
+      ${ix ? `
+        ${dcheck("Consensus fingerprint",
+           !ix.connected ? "info" : (!ix.checkable ? "info" : (ix.fingerprintMatch ? "ok" : "fail")),
+           !ix.connected ? "node offline" : (!ix.checkable ? ("no baked value for " + (ix.network||"?")) : (ix.fingerprintMatch ? ("matches the live " + ix.network + " network") : "MISMATCH — node running divergent rules")))}
+        ${dcheck("Reported", "info", `<span class="mono" style="font-size:10px">${(ix.nodeFingerprint||"—").slice(0,32)}…</span>`)}
+        ${dcheck("Node build", (ix.buildDirty || ix.buildProfile==="debug") ? "warn" : "ok", `${ix.buildProfile||"?"}${ix.buildDirty?" · dirty tree":""}${ix.buildCommit?" · "+ix.buildCommit.slice(0,8):""}`)}
+      ` : `<div class="note">Checking the node's consensus fingerprint…</div>`}
+      <p class="note" style="margin-top:8px">The node must report the exact consensus fingerprint of the live network. A mismatch means the bundled node is stale, swapped, or tampered — its balances can't be trusted.${ix && (ix.buildDirty || ix.buildProfile==="debug") ? " This is a development build (debug/dirty); a signed release will be a clean release build." : ""}</p>
+    </div>
     <p class="note" style="margin-top:16px">All checks run locally against your own node + wallet. Green = healthy, amber = attention, red = action needed.</p>
   `;
 }
 function wireDiagnostics(){
   // refresh ghost-mode state each visit/poll (cheap, never re-renders)
   if (IS_TAURI) invoke("churn_status").then(st => { if (st) S.churnOn = !!st.running; }).catch(()=>{});
+  // refresh the integrity snapshot each visit (one get_info; node may have restarted)
+  if (IS_TAURI) invoke("integrity_check").then(x => { if (x){ IX = x; if (current==="diagnostics") render("diagnostics"); } }).catch(()=>{});
   if (DX) return; // app_health loaded once per session; periodic render reuses it
   if (!IS_TAURI){ DX = { nodeBin:true, walletBin:true, rigBin:true, rpcKey:true, walletExists:true, dataDir:"%APPDATA%/coincync/cynchub-node", version:"0.1.0" }; return; }
   invoke("app_health").then(d => { if (d){ DX = d; if (current==="diagnostics") render("diagnostics"); } }).catch(()=>{});

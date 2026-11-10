@@ -208,6 +208,66 @@ fn totp_disable() -> Result<(), String> {
     Ok(())
 }
 
+// ── Supply-chain / build integrity ─────────────────────────────────
+// The node reports the consensus-rules fingerprint (magic + genesis + hard-fork
+// digest). If the node CyncHub launched reports a fingerprint other than the
+// one baked here, it is running DIVERGENT consensus rules — a stale, swapped, or
+// tampered binary that could feed the wallet a forked view of the chain. We warn
+// loudly rather than trust its balances. Expected = the live testnet value.
+const EXPECTED_TESTNET_FINGERPRINT: &str =
+    "fc428e8673379f07cc213b9a7aceb4c05d5433387113a02b818ba3e0ab3664ca";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IntegrityReport {
+    connected: bool,
+    network: String,
+    node_fingerprint: String,
+    expected_fingerprint: String,
+    fingerprint_match: bool,
+    /// True only when the network has a baked expected fingerprint to check.
+    checkable: bool,
+    build_commit: String,
+    build_profile: String,
+    build_dirty: bool,
+}
+
+#[tauri::command]
+fn integrity_check() -> IntegrityReport {
+    let expected = EXPECTED_TESTNET_FINGERPRINT.to_string();
+    let i = match rpc_call("get_info", serde_json::json!([])) {
+        Ok(v) => v,
+        Err(_) => {
+            return IntegrityReport {
+                connected: false,
+                network: String::new(),
+                node_fingerprint: String::new(),
+                expected_fingerprint: expected,
+                fingerprint_match: false,
+                checkable: false,
+                build_commit: String::new(),
+                build_profile: String::new(),
+                build_dirty: false,
+            };
+        }
+    };
+    let network = i["network"].as_str().unwrap_or("").to_string();
+    let fp = i["consensus_fingerprint"].as_str().unwrap_or("").to_string();
+    let checkable = network.eq_ignore_ascii_case("testnet");
+    let fingerprint_match = checkable && fp.eq_ignore_ascii_case(&expected);
+    IntegrityReport {
+        connected: true,
+        network,
+        node_fingerprint: fp,
+        expected_fingerprint: expected,
+        fingerprint_match,
+        checkable,
+        build_commit: i["build_commit"].as_str().unwrap_or("").to_string(),
+        build_profile: i["build_profile"].as_str().unwrap_or("").to_string(),
+        build_dirty: i["build_dirty"].as_bool().unwrap_or(false),
+    }
+}
+
 // ── child-process reaping across a crash/force-kill ─────────────────
 // Rust's Drop kills child miner/node/churn processes on a clean exit, but NOT
 // on a crash or a force-kill (SIGKILL/TerminateProcess) — those orphan the
@@ -1882,7 +1942,8 @@ fn main() {
             totp_status,
             totp_get,
             totp_set,
-            totp_disable
+            totp_disable,
+            integrity_check
         ])
         .run(tauri::generate_context!())
         .expect("error while running CyncHub");
