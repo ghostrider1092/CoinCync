@@ -828,6 +828,16 @@ impl Blockchain {
         // and offsets its ops by the running tree count.
         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
         if let Some(s) = &self.spark_pool_store {
+            // Self-check: an initialized store always has `begin_staging` called
+            // before this block's apply, so staging must be active at drain. If a
+            // future block-apply path skips it, `apply_pool_write` would have
+            // written to disk immediately (re-opening the non-atomic window #384/
+            // #386 closed) and `staging_trees()` would be None — fail loudly in
+            // debug/test rather than silently drain nothing.
+            debug_assert!(
+                s.staging_trees().is_some(),
+                "spark_pool_store: block commit reached drain without begin_staging"
+            );
             if let Some(t) = s.staging_trees() {
                 let base = trees.len();
                 trees.extend_from_slice(&t);

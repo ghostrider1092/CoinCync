@@ -10,28 +10,43 @@ use crate::primitives::Hash;
 
 use super::RpcState;
 
-/// Deterministically paginate a spent-tag set: returns `(total, page)` where
-/// `page` is the hex-encoded tags in sorted order sliced to
-/// `[offset, offset + limit)`. Extracted from the `get_spark_spent_tags`
-/// handler so the paging invariant (pages tile the whole set with no gap or
-/// overlap) is unit-testable without constructing an `RpcState`.
+/// Collect + sort a spent-tag set into canonical page order. This is the
+/// expensive part (O(N log N)); the handler caches its result per chain height
+/// so paging the whole set re-sorts it once per block, not once per page.
 #[cfg(feature = "sketch-gk-proof")]
+fn sort_spent_tags(set: std::collections::HashSet<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut all: Vec<Vec<u8>> = set.into_iter().collect();
+    // Sorted order makes successive [offset, limit) pages tile the set.
+    all.sort_unstable();
+    all
+}
+
+/// Slice a pre-sorted tag vec to `[offset, offset + limit)`, hex-encoded, and
+/// return `(total, page)`. Cheap (O(limit)); safe to call per page.
+#[cfg(feature = "sketch-gk-proof")]
+fn page_spent_tags(sorted: &[Vec<u8>], offset: usize, limit: usize) -> (usize, Vec<String>) {
+    let page = sorted
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|t| hex::encode(t))
+        .collect();
+    (sorted.len(), page)
+}
+
+/// Sort + slice in one shot: returns `(total, page)` where `page` is the
+/// hex-encoded tags in sorted order sliced to `[offset, offset + limit)`. Kept
+/// so the paging invariant (pages tile the whole set with no gap or overlap) is
+/// unit-testable without constructing an `RpcState`; the handler itself caches
+/// `sort_spent_tags` across pages and calls `page_spent_tags` directly, so this
+/// composed form is only referenced from the test below.
+#[cfg(all(test, feature = "sketch-gk-proof"))]
 fn paginate_spent_tags(
     set: std::collections::HashSet<Vec<u8>>,
     offset: usize,
     limit: usize,
 ) -> (usize, Vec<String>) {
-    let total = set.len();
-    let mut all: Vec<Vec<u8>> = set.into_iter().collect();
-    // Sorted order makes successive [offset, limit) pages tile the set.
-    all.sort_unstable();
-    let page = all
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .map(|t| hex::encode(&t))
-        .collect();
-    (total, page)
+    page_spent_tags(&sort_spent_tags(set), offset, limit)
 }
 
 pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
@@ -239,9 +254,17 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // Tags are returned SORTED so pages tile the set deterministically within a
     // call; a spend mined between pages shifts the set by one tag, which the
     // wallet's next scan reconciles.
+    // F1: cache the sorted spent-tag snapshot per chain height, so paging the
+    // global set re-sorts it ONCE per block instead of once per page. Within a
+    // height the pages come from the cached vec and are mutually consistent; a
+    // new block (height change) rebuilds it.
+    #[cfg(feature = "sketch-gk-proof")]
+    let spent_tags_cache: std::sync::Arc<
+        std::sync::RwLock<Option<(u64, std::sync::Arc<Vec<Vec<u8>>>)>>,
+    > = std::sync::Arc::new(std::sync::RwLock::new(None));
     #[cfg(feature = "sketch-gk-proof")]
     module
-        .register_method("get_spark_spent_tags", |params, state, _ext| {
+        .register_method("get_spark_spent_tags", move |params, state, _ext| {
             use std::collections::HashSet;
             // Optional positional params [offset, limit]; tolerate none/partial.
             let args: Vec<u64> = params.parse().unwrap_or_default();
@@ -249,9 +272,14 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             // Per-response cap bounds the serialized size; a larger request is
             // clamped and the wallet pages through the remainder.
             const MAX_PAGE: usize = 50_000;
+            // Clamp to [1, MAX_PAGE]: the upper bound caps the serialized
+            // response (DoS guard); the lower bound of 1 guarantees a paging
+            // client always makes progress — a limit of 0 would otherwise return
+            // count=0 with total>0 forever, spinning the client (and re-sorting
+            // the whole set each spin).
             let limit = args
                 .get(1)
-                .map(|&l| (l as usize).min(MAX_PAGE))
+                .map(|&l| (l as usize).clamp(1, MAX_PAGE))
                 .unwrap_or(MAX_PAGE);
             // Snapshot the MEMPOOL FIRST, then the on-chain spent set. Block
             // connect adds a tag to the chain spent set BEFORE removing it from
@@ -260,10 +288,30 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             // order (chain then mempool) has a window where a just-mined spend is
             // in NEITHER — the chain read is too early, the mempool read too late
             // — and the wallet would briefly treat a spent note as available.
-            let mut set: HashSet<Vec<u8>> =
-                state.mempool.linking_tags_snapshot().into_iter().collect();
-            set.extend(state.chain.spark_pool_spent_tags());
-            let (total, tags) = paginate_spent_tags(set, offset, limit);
+            // Reuse the sorted snapshot while the chain tip is unchanged;
+            // otherwise rebuild it — mempool FIRST, then chain (see the window
+            // note above) — sort once, and cache under the new height.
+            let height = state.chain.height();
+            let sorted: std::sync::Arc<Vec<Vec<u8>>> = {
+                let hit = spent_tags_cache.read().ok().and_then(|g| match &*g {
+                    Some((h, v)) if *h == height => Some(v.clone()),
+                    _ => None,
+                });
+                match hit {
+                    Some(v) => v,
+                    None => {
+                        let mut set: HashSet<Vec<u8>> =
+                            state.mempool.linking_tags_snapshot().into_iter().collect();
+                        set.extend(state.chain.spark_pool_spent_tags());
+                        let v = std::sync::Arc::new(sort_spent_tags(set));
+                        if let Ok(mut g) = spent_tags_cache.write() {
+                            *g = Some((height, v.clone()));
+                        }
+                        v
+                    }
+                }
+            };
+            let (total, tags) = page_spent_tags(&sorted, offset, limit);
             Ok::<_, ErrorObjectOwned>(json!({
                 "total": total,
                 "offset": offset,
