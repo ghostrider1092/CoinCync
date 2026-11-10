@@ -1,0 +1,13 @@
+# Rust / Tauri build output
+src-tauri/target/
+
+# Tauri-generated schemas (regenerated at build time)
+src-tauri/gen/
+
+# Chain binaries staged at build time from the parent repo
+# (coincync-node / coincync-wallet / coincync-rig) — not source.
+src-tauri/resources/binaries/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db

@@ -1,0 +1,54 @@
+{
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "frontendDist": "../web"
+  },
+  "bundle": {
+    "active": true,
+    "category": "Finance",
+    "targets": "all",
+    "publisher": "Cync Labs",
+    "copyright": "CoinCync · testnet · non-custodial",
+    "homepage": "https://coincync.network",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "CyncHub — the CoinCync privacy suite.",
+    "longDescription": "CyncHub — the official CoinCync desktop suite (Vault, Attest, Swap). Bundles the node, wallet CLI and miner so no separate downloads are needed.",
+    "resources": [
+      "resources/binaries/*"
+    ],
+    "windows": {
+      "wix": { "language": ["en-US"] },
+      "nsis": { "installMode": "currentUser", "languages": ["English"] }
+    }
+  },
+  "productName": "CyncHub",
+  "mainBinaryName": "CyncHub",
+  "version": "0.1.0",
+  "identifier": "network.coincync.cynchub",
+  "plugins": {},
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "fullscreen": false,
+        "resizable": true,
+        "title": "CyncHub",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1024,
+        "minHeight": 720,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    }
+  }
+}

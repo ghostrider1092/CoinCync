@@ -5,7 +5,7 @@ members  = [".", "crates/bridge", "crates/coincync-dbg", "crates/coincync-rig", 
 # wide builds with --features error on its Cargo.toml. Build standalone:
 # `cd crates/cynchub && cargo build`. Re-joins workspace when CIP-002
 # implementation starts (post v1.1).
-exclude  = ["coincync-wallet-v2/src-tauri", "crates/cynchub"]
+exclude  = ["coincync-wallet-v2/src-tauri", "crates/cynchub", "cynchub-app/src-tauri"]
 resolver = "2"
 
 [package]

@@ -1,0 +1,7 @@
+{
+  "identifier": "default",
+  "description": "CyncHub webview permissions — core IPC to the app's own commands.",
+  "local": true,
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
