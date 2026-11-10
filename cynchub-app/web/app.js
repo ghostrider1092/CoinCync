@@ -500,33 +500,17 @@ function wireSend(){
   };
   const btn = $("#sSend"), out = $("#sOut");
   if (!btn) return;
-  let confirming = false;
-  btn.onclick = async () => {
+  btn.onclick = () => {
     const addr = ($("#sAddr").value || "").trim();
     const amt = parseFloat($("#sAmt").value || "0");
     const memo = ($("#sMemo").value || "").trim();
     if (!addr){ showOut(out,"err","Enter a recipient address."); return; }
     if (!(amt > 0)){ showOut(out,"err","Enter a positive amount."); return; }
-    if (amt > S.transparent + 1e-9){ showOut(out,"err",`Amount exceeds your spendable ${f(S.transparent)} ${S.unit}.`); return; }
-    if (!confirming){
-      confirming = true;
-      btn.textContent = `Confirm — send ${amt} ${S.unit}`;
-      showOut(out,"", `Sending <b>${amt} ${S.unit}</b> to <span class="mono" style="font-size:11px;word-break:break-all">${addr}</span>${memo?` · memo "${memo}"`:""}. Click again to confirm.`);
-      return;
-    }
-    btn.disabled = true; btn.textContent = "Sending…";
-    try {
-      const txid = await invoke("send_transaction", { address: addr, amount: amt, memo: memo || null, feeMultiplier: sendFee });
-      recordSend({ txid, address: addr, amount: amt, memo, ts: Date.now(), height: S.tip || 0 });
-      showOut(out,"ok",`Sent ✓ — <span class="mono" style="font-size:11px;word-break:break-all">${txid}</span>`);
-      $("#sAddr").value = ""; $("#sAmt").value = ""; $("#sMemo").value = "";
-      pollWallet();
-    } catch(e){
-      showOut(out,"err", String((e && e.message) || e));
-    }
-    btn.disabled = false; btn.textContent = "Review & send"; confirming = false;
+    // A mandatory review step runs the money-protection checks (node sync,
+    // spendable, network, live address re-validation, risk flags) before
+    // anything is submitted. Nothing is sent until the user confirms there.
+    openSendReview({ addr, amt, memo, fee: sendFee });
   };
-  ["sAddr","sAmt","sMemo"].forEach(id => { const el = $("#"+id); if (el) el.oninput = () => { if (confirming){ confirming = false; btn.textContent = "Review & send"; if (out){ out.style.display="none"; } } }; });
   // Max — fill spendable (the node computes the fee; reduce slightly if it's tight)
   const maxEl = $("#sMax"); if (maxEl) maxEl.onclick = () => { const a = $("#sAmt"); if (a){ a.value = (S.transparent||0) > 0 ? String(S.transparent) : "0"; a.dispatchEvent(new Event("input")); } };
   // Fee / priority toggle
@@ -562,6 +546,111 @@ function wireSend(){
       } catch(e){ showAddrInfo(false, "✕ not a valid CoinCync address"); }
     }, 400);
   });
+}
+
+// ── Send protections: mandatory pre-send review ────────────────────
+// Optional per-transaction cap (user-set, in Settings). 0 = no cap.
+function getSendCap(){ try { return parseFloat(localStorage.getItem("cynchub.sendCap") || "0") || 0; } catch { return 0; } }
+function setSendCap(v){ try { localStorage.setItem("cynchub.sendCap", String(v || 0)); } catch {} }
+// Copy a secret, then wipe the clipboard after `secs` if it's still that secret
+// (a copied seed lingering in the clipboard is a real theft vector).
+async function copyThenClear(text, secs){
+  try { await navigator.clipboard.writeText(text); } catch { return false; }
+  setTimeout(async () => {
+    try { const cur = await navigator.clipboard.readText(); if (cur === text) await navigator.clipboard.writeText(""); } catch {}
+  }, (secs || 45) * 1000);
+  return true;
+}
+
+async function openSendReview(d){
+  // d = { addr, amt, memo, fee }. Builds the review overlay, runs every
+  // money-protection check, and only enables Confirm when none hard-block.
+  let ov = document.getElementById("sendOv");
+  if (!ov){
+    ov = document.createElement("div"); ov.id = "sendOv"; ov.className = "hist-ov"; ov.tabIndex = -1;
+    ov.onkeydown = (e) => { if (e.key === "Escape") ov.style.display = "none"; };
+    document.body.appendChild(ov);
+  }
+  ov.style.display = "grid";
+  ov.innerHTML = `<div class="hist-card"><div class="at-empty" style="padding:30px 8px">${I.clock}<p>Running pre-send safety checks…</p></div></div>`;
+  ov.focus();
+
+  const blocks = [], warns = [];
+  // 1) node must be reachable (offline = can't trust state); synced is a warning.
+  const connected = !!S.connected;
+  const synced = connected && (S.status === "synced" || (S.node && S.node.isSynced) || (S.tip != null && S.target != null && S.target > 0 && S.tip >= S.target));
+  if (!connected) blocks.push("Your node is offline — connect it before sending.");
+  else if (!synced) warns.push("Your node may not be fully synced; the transaction could be built against a stale view of the chain.");
+
+  // 2) amount sanity
+  if (d.amt > S.transparent + 1e-9) blocks.push(`Amount exceeds your spendable balance of ${f(S.transparent)} ${S.unit}.`);
+  const cap = getSendCap();
+  if (cap > 0 && d.amt > cap + 1e-9) blocks.push(`Amount is over your per-transaction cap of ${f(cap)} ${S.unit} (change it in Settings → Security).`);
+
+  // 3) anti-swap: re-validate the recipient RIGHT NOW (clipboard-hijack defense)
+  let kind = "address", net = S.network, addrOk = true;
+  if (IS_TAURI){
+    try {
+      const r = await invoke("validate_address", { address: d.addr });
+      if (!r || !r.valid){ addrOk = false; blocks.push("The recipient address is not a valid CoinCync address."); }
+      else {
+        kind = r.kind || "address"; net = r.network || net;
+        if (S.network && r.network && r.network !== S.network){ addrOk = false; blocks.push(`Wrong network — that is a ${r.network} address but you are on ${S.network}.`); }
+      }
+    } catch(e){ addrOk = false; blocks.push("Couldn't verify the recipient address — not sending."); }
+  }
+
+  // 4) risk flags (allowed, but surfaced)
+  const known = getContacts().some(c => (c.address || "") === d.addr);
+  if (!known) warns.push("First time sending to this address — check it character-by-character against your source.");
+  if (S.transparent > 0 && d.amt > S.transparent * 0.5) warns.push(`This is ${Math.round(d.amt / S.transparent * 100)}% of your spendable balance.`);
+
+  const remaining = Math.max(0, S.transparent - d.amt);
+  const canSend = blocks.length === 0;
+  const row = (k, v) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+  const blockHtml = blocks.map(b => `<div class="note" style="color:var(--red);margin:4px 0">⛔ ${b}</div>`).join("");
+  const warnHtml = warns.map(w => `<div class="note" style="color:var(--amber);margin:4px 0">⚠ ${w}</div>`).join("");
+
+  ov.innerHTML = `
+    <div class="hist-card">
+      <div class="hist-head"><div class="h1">Review transaction</div><button class="seg" id="svClose">Cancel</button></div>
+      ${row("Amount", `<b class="amt">${d.amt} ${S.unit}</b>`)}
+      ${row("To", `<span class="mono" style="font-size:11px;word-break:break-all">${d.addr}</span>`)}
+      ${row("Recipient", `${addrOk ? kind : "unverified"}${net ? " · " + net : ""}`)}
+      ${d.memo ? row("Memo", `"${d.memo}"`) : ""}
+      ${row("Fee", d.fee === 2 ? "Priority" : "Normal")}
+      ${row("Spendable now", `${f(S.transparent)} ${S.unit}`)}
+      ${row("Balance after", `~${f(remaining)} ${S.unit} <span class="note" style="display:inline;color:var(--text-tertiary)">(before fee)</span>`)}
+      ${(blocks.length || warns.length) ? `<div style="margin-top:10px">${blockHtml}${warnHtml}</div>` : ""}
+      <button class="cta" id="svConfirm" style="width:100%;margin-top:12px" ${canSend ? "" : "disabled"}>${canSend ? `Confirm — send ${d.amt} ${S.unit}` : "Resolve the blockers above to send"}</button>
+      <div class="note" id="svOut" style="margin-top:10px;display:none"></div>
+      <p class="note" style="margin-top:10px">Transfers are private and <b>irreversible</b> — once submitted they can't be recalled. The recipient address is re-checked here to catch clipboard tampering.</p>
+    </div>`;
+  ov.querySelector("#svClose").onclick = () => { ov.style.display = "none"; };
+  ov.onclick = (e) => { if (e.target === ov) ov.style.display = "none"; };
+  const conf = ov.querySelector("#svConfirm");
+  if (conf && canSend) conf.onclick = async () => {
+    conf.disabled = true; conf.textContent = "Sending…";
+    const svOut = ov.querySelector("#svOut");
+    try {
+      const txid = await invoke("send_transaction", { address: d.addr, amount: d.amt, memo: d.memo || null, feeMultiplier: d.fee });
+      recordSend({ txid, address: d.addr, amount: d.amt, memo: d.memo, ts: Date.now(), height: S.tip || 0 });
+      ov.style.display = "none";
+      showOut($("#sOut"), "ok", `Sent ✓ — <span class="mono" style="font-size:11px;word-break:break-all">${txid}</span>`);
+      ["sAddr","sAmt","sMemo"].forEach(id => { const el = $("#" + id); if (el) el.value = ""; });
+      pollWallet();
+    } catch(e){
+      const msg = String((e && e.message) || e);
+      if (svOut){
+        svOut.style.display = "block"; svOut.style.color = "var(--red)"; svOut.textContent = msg;
+        const low = msg.toLowerCase();
+        if (low.includes("auto-churn") || low.includes("too large") || low.includes("max_safe") || low.includes("redistribute")){
+          svOut.innerHTML += `<div style="margin-top:8px;color:var(--text-secondary)">This amount is larger than any single output can cover. Turn on <b>Ghost mode</b> in Privacy Center to redistribute (auto-churn) your outputs, then try again.</div>`;
+        }
+      }
+      conf.disabled = false; conf.textContent = `Confirm — send ${d.amt} ${S.unit}`;
+    }
+  };
 }
 
 // ── Receive (privacy-first) ────────────────────────────────────────
@@ -1250,6 +1339,12 @@ function settings(){
           ${[["Off",0],["5 min",5],["15 min",15],["30 min",30],["1 h",60]].map(([t,v])=>`<button class="seg ${lk===v?'on':''}" data-lock-set="${v}">${t}</button>`).join("")}
         </span></div>
       <div class="kv"><span class="k">Current</span><span class="v">${lkTxt}</span></div>
+      <div class="kv"><span class="k">Per-transaction cap (${S.unit})</span>
+        <span class="v" style="display:flex;gap:6px;align-items:center">
+          <input class="at-input" id="capInput" inputmode="decimal" placeholder="none" value="${getSendCap()>0?getSendCap():''}" style="max-width:120px;padding:6px 10px">
+          <button class="seg" id="capSave">Set</button>
+        </span></div>
+      <p class="note" style="margin-top:6px">A hard ceiling on any single send — the review step blocks anything above it. Blank = no cap.</p>
       <div style="margin-top:14px"><button class="ghost" id="lockBtn">Lock now</button></div>
     </div>
     ${backupPanel()}
@@ -1272,6 +1367,12 @@ function settings(){
 }
 function wireSettings(){
   const l = $("#lockBtn"); if (l) l.onclick = lockApp;
+  const capSave = $("#capSave");
+  if (capSave) capSave.onclick = () => {
+    const raw = ($("#capInput").value || "").trim();
+    const v = raw === "" ? 0 : (parseFloat(raw) || 0);
+    setSendCap(v); capSave.textContent = "Saved ✓"; setTimeout(()=>capSave.textContent="Set", 1400);
+  };
   view.querySelectorAll("[data-theme-set]").forEach(b => b.onclick = () => { setTheme(b.dataset.themeSet); render("settings"); });
   view.querySelectorAll("[data-accent-set]").forEach(b => b.onclick = () => { setAccent(b.dataset.accentSet); render("settings"); });
   const ac = document.getElementById("accentCustom");
@@ -1295,7 +1396,7 @@ function wireSettings(){
     try { const words = await invoke("reveal_seed", { password: pw }); bkWords = words; bkMode = "idle"; render("settings"); }
     catch(e){ if (err){ err.textContent = String((e && e.message) || e); err.style.display = "block"; } bkReveal.disabled = false; bkReveal.textContent = "Reveal phrase"; }
   };
-  const bkCopy = $("#bkCopy"); if (bkCopy) bkCopy.onclick = async () => { try { await navigator.clipboard.writeText((bkWords||[]).join(" ")); } catch {} bkCopy.textContent = "Copied ✓"; setTimeout(()=>bkCopy.textContent="Copy phrase",1400); };
+  const bkCopy = $("#bkCopy"); if (bkCopy) bkCopy.onclick = async () => { await copyThenClear((bkWords||[]).join(" "), 45); bkCopy.textContent = "Copied ✓ · clears in 45s"; setTimeout(()=>bkCopy.textContent="Copy phrase",2200); };
   const bkHide = $("#bkHide"); if (bkHide) bkHide.onclick = () => { bkWords = null; render("settings"); };
 }
 
