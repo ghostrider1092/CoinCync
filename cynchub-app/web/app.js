@@ -100,16 +100,37 @@ function lsSet(k, v){ try { localStorage.setItem(k, String(v)); } catch {} }
 const THEMES = [
   { id:"dark", label:"Dark" },
   { id:"light", label:"Light" },
+  { id:"system", label:"System" },
   { id:"midnight", label:"Midnight" },
   { id:"slate", label:"Slate" },
+  { id:"oled", label:"OLED" },
   { id:"sepia", label:"Sepia" },
   { id:"nord", label:"Nord" },
   { id:"mocha", label:"Mocha" },
+  { id:"rose", label:"Rosé" },
+  { id:"gruvbox", label:"Gruvbox" },
+  { id:"solarized-light", label:"Solarized" },
+  { id:"contrast", label:"High-contrast" },
 ];
 const THEME_IDS = THEMES.map(t => t.id);
 function getTheme(){ const t = lsGet("cynchub.theme","dark"); return THEME_IDS.includes(t) ? t : "dark"; }
-function applyTheme(t){ if (!THEME_IDS.includes(t)) t = "dark"; document.documentElement.setAttribute("data-theme", t); }
+// "system" resolves to dark/light from the OS; others map straight to a palette.
+function resolveTheme(t){ if (t === "system"){ return (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light"; } return t; }
+function applyTheme(t){ if (!THEME_IDS.includes(t)) t = "dark"; document.documentElement.setAttribute("data-theme", resolveTheme(t)); }
 function setTheme(t){ if (!THEME_IDS.includes(t)) t = "dark"; lsSet("cynchub.theme", t); applyTheme(t); }
+
+// Cosmetic toggles — each sets (or clears) a data-* attribute on <html>; the CSS
+// does the rest. All flat & clean: density, motion, UI font, corner style.
+const UIPREFS = {
+  density: { ls:"cynchub.density", def:"comfortable", attr:"data-density", on:v => v==="compact" ? "compact" : null },
+  motion:  { ls:"cynchub.motion",  def:"full",        attr:"data-motion",  on:v => v==="reduce" ? "reduce" : null },
+  font:    { ls:"cynchub.font",    def:"system",      attr:"data-font",    on:v => (v==="rounded"||v==="grotesk") ? v : null },
+  corners: { ls:"cynchub.corners", def:"round",       attr:"data-corners", on:v => v==="sharp" ? "sharp" : null },
+};
+function getPref(k){ return lsGet(UIPREFS[k].ls, UIPREFS[k].def) || UIPREFS[k].def; }
+function applyPref(k){ const p = UIPREFS[k]; const val = p.on(getPref(k)); if (val) document.documentElement.setAttribute(p.attr, val); else document.documentElement.removeAttribute(p.attr); }
+function setPref(k, v){ lsSet(UIPREFS[k].ls, v); applyPref(k); }
+function applyAllUiPrefs(){ Object.keys(UIPREFS).forEach(applyPref); }
 
 // Accent customization — overrides the theme's accent (--gold) independently.
 // Stored value is "theme" (use the theme's own accent) or a hex color; the
@@ -175,6 +196,9 @@ function getAutoLock(){ const n = parseInt(lsGet("cynchub.autolock","15"),10); r
 function setAutoLock(m){ lsSet("cynchub.autolock", m); armIdleLock(); }
 applyTheme(getTheme());
 applyAccent(getAccent());
+applyAllUiPrefs();
+// keep a "System" theme in step with the OS light/dark switch
+if (window.matchMedia){ try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (getTheme() === "system") applyTheme("system"); }); } catch {} }
 
 // ── toasts (incoming-payment + status alerts) ──────────────────────
 const toastEl = (() => { const d = document.createElement("div"); d.className = "toasts"; if (typeof document!=="undefined" && document.body) document.body.appendChild(d); return d; })();
@@ -1361,6 +1385,18 @@ function settings(){
           ${ACCENT_PRESETS.map(a => `<button class="seg ${(a.color?accent===a.color:accent==='theme')?'on':''}" data-accent-set="${a.color||'theme'}">${a.color?`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${a.color};margin-right:6px;vertical-align:-1px"></span>`:''}${a.label}</button>`).join("")}
           <label class="seg" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">Custom<input type="color" id="accentCustom" value="${currentAccentColor()}" style="width:20px;height:16px;border:none;background:none;padding:0;cursor:pointer"></label>
         </span></div>
+      <div class="kv"><span class="k">Density</span><span class="v" style="display:flex;gap:6px">
+        ${[["comfortable","Comfortable"],["compact","Compact"]].map(([v,l])=>`<button class="seg ${getPref('density')===v?'on':''}" data-pref="density" data-val="${v}">${l}</button>`).join("")}
+      </span></div>
+      <div class="kv"><span class="k">UI font</span><span class="v" style="display:flex;gap:6px">
+        ${[["system","System"],["rounded","Rounded"],["grotesk","Grotesk"]].map(([v,l])=>`<button class="seg ${getPref('font')===v?'on':''}" data-pref="font" data-val="${v}">${l}</button>`).join("")}
+      </span></div>
+      <div class="kv"><span class="k">Corners</span><span class="v" style="display:flex;gap:6px">
+        ${[["round","Rounded"],["sharp","Sharp"]].map(([v,l])=>`<button class="seg ${getPref('corners')===v?'on':''}" data-pref="corners" data-val="${v}">${l}</button>`).join("")}
+      </span></div>
+      <div class="kv"><span class="k">Reduce motion</span><span class="v" style="display:flex;gap:6px">
+        ${[["full","Off"],["reduce","On"]].map(([v,l])=>`<button class="seg ${getPref('motion')===v?'on':''}" data-pref="motion" data-val="${v}">${l}</button>`).join("")}
+      </span></div>
     </div>
     <div class="panel" style="margin-top:16px"><div class="plabel">Security</div>
       <div class="kv"><span class="k">Session</span><span class="v g">unlocked</span></div>
@@ -1409,6 +1445,7 @@ function wireSettings(){
   render2fa();
   view.querySelectorAll("[data-theme-set]").forEach(b => b.onclick = () => { setTheme(b.dataset.themeSet); render("settings"); });
   view.querySelectorAll("[data-accent-set]").forEach(b => b.onclick = () => { setAccent(b.dataset.accentSet); render("settings"); });
+  view.querySelectorAll("[data-pref]").forEach(b => b.onclick = () => { setPref(b.dataset.pref, b.dataset.val); render("settings"); });
   const ac = document.getElementById("accentCustom");
   if (ac){ ac.oninput = () => setAccent(ac.value); ac.onchange = () => { setAccent(ac.value); render("settings"); }; }
   view.querySelectorAll("[data-lock-set]").forEach(b => b.onclick = () => { setAutoLock(parseInt(b.dataset.lockSet,10)||0); render("settings"); });

@@ -205,3 +205,54 @@ body:not(.reveal) .amt{filter:blur(9px);user-select:none}
 .ibar-x{background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.45);color:#fff;border-radius:7px;padding:4px 11px;cursor:pointer;font-size:12px;white-space:nowrap}
 .ibar-x:hover{background:rgba(255,255,255,.28)}
 body.has-ibar .app{padding-top:40px}
+/* ── extra flat themes (clean, muted; no neon/glow) ────────────────── */
+:root[data-theme="oled"]{
+  --bg-base:#000000; --bg-panel:rgba(255,255,255,0.03); --bg-panel-2:rgba(255,255,255,0.055);
+  --border:rgba(255,255,255,0.1); --border-strong:rgba(255,255,255,0.18);
+  --text-primary:#f4f4f2; --text-secondary:#a8a8a4; --text-tertiary:#6e6e6a; --text-quaternary:#4c4c49;
+  --gold:#d4a059; --gold-200:#e8c88f; --green:#34e388; --amber:#ffc960; --red:#ff6b6b; --violet:#9b8cff;
+}
+:root[data-theme="rose"]{
+  --bg-base:#191217; --bg-panel:rgba(255,200,220,0.04); --bg-panel-2:rgba(255,200,220,0.07);
+  --border:rgba(255,200,220,0.12); --border-strong:rgba(255,200,220,0.2);
+  --text-primary:#f3e7ec; --text-secondary:#c3a9b3; --text-tertiary:#8c7079; --text-quaternary:#604c53;
+  --gold:#d98fa8; --gold-200:#ecc0d0; --green:#5bbf98; --amber:#e0a96b; --red:#e06b7a; --violet:#b08ad0;
+}
+:root[data-theme="gruvbox"]{
+  --bg-base:#1d2021; --bg-panel:rgba(235,219,178,0.04); --bg-panel-2:rgba(235,219,178,0.07);
+  --border:rgba(235,219,178,0.12); --border-strong:rgba(235,219,178,0.2);
+  --text-primary:#ebdbb2; --text-secondary:#bdae93; --text-tertiary:#928374; --text-quaternary:#665c54;
+  --gold:#d79921; --gold-200:#fabd2f; --green:#a9b665; --amber:#e78a4e; --red:#ea6962; --violet:#d3869b;
+}
+:root[data-theme="solarized-light"]{
+  --bg-base:#fdf6e3; --bg-panel:rgba(0,43,54,0.03); --bg-panel-2:rgba(0,43,54,0.06);
+  --border:rgba(0,43,54,0.12); --border-strong:rgba(0,43,54,0.2);
+  --text-primary:#073642; --text-secondary:#586e75; --text-tertiary:#839496; --text-quaternary:#93a1a1;
+  --gold:#b58900; --gold-200:#946f00; --green:#718900; --amber:#cb4b16; --red:#dc322f; --violet:#6c71c4;
+}
+:root[data-theme="contrast"]{
+  --bg-base:#000000; --bg-panel:rgba(255,255,255,0.05); --bg-panel-2:rgba(255,255,255,0.09);
+  --border:rgba(255,255,255,0.35); --border-strong:rgba(255,255,255,0.6);
+  --text-primary:#ffffff; --text-secondary:#eaeaea; --text-tertiary:#c4c4c4; --text-quaternary:#9a9a9a;
+  --gold:#ffcf5c; --gold-200:#ffe39a; --green:#4dffa0; --amber:#ffd84d; --red:#ff8a8a; --violet:#c0b2ff;
+}
+/* light-background themes need dark CTA/seg-on text */
+:root[data-theme="solarized-light"] .seg.on,:root[data-theme="solarized-light"] .cta{color:#fdf6e3}
+/* ── density: compact ──────────────────────────────────────────────── */
+:root[data-density="compact"] .main{padding:16px 22px 48px}
+:root[data-density="compact"] .panel{padding:14px}
+:root[data-density="compact"] .kv{padding:8px 0}
+:root[data-density="compact"] .tile{padding:12px 13px}
+:root[data-density="compact"] .qcard{padding:13px;gap:9px}
+:root[data-density="compact"] .act{padding:9px 0}
+:root[data-density="compact"] .side{padding:18px 12px;gap:16px}
+:root[data-density="compact"] .bigbal{font-size:38px}
+:root[data-density="compact"] .h1{font-size:24px}
+/* ── reduce motion (explicit toggle, or respect the OS by default) ─── */
+:root[data-motion="reduce"] *{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}
+@media (prefers-reduced-motion:reduce){:root:not([data-motion]) *{animation-duration:.001ms!important;transition-duration:.001ms!important}}
+/* ── UI font choice (system stacks only — no web fonts) ────────────── */
+:root[data-font="rounded"]{--sans:ui-rounded,"SF Pro Rounded","Segoe UI",system-ui,sans-serif}
+:root[data-font="grotesk"]{--sans:Inter,"Helvetica Neue","Segoe UI",Arial,sans-serif}
+/* ── corner style: sharp ───────────────────────────────────────────── */
+:root[data-corners="sharp"]{--r-sm:3px;--r-md:4px;--r-lg:5px;--r-xl:6px;--r-pill:7px}
