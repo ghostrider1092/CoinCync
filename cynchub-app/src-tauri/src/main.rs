@@ -460,6 +460,52 @@ fn difficulty_of(i: &serde_json::Value) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Parse `utxos --include-spent` stdout into rows. Data lines look like:
+///   `idx amount height subaddr spent tx:out [payment_id]`
+/// The CLI prints the spent column as "yes"/"no" (not "true"/"false"); matching
+/// the wrong token silently mislabels every output, so it's pinned by tests.
+fn parse_utxo_rows(out: &str) -> Vec<UtxoRow> {
+    let mut rows = Vec::new();
+    for line in out.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() >= 6 && f[0].parse::<u64>().is_ok() {
+            if let (Ok(idx), Ok(amount), Ok(height)) =
+                (f[0].parse::<u64>(), f[1].parse::<f64>(), f[2].parse::<u64>())
+            {
+                rows.push(UtxoRow {
+                    idx,
+                    amount,
+                    height,
+                    tx_out: f[5].to_string(),
+                    spent: f[4].eq_ignore_ascii_case("yes") || f[4].eq_ignore_ascii_case("true"),
+                });
+            }
+        }
+    }
+    rows
+}
+
+/// Parse `shielded-balance` stdout into (balance_cync, notes). The "Balance: <n>
+/// atomic" line is ATOMIC (÷1e12 → CYNC); "Owned notes: <n>" is a count. Keying
+/// off the wrong line once reported a fabricated 0, so both are pinned by tests.
+fn parse_shielded(out: &str) -> (f64, u64) {
+    let (mut balance, mut notes) = (0.0f64, 0u64);
+    for line in out.lines() {
+        let l = line.trim();
+        let low = l.to_ascii_lowercase();
+        if low.contains("atomic") {
+            if let Some(v) = l.split_whitespace().find_map(|t| t.parse::<u64>().ok()) {
+                balance = v as f64 / 1e12;
+            }
+        } else if low.contains("note") {
+            if let Some(v) = l.split_whitespace().find_map(|t| t.parse::<u64>().ok()) {
+                notes = v;
+            }
+        }
+    }
+    (balance, notes)
+}
+
 #[tauri::command]
 fn get_metrics() -> Metrics {
     let empty = || Metrics {
@@ -973,25 +1019,7 @@ fn list_received(state: tauri::State<'_, State>) -> Result<Vec<UtxoRow>, String>
     let out = wallet_cli(&bin, &["--wallet", &path, "utxos", "--include-spent"], &pw);
     pw.zeroize();
     let out = out?;
-    let mut rows = Vec::new();
-    for line in out.lines() {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        // data row: idx amount height subaddr spent tx:out [payment_id]
-        // (the CLI prints the spent column as "yes"/"no", not "true"/"false")
-        if f.len() >= 6 && f[0].parse::<u64>().is_ok() {
-            if let (Ok(idx), Ok(amount), Ok(height)) =
-                (f[0].parse::<u64>(), f[1].parse::<f64>(), f[2].parse::<u64>())
-            {
-                rows.push(UtxoRow {
-                    idx,
-                    amount,
-                    height,
-                    tx_out: f[5].to_string(),
-                    spent: f[4].eq_ignore_ascii_case("yes") || f[4].eq_ignore_ascii_case("true"),
-                });
-            }
-        }
-    }
+    let mut rows = parse_utxo_rows(&out);
     rows.sort_by(|a, b| b.height.cmp(&a.height));
     Ok(rows)
 }
@@ -1039,22 +1067,7 @@ fn shielded_balance(state: tauri::State<'_, State>) -> Result<ShieldedInfo, Stri
     //   Shielded balance (anchor height 25607):
     //     Owned notes:   0
     //     Balance:       0 atomic          <- value is ATOMIC, not CYNC
-    let (mut balance, mut notes) = (0.0f64, 0u64);
-    for line in out.lines() {
-        let l = line.trim();
-        let low = l.to_ascii_lowercase();
-        if low.contains("atomic") {
-            // the "Balance: <n> atomic" line — convert atomic -> CYNC
-            if let Some(v) = l.split_whitespace().find_map(|t| t.parse::<u64>().ok()) {
-                balance = v as f64 / 1e12;
-            }
-        } else if low.contains("note") {
-            // "Owned notes: <n>"
-            if let Some(v) = l.split_whitespace().find_map(|t| t.parse::<u64>().ok()) {
-                notes = v;
-            }
-        }
-    }
+    let (balance, notes) = parse_shielded(&out);
     Ok(ShieldedInfo { balance, notes, active })
 }
 
@@ -1246,13 +1259,7 @@ struct MiningStatus {
 /// on mainnet), so accept both a number and a numeric string.
 fn node_difficulty() -> f64 {
     match rpc_call("get_info", serde_json::json!([])) {
-        Ok(i) => {
-            let d = &i["difficulty"];
-            d.as_f64()
-                .or_else(|| d.as_u64().map(|v| v as f64))
-                .or_else(|| d.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
-                .unwrap_or(0.0)
-        }
+        Ok(i) => difficulty_of(&i),
         Err(_) => 0.0,
     }
 }
@@ -1822,4 +1829,73 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running CyncHub");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_removes_csi_sequences() {
+        assert_eq!(strip_ansi("\u{1b}[31mred\u{1b}[0m text"), "red text");
+        assert_eq!(strip_ansi("plain"), "plain");
+    }
+
+    #[test]
+    fn clean_cli_error_keeps_error_drops_warn() {
+        // Real shape: a WARN "password visible" line we must never surface,
+        // plus the actual ERROR we want.
+        let raw = "2026-11-10T18:45:16.765637Z  WARN Password passed via `--password` is visible\n\
+                   2026-11-10T18:45:17.000000Z ERROR insufficient funds: need 10, have 2\n";
+        let msg = clean_cli_error(raw);
+        assert!(msg.contains("insufficient funds"), "got: {msg}");
+        assert!(!msg.to_lowercase().contains("password"), "warn leaked: {msg}");
+    }
+
+    #[test]
+    fn clean_cli_error_passes_plain_text() {
+        assert_eq!(clean_cli_error("just a message"), "just a message");
+    }
+
+    #[test]
+    fn difficulty_of_handles_number_or_string() {
+        assert_eq!(difficulty_of(&serde_json::json!({ "difficulty": 131072 })), 131072.0);
+        // get_info returns difficulty as a STRING — the bug that stuck the advisor on "measuring".
+        assert_eq!(difficulty_of(&serde_json::json!({ "difficulty": "239538" })), 239538.0);
+        assert_eq!(difficulty_of(&serde_json::json!({ "difficulty": 1.5 })), 1.5);
+        assert_eq!(difficulty_of(&serde_json::json!({})), 0.0);
+    }
+
+    #[test]
+    fn parse_utxo_rows_spent_flag_and_filtering() {
+        let out = "idx amount height subaddr spent tx:out\n\
+                   0 1.500000 25600 tCYNCaaa no abcd:0\n\
+                   1 2.000000 25610 tCYNCbbb yes ef12:1\n\
+                   -- not a data row --\n";
+        let rows = parse_utxo_rows(out);
+        assert_eq!(rows.len(), 2, "header + junk lines must be skipped");
+        assert_eq!(rows[0].idx, 0);
+        assert_eq!(rows[0].height, 25600);
+        assert!((rows[0].amount - 1.5).abs() < 1e-9);
+        assert_eq!(rows[0].tx_out, "abcd:0");
+        assert!(!rows[0].spent, "'no' must be unspent");
+        assert!(rows[1].spent, "'yes' must be spent");
+    }
+
+    #[test]
+    fn parse_shielded_atomic_units_and_notes() {
+        let out = "Shielded balance (anchor height 25607):\n\
+                   Owned notes:   3\n\
+                   Balance:       1500000000000 atomic\n";
+        let (bal, notes) = parse_shielded(out);
+        assert!((bal - 1.5).abs() < 1e-9, "atomic->CYNC: got {bal}");
+        assert_eq!(notes, 3);
+    }
+
+    #[test]
+    fn parse_shielded_empty_is_zero() {
+        let (bal, notes) = parse_shielded("Owned notes: 0\nBalance: 0 atomic\n");
+        assert_eq!(bal, 0.0);
+        assert_eq!(notes, 0);
+    }
 }
