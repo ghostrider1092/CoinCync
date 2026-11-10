@@ -6610,7 +6610,10 @@ mod tests {
         use spark_connector::ffi::spend_outputs;
         use std::sync::Arc;
 
-        let mut chain = Blockchain::new();
+        // Regtest enables the shield bridge (sketch-gk-proof), so a paying spend's
+        // value_balance can bind to its bundle fee — same setup as the mint sibling
+        // and the other passing spend tests.
+        let mut chain = Blockchain::new_with_network(NetworkType::Regtest);
         chain.spark_pool_store = Some(Arc::new(SparkPoolStore::new()));
         let store = Arc::clone(chain.spark_pool_store.as_ref().unwrap());
 
@@ -6636,7 +6639,12 @@ mod tests {
         let owned_op = derive_outpoint(&[], 2);
         let spend_payload =
             build_spend_payload(seed, store.as_ref(), &owned_op, 3_000, 0, 1).unwrap();
-        let spend_tx = mk_shielded_tx(spend_payload.encode());
+        // Bind value_balance AND tx.fee to the bundle fee exactly as the wallet
+        // submit path / other passing spend tests do (build_spend_payload leaves
+        // value_balance=0, which the value-conservation guard rejects before the
+        // content-collision check under test is ever reached). Clone so the raw
+        // payload remains for extracting the collision coin below.
+        let spend_tx = bound_spend_tx(spend_payload.clone());
 
         // Control: with its output coin NOT yet pooled, the spend is accepted.
         assert!(
