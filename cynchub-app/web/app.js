@@ -22,15 +22,19 @@ async function invoke(cmd, args){
 function mockInvoke(cmd){
   switch(cmd){
     case "get_chain_info": return { connected:true, height:1068, isSynced:false, peers:4, targetHeight:25258, anonSet:1069, ringSize:11, status:"syncing", network:"testnet", supply:52786.07, tipAgeSecs:0 };
+    case "get_metrics": { const h=25633, now=Math.floor(Date.now()/1000); return { connected:true, height:h, peers:5, targetHeight:h, isSynced:true, difficulty:131072, netHashrate:1092, mempool:1, supply:52786.07, anonSet:1069, ringSize:16, tipAgeSecs:34, avgBlockSecs:112, blocks:Array.from({length:8},(_,k)=>({height:h-k, timestamp:now-k*112-30, txCount:k===1?1:0})) }; }
     case "wallet_exists":  return true;
     case "scan_wallet":    return { total:0, unlocked:0, height:1068, utxoCount:0 };
     case "get_wallet_address": return "cync1q…demo…x0qT9";
     case "disclose_balance":   return { kind:"balance", artifact:"zkCYNC1"+"deadbeefcafef00d".repeat(10) };
     case "disclose_scoped_view_key": return { kind:"scoped-view-key", artifact: JSON.stringify({from:0,to:S.tip,view_secret:"f805b0…",view_public:"866012…"}) };
     case "send_transaction":   return "mock"+"deadbeef".repeat(8);
+    case "validate_address":   return { valid:true, network:"testnet", kind:"Standard", paymentId:false };
     case "new_subaddress":     return "tCYNCsub"+"1a2b3c".repeat(6)+"demo";
     case "integrated_address": return "tCYNCint"+"9f8e7d".repeat(6)+"demo";
     case "list_received":      return [];
+    case "reveal_seed":        return "useful burger waste abuse risk injury crowd tiny squirrel calm step brand lyrics tomato floor review render behave inner plug produce pulse feel garage".split(" ");
+    case "app_health":         return { nodeBin:true, walletBin:true, rigBin:true, rpcKey:true, walletExists:true, dataDir:"%APPDATA%/coincync/cynchub-node", version:"0.1.0" };
     case "node_status":        return { running:true, managed:false, binAvailable:true, height:1068, targetHeight:25258, isSynced:false, peers:4, progress:1068/25258, phase:"Syncing 1,068 / 25,258" };
     case "start_node":         return { running:true, managed:true, binAvailable:true, height:0, targetHeight:0, isSynced:false, peers:0, progress:0, phase:"Starting…" };
     case "stop_node":          return { running:false, managed:false, binAvailable:true, height:0, targetHeight:0, isSynced:false, peers:0, progress:0, phase:"Stopped" };
@@ -99,14 +103,90 @@ const THEMES = [
   { id:"midnight", label:"Midnight" },
   { id:"slate", label:"Slate" },
   { id:"sepia", label:"Sepia" },
+  { id:"nord", label:"Nord" },
+  { id:"mocha", label:"Mocha" },
 ];
 const THEME_IDS = THEMES.map(t => t.id);
 function getTheme(){ const t = lsGet("cynchub.theme","dark"); return THEME_IDS.includes(t) ? t : "dark"; }
 function applyTheme(t){ if (!THEME_IDS.includes(t)) t = "dark"; document.documentElement.setAttribute("data-theme", t); }
 function setTheme(t){ if (!THEME_IDS.includes(t)) t = "dark"; lsSet("cynchub.theme", t); applyTheme(t); }
+
+// Accent customization — overrides the theme's accent (--gold) independently.
+// Stored value is "theme" (use the theme's own accent) or a hex color; the
+// lighter companion (--gold-200) is derived so any color stays cohesive.
+const ACCENT_PRESETS = [
+  { label:"Theme",   color:null },
+  { label:"Gold",    color:"#d9a24e" },
+  { label:"Amber",   color:"#f0a93a" },
+  { label:"Emerald", color:"#27bd83" },
+  { label:"Teal",    color:"#1fb6c4" },
+  { label:"Azure",   color:"#4f8ff0" },
+  { label:"Indigo",  color:"#8b7bf0" },
+  { label:"Rose",    color:"#eb5d97" },
+  { label:"Coral",   color:"#f0744a" },
+];
+const DEFAULT_ACCENT = "#d4a059";
+function isHexColor(s){ return typeof s === "string" && /^#[0-9a-fA-F]{6}$/.test(s); }
+function lightenHex(hex, amt){
+  const n = parseInt(hex.slice(1), 16);
+  let r = (n>>16)&255, g = (n>>8)&255, b = n&255;
+  r = Math.round(r + (255-r)*amt); g = Math.round(g + (255-g)*amt); b = Math.round(b + (255-b)*amt);
+  return "#" + ((1<<24) + (r<<16) + (g<<8) + b).toString(16).slice(1);
+}
+function getAccent(){ const a = lsGet("cynchub.accent","theme"); return isHexColor(a) ? a.toLowerCase() : "theme"; }
+function currentAccentColor(){ const a = getAccent(); return isHexColor(a) ? a : DEFAULT_ACCENT; }
+function applyAccent(v){
+  const r = document.documentElement.style;
+  if (!isHexColor(v)){ r.removeProperty("--gold"); r.removeProperty("--gold-200"); }
+  else { r.setProperty("--gold", v); r.setProperty("--gold-200", lightenHex(v, 0.28)); }
+}
+function setAccent(v){ const val = isHexColor(v) ? v.toLowerCase() : "theme"; lsSet("cynchub.accent", val); applyAccent(val); }
+
+// Address book — saved recipients (per device, localStorage).
+function getContacts(){ try { return JSON.parse(lsGet("cynchub.contacts","[]")) || []; } catch { return []; } }
+function saveContacts(cs){ lsSet("cynchub.contacts", JSON.stringify(cs)); }
+function addContact(label, address){ const cs = getContacts().filter(c => c.address !== address); cs.unshift({ label, address }); saveContacts(cs.slice(0, 30)); }
+function removeContact(address){ saveContacts(getContacts().filter(c => c.address !== address)); }
+
+// Sent-transaction log — the CLI doesn't record outgoing sends, so CyncHub
+// remembers the ones it submits (per device) to build a full history alongside
+// the on-chain received outputs. No amounts leave the device.
+function getSentLog(){ try { return JSON.parse(lsGet("cynchub.sentlog","[]")) || []; } catch { return []; } }
+function recordSend(e){ const l = getSentLog(); l.unshift(e); lsSet("cynchub.sentlog", JSON.stringify(l.slice(0, 60))); }
+// Export the unified history (sent-log + received outputs) as CSV, for records.
+async function exportHistoryCsv(){
+  let recv = [];
+  if (IS_TAURI){ try { recv = (await invoke("list_received")) || []; } catch(e){} }
+  const sent = getSentLog();
+  const esc = (s) => { s = String(s==null?"":s); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+  const rows = [["Type","Amount (CYNC)","Counterparty / Output","Block","Date","TxID","Memo/Status"]];
+  sent.forEach(s => rows.push(["Sent", Number(s.amount).toFixed(6), s.address||"", s.height||"", s.ts?new Date(s.ts).toISOString().slice(0,10):"", s.txid||"", s.memo||""]));
+  recv.forEach(r => rows.push(["Received", Number(r.amount).toFixed(6), r.txOut||"", r.height||"", "", "", r.spent?"spent":"confirmed"]));
+  if (rows.length === 1){ showToast(`<b>Nothing to export yet</b><br>No sends or received outputs recorded.`, ""); return; }
+  const csv = rows.map(r => r.map(esc).join(",")).join("\r\n");
+  try {
+    const u = URL.createObjectURL(new Blob([csv], { type:"text/csv" }));
+    const a = document.createElement("a"); a.href = u; a.download = `cynchub-history-${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u), 800);
+    showToast(`<b>History exported</b><br>${rows.length-1} transactions saved as CSV.`, "");
+  } catch(e){ showToast(`<b>Export failed</b><br>${String((e&&e.message)||e)}`, ""); }
+}
 function getAutoLock(){ const n = parseInt(lsGet("cynchub.autolock","15"),10); return Number.isFinite(n) && n>=0 ? n : 15; } // minutes; 0 = off
 function setAutoLock(m){ lsSet("cynchub.autolock", m); armIdleLock(); }
 applyTheme(getTheme());
+applyAccent(getAccent());
+
+// ── toasts (incoming-payment + status alerts) ──────────────────────
+const toastEl = (() => { const d = document.createElement("div"); d.className = "toasts"; if (typeof document!=="undefined" && document.body) document.body.appendChild(d); return d; })();
+function showToast(html, kind){
+  if (!toastEl) return;
+  if (!toastEl.parentNode && document.body) document.body.appendChild(toastEl);
+  const t = document.createElement("div");
+  t.className = "toast" + (kind === "in" ? " in" : "");
+  t.innerHTML = `<div class="tci">${kind==="in"?I.down:I.check}</div><div class="tcb">${html}</div>`;
+  toastEl.appendChild(t);
+  setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 320); }, 5200);
+}
 
 let idleTimer = null, idleBound = false;
 function armIdleLock(){
@@ -197,10 +277,10 @@ function vault(){
   // Pre-fork there is no shielded pool yet: say so honestly instead of a shield nudge.
   const nudge = !forkLive
     ? `<div class="nudge"><div class="ni">${I.clock}</div>
-         <div class="nt">The shielded pool activates at <b>h${FORK.toLocaleString()}</b>${toFork!=null?` — <b class="amt">~${toFork.toLocaleString()}</b> blocks away`:""}. Until then balances are transparent.</div></div>`
+         <div class="nt">Your balance is already <b>ring-private</b> — ring signatures (size ${S.ringSize||16}) + stealth addresses hide sender, recipient &amp; amount on every transaction; privacy is mandatory, there is no transparent mode. The <b>Spark pool</b> at h${FORK.toLocaleString()}${toFork!=null?` (~${num(toFork)} blocks away)`:""} adds an even larger shared anonymity set.</div></div>`
     : (S.transparent > 0
         ? `<div class="nudge"><div class="ni">${I.shieldPlain}</div>
-             <div class="nt"><b class="amt">${f(S.transparent)} ${S.unit}</b> is transparent — Shield it to join the anonymity set${S.anonSet!=null?` (${num(S.anonSet)} outputs)`:""}.</div></div>`
+             <div class="nt"><b class="amt">${f(S.transparent)} ${S.unit}</b> is in your ring-private base layer — Shield it into the Spark pool for the largest anonymity set${S.anonSet!=null?` (${num(S.anonSet)} outputs)`:""}.</div></div>`
         : "");
 
   const activity = `<div class="at-empty" style="padding:28px 8px">${I.clock}
@@ -222,10 +302,11 @@ function vault(){
         <div class="hlabel">Total balance${scanning?" · scanning…":""}</div>
         <div class="bigbal"><span class="amt">${f(S.total)}</span><span class="u">${S.unit}</span></div>
         <div class="splits">
-          <div class="split"><span class="sk">${I.circle} Transparent</span><div class="sv amt">${f(S.transparent)}</div></div>
+          <div class="split"><span class="sk">${I.circle} Ring-private</span><div class="sv amt">${f(S.transparent)}</div></div>
           <div class="split shield"><span class="sk">${I.lock} Shielded</span><div class="sv amt">${f(S.shielded)}</div></div>
         </div>
-        <div class="meter"><div class="ml"><span>Privacy coverage</span><b>${cov}% shielded</b></div><div class="bar"><i style="width:${cov}%"></i></div></div>
+        <div class="meter"><div class="ml"><span>Spark pool coverage${forkLive?"":" · pre-fork"}</span><b>${cov}% shielded</b></div><div class="bar"><i style="width:${cov}%"></i></div></div>
+        <div class="note" style="margin-top:7px">All funds are already <b style="color:var(--gold-200)">ring-private</b> (ring-${S.ringSize||16} + stealth). Spark adds a larger shared pool.</div>
       </div>
       ${privacyHealthPanel()}
     </section>
@@ -238,12 +319,12 @@ function vault(){
     <section class="grid2">
       <div class="panel">
         <div class="plabel">Balances by pool</div>
-        <div class="kv"><span class="k">${I.circle}Transparent · spendable now</span><span class="v amt">${f(S.transparent)}</span></div>
+        <div class="kv"><span class="k">${I.circle}Ring-private · spendable now</span><span class="v amt">${f(S.transparent)}</span></div>
         <div class="kv"><span class="k">${I.lock}Shielded · private</span><span class="v gold amt">${f(S.shielded)}</span></div>
         <div class="kv"><span class="k">${I.clock}Pending · unconfirmed</span><span class="v amt">${f(S.pending)}</span></div>
         <div class="kv"><span class="k">Total</span><span class="v amt">${f(S.total)} ${S.unit}</span></div>
       </div>
-      <div class="panel"><div class="plabel">Activity</div><div id="vAct">${activity}</div></div>
+      <div class="panel"><div class="plabel" style="display:flex;justify-content:space-between;align-items:center">Activity<a id="vExport" style="color:var(--gold);cursor:pointer;font-size:10.5px;text-transform:none;letter-spacing:0">Export CSV</a></div><div id="vAct">${activity}</div></div>
     </section>
     <p class="note" style="margin-top:4px">Balances blurred by default · non-custodial, keys on device · live from your node · testnet.</p>
   `;
@@ -254,6 +335,7 @@ function wireVault(){
     document.body.classList.toggle("reveal");
     $("#eyetxt").textContent = document.body.classList.contains("reveal") ? "Hide balances" : "Reveal balances";
   };
+  const ex = $("#vExport"); if (ex) ex.onclick = exportHistoryCsv;
   // Privacy Health one-tap fixes
   view.querySelectorAll("[data-pha]").forEach(b => b.onclick = async (e) => {
     e.stopPropagation();
@@ -266,23 +348,29 @@ function wireVault(){
       render("vault");
     }
   });
-  // Load real received-outputs into the Activity panel.
+  // Unified Activity: on-chain received outputs + CyncHub's own sent-log.
   (async () => {
-    if (!IS_TAURI) return;
     const el = $("#vAct"); if (!el) return;
-    try {
-      const rows = await invoke("list_received");
-      if (rows && rows.length){
-        el.innerHTML = rows.slice(0, 8).map(r => `
-          <div class="act">
-            <div class="ai in">${I.down}</div>
-            <div><div class="al">Received${r.spent?` <span class="atag">spent</span>`:""}</div><div class="am">block ${Number(r.height).toLocaleString()} · ${r.txOut}</div></div>
-            <div><div class="av ${r.spent?"":"in"}"><span class="amt">+${Number(r.amount).toFixed(6)}</span></div><div class="at">${r.spent?"spent":"confirmed"}</div></div>
-          </div>`).join("");
-      } else {
-        el.innerHTML = `<div class="at-empty" style="padding:28px 8px">${I.clock}<p>No received outputs yet. Incoming payments appear here once your wallet scans them.</p></div>`;
-      }
-    } catch(e){}
+    let recv = [];
+    if (IS_TAURI){ try { recv = (await invoke("list_received")) || []; } catch(e){} }
+    const sent = getSentLog();
+    const items = [
+      ...sent.map(s => ({ kind:"sent", amount:s.amount, height:s.height||0,
+        sub:`to ${(s.address||"").slice(0,14)}…${s.memo?` · "${s.memo}"`:""} · ${new Date(s.ts).toLocaleDateString()}` })),
+      ...recv.map(r => ({ kind:"recv", amount:r.amount, height:r.height||0, spent:r.spent,
+        sub:`block ${Number(r.height).toLocaleString()} · ${r.txOut}` })),
+    ];
+    if (!items.length){
+      el.innerHTML = `<div class="at-empty" style="padding:28px 8px">${I.clock}<p>No activity yet. Your sends and received payments appear here.</p></div>`;
+      return;
+    }
+    items.sort((a,b) => (b.height||0) - (a.height||0));
+    el.innerHTML = items.slice(0, 10).map(it => `
+      <div class="act">
+        <div class="ai ${it.kind==="recv"?"in":""}">${it.kind==="recv"?I.down:I.up}</div>
+        <div><div class="al">${it.kind==="recv"?"Received":"Sent"}${it.spent?` <span class="atag">spent</span>`:""}</div><div class="am">${it.sub}</div></div>
+        <div><div class="av ${it.kind==="recv"?"in":""}"><span class="amt">${it.kind==="recv"?"+":"−"}${Number(it.amount).toFixed(6)}</span></div><div class="at">${it.kind==="recv"?(it.spent?"spent":"confirmed"):"sent"}</div></div>
+      </div>`).join("");
   })();
 }
 
@@ -292,23 +380,48 @@ function showOut(el, kind, html){
   el.style.display = "block"; el.innerHTML = html;
   el.style.color = kind==="err" ? "var(--red)" : kind==="ok" ? "var(--green)" : "var(--text-secondary)";
 }
+let sendFee = 1; // 1 = normal, 2 = priority (fee multiplier)
 function send(){
   const forkLive = S.tip != null && S.tip >= FORK;
   return `
-    <div class="pageh"><div class="h1">Send</div><div class="sub">${forkLive?"Private by default · hides amount &amp; recipient":"Transparent transfer · shielded sends unlock at h"+FORK.toLocaleString()}</div></div>
+    <div class="pageh"><div class="h1">Send</div><div class="sub">Private by default — ring signatures + stealth addresses hide sender, recipient &amp; amount${forkLive?"":" · Spark shielding unlocks at h"+FORK.toLocaleString()}</div></div>
     <div class="panel" style="max-width:640px">
       <div class="plabel">Transfer</div>
-      <div class="at-field"><div class="fl">Recipient address</div><input class="at-input" id="sAddr" placeholder="tCYNC… · standard, subaddress or integrated"></div>
-      <div class="at-field"><div class="fl">Amount (${S.unit})</div><input class="at-input" id="sAmt" inputmode="decimal" placeholder="0.00"></div>
+      <div class="at-field"><div class="fl">Recipient address</div><input class="at-input" id="sAddr" placeholder="tCYNC… · standard, subaddress or integrated"><div class="note" id="sAddrInfo" style="margin-top:6px;display:none"></div></div>
+      <div id="sContacts" style="margin:-4px 0 12px"></div>
+      <div class="at-field"><div class="fl" style="display:flex;justify-content:space-between;align-items:center"><span>Amount (${S.unit})</span><a id="sMax" style="color:var(--gold);cursor:pointer;font-size:11px;text-transform:none;letter-spacing:0">Max</a></div><input class="at-input" id="sAmt" inputmode="decimal" placeholder="0.00"></div>
       <div class="at-field"><div class="fl">Memo — optional, encrypted to the recipient</div><input class="at-input" id="sMemo" placeholder="note…"></div>
       <div class="kv"><span class="k">Spendable</span><span class="v amt">${f(S.transparent)} ${S.unit}</span></div>
+      <div class="kv"><span class="k">Fee / priority</span><span class="v" style="display:flex;gap:6px">
+        <button class="seg ${sendFee===1?'on':''}" data-fee="1">Normal</button>
+        <button class="seg ${sendFee===2?'on':''}" data-fee="2">Priority</button></span></div>
       <button class="cta" id="sSend" style="width:100%;margin-top:10px">Review &amp; send</button>
       <div class="note" id="sOut" style="margin-top:12px;display:none"></div>
     </div>
     <p class="note" style="margin-top:16px">Sends are built on device and submitted to your node. Double-check the address — transfers are irreversible.</p>
   `;
 }
+function renderSendContacts(){
+  const el = $("#sContacts"); if (!el) return;
+  const cs = getContacts();
+  const chips = cs.map(c => `<button class="seg" data-fillc="${c.address}" title="${c.address}">${c.label}<span data-rmc="${c.address}" style="margin-left:6px;opacity:.55">×</span></button>`).join("");
+  el.innerHTML = `
+    ${cs.length ? `<div class="note" style="margin:2px 0 6px">Saved contacts</div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px">${chips}</div>` : ""}
+    <div style="display:flex;gap:6px;align-items:center"><input class="at-input" id="sCLabel" placeholder="name this address" style="max-width:150px;padding:7px 11px"><button class="seg" id="sCSave">Save to contacts</button></div>`;
+  el.querySelectorAll("[data-fillc]").forEach(b => b.onclick = (e) => {
+    if (e.target && e.target.dataset && e.target.dataset.rmc){ removeContact(e.target.dataset.rmc); renderSendContacts(); return; }
+    const a = $("#sAddr"); if (a) a.value = b.dataset.fillc;
+  });
+  const save = $("#sCSave");
+  if (save) save.onclick = () => {
+    const addr = ($("#sAddr").value || "").trim();
+    if (!addr){ return; }
+    const label = ($("#sCLabel").value || "").trim() || (addr.slice(0, 9) + "…");
+    addContact(label, addr); const l = $("#sCLabel"); if (l) l.value = ""; renderSendContacts();
+  };
+}
 function wireSend(){
+  renderSendContacts();
   const btn = $("#sSend"), out = $("#sOut");
   if (!btn) return;
   let confirming = false;
@@ -327,7 +440,8 @@ function wireSend(){
     }
     btn.disabled = true; btn.textContent = "Sending…";
     try {
-      const txid = await invoke("send_transaction", { address: addr, amount: amt, memo: memo || null });
+      const txid = await invoke("send_transaction", { address: addr, amount: amt, memo: memo || null, feeMultiplier: sendFee });
+      recordSend({ txid, address: addr, amount: amt, memo, ts: Date.now(), height: S.tip || 0 });
       showOut(out,"ok",`Sent ✓ — <span class="mono" style="font-size:11px;word-break:break-all">${txid}</span>`);
       $("#sAddr").value = ""; $("#sAmt").value = ""; $("#sMemo").value = "";
       pollWallet();
@@ -337,31 +451,64 @@ function wireSend(){
     btn.disabled = false; btn.textContent = "Review & send"; confirming = false;
   };
   ["sAddr","sAmt","sMemo"].forEach(id => { const el = $("#"+id); if (el) el.oninput = () => { if (confirming){ confirming = false; btn.textContent = "Review & send"; if (out){ out.style.display="none"; } } }; });
+  // Max — fill spendable (the node computes the fee; reduce slightly if it's tight)
+  const maxEl = $("#sMax"); if (maxEl) maxEl.onclick = () => { const a = $("#sAmt"); if (a){ a.value = (S.transparent||0) > 0 ? String(S.transparent) : "0"; a.dispatchEvent(new Event("input")); } };
+  // Fee / priority toggle
+  view.querySelectorAll("[data-fee]").forEach(b => b.onclick = () => { sendFee = parseInt(b.dataset.fee,10)===2?2:1; view.querySelectorAll("[data-fee]").forEach(x=>x.classList.toggle("on", x===b)); });
+  // Live recipient-address validation (debounced)
+  const addrEl = $("#sAddr"), info = $("#sAddrInfo");
+  let vTimer = null;
+  const showAddrInfo = (ok, html) => { if (!info) return; info.style.display="block"; info.style.color = ok?"var(--green)":"var(--red)"; info.innerHTML = html; };
+  if (addrEl) addrEl.addEventListener("input", () => {
+    const v = (addrEl.value||"").trim();
+    if (info) info.style.display = "none";
+    if (vTimer) clearTimeout(vTimer);
+    if (v.length < 8) return;
+    vTimer = setTimeout(async () => {
+      if (!IS_TAURI){ showAddrInfo(v.startsWith("tCYNC")||v.startsWith("CYNC"), v.startsWith("tCYNC")?"✓ valid · testnet":"✕ not a CoinCync address"); return; }
+      try {
+        const r = await invoke("validate_address", { address: v });
+        if (!r || !r.valid){ showAddrInfo(false, "✕ not a valid CoinCync address"); return; }
+        const netOk = !S.network || !r.network || r.network === S.network;
+        showAddrInfo(netOk, `${netOk?"✓":"⚠"} ${r.kind||"address"} · ${r.network||"?"}${r.paymentId?" · has payment ID":""}${netOk?"":" — wrong network!"}`);
+      } catch(e){ showAddrInfo(false, "✕ not a valid CoinCync address"); }
+    }, 400);
+  });
 }
 
-// ── Receive ────────────────────────────────────────────────────────
+// ── Receive (privacy-first) ────────────────────────────────────────
+let rKind = "main"; // main | private | integrated
+function rKindLabel(){
+  return rKind === "private" ? `· fresh · <span style="color:var(--green)">unlinkable</span>`
+       : rKind === "integrated" ? `· integrated (payment ID)`
+       : `· main`;
+}
 function receive(){
   return `
-    <div class="pageh"><div class="h1">Receive</div><div class="sub">Share an address to get paid · private by default</div></div>
+    <div class="pageh"><div class="h1">Receive</div><div class="sub">Privacy by default — every address here is fresh and unlinkable</div></div>
+    <div class="nudge" style="margin-bottom:16px"><div class="ni">${I.shield}</div>
+      <div class="nt"><b>CyncHub hands you a fresh private address automatically.</b> CoinCync subaddresses are unlinkable — two senders can't tell they paid the same wallet, and outsiders can't tie your payments together. Tap <b>New private address</b> for the next sender; every payment also lands at a one-time stealth address on-chain.</div></div>
     <section class="grid2">
       <div class="panel" style="text-align:center">
-        <div class="plabel" style="text-align:left">Your address</div>
+        <div class="plabel" style="text-align:left">Receiving address <span id="rKind" style="color:var(--gold-200);font-weight:400;text-transform:none;letter-spacing:0">${rKindLabel()}</span></div>
         <div id="rQr" style="display:flex;justify-content:center;align-items:center;min-height:160px;padding:14px 0;color:var(--text-tertiary)">generating…</div>
         <div id="rAddr" class="mono" style="font-size:11px;word-break:break-all;color:var(--text-secondary);margin:6px 4px 14px">loading…</div>
-        <div class="at-actions" style="justify-content:center"><button class="cta" id="rCopy">Copy address</button></div>
+        <div class="at-actions" style="justify-content:center"><button class="cta" id="rNew">New private address</button><button class="ghost" id="rCopy">Copy</button></div>
       </div>
       <div class="panel">
-        <div class="plabel">More addresses</div>
-        <p class="note" style="margin-bottom:14px">A fresh <b>subaddress</b> is unlinkable — senders can't tell two of your addresses belong to one wallet. An <b>integrated address</b> embeds a payment ID for matching invoices.</p>
-        <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="ghost" id="rSub">New subaddress</button><button class="ghost" id="rInt">Integrated address</button></div>
+        <div class="plabel">Address options</div>
+        <p class="note" style="margin-bottom:14px">A <b>fresh private address</b> is best — a new, unlinkable one per sender. An <b>integrated address</b> adds a payment ID so you can match an incoming payment to an invoice. Your <b>main address</b> is fine for a one-off or a public tip jar, but reusing it lets a sender recognize you again.</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="ghost" id="rInt">Integrated address</button><button class="ghost" id="rMain">Show main address</button></div>
         <div class="note" id="rMore" style="margin-top:16px;display:none"></div>
       </div>
     </section>
   `;
 }
-async function setReceiveAddr(addr){
+async function setReceiveAddr(addr, kind){
   if (addr) S.address = addr;
+  if (kind) rKind = kind;
   const a = $("#rAddr"); if (a) a.textContent = addr || "—";
+  const k = $("#rKind"); if (k) k.innerHTML = rKindLabel();
   const q = $("#rQr");
   if (q && addr){
     try { const svg = await invoke("generate_qr_svg", { payload: addr }); q.innerHTML = `<div style="width:180px;height:180px;background:#fff;border-radius:8px;padding:8px;box-sizing:border-box">${svg}</div>`; }
@@ -370,15 +517,22 @@ async function setReceiveAddr(addr){
 }
 function wireReceive(){
   (async () => {
+    // Privacy by default: automatically hand out a FRESH, unlinkable address.
+    // The main address is a deliberate opt-in ("Show main address"), never the
+    // default — so a user is private without having to think about it.
+    if (IS_TAURI){
+      try { const a = await invoke("new_subaddress"); await setReceiveAddr(a, "private"); return; } catch(e){}
+    }
     let addr = S.address;
     if (!addr){ try { addr = await invoke("get_wallet_address"); } catch{} }
-    await setReceiveAddr(addr);
+    if (addr) await setReceiveAddr(addr, "main");
   })();
-  const copy = $("#rCopy"); if (copy) copy.onclick = async () => { try{ await navigator.clipboard.writeText(S.address||""); }catch{} copy.textContent="Copied ✓"; setTimeout(()=>copy.textContent="Copy address",1400); };
-  const showMore = (label, addr) => { const m = $("#rMore"); if (!m) return; m.style.display="block"; m.style.color="var(--text-secondary)"; m.innerHTML = `${label}:<br><span class="mono" style="font-size:11px;word-break:break-all;color:var(--gold-200)">${addr}</span>`; };
+  const copy = $("#rCopy"); if (copy) copy.onclick = async () => { try{ await navigator.clipboard.writeText(S.address||""); }catch{} copy.textContent="Copied ✓"; setTimeout(()=>copy.textContent="Copy",1400); };
   const errMore = (e) => { const m = $("#rMore"); if (!m) return; m.style.display="block"; m.style.color="var(--red)"; m.textContent = String((e && e.message) || e); };
-  const sub = $("#rSub"); if (sub) sub.onclick = async () => { sub.disabled=true; try{ const a = await invoke("new_subaddress"); showMore("New subaddress", a); await setReceiveAddr(a); }catch(e){ errMore(e); } sub.disabled=false; };
-  const int = $("#rInt"); if (int) int.onclick = async () => { int.disabled=true; try{ const a = await invoke("integrated_address"); showMore("Integrated address", a); await setReceiveAddr(a); }catch(e){ errMore(e); } int.disabled=false; };
+  const info = (html) => { const m = $("#rMore"); if (!m) return; m.style.display="block"; m.style.color="var(--text-secondary)"; m.innerHTML = html; };
+  const neu = $("#rNew"); if (neu) neu.onclick = async () => { neu.disabled=true; neu.textContent="Generating…"; try{ const a = await invoke("new_subaddress"); await setReceiveAddr(a, "private"); info(`Fresh unlinkable address ready — share it with just this one sender.`); }catch(e){ errMore(e); } neu.disabled=false; neu.textContent="New private address"; };
+  const int = $("#rInt"); if (int) int.onclick = async () => { int.disabled=true; try{ const a = await invoke("integrated_address"); await setReceiveAddr(a, "integrated"); info(`Integrated address — carries a payment ID so you can match the incoming payment to an invoice.`); }catch(e){ errMore(e); } int.disabled=false; };
+  const main = $("#rMain"); if (main) main.onclick = async () => { main.disabled=true; try{ const a = await invoke("get_wallet_address"); await setReceiveAddr(a, "main"); info(`This is your main address. Fine for a one-off, but reusing it lets senders link your payments — prefer a fresh private address.`); }catch(e){ errMore(e); } main.disabled=false; };
 }
 
 // ── Shield / Unshield (Spark pool · activates at h29000) ────────────
@@ -387,21 +541,21 @@ function shield(){
   const forkLive = S.tip != null && S.tip >= FORK;
   const toFork = S.tip == null ? null : Math.max(0, FORK - S.tip);
   const isShield = shDir === "shield";
-  const srcLabel = isShield ? "Transparent" : "Shielded";
+  const srcLabel = isShield ? "Ring-private" : "Shielded";
   const srcBal = isShield ? S.transparent : S.shielded;
   const gate = !forkLive
     ? `<div class="nudge" style="margin-bottom:18px"><div class="ni">${I.clock}</div>
          <div class="nt">The shielded pool activates at <b>h${FORK.toLocaleString()}</b>${toFork!=null?` — <b class="amt">~${toFork.toLocaleString()}</b> blocks away`:""}. Shield &amp; unshield unlock then.</div></div>`
     : "";
   return `
-    <div class="pageh"><div class="h1">Shield</div><div class="sub">Move value between your transparent balance and the private Spark pool</div></div>
+    <div class="pageh"><div class="h1">Shield</div><div class="sub">Move value between your ring-private base balance and the Spark shielded pool</div></div>
     ${gate}
     <div class="at-types">
-      <button class="at-type ${isShield?"on":""}" data-sh="shield"><div class="tt">${I.shieldPlain} Shield</div><div class="ts">Transparent → pool · join the anonymity set.</div></button>
-      <button class="at-type ${!isShield?"on":""}" data-sh="unshield"><div class="tt">${I.unshield} Unshield</div><div class="ts">Pool → transparent · your clean public exit.</div></button>
+      <button class="at-type ${isShield?"on":""}" data-sh="shield"><div class="tt">${I.shieldPlain} Shield</div><div class="ts">Base → Spark pool · join the largest anonymity set.</div></button>
+      <button class="at-type ${!isShield?"on":""}" data-sh="unshield"><div class="tt">${I.unshield} Unshield</div><div class="ts">Pool → base · value-revealing clean exit.</div></button>
     </div>
     <div class="panel" style="max-width:640px;margin-top:16px">
-      <div class="plabel">${isShield?"Shield into the pool":"Unshield to transparent"}</div>
+      <div class="plabel">${isShield?"Shield into the Spark pool":"Unshield (value-revealing exit)"}</div>
       <div class="at-field"><div class="fl">Amount (${S.unit})</div><input class="at-input" id="shAmt" inputmode="decimal" placeholder="0.00" ${forkLive?"":"disabled"}></div>
       <div class="kv"><span class="k">${srcLabel} balance</span><span class="v amt">${f(srcBal)} ${S.unit}</span></div>
       ${!isShield?`<div class="kv"><span class="k">Shielded notes</span><span class="v">${S.shieldedNotes||0}</span></div>`:""}
@@ -430,7 +584,7 @@ function cleanExitWizard(forkLive){
       <p class="note" style="margin-bottom:4px">A clean exit is your <b style="color:var(--gold-200)">delisting insurance</b> — a public, provable trail from the shielded pool to a transparent output an exchange will accept, with your private history left private.</p>
       ${step(1,"Decorrelate","Run ghost-mode churn first so the coins you exit can't be linked back to your shielded activity.",churnBtn)}
       ${step(2,"Unshield","Move the amount above out of the pool — it becomes a transparent, value-revealing output back to your own wallet.","")}
-      ${step(3,"Exit","Send the clean transparent coins to your exchange or custodian. Their chain analysis sees a normal transparent transfer.",sendBtn)}
+      ${step(3,"Exit","Send the unshielded coins to your exchange or custodian — they can verify the public unshield trail, while the rest of your history stays private.",sendBtn)}
     </div>`;
 }
 function wireShield(){
@@ -453,7 +607,7 @@ function wireShield(){
     const amt = parseFloat($("#shAmt").value || "0");
     const srcBal = isShield ? S.transparent : S.shielded;
     if (!(amt > 0)){ showOut(out,"err","Enter a positive amount."); return; }
-    if (amt > srcBal + 1e-9){ showOut(out,"err",`Amount exceeds your ${isShield?"transparent":"shielded"} ${f(srcBal)} ${S.unit}.`); return; }
+    if (amt > srcBal + 1e-9){ showOut(out,"err",`Amount exceeds your ${isShield?"ring-private":"shielded"} ${f(srcBal)} ${S.unit}.`); return; }
     if (!confirming){ confirming = true; btn.innerHTML = `Confirm — ${isShield?"shield":"unshield"} ${amt} ${S.unit}`; showOut(out,"",`${isShield?"Shielding":"Unshielding"} <b>${amt} ${S.unit}</b>. Click again to confirm.`); return; }
     btn.disabled = true; btn.textContent = isShield?"Shielding…":"Unshielding…";
     try {
@@ -626,6 +780,21 @@ function recLabel(m){
   if (m.recommend==="solo") return { t:`Solo is worthwhile — ~a block every ${dur(m.estSoloSecs).replace("~","")}`, cls:"g" };
   return { t:`Solo would take ${dur(m.estSoloSecs)} — a pool earns steadier shares`, cls:"" };
 }
+// Your share of total network hashrate (difficulty-derived net includes you).
+function shareOf(m){ return (m && m.hashrate>0 && m.netHashrate>0) ? Math.min(1, m.hashrate/m.netHashrate) : null; }
+function shareTxt(m){ const s = shareOf(m); return s==null ? "—" : (s>=0.1?(s*100).toFixed(0):(s*100).toFixed(1))+"%"; }
+// What Auto decided and why — plain language, so the user trusts the routing.
+function autoBanner(m, running){
+  if (!running) return "";
+  if (m.recommend==="measuring") return `<b>Auto</b> is measuring your hashrate to pick the mode where you actually earn…`;
+  if (m.mode==="pool") return `<b>Auto → Pool.</b> Solo would take ${dur(m.estSoloSecs)} to find a block, so you're earning steadier shares on the pool instead.`;
+  if (m.recommend==="pool"){
+    return (S.poolUrl||"").trim()
+      ? `<b>Auto.</b> Solo would take ${dur(m.estSoloSecs)} — routing you to the pool for steadier shares…`
+      : `<b>Auto → Solo (no pool set).</b> Solo would take ${dur(m.estSoloSecs)} here — add a pool address below and Auto will switch you to steadier shares.`;
+  }
+  return `<b>Auto → Solo.</b> You're ${shareTxt(m)} of the network, finding ~a block every ${dur(m.estSoloSecs).replace("~","")} — and you keep the whole reward.`;
+}
 function mining(){
   const m = S.mining;
   const maxT = m.maxThreads || 4;
@@ -644,13 +813,17 @@ function mining(){
     <div class="pageh"><div class="h1">Mining</div><div class="sub">RandomX · solo, pool, or smart auto — everyone gets a share${routed}</div></div>
     <div class="tiles">
       <div class="tile"><div class="tk">Status</div><div class="tv" id="mStatus" style="font-size:20px">${running?"Mining":"Idle"}</div><div class="td ${running?"g":""}" id="mStatusSub">${running?(m.mode==="pool"?"pool":"solo"):"stopped"}</div></div>
-      <div class="tile"><div class="tk">Hashrate</div><div class="tv"><span id="mHash">${hps(m.hashrate)}</span> <span style="font-size:13px;color:var(--text-tertiary)">H/s</span></div><div class="td" id="mHashSub">${running?(m.hashrate>0?"live":"building dataset…"):"—"}</div></div>
+      <div class="tile"><div class="tk">Hashrate</div><div class="tv"><span id="mHash">${hps(m.hashrate)}</span> <span style="font-size:13px;color:var(--text-tertiary)">H/s</span></div><div class="td" id="mHashSub">${running?(m.hashrate>0?"live":"warming up…"):"—"}</div></div>
       ${third}
       <div class="tile"><div class="tk">Threads</div><div class="tv" id="mThreadsTv">${running?m.threads:want}</div><div class="td">of ${maxT} cores</div></div>
     </div>
+    <div id="mWarm" class="nudge" style="margin-bottom:16px;display:${running && !(m.hashrate>0) ? 'flex':'none'}"><div class="ni">${I.clock}</div>
+      <div class="nt"><b>Warming up</b> — building the ~2 GB RandomX dataset (one-time, ~30–60s). The miner is running; your hashrate appears here the moment it's ready.</div></div>
+    ${(mode==="auto" && running) ? `<div id="mAuto" class="nudge" style="margin-bottom:16px;border-left-color:var(--gold)"><div class="ni">${I.shield}</div><div class="nt" id="mAutoTxt">${autoBanner(m, running)}</div></div>` : ""}
     <div class="panel"><div class="plabel">Smart mining advisor</div>
       <div class="kv"><span class="k">Your hashrate</span><span class="v"><span id="mHash2">${hps(m.hashrate)}</span> H/s</span></div>
       <div class="kv"><span class="k">Network hashrate</span><span class="v" id="mNet">${m.netHashrate?hps(m.netHashrate)+" H/s":"—"}</span></div>
+      <div class="kv"><span class="k">Your share of network</span><span class="v ${shareOf(m)>=0.25?'g':''}" id="mShare">${shareTxt(m)}</span></div>
       <div class="kv"><span class="k">Difficulty</span><span class="v" id="mDiff">${m.difficulty?num(Math.round(m.difficulty)):"—"}</span></div>
       <div class="kv"><span class="k">Expected block (solo)</span><span class="v" id="mEst">${dur(m.estSoloSecs)}</span></div>
       <div class="kv"><span class="k">Recommendation</span><span class="v ${rec.cls}" id="mRec">${rec.t}</span></div>
@@ -668,12 +841,12 @@ function mining(){
           <input id="mThreads" type="range" min="1" max="${maxT}" value="${want}" ${running?"disabled":""} style="width:180px;accent-color:var(--gold)">
           <b id="mThreadsVal" class="amt" style="min-width:2ch;text-align:right">${want}</b>
         </span></div>
-      <div class="kv"><span class="k">Payout</span><span class="v">${mode==='pool'?'pool-decided · to your login address':'your wallet · transparent'}</span></div>
+      <div class="kv"><span class="k">Payout</span><span class="v">${mode==='pool'?'pool-decided · to your login address':'your wallet · stealth address'}</span></div>
       <div style="margin-top:16px"><button class="cta" id="mToggle" ${(!running&&!canMine)?"disabled":""}>${running?"Stop mining":"Start mining"}</button></div>
       ${(!running&&!canMine)?`<div class="note" style="margin-top:12px">Waiting for the node to be reachable…</div>`:""}
       <div class="note" id="mErr" style="margin-top:12px;color:var(--red);display:none"></div>
     </div>
-    <p class="note" style="margin-top:16px">Mining runs the native rig as a separate process — nothing hashes in this window. <b>Solo</b> pays you the whole block when you win; <b>Pool</b> earns steady shares so small miners still get paid; <b>Auto</b> measures your hashrate and routes you to whichever actually pays. Rewards are transparent — Shield them after the h${FORK.toLocaleString()} fork.</p>
+    <p class="note" style="margin-top:16px">Mining runs the native rig as a separate process — nothing hashes in this window. <b>Solo</b> pays you the whole block when you win; <b>Pool</b> earns steady shares so small miners still get paid; <b>Auto</b> measures your hashrate and routes you to whichever actually pays. Rewards land in your ring-private base balance (coinbase amount is public, address is stealth) — Shield them into the Spark pool after h${FORK.toLocaleString()}.</p>
   `;
 }
 let miningTimer = null;
@@ -683,14 +856,17 @@ function patchMining(){
   set("mStatus", m.mining?"Mining":"Idle");
   const sub = document.getElementById("mStatusSub"); if (sub){ sub.textContent = m.mining?(m.mode==="pool"?"pool":"solo"):"stopped"; sub.className = "td "+(m.mining?"g":""); }
   set("mHash", hps(m.hashrate)); set("mHash2", hps(m.hashrate));
-  set("mHashSub", m.mining?(m.hashrate>0?"live":"building dataset…"):"—");
+  set("mHashSub", m.mining?(m.hashrate>0?"live":"warming up…"):"—");
+  const warm = document.getElementById("mWarm"); if (warm) warm.style.display = (m.mining && !(m.hashrate>0)) ? "flex" : "none";
   const poolRunning = m.mining && m.mode==="pool";
   set("mThird", poolRunning ? (m.sharesAccepted||0) : (m.blocksFound||0));
   const tsub = document.getElementById("mThirdSub"); if (tsub) tsub.textContent = poolRunning ? `accepted${m.sharesRejected?` · ${m.sharesRejected} rej`:""}` : "this run";
   set("mNet", m.netHashrate?hps(m.netHashrate)+" H/s":"—");
+  const shEl = document.getElementById("mShare"); if (shEl){ shEl.textContent = shareTxt(m); shEl.className = "v "+(shareOf(m)>=0.25?"g":""); }
   set("mDiff", m.difficulty?num(Math.round(m.difficulty)):"—");
   set("mEst", dur(m.estSoloSecs));
   const rec = recLabel(m); const re = document.getElementById("mRec"); if (re){ re.textContent = rec.t; re.className = "v "+rec.cls; }
+  const at = document.getElementById("mAutoTxt"); if (at && S.minerMode==="auto") at.innerHTML = autoBanner(m, m.mining);
   if (m.mining) set("mThreadsTv", m.threads);
   const btn = document.getElementById("mToggle");
   if (btn && document.activeElement !== btn) btn.textContent = m.mining?"Stop mining":"Start mining";
@@ -705,7 +881,7 @@ async function refreshMining(){
     S.autoRouted = true;
     if (m.recommend==="pool" && (S.poolUrl||"").trim() && m.mode==="solo"){
       try {
-        const st = await invoke("start_mining", { threads:S.minerThreads, mode:"pool", pool_url:S.poolUrl });
+        const st = await invoke("start_mining", { threads:S.minerThreads, mode:"pool", poolUrl:S.poolUrl });
         if (st){ S.mining = st; S.autoSwitchedTo = "pool"; }
         if (current==="mining") render("mining");
         return;
@@ -740,7 +916,7 @@ function wireMining(){
     try {
       let st;
       if (wasMining){ st = await invoke("stop_mining"); }
-      else { S.autoRouted = false; st = await invoke("start_mining", { threads:S.minerThreads, mode:backendMode, pool_url:poolUrl }); }
+      else { S.autoRouted = false; st = await invoke("start_mining", { threads:S.minerThreads, mode:backendMode, poolUrl:poolUrl }); }
       if (st) S.mining = st;
       render("mining");
     } catch(e){
@@ -831,30 +1007,97 @@ function wireNodes(){
   nodesTimer = setInterval(refreshNodes, 2500);
 }
 function stopNodesPoll(){ if (nodesTimer){ clearInterval(nodesTimer); nodesTimer = null; } }
+let DX = null; // app_health snapshot
+function dcheck(label, status, detail){
+  const c = status==="ok"?"var(--green)":status==="warn"?"var(--amber)":status==="fail"?"var(--red)":"var(--text-tertiary)";
+  const dot = status==="ok"?"●":status==="warn"?"▲":status==="fail"?"✕":"○";
+  return `<div class="kv"><span class="k">${label}</span><span class="v" style="color:${c}">${dot} ${detail}</span></div>`;
+}
 function diagnostics(){
+  const forkLive = S.tip != null && S.tip >= FORK;
+  const toFork = S.tip == null ? null : Math.max(0, FORK - S.tip);
+  const synced = S.status==="synced" || (S.tip!=null && S.target!=null && S.tip>=S.target);
+  const d = DX;
+  // overall verdict
+  const fails = [S.connected, d?d.nodeBin:true, d?d.walletBin:true, d?d.rigBin:true].filter(x=>x===false).length;
+  const verdict = !S.connected ? {t:"Node offline",c:"var(--red)"} : fails? {t:"Issues found",c:"var(--amber)"} : synced ? {t:"All systems go",c:"var(--green)"} : {t:"Syncing",c:"var(--amber)"};
   return `
-    <div class="pageh"><div class="h1">Diagnostics</div><div class="sub">Health checks · for support &amp; audit</div></div>
-    <div class="panel"><div class="plabel">Self-check</div>
-      <div class="kv"><span class="k">Node reachable</span><span class="v ${S.connected?"g":""}">${S.connected?"yes":"no"}</span></div>
-      <div class="kv"><span class="k">Node tip</span><span class="v">${num(S.tip)}</span></div>
-      <div class="kv"><span class="k">Wallet scanned to</span><span class="v">${S.scanned?num(S.scannedHeight):"—"}</span></div>
-      <div class="kv"><span class="k">UTXOs tracked</span><span class="v">${S.scanned?num(S.utxoCount):"—"}</span></div>
-      <div class="kv"><span class="k">Consensus network</span><span class="v">${S.network||"—"}</span></div>
+    <div class="pageh"><div class="h1">Diagnostics</div><div class="sub">Live health checks · <span style="color:${verdict.c}">${verdict.t}</span></div></div>
+    <section class="grid2">
+      <div class="panel"><div class="plabel">Node</div>
+        ${dcheck("Reachable", S.connected?"ok":"fail", S.connected?"connected":"offline")}
+        ${dcheck("Sync", S.connected?(synced?"ok":"warn"):"fail", S.connected?(synced?"synced":"syncing "+(S.tip!=null&&S.target?Math.floor(S.tip/S.target*100)+"%":"")):"—")}
+        ${dcheck("Chain tip", S.connected?"info":"fail", num(S.tip))}
+        ${dcheck("Peers", S.peers>0?"ok":(S.connected?"warn":"fail"), num(S.peers))}
+        ${dcheck("Network", "info", S.network||"—")}
+        ${dcheck("Shielded pool", forkLive?"ok":"info", forkLive?"live · h"+FORK:"activates h"+FORK+(toFork!=null?` (~${num(toFork)} to go)`:""))}
+      </div>
+      <div class="panel"><div class="plabel">Wallet</div>
+        ${dcheck("Wallet file", d?(d.walletExists?"ok":"warn"):"info", d?(d.walletExists?"present":"none"):"—")}
+        ${dcheck("Session", "ok", "unlocked")}
+        ${dcheck("Scanned", S.scanned?"ok":"warn", S.scanned?"to block "+num(S.scannedHeight):"not yet")}
+        ${dcheck("Outputs tracked", "info", S.scanned?num(S.utxoCount):"—")}
+        ${dcheck("RPC auth key", d?(d.rpcKey?"ok":"warn"):"info", d?(d.rpcKey?"loaded":"missing"):"—")}
+        ${dcheck("Ghost mode", S.churnOn?"ok":"info", S.churnOn?"running":"off")}
+      </div>
+    </section>
+    <div class="panel" style="margin-top:16px"><div class="plabel">Bundled components</div>
+      ${dcheck("Node binary", d?(d.nodeBin?"ok":"fail"):"info", d?(d.nodeBin?"bundled":"missing"):"…")}
+      ${dcheck("Wallet binary", d?(d.walletBin?"ok":"fail"):"info", d?(d.walletBin?"bundled":"missing"):"…")}
+      ${dcheck("Miner binary", d?(d.rigBin?"ok":"fail"):"info", d?(d.rigBin?"bundled":"missing"):"…")}
+      ${dcheck("App version", "info", d?("CyncHub "+d.version):"CyncHub")}
+      ${dcheck("Node data dir", "info", d?`<span class="mono" style="font-size:10.5px">${d.dataDir}</span>`:"—")}
     </div>
-    <p class="note" style="margin-top:16px">Surfaces the CYNC-* self-checks + gated-surface registry for support and audit.</p>
+    <p class="note" style="margin-top:16px">All checks run locally against your own node + wallet. Green = healthy, amber = attention, red = action needed.</p>
   `;
+}
+function wireDiagnostics(){
+  // refresh ghost-mode state each visit/poll (cheap, never re-renders)
+  if (IS_TAURI) invoke("churn_status").then(st => { if (st) S.churnOn = !!st.running; }).catch(()=>{});
+  if (DX) return; // app_health loaded once per session; periodic render reuses it
+  if (!IS_TAURI){ DX = { nodeBin:true, walletBin:true, rigBin:true, rpcKey:true, walletExists:true, dataDir:"%APPDATA%/coincync/cynchub-node", version:"0.1.0" }; return; }
+  invoke("app_health").then(d => { if (d){ DX = d; if (current==="diagnostics") render("diagnostics"); } }).catch(()=>{});
+}
+let bkMode = "idle";   // idle | prompt
+let bkWords = null;     // revealed recovery words — held only while shown
+function backupPanel(){
+  const body = bkMode === "prompt" ? `
+    <div style="padding:12px;border:1px solid var(--border);border-radius:var(--r-md);margin-top:4px">
+      <div class="note" style="color:var(--amber);margin-bottom:9px">⚠ Your recovery phrase controls all your funds. Never share it, never type it into a website, and make sure no one can see your screen.</div>
+      <input class="at-input" id="bkPw" type="password" placeholder="Confirm your wallet password">
+      <div style="display:flex;gap:8px;margin-top:9px"><button class="cta" id="bkReveal">Reveal phrase</button><button class="ghost" id="bkCancel">Cancel</button></div>
+      <div class="note" id="bkErr" style="margin-top:8px;color:var(--red);display:none"></div>
+    </div>`
+    : bkWords ? `
+    <div style="padding:12px;border:1px solid var(--border);border-radius:var(--r-md);margin-top:4px">
+      <div class="note" style="color:var(--amber);margin-bottom:10px">Write these 24 words down <b>in order</b> and keep them offline. Anyone who has them can take your funds.</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px">${bkWords.map((w,i)=>`<div style="font-family:var(--mono);font-size:12px;padding:6px 9px;background:var(--bg-panel-2);border-radius:6px"><span style="color:var(--text-tertiary)">${i+1}.</span> ${w}</div>`).join("")}</div>
+      <div style="display:flex;gap:8px;margin-top:11px"><button class="ghost" id="bkCopy">Copy phrase</button><button class="cta" id="bkHide">I've saved it — hide</button></div>
+    </div>`
+    : `<div style="margin-top:4px"><button class="ghost" id="bkStart">Reveal recovery phrase</button></div>`;
+  return `
+    <div class="panel" style="margin-top:16px"><div class="plabel">Backup</div>
+      <p class="note" style="margin-bottom:10px">Your 24-word recovery phrase is the only way to restore this wallet. Back it up offline — on paper, not a photo or cloud note.</p>
+      ${body}
+    </div>`;
 }
 function settings(){
   const forkLive = S.tip != null && S.tip >= FORK;
   const theme = getTheme();
+  const accent = getAccent();
   const lk = getAutoLock();
   const lkTxt = lk === 0 ? "Off" : lk >= 60 ? (lk/60)+" h" : lk+" min";
   return `
     <div class="pageh"><div class="h1">Settings</div><div class="sub">CyncHub · on the CoinCync network</div></div>
     <div class="panel"><div class="plabel">Appearance</div>
       <div class="kv" style="align-items:flex-start"><span class="k">Theme</span>
-        <span class="v" style="display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end;max-width:360px">
+        <span class="v" style="display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end;max-width:380px">
           ${THEMES.map(t => `<button class="seg ${theme===t.id?'on':''}" data-theme-set="${t.id}">${t.label}</button>`).join("")}
+        </span></div>
+      <div class="kv" style="align-items:flex-start"><span class="k">Accent</span>
+        <span class="v" style="display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end;max-width:380px">
+          ${ACCENT_PRESETS.map(a => `<button class="seg ${(a.color?accent===a.color:accent==='theme')?'on':''}" data-accent-set="${a.color||'theme'}">${a.color?`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${a.color};margin-right:6px;vertical-align:-1px"></span>`:''}${a.label}</button>`).join("")}
+          <label class="seg" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">Custom<input type="color" id="accentCustom" value="${currentAccentColor()}" style="width:20px;height:16px;border:none;background:none;padding:0;cursor:pointer"></label>
         </span></div>
     </div>
     <div class="panel" style="margin-top:16px"><div class="plabel">Security</div>
@@ -866,6 +1109,7 @@ function settings(){
       <div class="kv"><span class="k">Current</span><span class="v">${lkTxt}</span></div>
       <div style="margin-top:14px"><button class="ghost" id="lockBtn">Lock now</button></div>
     </div>
+    ${backupPanel()}
     <div class="panel" style="margin-top:16px"><div class="plabel">Privacy · ghost mode</div>
       <div class="kv"><span class="k">Auto-churn</span>
         <span class="v" style="display:flex;align-items:center;gap:10px">
@@ -886,6 +1130,9 @@ function settings(){
 function wireSettings(){
   const l = $("#lockBtn"); if (l) l.onclick = lockApp;
   view.querySelectorAll("[data-theme-set]").forEach(b => b.onclick = () => { setTheme(b.dataset.themeSet); render("settings"); });
+  view.querySelectorAll("[data-accent-set]").forEach(b => b.onclick = () => { setAccent(b.dataset.accentSet); render("settings"); });
+  const ac = document.getElementById("accentCustom");
+  if (ac){ ac.oninput = () => setAccent(ac.value); ac.onchange = () => { setAccent(ac.value); render("settings"); }; }
   view.querySelectorAll("[data-lock-set]").forEach(b => b.onclick = () => { setAutoLock(parseInt(b.dataset.lockSet,10)||0); render("settings"); });
   const ct = $("#chToggle"), cerr = $("#chErr");
   if (ct) ct.onclick = async () => {
@@ -894,10 +1141,133 @@ function wireSettings(){
     try { const st = await invoke(S.churnOn?"stop_churn":"start_churn"); S.churnOn = !!(st && st.running); render("settings"); }
     catch(e){ if (cerr){ cerr.textContent = String((e&&e.message)||e); cerr.style.display="block"; } ct.disabled=false; ct.textContent = S.churnOn?"Stop":"Start"; }
   };
+  // Backup / seed reveal
+  const bkStart = $("#bkStart"); if (bkStart) bkStart.onclick = () => { bkMode = "prompt"; render("settings"); };
+  const bkCancel = $("#bkCancel"); if (bkCancel) bkCancel.onclick = () => { bkMode = "idle"; render("settings"); };
+  const bkReveal = $("#bkReveal");
+  if (bkReveal) bkReveal.onclick = async () => {
+    const pw = ($("#bkPw").value || ""); const err = $("#bkErr");
+    if (!pw){ if (err){ err.textContent = "Enter your password."; err.style.display = "block"; } return; }
+    bkReveal.disabled = true; bkReveal.textContent = "Revealing…";
+    try { const words = await invoke("reveal_seed", { password: pw }); bkWords = words; bkMode = "idle"; render("settings"); }
+    catch(e){ if (err){ err.textContent = String((e && e.message) || e); err.style.display = "block"; } bkReveal.disabled = false; bkReveal.textContent = "Reveal phrase"; }
+  };
+  const bkCopy = $("#bkCopy"); if (bkCopy) bkCopy.onclick = async () => { try { await navigator.clipboard.writeText((bkWords||[]).join(" ")); } catch {} bkCopy.textContent = "Copied ✓"; setTimeout(()=>bkCopy.textContent="Copy phrase",1400); };
+  const bkHide = $("#bkHide"); if (bkHide) bkHide.onclick = () => { bkWords = null; render("settings"); };
 }
 
 // ── router ─────────────────────────────────────────────────────────
-const SCREENS = { vault, send, receive, shield, lens, attest, swap, mining, nodes, diagnostics, settings };
+// ── Metrics (live "the chain is working" dashboard) ────────────────
+let MX = null, metricsTimer = null;
+function fmtAge(s){ if (s==null) return "—"; s=Math.max(0,Math.floor(s)); if (s<60) return s+"s"; if (s<3600) return Math.floor(s/60)+"m "+(s%60)+"s"; return Math.floor(s/3600)+"h "+Math.floor((s%3600)/60)+"m"; }
+function metrics(){
+  const m = MX;
+  if (!m){
+    return `<div class="pageh"><div class="h1">Metrics</div><div class="sub">Live chain activity from your node</div></div>
+      <div class="panel"><div class="at-empty" style="padding:28px 8px">${I.clock}<p>Reading live metrics from your node…</p></div></div>`;
+  }
+  const sl = !m.connected ? {txt:"node offline",cls:""} : (m.isSynced?{txt:"synced · live",cls:"g"}:{txt:"syncing",cls:""});
+  const diffTxt = m.difficulty ? num(Math.round(m.difficulty)) : "—";
+  const bt = m.avgBlockSecs>0 ? Math.round(m.avgBlockSecs)+"s" : "—";
+  const btCls = m.avgBlockSecs>0 && m.avgBlockSecs<=180 ? "g" : "";
+  const supplyTxt = m.supply==null?"—":(m.supply>=1e6?(m.supply/1e6).toFixed(2)+" M":Math.round(m.supply).toLocaleString());
+  const now = Math.floor(Date.now()/1000);
+  const feed = (m.blocks||[]).map((b,idx)=>{
+    const age = b.timestamp ? (now - b.timestamp) : null;
+    return `<div class="kv"><span class="k"><b style="font-family:var(--mono);color:var(--gold-200)">#${Number(b.height).toLocaleString()}</b>${idx===0?' <span class="atag">newest</span>':''}</span><span class="v">${fmtAge(age)} ago · ${b.txCount} tx</span></div>`;
+  }).join("");
+  return `
+    <div class="pageh"><div class="h1">Metrics</div><div class="sub">Live chain activity from your node · <span class="${sl.cls}">${sl.txt}</span></div></div>
+    <div class="tiles">
+      <div class="tile"><div class="tk">Chain tip</div><div class="tv">${num(m.height)}</div><div class="td">tip ${fmtAge(m.tipAgeSecs)} old</div></div>
+      <div class="tile"><div class="tk">Block time</div><div class="tv ${btCls}">${bt}</div><div class="td">target ~120s</div></div>
+      <div class="tile"><div class="tk">Difficulty</div><div class="tv" style="font-size:20px">${diffTxt}</div><div class="td">retargets each block</div></div>
+      <div class="tile"><div class="tk">Network hashrate</div><div class="tv">${hps(m.netHashrate)} <span style="font-size:13px;color:var(--text-tertiary)">H/s</span></div><div class="td">est. from difficulty</div></div>
+    </div>
+    <div class="tiles">
+      <div class="tile"><div class="tk">Peers</div><div class="tv">${num(m.peers)}</div><div class="td">connected</div></div>
+      <div class="tile"><div class="tk">Mempool</div><div class="tv">${num(m.mempool)}</div><div class="td">pending tx</div></div>
+      <div class="tile"><div class="tk">Supply</div><div class="tv" style="font-size:20px">${supplyTxt}</div><div class="td">${S.unit}</div></div>
+      <div class="tile"><div class="tk">Anon set</div><div class="tv">${num(m.anonSet)}</div><div class="td">${m.ringSize?'ring '+m.ringSize:'—'}</div></div>
+    </div>
+    <div class="panel"><div class="plabel">Latest blocks</div>${feed || `<div class="note">waiting for the next block…</div>`}</div>
+    <p class="note" style="margin-top:16px">Live from your node, refreshed every few seconds — public chain state only; your wallet stays private.</p>
+  `;
+}
+async function refreshMetrics(){
+  try { const m = await invoke("get_metrics"); if (m) MX = m; } catch(e){}
+  if (current === "metrics") view.innerHTML = metrics();
+}
+function wireMetrics(){
+  if (metricsTimer) clearInterval(metricsTimer);
+  refreshMetrics();
+  metricsTimer = setInterval(refreshMetrics, 4000);
+}
+function stopMetricsPoll(){ if (metricsTimer){ clearInterval(metricsTimer); metricsTimer = null; } }
+
+// ── Privacy Center ─────────────────────────────────────────────────
+function privacy(){
+  const forkLive = S.tip != null && S.tip >= FORK;
+  const toFork = S.tip == null ? null : Math.max(0, FORK - S.tip);
+  const ring = S.ringSize || 16;
+  const facts = [
+    ["Ring signatures (CLSAG)", `ring size ${ring}`, `Every input is signed together with ${ring-1} decoy outputs, so the ledger can't tell which one you actually spent.`],
+    ["Stealth addresses", "one-time, per payment", "Each payment is received on a fresh one-time address derived on-chain. Your public address never appears in a transaction."],
+    ["Confidential amounts", "Pedersen commitments", "Transaction amounts are cryptographically committed — hidden from everyone except the sender and the receiver."],
+    ["Transparent mode", "none · by protocol", "CoinCync has no transparent transactions. Privacy is the only mode — there is nothing to switch on and nothing to forget."],
+  ];
+  const factRows = facts.map(([k,v,note])=>`
+    <div class="kv"><span class="k" style="display:flex;align-items:center;gap:8px"><span style="color:var(--green);display:inline-flex;width:16px">${I.check}</span>${k}</span><span class="v g">${v}</span></div>
+    <p class="note" style="margin:-2px 0 12px 24px">${note}</p>`).join("");
+
+  const sparkPanel = forkLive
+    ? `<div class="panel" style="margin-top:16px"><div class="plabel">Spark shielded pool · live</div>
+         <p class="note">The shielded pool is active. Shielding your balance joins it to the largest shared anonymity set${S.anonSet!=null?` (${num(S.anonSet)} outputs)`:""}, on top of the ring-private base layer.</p>
+         <div style="margin-top:10px"><button class="seg" data-screen="shield">Open Shield</button></div></div>`
+    : `<div class="panel" style="margin-top:16px"><div class="plabel">Spark shielded pool · pending</div>
+         <p class="note">A second, even larger anonymity layer activates at <b>h${FORK.toLocaleString()}</b>${toFork!=null?` (~${num(toFork)} blocks away)`:""}. Until then your funds are already ring-private — the pool is an upgrade, not a prerequisite.</p></div>`;
+
+  return `
+    <div class="pageh"><div class="h1">Privacy Center</div><div class="sub">Privacy is mandatory on CoinCync — always on, enforced by the protocol</div></div>
+    <div class="nudge"><div class="ni">${I.shield}</div>
+      <div class="nt">Every transaction hides the <b>sender</b>, the <b>recipient</b> and the <b>amount</b>. There is no way to send in the clear — which is exactly how CoinCync avoids the opt-in-privacy trap, where almost no one ends up actually private.</div></div>
+    <div class="panel"><div class="plabel">Guaranteed by protocol</div>${factRows}</div>
+    ${privacyHealthPanel()}
+    <div class="panel" style="margin-top:16px"><div class="plabel">Ghost mode · auto-churn</div>
+      <div class="kv"><span class="k">Background re-mixing</span>
+        <span class="v" style="display:flex;align-items:center;gap:10px">
+          <span class="${S.churnOn?'g':''}" id="pvState">${S.churnOn?"running":"off"}</span>
+          <button class="seg ${S.churnOn?'on':''}" id="pvChurn">${S.churnOn?"Stop":"Start"}</button>
+        </span></div>
+      <p class="note" style="margin-top:10px">Ghost mode periodically re-mixes your outputs so long-term chain analysis can't pin a stable balance to you. It runs the native wallet quietly in the background.${forkLive?"":" It becomes most effective once the shielded pool is live."}</p>
+      <div class="note" id="pvErr" style="margin-top:8px;color:var(--red);display:none"></div>
+    </div>
+    ${sparkPanel}
+    <p class="note" style="margin-top:16px">These guarantees come from CoinCync's consensus rules (Constitution Article III — mandatory privacy), not from this app. CyncHub only surfaces them.</p>
+  `;
+}
+function wirePrivacy(){
+  view.querySelectorAll("[data-pha]").forEach(b => b.onclick = async (e) => {
+    e.stopPropagation();
+    const act = b.dataset.pha;
+    if (act === "shield"){ render("shield"); return; }
+    if (act === "churn"){
+      b.disabled = true; b.textContent = "…";
+      try { const st = await invoke("start_churn"); S.churnOn = !!(st && st.running); }
+      catch(err){ b.disabled = false; b.textContent = "Turn on"; return; }
+      render("privacy");
+    }
+  });
+  const ct = $("#pvChurn"), cerr = $("#pvErr");
+  if (ct) ct.onclick = async () => {
+    if (cerr){ cerr.style.display="none"; cerr.textContent=""; }
+    ct.disabled = true; ct.textContent = S.churnOn ? "Stopping…" : "Starting…";
+    try { const st = await invoke(S.churnOn?"stop_churn":"start_churn"); S.churnOn = !!(st && st.running); render("privacy"); }
+    catch(e){ if (cerr){ cerr.textContent = String((e&&e.message)||e); cerr.style.display="block"; } ct.disabled=false; ct.textContent = S.churnOn?"Stop":"Start"; }
+  };
+}
+
+const SCREENS = { vault, send, receive, shield, lens, attest, swap, mining, nodes, metrics, diagnostics, privacy, settings };
 function render(name){
   current = name;
   const fn = SCREENS[name] || vault;
@@ -905,6 +1275,8 @@ function render(name){
   document.querySelectorAll(".nav").forEach(n => n.classList.toggle("active", n.dataset.screen === name));
   if (name !== "mining") stopMiningPoll();
   if (name !== "nodes") stopNodesPoll();
+  if (name !== "metrics") stopMetricsPoll();
+  if (name !== "settings"){ bkWords = null; bkMode = "idle"; } // never keep the seed around off-screen
   if (name === "vault") wireVault();
   if (name === "send") wireSend();
   if (name === "receive") wireReceive();
@@ -912,6 +1284,9 @@ function render(name){
   if (name === "attest") wireAttest();
   if (name === "mining") wireMining();
   if (name === "nodes") wireNodes();
+  if (name === "metrics") wireMetrics();
+  if (name === "diagnostics") wireDiagnostics();
+  if (name === "privacy") wirePrivacy();
   if (name === "settings") wireSettings();
   // in-content links that navigate (e.g. Vault's Attest card)
   view.querySelectorAll("[data-screen]").forEach(el => el.onclick = () => render(el.dataset.screen));
@@ -925,6 +1300,23 @@ function aerr(m){ const e = document.getElementById("aerr"); if (e) e.textConten
 function showAuth(mode, data){ authEl.style.display = "grid"; authEl.innerHTML = authHtml(mode, data); wireAuth(mode); const i = authEl.querySelector("input,textarea"); if (i) i.focus(); }
 function hideAuth(){ authEl.style.display = "none"; authEl.innerHTML = ""; }
 
+let onboardSeed = null;   // 24 words during first-run (cleared after verify)
+let verifyState = null;   // { positions:[], options:{pos:[words]}, picks:{} }
+function buildVerify(){
+  const words = onboardSeed || [];
+  if (words.length < 12){ enterApp(); return; }
+  const idxs = [];
+  while (idxs.length < 3 && idxs.length < words.length){ const r = Math.floor(Math.random()*words.length); if (!idxs.includes(r)) idxs.push(r); }
+  idxs.sort((a,b)=>a-b);
+  const options = {};
+  idxs.forEach(pos => {
+    const opts = new Set([words[pos]]);
+    let guard = 0;
+    while (opts.size < 4 && guard++ < 200){ opts.add(words[Math.floor(Math.random()*words.length)]); }
+    options[pos] = Array.from(opts).sort(()=>Math.random()-0.5);
+  });
+  verifyState = { positions: idxs, options, picks: {} };
+}
 function authHtml(mode, data){
   if (mode === "unlock") return `<div class="auth-card">${authLogo}<div class="auth-eyebrow">Welcome back</div><div class="auth-title">Unlock CyncHub</div>
     <div class="auth-err" id="aerr"></div>
@@ -947,10 +1339,29 @@ function authHtml(mode, data){
     <input class="auth-input" id="apw" type="password" placeholder="Choose a password">
     <button class="auth-btn" id="abtn">Restore</button>
     <div class="auth-alt"><a id="aback">← back</a></div></div>`;
-  if (mode === "seed") return `<div class="auth-card">${authLogo}<div class="auth-title">Your recovery phrase</div>
-    <div class="auth-warn">Write these words down and keep them safe. They are the ONLY way to recover your wallet — CyncHub cannot reset it.</div>
-    <div class="auth-seed">${data || "(seed unavailable)"}</div>
-    <button class="auth-btn" id="adone">I've written it down</button></div>`;
+  if (mode === "seed"){
+    const words = data ? data.split(/\s+/).filter(Boolean) : (onboardSeed || []);
+    onboardSeed = words;
+    const grid = words.length ? `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:14px;text-align:left">${words.map((w,i)=>`<div style="font-family:var(--mono);font-size:12px;padding:6px 8px;background:var(--bg-panel-2);border-radius:6px"><span style="color:var(--text-tertiary)">${i+1}.</span> ${w}</div>`).join("")}</div>` : `<div class="auth-seed">(seed unavailable)</div>`;
+    return `<div class="auth-card" style="max-width:460px">${authLogo}<div class="auth-title">Your recovery phrase</div>
+    <div class="auth-warn">Write these ${words.length||24} words down <b>in order</b> and keep them offline. They are the ONLY way to recover your wallet — CyncHub cannot reset it.</div>
+    ${grid}
+    <button class="auth-btn" id="adone">I've written it down → verify</button></div>`;
+  }
+  if (mode === "verify"){
+    const v = verifyState || { positions:[], options:{} };
+    const blocks = v.positions.map(pos => `
+      <div style="margin-bottom:14px;text-align:left">
+        <div style="font-family:var(--mono);font-size:11.5px;color:var(--text-secondary);margin-bottom:7px">Select word #${pos+1}</div>
+        <div style="display:flex;gap:7px;flex-wrap:wrap">${(v.options[pos]||[]).map(w=>`<button class="seg vword" data-pos="${pos}" data-word="${w}">${w}</button>`).join("")}</div>
+      </div>`).join("");
+    return `<div class="auth-card" style="max-width:460px">${authLogo}<div class="auth-title">Confirm your backup</div>
+    <div class="auth-err" id="aerr"></div>
+    <div class="auth-warn" style="margin-bottom:16px">Prove you saved your phrase — pick the right word for each position.</div>
+    ${blocks}
+    <button class="auth-btn" id="avdone">Finish setup</button>
+    <div class="auth-alt"><a id="avback">← show my phrase again</a></div></div>`;
+  }
   return "";
 }
 
@@ -982,11 +1393,25 @@ function wireAuth(mode){
       catch(e){ aerr(String((e && e.message) || e)); }
     };
   } else if (mode === "seed"){
-    document.getElementById("adone").onclick = () => enterApp();
+    document.getElementById("adone").onclick = () => { buildVerify(); showAuth("verify"); };
+  } else if (mode === "verify"){
+    authEl.querySelectorAll(".vword").forEach(b => b.onclick = () => {
+      const pos = b.dataset.pos;
+      verifyState.picks[pos] = b.dataset.word;
+      authEl.querySelectorAll(`.vword[data-pos="${pos}"]`).forEach(x => x.classList.remove("on"));
+      b.classList.add("on"); aerr("");
+    });
+    document.getElementById("avback").onclick = () => showAuth("seed");
+    document.getElementById("avdone").onclick = () => {
+      const v = verifyState, words = onboardSeed || [];
+      const allRight = v && v.positions.length && v.positions.every(pos => v.picks[pos] === words[pos]);
+      if (!allRight){ aerr("That's not quite right — check your written phrase and try again."); buildVerify(); showAuth("verify"); return; }
+      onboardSeed = null; verifyState = null; enterApp();
+    };
   }
 }
 
-function lockApp(){ if (pollTimer){ clearInterval(pollTimer); pollTimer = null; } stopMiningPoll(); stopNodesPoll(); if (idleTimer){ clearTimeout(idleTimer); idleTimer = null; } document.body.dataset.locked = "1"; invoke("lock_wallet").catch(()=>{}); S.scanned=false; S.total=S.transparent=S.shielded=0; document.body.classList.remove("reveal"); showAuth("unlock"); }
+function lockApp(){ if (pollTimer){ clearInterval(pollTimer); pollTimer = null; } stopMiningPoll(); stopNodesPoll(); stopMetricsPoll(); bkWords = null; bkMode = "idle"; if (idleTimer){ clearTimeout(idleTimer); idleTimer = null; } document.body.dataset.locked = "1"; invoke("lock_wallet").catch(()=>{}); S.scanned=false; S.balBaseline=false; S.total=S.transparent=S.shielded=0; document.body.classList.remove("reveal"); showAuth("unlock"); }
 
 // Pull public chain state from the node (works before/without a wallet).
 async function pollChain(){
@@ -1029,13 +1454,29 @@ async function pollWallet(){
       S.total = (S.transparent||0) + (S.pending||0) + S.shielded;
     }
   } catch(e){ /* pre-fork / locked: leave shielded at 0 */ }
+  // Incoming-payment detection: a balance increase since the last scan means
+  // funds arrived — alert the user (the first scan just sets the baseline).
+  if (S.scanned){
+    if (S.balBaseline && S.total > S.prevTotal + 1e-9){
+      const delta = S.total - S.prevTotal;
+      showToast(`<b>Received +${f(delta)} ${S.unit}</b><br>Your balance just updated.`, "in");
+    }
+    S.prevTotal = S.total;
+    S.balBaseline = true;
+  }
 }
 
-let pollTimer = null;
+let pollTimer = null, walletPollTick = 0;
 function startPolling(){
   if (pollTimer) return;
   pollTimer = setInterval(async () => {
     await pollChain();
+    // re-scan the wallet every ~25s so the balance stays live + receipts alert
+    walletPollTick = (walletPollTick + 1) % 5;
+    if (walletPollTick === 0 && S.scanned){
+      await pollWallet();
+      if (current === "vault") render("vault");
+    }
     // only re-render the live network screens so we don't disturb inputs
     if (["lens","nodes","diagnostics","vault","settings"].includes(current)) render(current);
   }, 5000);

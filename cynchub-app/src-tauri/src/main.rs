@@ -416,6 +416,107 @@ fn get_chain_info() -> ChainInfo {
     }
 }
 
+// ── live metrics (a "the chain is working" dashboard) ───────────────
+#[derive(Serialize)]
+struct BlockRow {
+    height: u64,
+    timestamp: u64,
+    #[serde(rename = "txCount")]
+    tx_count: u64,
+}
+#[derive(Serialize)]
+struct Metrics {
+    connected: bool,
+    height: u64,
+    peers: u32,
+    #[serde(rename = "targetHeight")]
+    target_height: u64,
+    #[serde(rename = "isSynced")]
+    is_synced: bool,
+    difficulty: f64,
+    #[serde(rename = "netHashrate")]
+    net_hashrate: f64,
+    mempool: u64,
+    supply: f64,
+    #[serde(rename = "anonSet")]
+    anon_set: u64,
+    #[serde(rename = "ringSize")]
+    ring_size: u32,
+    #[serde(rename = "tipAgeSecs")]
+    tip_age_secs: u64,
+    status: String,
+    network: String,
+    #[serde(rename = "avgBlockSecs")]
+    avg_block_secs: f64,
+    /// Most recent blocks, newest first — a live feed so the user sees blocks land.
+    blocks: Vec<BlockRow>,
+}
+
+fn difficulty_of(i: &serde_json::Value) -> f64 {
+    let d = &i["difficulty"];
+    d.as_f64()
+        .or_else(|| d.as_u64().map(|v| v as f64))
+        .or_else(|| d.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+        .unwrap_or(0.0)
+}
+
+#[tauri::command]
+fn get_metrics() -> Metrics {
+    let empty = || Metrics {
+        connected: false, height: 0, peers: 0, target_height: 0, is_synced: false,
+        difficulty: 0.0, net_hashrate: 0.0, mempool: 0, supply: 0.0, anon_set: 0,
+        ring_size: 0, tip_age_secs: 0, status: "offline".into(), network: String::new(),
+        avg_block_secs: 0.0, blocks: Vec::new(),
+    };
+    let i = match rpc_call("get_info", serde_json::json!([])) {
+        Ok(i) => i,
+        Err(_) => return empty(),
+    };
+    let height = i["height"].as_u64().unwrap_or(0);
+    let diff = difficulty_of(&i);
+    // Pull the last few blocks for a live feed + an observed block time.
+    let mut blocks: Vec<BlockRow> = Vec::new();
+    let n: u64 = 8;
+    let start = height.saturating_sub(n.saturating_sub(1));
+    for h in (start..=height).rev() {
+        if let Ok(b) = rpc_call("get_block_by_height", serde_json::json!([h])) {
+            let ts = b["block"]["timestamp"].as_u64().or_else(|| b["timestamp"].as_u64()).unwrap_or(0);
+            let tx = b["block"]["transactions"].as_array().map(|a| a.len() as u64)
+                .or_else(|| b["transactions"].as_array().map(|a| a.len() as u64))
+                .or_else(|| b["block"]["tx_count"].as_u64())
+                .or_else(|| b["tx_count"].as_u64())
+                .unwrap_or(0);
+            blocks.push(BlockRow { height: h, timestamp: ts, tx_count: tx });
+        }
+    }
+    // observed average block time from the fetched timestamps
+    let ts: Vec<u64> = blocks.iter().map(|b| b.timestamp).filter(|&t| t > 0).collect();
+    let avg = if ts.len() >= 2 {
+        let (mx, mn) = (*ts.iter().max().unwrap(), *ts.iter().min().unwrap());
+        (mx - mn) as f64 / (ts.len() as f64 - 1.0)
+    } else {
+        0.0
+    };
+    Metrics {
+        connected: true,
+        height,
+        peers: i["peer_count"].as_u64().unwrap_or(0) as u32,
+        target_height: i["peer_target_height"].as_u64().or_else(|| i["target_height"].as_u64()).unwrap_or(0),
+        is_synced: i["is_synced"].as_bool().unwrap_or(false),
+        difficulty: diff,
+        net_hashrate: if diff > 0.0 { diff / TARGET_BLOCK_SECS } else { 0.0 },
+        mempool: i["mempool_size"].as_u64().or_else(|| i["tx_pool_size"].as_u64()).unwrap_or(0),
+        supply: i["supply_atomic"].as_u64().unwrap_or(0) as f64 / 1e12,
+        anon_set: i["anonymity_set"].as_u64().unwrap_or(0),
+        ring_size: i["effective_ring_size"].as_u64().unwrap_or(0) as u32,
+        tip_age_secs: i["tip_age_secs"].as_u64().unwrap_or(0),
+        status: i["status"].as_str().unwrap_or("unknown").to_string(),
+        network: i["network"].as_str().unwrap_or("").to_string(),
+        avg_block_secs: avg,
+        blocks,
+    }
+}
+
 // ── wallet lifecycle ────────────────────────────────────────────────
 #[tauri::command]
 fn wallet_exists() -> bool {
@@ -577,6 +678,35 @@ fn get_wallet_address(state: tauri::State<'_, State>) -> String {
     }
 }
 
+/// Reveal the wallet's 24-word recovery phrase for backup. Requires the
+/// password to be re-entered (this call re-authenticates it via `show-seed`),
+/// so a glance at an unlocked screen can't expose it. Never logged or stored.
+#[tauri::command]
+fn reveal_seed(password: String, state: tauri::State<'_, State>) -> Result<Vec<String>, String> {
+    let (bin, path) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        if !s.unlocked {
+            return Err("unlock your wallet first".into());
+        }
+        (s.wallet_bin.clone(), s.wallet_path.to_string_lossy().to_string())
+    };
+    let mut pw = password;
+    let out = wallet_cli(&bin, &["--wallet", &path, "show-seed"], &pw);
+    pw.zeroize();
+    let out = out.map_err(|_| "wrong password".to_string())?;
+    // the mnemonic is the line of 12/15/18/21/24 lowercase words
+    let words = out
+        .lines()
+        .map(str::trim)
+        .find(|l| {
+            let n = l.split_whitespace().count();
+            matches!(n, 12 | 15 | 18 | 21 | 24)
+                && l.split_whitespace().all(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase()))
+        })
+        .ok_or("could not read the recovery phrase")?;
+    Ok(words.split_whitespace().map(|s| s.to_string()).collect())
+}
+
 // ── disclosure (Attest) ─────────────────────────────────────────────
 #[derive(Serialize)]
 struct Disclosure {
@@ -677,12 +807,52 @@ fn generate_qr_svg(payload: String) -> Result<String, String> {
 }
 
 // ── send / receive ──────────────────────────────────────────────────
+#[derive(Serialize)]
+struct AddrInfo {
+    valid: bool,
+    network: String,
+    kind: String,
+    #[serde(rename = "paymentId")]
+    payment_id: bool,
+}
+
+/// Decode/validate a recipient address (stateless `address-info`), so the Send
+/// screen can confirm it's a real address on the right network before sending.
+#[tauri::command]
+fn validate_address(address: String, state: tauri::State<'_, State>) -> AddrInfo {
+    let bad = || AddrInfo { valid: false, network: String::new(), kind: String::new(), payment_id: false };
+    let address = address.trim().to_string();
+    if address.is_empty() {
+        return bad();
+    }
+    let bin = match state.lock() {
+        Ok(s) => s.wallet_bin.clone(),
+        Err(_) => return bad(),
+    };
+    // address-info needs no password; empty env password is ignored for it.
+    match wallet_cli(&bin, &["address-info", &address, "--json"], "") {
+        Ok(o) => {
+            if let Some(j) = json_blob(&o).and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok()) {
+                return AddrInfo {
+                    valid: true,
+                    network: j["network"].as_str().unwrap_or("").to_string(),
+                    kind: j["address_type"].as_str().unwrap_or("").to_string(),
+                    payment_id: !j["payment_id"].is_null(),
+                };
+            }
+            bad()
+        }
+        Err(_) => bad(),
+    }
+}
+
 /// Build + submit a transfer. `amount` is in CYNC; converted to atomic.
 #[tauri::command]
 fn send_transaction(
     address: String,
     amount: f64,
     memo: Option<String>,
+    fee_multiplier: Option<f64>,
     state: tauri::State<'_, State>,
 ) -> Result<String, String> {
     let address = address.trim().to_string();
@@ -692,6 +862,7 @@ fn send_transaction(
     if !amount.is_finite() || amount <= 0.0 {
         return Err("enter a positive amount".into());
     }
+    let fee_mult = fee_multiplier.unwrap_or(1.0).clamp(1.0, 100.0);
     let atomic = (amount * 1e12).round() as u64;
     if atomic == 0 {
         return Err("amount is too small".into());
@@ -705,9 +876,11 @@ fn send_transaction(
     };
     let node = active_node_url();
     let atomic_s = atomic.to_string();
+    let fee_s = format!("{:.2}", fee_mult);
     let mut args: Vec<&str> = vec![
         "--wallet", &path, "--node", &node,
         "send", "--address", &address, "--amount", &atomic_s,
+        "--fee-multiplier", &fee_s,
     ];
     let memo_val = memo.unwrap_or_default();
     let memo_trim = memo_val.trim();
@@ -1537,6 +1710,46 @@ fn stop_node(state: tauri::State<'_, State>) -> Result<NodeStatus, String> {
     }
 }
 
+// ── app health (Diagnostics) ────────────────────────────────────────
+#[derive(Serialize)]
+struct AppHealth {
+    #[serde(rename = "nodeBin")]
+    node_bin: bool,
+    #[serde(rename = "walletBin")]
+    wallet_bin: bool,
+    #[serde(rename = "rigBin")]
+    rig_bin: bool,
+    #[serde(rename = "rpcKey")]
+    rpc_key: bool,
+    #[serde(rename = "walletExists")]
+    wallet_exists: bool,
+    #[serde(rename = "dataDir")]
+    data_dir: String,
+    version: String,
+}
+
+#[tauri::command]
+fn app_health(state: tauri::State<'_, State>) -> AppHealth {
+    let (node_bin, wallet_bin, rig_bin, wallet_exists) = match state.lock() {
+        Ok(s) => (
+            std::path::Path::new(&s.node_bin).exists(),
+            std::path::Path::new(&s.wallet_bin).exists(),
+            std::path::Path::new(&s.rig_bin).exists(),
+            s.wallet_path.exists(),
+        ),
+        Err(_) => (false, false, false, false),
+    };
+    AppHealth {
+        node_bin,
+        wallet_bin,
+        rig_bin,
+        rpc_key: rpc_key().is_some(),
+        wallet_exists,
+        data_dir: node_data_dir().to_string_lossy().to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
 fn main() {
     // Reap any child processes orphaned by a previous crash/force-kill.
     cleanup_stale_children();
@@ -1560,6 +1773,8 @@ fn main() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_chain_info,
+            get_metrics,
+            app_health,
             wallet_exists,
             create_wallet,
             restore_wallet,
@@ -1567,10 +1782,12 @@ fn main() {
             lock_wallet,
             scan_wallet,
             get_wallet_address,
+            reveal_seed,
             disclose_balance,
             disclose_scoped_view_key,
             generate_qr_svg,
             send_transaction,
+            validate_address,
             new_subaddress,
             integrated_address,
             list_received,
