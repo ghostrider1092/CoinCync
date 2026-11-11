@@ -77,8 +77,7 @@ After SSH-ing into your new VPS:
 
 ```bash
 # 1. Download the latest testnet binary (Linux x86_64)
-#    Native Linux binaries are added by the v1.0.10 release workflow;
-#    for v1.0.9-testnet-pre-audit you'll need to build from source:
+#    Build the node from source (works on any Linux x86_64):
 git clone https://github.com/ghostrider1092/CoinCync coincync
 cd coincync && cargo build --release --bin coincync-node
 
@@ -139,7 +138,7 @@ The maintainer will:
 
 1. Confirm the node is reachable + syncing
 2. Add it to the official testnet seed list in the next release
-3. Credit you in the v1.0.10-testnet-community announcement and on
+3. Credit you in the next community release announcement and on
    the project's "Network operators" page (once that page exists)
 
 ---
@@ -191,7 +190,7 @@ The maintainer will:
 
 ---
 
-## Mainnet (October 1, 2026)
+## Mainnet (~March 2027)
 
 This guide is for **testnet** seed nodes. Mainnet seed nodes are a
 separate set with stricter operational requirements — see

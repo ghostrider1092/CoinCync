@@ -45,6 +45,6 @@ Mining is **RandomX only** by [Constitution Article V](./governance/constitution
 
 ## Status
 
-CoinCync is **pre-launch on mainnet**. The current testnet is live and stable. Mainnet genesis is scheduled for **October 1, 2026 00:00:00 UTC**. Until then, the explorer and API surfaces serve testnet data; mainnet selectors return a launch countdown.
+CoinCync is **pre-launch on mainnet**. The current testnet is live and stable. Mainnet is targeted for **~March 2027**, after extensive testing and hardening. Until then, the explorer and API surfaces serve testnet data; mainnet selectors return a launch countdown.
 
 For protocol decisions, design notes, and the why-it-works-this-way reasoning, start with [Privacy model](./protocol/privacy-model.md) and read forward.

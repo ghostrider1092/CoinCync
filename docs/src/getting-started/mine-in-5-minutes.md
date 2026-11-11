@@ -10,40 +10,30 @@ solo-node setup, performance tuning, etc., see
 
 ---
 
-## Windows — paste these three commands
+## Windows — use CyncHub
 
-Open PowerShell (Start menu → type `powershell` → Enter), then:
+[Download CyncHub](https://github.com/ghostrider1092/CoinCync/releases/tag/cynchub-v0.1.0-testnet) —
+the desktop suite bundles the node, wallet, and CPU miner in one
+installer, so there's nothing to download or wire up by hand:
 
-```powershell
-# 1. Download the miner + wallet (~30 sec)
-$base = 'https://github.com/ghostrider1092/CoinCync/releases/latest/download'
-Invoke-WebRequest -Uri "$base/coincync-rig.exe"    -OutFile coincync-rig.exe
-Invoke-WebRequest -Uri "$base/coincync-wallet.exe" -OutFile coincync-wallet.exe
+1. Run the installer. It's unsigned, so click through the Windows
+   SmartScreen warning; verify the SHA256 on the release page first.
+2. Open the **Wallet** tab and create a wallet — write down the 24-word
+   seed phrase.
+3. Open the **Mining** tab, paste your `tCYNC…` address, and start.
+   CyncHub runs a local testnet node and the miner for you.
 
-# 2. Create a wallet (you'll set a password; remember it)
-.\coincync-wallet.exe --network testnet --wallet testnet.bin create
-
-# 3. Start mining against your own local node's RPC
-#    (the public api.coincync.network RPC is temporarily unavailable — run a
-#     local testnet node first, see Run a node, and point the rig at it)
-$addr = (.\coincync-wallet.exe --network testnet --wallet testnet.bin address | Select-String '^Address:').ToString().Split()[-1]
-.\coincync-rig.exe run-solo --node http://127.0.0.1:28081/rpc/testnet --address $addr --network testnet --tui
-```
-
-The `--tui` flag opens a live dashboard. Press `q` to quit.
-
-> Verified against `v1.0.9-testnet-pre-audit` (the current `latest`
-> release). The `/releases/latest/download/...` URLs are GitHub's
-> tag-redirect — they automatically resolve to the most recent
-> release without doc updates per tag.
+Prefer the command line? See [Mine CYNC from your PC](./mining-on-your-pc.md)
+for the Linux binaries and solo-mining flags.
 
 ---
 
 ## Linux / macOS — build from source (10-15 min)
 
-Native Linux / macOS binaries aren't currently shipped on the GitHub
-release page (Windows `.exe` + installer only as of `v1.0.9-testnet-pre-audit`).
-For now, build locally — you only need this once.
+Pre-built Linux x86_64 binaries (`coincync-rig`, `coincync-wallet`) are on
+the [`v1.1.2-testnet`](https://github.com/ghostrider1092/CoinCync/releases/tag/v1.1.2-testnet)
+release. On macOS, or to build the latest yourself, build from source —
+you only need this once.
 
 ```bash
 # Prereqs: rustup (rustc 1.88+) and a C toolchain
