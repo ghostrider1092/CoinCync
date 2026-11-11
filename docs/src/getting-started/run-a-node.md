@@ -6,13 +6,13 @@ You can either download a pre-built binary or build from source ([Build from sou
 
 |Platform|URL|
 |---|---|
-|Linux x86_64|<https://coincync.network/release/v1.0.1-testnet/coincync-node-linux-x86_64>|
-|Windows x86_64|<https://coincync.network/release/v1.0.1-testnet/coincync-node-windows-x86_64.exe>|
+|Linux x86_64|<https://github.com/ghostrider1092/CoinCync/releases/download/v1.1.2-testnet/coincync-node>|
+|Windows|Bundled in the [CyncHub](https://github.com/ghostrider1092/CoinCync/releases/tag/cynchub-v0.1.0-testnet) installer, or [build from source](./build.md)|
 
 ```bash
 # Linux example
 curl -L -o coincync-node \
-  https://coincync.network/release/v1.0.1-testnet/coincync-node-linux-x86_64
+  https://github.com/ghostrider1092/CoinCync/releases/download/v1.1.2-testnet/coincync-node
 chmod +x coincync-node
 ./coincync-node --network testnet --data-dir ~/.coincync
 ```
@@ -21,7 +21,7 @@ chmod +x coincync-node
 > RPC, no PoW computation) on a cloud VPS is fine. **Mining is different** —
 > DigitalOcean, Cloudflare, AWS, GCP, and most major hosting providers
 > explicitly prohibit cryptocurrency mining in their TOS and will terminate
-> accounts that compute PoW. Run `coincync-miner` / `coincync-tui-miner` on
+> accounts that compute PoW. Run `coincync-rig` on
 > personal hardware (your laptop, desktop, or a server you physically own).
 > RandomX is CPU-only by design specifically so home machines can secure the
 > chain — that's the architecture, not a workaround.
@@ -129,6 +129,10 @@ The full method inventory is in [JSON-RPC reference](../api/json-rpc.md).
 | `testnet` | 28080 | 28081 | March 6, 2026 | **live** |
 | `mainnet` | 19080 | 19081 | October 1, 2026 | pre-launch |
 | `regtest` | (any) | (any) | local-only | for isolated dev |
+
+> The mainnet **Genesis** date above is a pre-launch placeholder baked into
+> the code; the final genesis timestamp is set at launch (mainnet is targeted
+> for ~March 2027).
 
 ## Try the local explorer
 

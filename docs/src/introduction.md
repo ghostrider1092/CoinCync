@@ -36,13 +36,15 @@ Mining is **RandomX only** by [Constitution Article V](./governance/constitution
 
 ## Where the live data is
 
-- **Block explorer** — [explorer.coincync.network](https://explorer.coincync.network)
-- **Public RPC API** — [api.coincync.network](https://api.coincync.network)
-- **Source code** — [git.coincync.network/coincync/cync-protocol](https://git.coincync.network/coincync/cync-protocol)
-- **Network status (testnet)** — see the explorer
+- **Source code** — [github.com/ghostrider1092/CoinCync](https://github.com/ghostrider1092/CoinCync)
+- **Public testnet seed** — `2.29.34.197:28080` (P2P) — point your own node at it
+- **RPC & explorer** — the public `api.coincync.network` and
+  `explorer.coincync.network` endpoints are temporarily offline while hosting
+  is brought back up. Until then, run a local node and use its RPC at
+  `http://127.0.0.1:28081` (see [Run a node](./getting-started/run-a-node.md)).
 
 ## Status
 
-CoinCync is **pre-launch on mainnet**. The current testnet is live and stable. Mainnet genesis is scheduled for **October 1, 2026 00:00:00 UTC**. Until then, the explorer and API surfaces serve testnet data; mainnet selectors return a launch countdown.
+CoinCync is **pre-launch on mainnet**. The current testnet is live and stable. Mainnet is targeted for **~March 2027**, after extensive testing and hardening. Until then, the explorer and API surfaces serve testnet data; mainnet selectors return a launch countdown.
 
 For protocol decisions, design notes, and the why-it-works-this-way reasoning, start with [Privacy model](./protocol/privacy-model.md) and read forward.
