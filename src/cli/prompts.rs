@@ -179,18 +179,15 @@ impl WalletCreationPrompt {
         }
         .to_string();
 
-        // Password
-        let use_password = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("Encrypt wallet with password?")
-            .default(true)
-            .interact()?;
-
-        let password = if use_password {
-            Some(prompt_password_confirm("Enter wallet password")?)
-        } else {
-            println!("{}", "⚠ Warning: Wallet will not be encrypted!".yellow());
-            None
-        };
+        // Password — encryption is MANDATORY for interactive wallet creation.
+        // A human at a prompt should never be one keystroke away from writing a
+        // plaintext seed to disk, so there is deliberately no "no" option here.
+        // Automation that genuinely needs an unencrypted throwaway wallet must
+        // opt in explicitly and loudly via the non-interactive
+        // `create --no-encrypt` flag.
+        let password = Some(prompt_password_confirm(
+            "Set a wallet password (encrypts your seed on disk)",
+        )?);
 
         Ok(Self {
             name,
