@@ -145,9 +145,14 @@ impl Blockchain {
         self.inner.read().tip.difficulty
     }
 
-    /// Get next difficulty (placeholder)
+    /// Difficulty of the NEXT block: the ASERT-retargeted target the validator
+    /// will enforce for `height + 1` ([`next_target`]), converted to a difficulty
+    /// number. Previously a placeholder returning the TIP's difficulty, so the
+    /// mining template's displayed "difficulty" lagged the real retarget by one
+    /// step (the miner always mined against the correct `next_target`, so this
+    /// was a reporting inaccuracy, never a consensus issue).
     pub fn next_difficulty(&self) -> u128 {
-        self.inner.read().tip.difficulty
+        crate::consensus::difficulty::target_to_difficulty(&self.next_target()).as_u128()
     }
 
     /// Consensus difficulty target for a block at `height`, given its difficulty
