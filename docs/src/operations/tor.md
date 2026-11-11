@@ -150,7 +150,7 @@ Once it's published, users running Tor Browser can paste it directly. Tor Browse
 
 ## Same setup for the API host
 
-The API stack at Toronto can publish its own `.onion` using exactly the same recipe — just point `HiddenServiceDir` at `/var/lib/tor/coincync_api/`, append a parallel `http://127.0.0.1:80` block to `deploy/api/Caddyfile` that proxies `/rpc` and `/v1/*` to the local cyncd, and publish the resulting onion hostname.
+The API stack can publish its own `.onion` using exactly the same recipe — just point `HiddenServiceDir` at `/var/lib/tor/coincync_api/`, append a parallel `http://127.0.0.1:80` block to `deploy/api/Caddyfile` that proxies `/rpc` and `/v1/*` to the local coincync-node, and publish the resulting onion hostname.
 
 The two `.onion` addresses are independent. They're both on the Tor network but they have separate keys, separate hostnames, and separate failure modes.
 

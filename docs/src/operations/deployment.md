@@ -13,7 +13,7 @@ Before deploying any node to a public host, confirm:
   - **RPC port** (28081 / 19081) — **never** public; bind to 127.0.0.1
   - **REST port** (28083 / 19083, optional) — never public
   - **Metrics port** (9091, optional) — never public; if you want metrics scraped from another host, use SSH tunneling or WireGuard
-  - **nginx** (80 + 443) — only on hosts that run public web ingress; see [Block explorer](./explorer.md), [Public RPC API](./api-host.md), or [the landing/docs deployment](./deployment.md#nyc-landing--docs).
+  - **nginx** (80 + 443) — only on hosts that run public web ingress; see [Block explorer](./explorer.md), [Public RPC API](./api-host.md), or [the landing/docs role](#network-roles).
 - [ ] **DNS** pointing at the host (if you want a public hostname).
 - [ ] **Time synchronization**: `chronyd` or `systemd-timesyncd` running. PoW timestamp validation has a 10-minute drift window; a clock that's off by more than that will reject incoming blocks.
 
@@ -38,7 +38,8 @@ For a mainnet host, swap `testnet` for `mainnet`. (Or build with `--features "ra
 ```bash
 sudo install -m 0755 target/release/coincync-node /usr/local/bin/coincync-node
 sudo install -m 0755 target/release/coincync-wallet /usr/local/bin/coincync-wallet
-# coincync-miner only on hosts that will mine
+# coincync-rig (the miner) only on hosts that will mine:
+# sudo install -m 0755 target/release/coincync-rig /usr/local/bin/coincync-rig
 ```
 
 ### 3. Create the service user and data directory
@@ -103,7 +104,7 @@ The compose file ships several optional profiles for hosts that play specific ro
 | Profile | Adds | Run on |
 |---|---|---|
 | (default) | just the relay node | every node |
-| `mining` | the `coincync-miner` daemon | hosts that mine (one is enough; running on every host is wasteful) |
+| `mining` | the `coincync-rig` miner | hosts that mine (one is enough; running on every host is wasteful) |
 | `faucet` | the testnet faucet HTTP service | one host (the faucet host) |
 | `monitoring` | Prometheus + Grafana | one host (the monitoring host) |
 | `explorer` | a separate explorer service via [`/deploy/explorer/`](./explorer.md) | the explorer host |
@@ -147,7 +148,7 @@ Every match should be `127.0.0.1:port`, never `0.0.0.0:port`. The only `0.0.0.0`
 
 ## Stratum banlist operations
 
-If you run Stratum (`coincync-miner` pool mode), abuse tracking now persists across restarts.
+If you run Stratum (`coincync-rig` pool mode), abuse tracking now persists across restarts.
 
 - Banlist file path:
   - `COINCYNC_STRATUM_BANLIST_PATH=/var/lib/coincync/stratum_bans.json`
@@ -241,15 +242,15 @@ If these are not set, keep pool endpoints loopback-only.
 
 Most production nodes do exactly one of these. Specializing per host limits blast radius.
 
-| Role | What runs there | Public ports | Example host |
-|---|---|---|---|
-| **Seed node** | cyncd | 28080 (P2P) | seed1, seed2, seed3 |
-| **Explorer host** | cyncd + nginx + explorer assets | 80, 443, 28080 | LON (current public host) |
-| **API host** | cyncd + nginx (REST/RPC proxy) | 80, 443, 28080 | TOR |
-| **Miner** | cyncd + coincync-miner | 28080 | NYC3 |
-| **Faucet** | cyncd + faucet HTTP service | 28080, 8080 (faucet UI) | (operator-assigned host) |
-| **Landing/docs** | nginx (no cyncd needed) | 80, 443 | NYC3 |
-| **Monitoring** | Prometheus + Grafana | (no public DNS) | (operator-assigned host) |
+| Role | What runs there | Public ports |
+|---|---|---|
+| **Seed node** | coincync-node | 28080 (P2P) |
+| **Explorer host** | coincync-node + nginx + explorer assets | 80, 443, 28080 |
+| **API host** | coincync-node + nginx (REST/RPC proxy) | 80, 443, 28080 |
+| **Miner** | coincync-node + coincync-rig | 28080 |
+| **Faucet** | coincync-node + faucet HTTP service | 28080, 8080 (faucet UI) |
+| **Landing/docs** | nginx (no node needed) | 80, 443 |
+| **Monitoring** | Prometheus + Grafana | (no public DNS) |
 
 Splitting roles across hosts is the same federation strategy explained in [Federation & DDoS](./federation-and-ddos.md). One host going down only affects one role.
 

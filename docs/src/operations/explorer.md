@@ -4,7 +4,7 @@ How to run the public block explorer at `https://explorer.coincync.network`. Liv
 
 ## Architecture (one-line)
 
-A single Caddy reverse proxy on port 443, fronting a localhost-bound `coincync-node` jsonrpsee server, with the block explorer static asset bundle served from `/` and `POST /api/{testnet,mainnet}` proxying to the cyncd RPC.
+A single Caddy reverse proxy on port 443, fronting a localhost-bound `coincync-node` jsonrpsee server, with the block explorer static asset bundle served from `/` and `POST /api/{testnet,mainnet}` proxying to the coincync-node RPC.
 
 The explorer UI loads chain data **only** through that JSON-RPC surface (same-origin `/api/testnet` or `/api/mainnet`). On the **Blocks** page it walks the full canonical height range using batched `get_block_range` (100 heights per request, server-capped) so the table can list every block the upstream node stores, without thousands of per-height round trips.
 
@@ -14,8 +14,8 @@ Recent UX hardening keeps the CoinCync visual style while making chain views mor
 - duplicate low-signal widgets were removed from high-traffic pages to prioritize chain state.
 
 ```text
-    public 443/tcp ── Caddy ── 127.0.0.1:28081 (cyncd testnet RPC)
-                        │   └─ 127.0.0.1:19081 (cyncd mainnet RPC, post-launch)
+    public 443/tcp ── Caddy ── 127.0.0.1:28081 (coincync-node testnet RPC)
+                        │   └─ 127.0.0.1:19081 (coincync-node mainnet RPC, post-launch)
                         ├─── /var/www/explorer/ (HTML, CSS, and JavaScript)
                         └─── /static/vendor/* (vendored CDN assets)
 ```
@@ -34,10 +34,10 @@ Recent UX hardening keeps the CoinCync visual style while making chain views mor
 
 ## First-time deploy
 
-On the explorer host (currently LON):
+On the explorer host:
 
 ```bash
-# 1. Pre-flight: confirm cyncd is bound to localhost only
+# 1. Pre-flight: confirm coincync-node is bound to localhost only
 ss -tlnp | grep -E ':(28081|19081) '
 # Expect: 127.0.0.1:28081 (testnet RPC). Mainnet RPC appears post-launch.
 # DO NOT see 0.0.0.0 — that defeats the entire Caddy security model.
@@ -157,7 +157,7 @@ The explorer host is a **trust boundary**. Every public-facing HTTP request land
 - **Method allowlist** enforced by the upstream `rest.rs` proxy when the explorer's JS calls `/api/v1/...`
 - **No third-party MITM** (no Cloudflare, no CDN, no edge cache that sees decrypted traffic)
 
-The cyncd node itself is NOT exposed publicly. Caddy proxies allowlisted requests to it on localhost. Any attacker who finds a vulnerability in jsonrpsee can still only hit it through Caddy's allowlisted method set, with the rate limit applied.
+The coincync-node node itself is NOT exposed publicly. Caddy proxies allowlisted requests to it on localhost. Any attacker who finds a vulnerability in jsonrpsee can still only hit it through Caddy's allowlisted method set, with the rate limit applied.
 
 ## What this stack deliberately does NOT do
 

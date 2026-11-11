@@ -86,8 +86,8 @@ Three parallel independent deployments. A user who doesn't trust one picks anoth
 For CoinCync, the federation plan looks like:
 
 ```text
-explorer.coincync.network    →  RIC      (primary)
-explorer2.coincync.network   →  <new>    (second host you control)
+explorer.coincync.network    →  <host-a>  (primary, operator-run)
+explorer2.coincync.network   →  <host-b>  (second host you control)
 explorer3.coincync.network   →  <community-run>
 ```
 
@@ -102,11 +102,11 @@ The mirror list is published as a small static JSON file at `https://docs.coincy
 ```json
 {
   "explorer": [
-    { "url": "https://explorer.coincync.network",  "host": "RIC",      "operator": "official" },
+    { "url": "https://explorer.coincync.network",  "host": "<region>", "operator": "official" },
     { "url": "https://explorer2.coincync.network", "host": "<region>", "operator": "<community>" }
   ],
   "api": [
-    { "url": "https://api.coincync.network",       "host": "Toronto",  "operator": "official" }
+    { "url": "https://api.coincync.network",       "host": "<region>", "operator": "official" }
   ]
 }
 ```

@@ -38,7 +38,7 @@ Every method is **read-only**. The REST proxy in `src/rpc/rest.rs::RPC_ALLOWED_M
 On the API host (TOR — resolve `api.coincync.network` for the current address):
 
 ```bash
-# 1. Pre-flight: cyncd RPC + REST bound to localhost only.
+# 1. Pre-flight: coincync-node RPC + REST bound to localhost only.
 ss -tlnp | grep -E ':(28080|28081|28083) '
 # Expect:
 #   0.0.0.0:28080      ← P2P (this host is also seed1, so P2P is public)
