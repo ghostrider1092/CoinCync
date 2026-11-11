@@ -20,6 +20,7 @@
 #include <map>
 #include <cmath>
 #include <cstdio>
+#include <chrono>
 
 using secp_primitives::GroupElement;
 using secp_primitives::Scalar;
@@ -741,6 +742,37 @@ int spark_ffi_identify_view_only(const unsigned char* s1_ptr, int s1_len,
         return 1;
     } catch (...) {
         return 0; // not ours / malformed
+    }
+}
+
+// B1 PERF HARNESS (not used in consensus): time a single representative
+// GroupElement*Scalar scalar-mul on the secp256k1 curve — the per-coin cost that
+// dominates `Coin::identify` (the `K * s1` shared-secret mul). Multiplies the
+// public P2 by s1 `iters` times with an anti-dead-code sink, and writes elapsed
+// nanoseconds to *out_ns. Lets the Rust side compare this against a full
+// `identify_view_only` to confirm B1 (the mul dominates; the key_commitment
+// fast-reject tail is cheap). Returns 1 on success, 0 on bad input.
+int spark_ffi_bench_scalarmul(const unsigned char* s1_ptr, int s1_len,
+                              const unsigned char* p2_ptr, int p2_len,
+                              uint64_t iters, uint64_t* out_ns) {
+    try {
+        if (s1_len != 32 || p2_len != 34 || iters == 0) return 0;
+        Scalar s1; s1.deserialize(s1_ptr);
+        GroupElement P2; P2.deserialize(p2_ptr);
+        unsigned char sink = 0;
+        unsigned char buf[34];
+        auto t0 = std::chrono::steady_clock::now();
+        for (uint64_t i = 0; i < iters; i++) {
+            GroupElement R = P2 * s1;
+            R.serialize(buf);
+            sink ^= buf[0];
+        }
+        auto t1 = std::chrono::steady_clock::now();
+        volatile unsigned char keep = sink; (void)keep;
+        *out_ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        return 1;
+    } catch (...) {
+        return 0;
     }
 }
 

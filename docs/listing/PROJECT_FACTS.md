@@ -1,8 +1,8 @@
 # CoinCync — Canonical Project Facts
 
 Single source of truth for the numbers, hashes, and identifiers used
-across listing submissions, exchange paperwork, audit-firm intake
-forms, and compliance disclosures. When a fact changes here, update
+across listing submissions, exchange paperwork, and compliance
+disclosures. When a fact changes here, update
 [SUBMISSION_KIT.md](SUBMISSION_KIT.md) and any external listing in
 the same change.
 
@@ -114,12 +114,10 @@ Solo-mineability: yes. Reference miner shipped in the node binary.
 
 (Mirror at `.org` TLD via Cloudflare for resilience.)
 
-## 8. Audit posture
+## 8. Security posture
 
 | Field | Value |
 |---|---|
-| External audit status | (fill in once a firm is booked — booked / in-progress / report-URL) |
-| Internal pre-audit prep | [docs/audit-submission.md](../audit-submission.md), [docs/security/](../security/) |
 | Threat model | [docs/THREAT_MODEL.md](../THREAT_MODEL.md) |
 | Known issues | [docs/launch/KNOWN_ISSUES.md](../launch/KNOWN_ISSUES.md) |
 | Bug bounty program | (fill in — currently "post-mainnet, public credit only" per [SECURITY.md](../../SECURITY.md) §Bug bounty) |

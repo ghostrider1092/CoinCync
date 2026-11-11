@@ -8,7 +8,7 @@ plus the operational checklist for tag-cut week.
 themselves a scam signal — reviewers see "we'll get back to you" and
 move the application to the bottom of the queue. A complete packet
 submitted on day 1 of public mainnet shifts you from "unknown
-project" to "audited, doxxed, transparent" before market makers
+project" to "doxxed, transparent" before market makers
 ever look.
 
 All fact-fields below pull from [PROJECT_FACTS.md](PROJECT_FACTS.md).
@@ -44,7 +44,6 @@ Keep that as the source of truth; do not edit numbers here directly.
 | Block explorer URL | https://explorer.coincync.network |
 | Public RPC endpoint | https://api.coincync.network/rpc/mainnet (post-launch) |
 | Whitepaper / docs | https://coincync.network/docs (or repo `docs/` URL) |
-| Audit report | (link once published) |
 | Discord / community URL | (fill) |
 | Twitter / X | (fill, if any) |
 | Reddit | (fill, if any) |
@@ -77,10 +76,9 @@ Keep that as the source of truth; do not edit numbers here directly.
 > economic shocks that have historically destabilized halvening-based
 > chains.
 >
-> **Public audit posture.** [link to audit report once published].
-> Pre-audit verification: 27 fuzz targets, reproducible builds, signed
-> binaries, critical-files SHA-256 lockfile that fails the build on
-> any consensus-file tampering.
+> **Public verification posture.** 27 fuzz targets, reproducible
+> builds, signed binaries, critical-files SHA-256 lockfile that fails
+> the build on any consensus-file tampering.
 >
 > CoinCync is open source under [license]. There is no operating
 > company — the protocol is maintained by the contributors listed
@@ -169,7 +167,7 @@ arithmetic before producing listing-site responses.
 `/api/v1/(testnet|mainnet)/(.*)` to the daemon's REST port and
 **preserve the `/api/v1/` prefix**. The current production proxy
 returns 404 on these paths — `scripts/deploy-explorer-nginx.ps1`
-needs a re-deploy / rewrite-rule audit before CMC's polling can
+needs a re-deploy / rewrite-rule review before CMC's polling can
 succeed.
 
 ---
@@ -180,7 +178,6 @@ Submit listings on **day 1** of public mainnet, not week 4. The
 pre-drafted packet above is what makes this realistic.
 
 - [ ] **T-7 days:** PROJECT_FACTS.md `(set this)` placeholders all filled
-- [ ] **T-7 days:** audit report URL fixed (or "in progress" with firm name)
 - [ ] **T-3 days:** emission-curve chart generated and saved to `docs/listing/`
 - [ ] **T-3 days:** self-reported supply endpoint deployed and live on testnet
 - [ ] **T-1 day:** verify `https://api.coincync.network/v1/testnet/supply` returns a sensible number
@@ -204,7 +201,6 @@ before submitting listings. Reviewers love a single download.
 | SHA256SUMS (signed) | binary integrity for the launched release |
 | SECURITY.md | responsible disclosure process |
 | MAINTAINERS.md + governance/bus-factor.md | who maintains, who has keys |
-| docs/audit-submission.md + audit firm report | external attestation |
 | sha256(release-binary).txt + signing key fingerprint | reproducibility proof |
 | docs/THREAT_MODEL.md | shows the project has thought about adversaries |
 | docs/explicitly-not-doing.md | bounds the attack surface intentionally |

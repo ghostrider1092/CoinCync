@@ -51,11 +51,11 @@
       <div style="background:var(--surface);padding:24px 20px;text-align:center">
         <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px">§ 01</div>
         <div style="font-family:var(--serif);font-size:17px;font-weight:400;margin-bottom:8px">Private by default</div>
-        <div style="font-size:12px;color:var(--t3);line-height:1.5;font-weight:300">Every transaction is shielded. No opt-out. No transparent mode. CLSAG ring-16 (11 during bootstrap, height &lt; 10,000), Bulletproofs+, stealth addresses.</div>
+        <div style="font-size:12px;color:var(--t3);line-height:1.5;font-weight:300">Every transaction is private. No opt-out. No transparent mode. CLSAG ring-16 (11 during bootstrap, height &lt; 10,000), Bulletproofs+, stealth addresses.</div>
       </div>
       <div style="background:var(--surface);padding:24px 20px;text-align:center">
         <div style="font-family:var(--mono);font-size:10px;color:var(--ac2);letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px">§ 02</div>
-        <div style="font-family:var(--serif);font-size:17px;font-weight:400;margin-bottom:8px">Auditable by anyone</div>
+        <div style="font-family:var(--serif);font-size:17px;font-weight:400;margin-bottom:8px">Verifiable by anyone</div>
         <div style="font-size:12px;color:var(--t3);line-height:1.5;font-weight:300">Supply is cryptographically verifiable. Pedersen commitments balance without revealing amounts. No trusted setup.</div>
       </div>
       <div style="background:var(--surface);padding:24px 20px;text-align:center">
@@ -65,7 +65,7 @@
       </div>
     </div>
 
-    <p style="font-weight:300;color:var(--t3)">Every CYNC transaction is 100% private by default. Explore blocks and network health in real time.</p>
+    <p style="font-weight:300;color:var(--t3)">Every CYNC transaction is private by default. Explore blocks and network health in real time.</p>
     <div class="stats">
       <div class="stat" onclick="go('blocks')" style="cursor:pointer"><div class="label">Height</div><div class="val" id="s-height">—</div><div class="sub">blocks mined</div></div>
       <div class="stat"><div class="label">Reward</div><div class="val" id="s-reward">—</div><div class="sub">CYNC/block</div></div>
@@ -136,7 +136,7 @@
           <li><strong style="color:var(--t2)">Ring-size enforcement</strong> via monotonic <code>total_outputs_ever()</code>, so ring decoys cannot reference future outputs.</li>
         </ul>
         <div style="margin-top:8px;font-size:10px;color:var(--t3)">
-          Shipping in rc3: PR #112 peer-aging (purges dead IPs from <code>AddressManager</code> after 5 failed dials), PR #117 legacy-DB migration (existing v1.0.11.x operators upgrade without wiping chaindata &mdash; run <code>coincync-node --network testnet migrate-legacy-db</code> once before starting on rc3), 12-PR audit-prep marathon (#90-101, Bitcoin-Core-equivalent defense-in-depth), 2 new gossip-resilience relay nodes, second miner randomx2 (closes single-miner SPOF), miner-stall watchdog. Binary SHA-256: <code>6fcf9d91c46&hellip;</code>. Full ledger: <a href="https://github.com/ghostrider1092/CoinCync/blob/main/docs/operations/CHANGES-2026-06-26.md" style="color:var(--ac2)">CHANGES-2026-06-26.md</a>.
+          Shipping in rc3: PR #112 peer-aging (purges dead IPs from <code>AddressManager</code> after 5 failed dials), PR #117 legacy-DB migration (existing v1.0.11.x operators upgrade without wiping chaindata &mdash; run <code>coincync-node --network testnet migrate-legacy-db</code> once before starting on rc3), 12-PR hardening marathon (#90-101, Bitcoin-Core-equivalent defense-in-depth), 2 new gossip-resilience relay nodes, second miner randomx2 (closes single-miner SPOF), miner-stall watchdog. Binary SHA-256: <code>6fcf9d91c46&hellip;</code>. Full ledger: <a href="https://github.com/ghostrider1092/CoinCync/blob/main/docs/operations/CHANGES-2026-06-26.md" style="color:var(--ac2)">CHANGES-2026-06-26.md</a>.
         </div>
       </div>
 

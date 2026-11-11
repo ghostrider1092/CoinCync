@@ -391,6 +391,36 @@ pub mod ffi {
             memo_cap: c_int,
             out_memo_len: *mut c_int,
         ) -> c_int;
+        fn spark_ffi_bench_scalarmul(
+            s1_ptr: *const u8,
+            s1_len: c_int,
+            p2_ptr: *const u8,
+            p2_len: c_int,
+            iters: u64,
+            out_ns: *mut u64,
+        ) -> c_int;
+    }
+
+    /// B1 perf harness: time `iters` representative secp256k1 scalar-muls (`P2 *
+    /// s1`) — the per-coin cost that dominates `identify`. Returns total
+    /// nanoseconds, or `None` on error. Not for consensus; used by the B1 bench
+    /// test to confirm the mul dominates full `identify_view_only`.
+    pub fn bench_scalarmul(view_key: &IncomingViewKeyBytes, iters: u64) -> Option<u64> {
+        let mut out_ns: u64 = 0;
+        let rc = unsafe {
+            spark_ffi_bench_scalarmul(
+                view_key.s1.as_ptr(),
+                view_key.s1.len() as c_int,
+                view_key.p2.as_ptr(),
+                view_key.p2.len() as c_int,
+                iters,
+                &mut out_ns,
+            )
+        };
+        if rc != 1 {
+            return None;
+        }
+        Some(out_ns)
     }
 
     /// A wallet's WATCH-ONLY shielded view key: the exported incoming-view-key
@@ -1461,6 +1491,61 @@ pub mod ffi {
             let b = LibsparkBackend;
             let via_seed = b.identify(seed_a, &coin, &ctx).unwrap().expect("seed identifies");
             assert_eq!(via_seed.value, owned.value, "view-only sees the same value as the seed");
+        }
+
+        /// B1 CONFIRMATION (perf; #[ignore]). Confirms the per-coin secp256k1
+        /// scalar-mul (`K * s1`) dominates `identify_view_only`, so an on-wire view
+        /// tag — which cannot avoid that mul and would only save the already-cheap
+        /// `key_commitment` hash-reject tail — would NOT speed up Spark scanning.
+        /// Prints per-op nanoseconds for: a full identify on a NON-owned coin (the
+        /// common scan case), a full identify on an OWNED coin (adds decrypt +
+        /// validate), and a bare representative scalar-mul. Expect
+        /// `identify_nonowned ≈ scalar_mul` (the mul is ~the whole non-owned cost).
+        /// Run: `cargo test -p spark-connector --features libspark-ffi
+        /// b1_scalarmul_dominates_identify -- --ignored --nocapture`.
+        #[test]
+        #[ignore = "perf harness: run with --ignored --nocapture"]
+        fn b1_scalarmul_dominates_identify() {
+            use std::time::Instant;
+            let seed_a = b"b1-seed-A";
+            let seed_b = b"b1-seed-B";
+            let ctx = serial_context(b"b1:tx:0").expect("ctx");
+            let coin = mint_to_seed(seed_a, 9_000, &ctx).expect("mint to A");
+            let vk_a = export_incoming_view_key(seed_a).expect("A vk");
+            let vk_b = export_incoming_view_key(seed_b).expect("B vk");
+
+            // Sanity: A owns it, B does not.
+            assert!(identify_view_only(&vk_a, &coin, &ctx).unwrap().is_some());
+            assert!(identify_view_only(&vk_b, &coin, &ctx).unwrap().is_none());
+
+            let iters: u64 = 2000;
+
+            // Full identify on a NON-owned coin — the dominant scan case.
+            let t = Instant::now();
+            for _ in 0..iters {
+                let _ = identify_view_only(&vk_b, &coin, &ctx).unwrap();
+            }
+            let nonowned_ns = t.elapsed().as_nanos() as u64 / iters;
+
+            // Full identify on an OWNED coin — mul + decrypt + validate.
+            let t = Instant::now();
+            for _ in 0..iters {
+                let _ = identify_view_only(&vk_a, &coin, &ctx).unwrap();
+            }
+            let owned_ns = t.elapsed().as_nanos() as u64 / iters;
+
+            // Bare representative secp256k1 scalar-mul — the K*s1 cost.
+            let mul_total = bench_scalarmul(&vk_a, iters).expect("scalarmul bench");
+            let mul_ns = mul_total / iters;
+
+            println!(
+                "B1 per-op (ns):  scalar_mul={mul_ns}  identify_nonowned={nonowned_ns}  identify_owned={owned_ns}"
+            );
+            println!(
+                "B1 ratios:  nonowned/mul={:.2}  owned/mul={:.2}  (≈1 nonowned/mul ⇒ mul dominates ⇒ view tags don't help)",
+                nonowned_ns as f64 / mul_ns.max(1) as f64,
+                owned_ns as f64 / mul_ns.max(1) as f64
+            );
         }
 
         #[test]
