@@ -88,7 +88,7 @@ The Caddyfile already has the `/rpc/mainnet` upstream pool defined. To activate:
 
 ## Federation
 
-When traffic on the public API outgrows what one Toronto host can handle, the right answer is a second API host with `api2.coincync.network` pointing at it. **Not** a CDN. The full reasoning is in [Federation & DDoS](./federation-and-ddos.md). The Caddyfile is parameterized so a second operator can drop in a new deployment with a different hostname.
+When traffic on the public API outgrows what one host can handle, the right answer is a second API host with `api2.coincync.network` pointing at it. **Not** a CDN. The full reasoning is in [Federation & DDoS](./federation-and-ddos.md). The Caddyfile is parameterized so a second operator can drop in a new deployment with a different hostname.
 
 ## See also
 
