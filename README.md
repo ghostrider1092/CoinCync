@@ -3,8 +3,8 @@
 Copyright (c) 2025-2026, The CoinCync Project
 
 **Privacy money that requires no permission.** A fair-launch, RandomX
-CPU-mined cryptocurrency with mandatory privacy at the consensus layer, an
-auditable asymptotic supply, and a hash-locked constitution that even its authors
+CPU-mined cryptocurrency with mandatory privacy at the consensus layer, a
+verifiable asymptotic supply, and a hash-locked constitution that even its authors
 cannot quietly change.
 
 ## Table of Contents
@@ -105,7 +105,7 @@ the node software, validate the chain, and mine on equal terms.
 premine, dev tax, founder allocation, admin authority, surveillance hooks, and
 external-chain trust — and it is **hash-locked into the build**, so these
 guarantees cannot be quietly changed later. Supply approaches an asymptote of
-100,000,000 CYNC on an auditable curve; a perpetual 0.6 CYNC/block tail emission
+100,000,000 CYNC on a verifiable curve; a perpetual 0.6 CYNC/block tail emission
 continues past it.
 
 ## About this project
@@ -127,7 +127,7 @@ CoinCync takes **no dev tax, has no premine, and holds no founder allocation** �
 these are constitutional and hash-locked, so there is no insider stake and users
 are never anyone's exit liquidity. The project is sustained instead by:
 
-- **Public-interest grants** (e.g. NLnet / NGI0) that fund audits and development.
+- **Public-interest grants** (e.g. NLnet / NGI0) that fund development.
 - **Voluntary community crowdfunding** on a transparent, per-initiative basis.
 - **Founders and contributors mining on equal terms**, like everyone else.
 
@@ -162,7 +162,7 @@ finalized before genesis.
 | Testnet | 13,000 | — | Hard-fork rules activation | v1.0.12 |
 | Testnet | 29,000 | — | Shielded (Lelantus Spark) bridge activation — shield-in / shielded-send / unshield | v1.1.0-testnet |
 | Testnet | TBD | — | CIP-011 rolling soft-finality (behind `rolling-finality`) — deferred until after mainnet; enabled later by scheduled activation | TBD |
-| Mainnet | genesis | 2027-03-01 (target) | Genesis — audited transparent ring-privacy core. Shielded pool and rolling finality enabled post-genesis via scheduled activations, after audit | TBD |
+| Mainnet | genesis | 2027-03-01 (target) | Genesis — transparent ring-privacy core. Shielded pool and rolling finality enabled post-genesis via scheduled activations | TBD |
 
 Values marked TBD/— are not finalized as of this revision.
 
@@ -363,11 +363,11 @@ current state:
   providers.
 - **Shielded pool activating on testnet.** The shielded (Lelantus Spark) bridge
   — shield-in / shielded-send / unshield — activates on the **public testnet** at
-  block 29,000, shipped in `v1.1.0-testnet`. This is a pre-audit testnet
-  activation, exercised live ahead of the security audit. MimbleWimble kernels
+  block 29,000, shipped in `v1.1.0-testnet`. This is an early testnet
+  activation, exercised live on the public testnet. MimbleWimble kernels
   and CIP-011 rolling soft-finality remain feature-gated and off by default.
 - **Atomic swaps in progress.** CYNC↔BTC atomic-swap machinery is shipped; the
-  real adaptor-signature crypto is pending its audit window.
+  real adaptor-signature crypto is still in development.
 - **Wallet UX** is mid-refactor; some flows are still utilitarian.
 
 Use at your own risk. Testnet coins have no value; mainnet is not yet live.

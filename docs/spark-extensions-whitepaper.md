@@ -10,7 +10,7 @@
 > roadmap and the reasoning behind it. Where it states a result as *measured* or
 > *proven*, the number or proof is cited; everything else is *proposed* and marked
 > as such. Nothing here is activated on any chain: the on-wire advancements are
-> gated and activation-locked until externally audited. This paper is written to
+> gated and activation-locked until independently reviewed and hardened. This paper is written to
 > invite scrutiny of the design, not to announce a product.
 
 ---
@@ -72,16 +72,16 @@ commons, not fenced off. A healthy privacy ecosystem is many independent
 implementations that fail differently; we want to add to Spark's resilience, not
 fork its community.
 
-**Best, proven by audit — not first.** We make no "most private" claim. Where an
+**Best, proven in the open — not first.** We make no "most private" claim. Where an
 advancement reuses a mechanism proven elsewhere (Sapling/Jamtis view tags, FROST
 thresholds), we say so and inherit its scrutiny; where our composition is younger
 than the parts it joins, we say that too. Each on-wire version ships only behind a
-coordinated activation and an external audit. Rigor is the moat.
+coordinated activation and independent review. Rigor and openness are the moat.
 
 **One advancement per version.** Versions are small and legible on purpose. Each
 is a discrete, reviewable, independently-valuable step, with its own CIP, its own
 activation (if it touches consensus), and its own section here. Small steps are
-easier to audit, easier to roll back, and easier for others to adopt piecemeal.
+easier to review, easier to roll back, and easier for others to adopt piecemeal.
 
 ---
 
@@ -89,12 +89,11 @@ easier to audit, easier to roll back, and easier for others to adopt piecemeal.
 
 - **v1 — native sketch.** A CoinCync-native Halo2 shielded store. Superseded; gated off.
 - **v2 — libspark Spark (live at testnet height 29 000).** The real Lelantus-Spark
-  engine via an audited C++ library behind an FFI connector. It provides: mint and
+  engine via a vendored C++ library behind an FFI connector. It provides: mint and
   spend over an accumulator pool; Grootle one-of-many membership proofs; 34-byte
   VRF linking tags; a Sapling-style transparent↔shielded value bridge; content
   binding against coin replay; and a batched block-level verifier. This is the
-  substrate the extension program builds on, and the version an external audit
-  will bind to.
+  substrate the extension program builds on.
 
 Everything in §4 is an addition on top of this v2 substrate.
 
@@ -141,7 +140,7 @@ per-asset pools.
 For mobile/light clients: a semi-trusted server scans the chain **obliviously** and
 returns a small digest, without learning which coins are the client's and without
 the client downloading the chain. The privacy-maximalist scanning path, promoted
-from a v3 stretch to its own version because it is a research-and-audit effort in
+from a v3 stretch to its own version because it is a research effort in
 its own right.
 
 ### Cross-cutting tracks (continuous)
@@ -190,8 +189,8 @@ scalar-mul, and it is attacked **without any consensus change**:
 - Use an **optimized fixed-scalar multiplication** for the wallet's view scalar.
 - **Cache** cover-set anchors and scan position so resume is incremental.
 
-All of this is wallet-side and ships pre-audit. The only genuinely post-audit
-piece of the scanning story is **oblivious light-client scanning (OMR, v8)** —
+All of this is wallet-side and ships now, with no consensus change. The only piece
+of the scanning story that must wait is **oblivious light-client scanning (OMR, v8)** —
 a different problem (don't scan the chain at all), not a view tag. The net effect
 of B1 is that v3's scanning win got *simpler and sooner*: no coin-format fork.
 
@@ -204,12 +203,12 @@ management and encoding only — no on-chain change.
 
 ### 5.5 What ships when
 v3 splits cleanly:
-- **Pre-audit, wallet-only (no consensus change):** parallel and batched scan,
+- **Now, wallet-only (no consensus change):** parallel and batched scan,
   witness/anchor caching with incremental resume, deterministic sub-addresses, and
-  view-only/audit wallets. These deliver a felt improvement without touching the
-  audited wire format.
-- **Post-audit:** nothing in v3's core scanning win — B1 dropped the coin-format
-  fork. The only post-audit scanning work is oblivious light-client scanning (OMR),
+  view-only wallets. These deliver a felt improvement without touching the
+  consensus wire format.
+- **Later (gated):** nothing in v3's core scanning win — B1 dropped the coin-format
+  fork. The only scanning work that must wait is oblivious light-client scanning (OMR),
   which is tracked separately as v8.
 
 ---
@@ -220,8 +219,8 @@ v3 splits cleanly:
   savings, and the privacy theorem in §5.3 are *projected* until a prototype and a
   benchmark (and, for the theorem, a proof) exist. This paper will carry the
   numbers only once they do.
-- **On-wire advancements need a coordinated fork and an audit.** Nothing on-wire
-  activates before an external review binds to it.
+- **On-wire advancements need a coordinated fork and independent review.** Nothing on-wire
+  activates before that review completes.
 - **Composition risk.** Adding layers to a proven protocol can introduce
   interactions the base construction never had. Each version is reviewed not only
   in isolation but for its effect on the properties of the versions beside it.

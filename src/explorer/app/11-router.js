@@ -147,7 +147,7 @@ async function viewTx(txHash){
   el.innerHTML=`
     <div class="bc"><a onclick="go('home')">Home</a><span>›</span>${isMempool?'<a onclick="go(\'mempool\')" style="cursor:pointer;color:var(--ac2)">Mempool</a>':`<a onclick="viewBlock(${tx.block_height})" style="cursor:pointer;color:var(--ac2)">Block #${num(tx.block_height||0)}</a>`}<span>›</span>Transaction</div>
     <div class="page-title" style="margin-bottom:4px">Transaction Detail</div>
-    <div class="page-sub" style="margin-bottom:20px">${isMempool?'<span style="color:#F0C040;font-weight:600">Unconfirmed</span> — waiting in mempool for next block':'Fully private '+(isCoinbase?'coinbase':'transfer')+' transaction'}</div>
+    <div class="page-sub" style="margin-bottom:20px">${isMempool?'<span style="color:#F0C040;font-weight:600">Unconfirmed</span> — waiting in mempool for next block':'Private by default '+(isCoinbase?'coinbase':'transfer')+' transaction'}</div>
 
     <!-- Privacy Score Banner -->
     <div style="background:linear-gradient(135deg,rgba(158,122,62,.12),rgba(158,122,62,.04));border:1px solid rgba(158,122,62,.25);border-radius:12px;padding:20px 24px;margin-bottom:20px;display:flex;align-items:center;gap:20px">

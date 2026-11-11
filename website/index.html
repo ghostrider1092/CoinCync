@@ -6,9 +6,9 @@
 <title>CoinCync — Privacy money that requires no permission.</title>
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon.svg">
-<meta name="description" content="CoinCync is permissionless privacy money built on Concentric Privacy — layered, defense-in-depth privacy where no single break exposes the whole. Every transaction is shielded and mandatory; CPU-mined; supply is auditable; no admin, no federation, no governance token.">
+<meta name="description" content="CoinCync is permissionless privacy money built on Concentric Privacy — layered, defense-in-depth privacy where no single break exposes the whole. Every transaction is private and mandatory; CPU-mined; supply is verifiable; no admin, no federation, no governance token.">
 <meta property="og:title" content="CoinCync — Privacy money that requires no permission.">
-<meta property="og:description" content="Permissionless privacy money built on Concentric Privacy — layered defense-in-depth where no single break exposes the whole. Mandatory privacy at the consensus layer, CPU-mined, auditable supply, constitutionally protected.">
+<meta property="og:description" content="Permissionless privacy money built on Concentric Privacy — layered defense-in-depth where no single break exposes the whole. Mandatory privacy at the consensus layer, CPU-mined, verifiable supply, constitutionally protected.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://coincync.network">
 <meta property="og:image" content="https://coincync.network/assets/og-card.svg">
@@ -531,8 +531,8 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     <span>Testnet live &mdash; <span id="live-nodes">&mdash;</span> peers &mdash; block <span id="live-height">&mdash;</span></span>
   </div>
   <h1>Your money<br>is <em class="bubble"><span class="bubble-letter">y</span><span class="bubble-letter">o</span><span class="bubble-letter">u</span><span class="bubble-letter">r</span><span class="bubble-letter">s</span></em>.</h1>
-  <p class="hero-sub">A privacy-first cryptocurrency where every transaction is private by default &mdash; ring signatures, stealth addresses, hidden amounts &mdash; supply is cryptographically auditable, and no permission is required to participate.</p>
-  <p class="hero-thesis" style="font-family:var(--serif);font-style:italic;font-size:clamp(15px,1.5vw,18px);line-height:1.5;color:var(--t2);max-width:680px;margin:0 auto 36px;padding:0 24px;border-left:2px solid var(--ac);text-align:left;padding-left:20px">Privacy money that doesn&rsquo;t depend on permission to participate &mdash; built on <strong>Concentric Privacy</strong>: independent privacy layers, each guarding a different attack surface, arranged so that no single break exposes the whole. Consensus stays live; privacy never silently downgrades. Built in the same staging Monero proved out &mdash; chain first, novel crypto later, each behind its own audit.</p>
+  <p class="hero-sub">A privacy-first cryptocurrency where every transaction is private by default &mdash; ring signatures, stealth addresses, hidden amounts &mdash; supply is cryptographically verifiable, and no permission is required to participate.</p>
+  <p class="hero-thesis" style="font-family:var(--serif);font-style:italic;font-size:clamp(15px,1.5vw,18px);line-height:1.5;color:var(--t2);max-width:680px;margin:0 auto 36px;padding:0 24px;border-left:2px solid var(--ac);text-align:left;padding-left:20px">Privacy money that doesn&rsquo;t depend on permission to participate &mdash; built on <strong>Concentric Privacy</strong>: independent privacy layers, each guarding a different attack surface, arranged so that no single break exposes the whole. Consensus stays live; privacy never silently downgrades. Built in the same staging Monero proved out &mdash; chain first, novel crypto later, each proven in the open.</p>
   <div class="hero-actions">
     <a href="#download" class="btn-primary">Download Wallet</a>
     <a href="https://explorer.coincync.network" class="btn-ghost" target="_blank">Explore the chain</a>
@@ -577,8 +577,8 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
     </div>
     <div class="pillar">
       <div class="pillar-num">&sect; 02</div>
-      <h3>Auditable by anyone</h3>
-      <p>Supply is cryptographically verifiable. Pedersen commitments are additively homomorphic &mdash; they balance without revealing amounts. No trusted setup. No ceremony. Anyone can audit.</p>
+      <h3>Verifiable by anyone</h3>
+      <p>Supply is cryptographically verifiable. Pedersen commitments are additively homomorphic &mdash; they balance without revealing amounts. No trusted setup. No ceremony. Anyone can verify.</p>
     </div>
     <div class="pillar">
       <div class="pillar-num">&sect; 03</div>
@@ -1077,7 +1077,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
       <div class="faq-a"><div class="faq-a-inner">Yes. CoinCync uses RandomX, a CPU-only proof-of-work algorithm. GPUs and ASICs offer no advantage. Any modern CPU with 2GB of free RAM per thread can mine. At genesis, a laptop with 4 cores earns roughly 50 CYNC per block found.</div></div>
     </div>
     <div class="faq-item">
-      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">How is supply auditable if amounts are hidden?</div>
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">How is supply verifiable if amounts are hidden?</div>
       <div class="faq-a"><div class="faq-a-inner">Pedersen commitments are additively homomorphic. This means you can verify that inputs equal outputs without knowing the actual amounts. Every node independently checks that no coins are created from nothing &mdash; the math balances without revealing any values. Combined with Bulletproofs+ range proofs (which prove amounts are non-negative), this guarantees no hidden inflation.</div></div>
     </div>
     <div class="faq-item">
@@ -1089,12 +1089,12 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
       <div class="faq-a"><div class="faq-a-inner">Your funds are controlled by your 24-word seed phrase, encrypted with Argon2id + XChaCha20-Poly1305. If you lose both your seed phrase and your wallet file, the funds are permanently inaccessible. CoinCync includes a dead man's switch feature &mdash; time-locked recovery that can send funds to a backup address after a configurable period of inactivity.</div></div>
     </div>
     <div class="faq-item">
-      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">Can I disclose transactions for tax or audit purposes?</div>
-      <div class="faq-a"><div class="faq-a-inner">Yes. Time-scoped view keys let you selectively reveal transactions within a specific block range to an auditor, exchange, or tax authority &mdash; without exposing your full history or breaking anyone else's privacy. You choose what to reveal and to whom.</div></div>
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">Can I disclose transactions for tax or compliance purposes?</div>
+      <div class="faq-a"><div class="faq-a-inner">Yes. Time-scoped view keys let you selectively reveal transactions within a specific block range to a reviewer, exchange, or tax authority &mdash; without exposing your full history or breaking anyone else's privacy. You choose what to reveal and to whom.</div></div>
     </div>
     <div class="faq-item">
       <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">When does mainnet launch?</div>
-      <div class="faq-a"><div class="faq-a-inner">Not yet scheduled &mdash; mainnet is parked pending the security audit, so there is no genesis date. The testnet is live now with mining active; all testnet coins will be wiped at mainnet launch. <strong>v1.0 mainnet will ship the base chain only</strong> &mdash; mine, send, receive, multi-sig, with the full 7-feature privacy stack. CYNC&harr;BTC atomic swaps (cyncswap) ship in v1.1 after their own dedicated audit, ~Q1&ndash;Q2 2027. Same staging Monero used: chain first, novel crypto later, each behind its own audit.</div></div>
+      <div class="faq-a"><div class="faq-a-inner">Mainnet is targeted for March 2027 &mdash; still in active development and testing, so treat the date as a target, not a commitment. The testnet is live now with mining active; all testnet coins will be wiped at mainnet launch. <strong>v1.0 mainnet will ship the base chain only</strong> &mdash; mine, send, receive, multi-sig, with the full 7-feature privacy stack. CYNC&harr;BTC atomic swaps (cyncswap) ship in v1.1, ~Q1&ndash;Q2 2027. Same staging Monero used: chain first, novel crypto later, each proven in the open.</div></div>
     </div>
   </div>
 </section>
@@ -1142,7 +1142,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
         <span class="builtin-name">Pedersen</span>
         <div class="builtin-overlay" aria-hidden="true">
           <span class="builtin-overlay-name">Pedersen</span>
-          <span class="builtin-overlay-desc">Hiding + binding commitments &mdash; additively homomorphic, supply auditable</span>
+          <span class="builtin-overlay-desc">Hiding + binding commitments &mdash; additively homomorphic, supply verifiable</span>
         </div>
       </a>
       <a href="https://ristretto.group/" target="_blank" rel="noopener noreferrer" class="builtin-cell">
@@ -1185,7 +1185,7 @@ body.has-wallpaper footer{background:color-mix(in srgb,var(--bg) 85%,transparent
   <p>Every CYNC in existence traces to the emission curve. The math can be checked by anyone, at any block, on their own node.</p>
   <div class="cta-buttons">
     <a href="https://docs.coincync.network/introduction" class="btn-primary">Read the Whitepaper</a>
-    <a href="https://explorer.coincync.network" class="btn-ghost" target="_blank">Supply Audit</a>
+    <a href="https://explorer.coincync.network" class="btn-ghost" target="_blank">Supply Verification</a>
   </div>
 </div>
 

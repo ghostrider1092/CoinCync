@@ -243,7 +243,7 @@ function renderAnonChart() {
 //
 function shareBlock(height) {
   const url = `https://explorer.coincync.network/#block-${height}`;
-  const text = `CoinCync Block #${height} — 100% private transactions, CPU-mined with RandomX`;
+  const text = `CoinCync Block #${height} — private by default transactions, CPU-mined with RandomX`;
   window.open(`https://x.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`, '_blank');
 }
 function shareTelegram(text) {

@@ -1,7 +1,7 @@
 # CIP — Spark v3: scanning & addressing
 
 **Status:** design (DRAFT; nothing built). Planning only. The on-wire parts are
-**post-audit** (coordinated fork, like the h29000 shielded activation); the
+**in a later phase** (coordinated fork, like the h29000 shielded activation); the
 wallet-only parts can ship under the already-lifted CyncHub build freeze.
 **Depends on:** the live v2 path — `SparkPayload`/`SparkPoolStore` (see
 [[cip-spark-block-format]]), the libspark FFI connector
@@ -10,7 +10,7 @@ CyncHub's background sync.
 **Goal:** make finding your own shielded coins cheap. Today scanning is
 `O(total pool coins)` full libspark recoveries per wallet per sync; this CIP cuts
 the dominant cost with a **view tag** pre-filter and standardized **diversified
-addressing**, split into a pre-audit wallet-only slice and a post-audit
+addressing**, split into a now-shippable wallet-only slice and a later (gated)
 coordinated-fork slice.
 
 Positioning: this is the near-term v3 thesis (chosen over FCMP++ full-chain
@@ -26,12 +26,12 @@ is also the selection rule for what belongs in v3:
 
 - **In scope:** changes that are **additive layers on Spark's own primitives** —
   view tags on Spark coins, sub-addresses derived from Spark's diversifier, OMR
-  over Spark's existing outputs. The audited core stays; we build on top.
+  over Spark's existing outputs. The proven core stays; we build on top.
 - **Out of scope (defer):** anything that **replaces** a Spark primitive. FCMP++
   swaps out the membership proof entirely → not v3, by this rule. (That is *why*
   it is deferred, not just a timing call.)
 
-This matches "the BEST auditable-privacy chain, proven by audit — not the first"
+This matches "the BEST verifiable-privacy chain, proven in the open — not the first"
 ([[coincync-position-best-not-first]]) and "build the hard thing"
 ([[coincync-build-the-hard-thing]]): improve the real cryptography, credit its
 author, don't chase novelty for its own sake.
@@ -83,7 +83,7 @@ What Spark already gives us (so v3 builds on it, not around it):
 >
 > **Revised v3 direction:** the scan cost is `pool_size × (one EC mul + one
 > hash)`, so attack the **mul**, not the tail — (a) parallelize + optimize the
-> per-coin `K · s1` (PRE-AUDIT, wallet-only, NO fork), and (b) OMR for light
+> per-coin `K · s1` (NOW, wallet-only, NO fork), and (b) OMR for light
 > clients (v8). v3 becomes mostly Slice A; the coin-format fork is dropped. See
 > revised §3.
 
@@ -107,8 +107,8 @@ profile `identify_view_only` into (a)/(b) on the real backend before committing
 to a tag design — the answer picks the construction.
 
 **This is a coin-wire-format change** → it changes what the pool commits to →
-**consensus** → fingerprint change → coordinated fork (post-audit, own libspark
-C++ change). It is NOT a pre-audit change.
+**consensus** → fingerprint change → coordinated fork (in a later phase, own libspark
+C++ change). It is NOT a wallet-side change.
 
 ### Privacy cost — weighed, and why a 1-byte tag is acceptable
 A view tag is a **linkability surface**, so we justify it rather than wave it
@@ -132,17 +132,17 @@ large anon set** ([[coincync-privacy-adoption-vs-delisting]]):
 4. **Precedent + reversibility.** Sapling and Monero/Jamtis shipped 1-byte view
    tags after this same debate; the scan win (orders of magnitude) dominates the
    bounded linkability. Tag size is a **tunable parameter** (0 = none), and OMR
-   (§5) remains the zero-on-wire-linkability alternative if the audit disagrees.
+   (§5) remains the zero-on-wire-linkability alternative if further review disagrees.
 
 Net: accept a 1-byte tag because its privacy cost is **provably bounded** (points
-1–2) and its benefit is large (§1), and document that bound for the audit.
+1–2) and its benefit is large (§1), and document that bound for review.
 
 ---
 
 ## 3. The two slices (this is the important split)
 
-### Slice A — PRE-AUDIT, wallet-only, NO consensus change
-Ships under the lifted CyncHub build freeze; no wire change, no fork, no audit
+### Slice A — NOW, wallet-only, NO consensus change
+Ships under the lifted CyncHub build freeze; no wire change, no fork, no gating
 dependency. Real CyncHub wins now:
 - **Parallel + batched scan.** Call `identify_view_only` across a block's coins
   in parallel; batch RPC block fetch (background_sync already has batching hooks).
@@ -154,7 +154,7 @@ dependency. Real CyncHub wins now:
   address (private-by-default, better anon-set usage). Wallet + address codec
   only.
 - **View-only wallet UX.** `export_incoming_view_key` already supports watch-only;
-  surface it in CyncHub (auditor / watch wallets) — complements the disclosure
+  surface it in CyncHub (reviewer / watch wallets) — complements the disclosure
   work ([[coincync-aggregate-disclosure]]).
 
 **Added by B1 — optimize the per-coin mul (still Slice A, no fork).** Since the
@@ -162,15 +162,15 @@ scan cost is dominated by the `K · s1` scalar-mul per coin, parallelize it acro
 a block's coins and across blocks, and use an optimized fixed-scalar mul for `s1`.
 This is the primary v3 scanning win and needs NO wire change.
 
-### Slice B — POST-AUDIT
+### Slice B — LATER (GATED)
 - **OMR** (§5 / v8) — the light-client scanning path. This is now the ONLY
-  post-audit piece of the scanning story; the view-tag coin-format fork is
+  later (gated) piece of the scanning story; the view-tag coin-format fork is
   **dropped** (B1: it buys ~nothing for Spark).
 
-Rationale: B1 collapsed v3's scanning win into Slice A — wallet-only, pre-audit,
+Rationale: B1 collapsed v3's scanning win into Slice A — wallet-only, shippable now,
 no coin-format fork. That is a strictly better outcome (ships sooner, no consensus
 risk). Slice B is reduced to the genuinely-different light-client problem (OMR),
-gated behind the usual discipline ([[coincync-testnet-only-until-audit]]).
+gated on further review (the usual testnet-only discipline).
 
 ---
 
@@ -189,11 +189,11 @@ receiving addresses. v3 standardizes:
 Let a semi-trusted server scan the chain for a light client and return a small
 digest, **without** learning which coins are the client's. This is the real
 answer for mobile CyncHub (no full-chain download, no on-wire tag linkability).
-It is heavy crypto (homomorphic retrieval), an own research + audit track, and
-would be **v3.5 / post-audit**. Flagged here because it is the privacy-preserving
+It is heavy crypto (homomorphic retrieval), an own research + review track, and
+would be **v3.5 / later (gated)**. Flagged here because it is the privacy-preserving
 alternative to on-wire view tags (§2) — the two are a design *choice*, not a
 sequence. **Q1 is resolved to view tags (§2); OMR is deferred to v3.5** as the
-fallback if the audit rejects any on-wire linkability.
+fallback if review rejects any on-wire linkability.
 
 ---
 
@@ -201,7 +201,7 @@ fallback if the audit rejects any on-wire linkability.
 - **Q1 (direction): RE-RESOLVED (2026-11-11, by B1) → NOT view tags.** B1's static
   analysis of `Coin::identify` shows Spark already fast-rejects via `key_commitment`,
   so an on-wire view tag buys ~nothing and would cost a fork (§2). v3's scanning
-  win is instead (a) parallelize/optimize the per-coin `K · s1` mul (pre-audit, no
+  win is instead (a) parallelize/optimize the per-coin `K · s1` mul (now, no
   fork) and (b) OMR for light clients (v8). The coin-format fork is dropped.
 - **B1 (benchmark): the static analysis already answered the design question** (tag
   vs no-tag); a runtime profile of `identify` into mul-vs-tail now only needs to
@@ -209,7 +209,7 @@ fallback if the audit rejects any on-wire linkability.
 - **B1 (benchmark):** profile `identify_view_only` into DH vs recovery-tail to
   pick the tag construction (Sapling-style vs Jamtis-style).
 - **Q2 (tag size):** 1 byte (256×, more partitioning) vs none; is any on-wire
-  linkability acceptable under the "best auditable-privacy" positioning?
+  linkability acceptable under the "best verifiable-privacy" positioning?
 - **Q3 (format room):** does libspark's `Coin` serialization have a clean place
   for a tag, or does this need a CoinCync-side wrapper? (affects whether it's a
   libspark-core change or a payload-level add.)
@@ -222,7 +222,7 @@ fallback if the audit rejects any on-wire linkability.
   fork, never a unilateral core edit ([[coincync-fuse-box-standard]]).
 - Disclosure stays off-chain ([[coincync-attestation-onchain-stamp]]); view-only
   keys are the watch path, not an on-chain reveal.
-- Stays feature-gated and activation-locked until externally audited
+- Stays feature-gated and activation-locked until hardened
   ([[coincync-feature-freeze-finish-chain]]).
 - No scope sprawl: this is the ONE near-term v3 track; FCMP++ membership is a
   separate, later CIP.
@@ -254,7 +254,7 @@ Every item is an extension of Spark's own foundation.
 - *Operational privacy:* auto-churn "ghost mode" ⚡, denomination/output uniformity, Dandelion++ for shielded propagation.
 - *Verifiability (the moat):* provable total shielded supply, a public reproducible verifier + test vectors **contributed back to the Spark ecosystem**, and a formal/machine-checked spec of the core security properties.
 
-**Per-item tags** *( [pre] pre-audit · [fork] post-audit coordinated fork · S/M/L effort · ⚡ in-flight )*
+**Per-item tags** *( [pre] now, wallet-side · [fork] later coordinated fork (gated) · S/M/L effort · ⚡ in-flight )*
 
 | # | Idea | Version/Track | Tag |
 |---|------|---------------|-----|
@@ -270,7 +270,7 @@ Every item is an extension of Spark's own foundation.
 | 10 | Confidential asset types | v7 | [fork] L |
 | 11 | Atomic shielded swaps / junction | Swap backend | [fork] L ⚡ |
 | 12 | Deterministic sub-address derivation | v3 | [pre] S |
-| 13 | View-only / audit keys in CyncHub | v3 | [pre] S ⚡ |
+| 13 | View-only / reviewer keys in CyncHub | v3 | [pre] S ⚡ |
 | 14 | Threshold / multisig Spark | v6 | [fork] L |
 | 15 | Hardware-wallet Spark signing | v6 | [pre] M |
 | 16 | Auto-churn "ghost mode" | Op track | [pre] M ⚡ |
@@ -288,5 +288,5 @@ thesis; not on this line.
 
 *Draft 1 — scope/thesis set with the user 2026-11-11; Q1 resolved to view-tags
 core (OMR → v8). Next: run B1 (profile `identify_view_only`) before building the
-tag; pre-audit Slice A + the v3 wallet items can proceed independently. Companion:
+tag; wallet-side Slice A + the v3 wallet items can proceed independently. Companion:
 `docs/spark-extensions-whitepaper.md`.*

@@ -68,11 +68,11 @@ async function loadMempool(){
     }).join('');
     el.innerHTML=`<table><thead><tr><th>Hash</th><th>Type</th><th>Shape</th><th>Size</th><th>Age</th><th>Privacy Features</th></tr></thead><tbody>${rows}</tbody></table>
     <div style="padding:12px 20px;display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--t3);font-family:var(--mono);border-top:1px solid var(--b)">
-      <span>${txData.transactions.length} transactions · all fully private</span>
+      <span>${txData.transactions.length} transactions · all private by default</span>
       <span>Dandelion++ propagated · 30% fee burn</span>
     </div>`;
   } else {
-    el.innerHTML='<div style="text-align:center;padding:24px;color:var(--t3);font-size:11px;font-family:var(--mono)"><div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:10px"><span class="badge">CLSAG-11</span><span class="badge">Bulletproofs+</span><span class="badge">Stealth</span><span class="badge">Pedersen</span><span class="badge badge-amber">2→2 shape</span><span class="badge">Dandelion++</span></div>All '+count+' transactions are fully private. Individual tx data pending next sync.</div>';
+    el.innerHTML='<div style="text-align:center;padding:24px;color:var(--t3);font-size:11px;font-family:var(--mono)"><div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:10px"><span class="badge">CLSAG-11</span><span class="badge">Bulletproofs+</span><span class="badge">Stealth</span><span class="badge">Pedersen</span><span class="badge badge-amber">2→2 shape</span><span class="badge">Dandelion++</span></div>All '+count+' transactions are private by default. Individual tx data pending next sync.</div>';
   }
   if(syncBtn){syncBtn.disabled=false;syncBtn.style.opacity='1';}
 }
