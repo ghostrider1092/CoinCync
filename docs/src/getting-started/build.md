@@ -1,6 +1,6 @@
 # Build from source
 
-CoinCync is written in Rust. Pre-built Linux and Windows binaries are available — see the download table at the top of [Run a testnet node](./run-a-node.md). Building from source is for users on other platforms, those who want to verify reproducibility, or contributors patching the code. The build is reproducible: same commit + same Rust version → byte-identical output.
+CoinCync is written in Rust. Pre-built Linux binaries (and the [CyncHub](https://github.com/ghostrider1092/CoinCync/releases/tag/cynchub-v0.1.0-testnet) installer for Windows) are available — see the download table at the top of [Run a testnet node](./run-a-node.md). Building from source is for users on other platforms, those who want to verify reproducibility, or contributors patching the code. The build is reproducible: same commit + same Rust version → byte-identical output.
 
 ## Prerequisites
 
@@ -31,22 +31,20 @@ Windows: use [WSL2](https://learn.microsoft.com/windows/wsl/install) running Ubu
 ## Clone and build
 
 ```bash
-git clone https://git.coincync.network/coincync/cync-protocol.git
+git clone https://github.com/ghostrider1092/CoinCync.git
 cd CoinCync
 cargo build --release --features "randomx testnet"
 ```
 
 First build takes 5–15 minutes depending on the machine because RocksDB and several Rust crypto crates compile from source. Subsequent builds are incremental (seconds).
 
-The five binaries land under `target/release/`:
+The main binaries land under `target/release/`:
 
 | Binary | Purpose |
 |---|---|
 | `coincync-node` | the full node daemon (P2P + RPC + chain) |
 | `coincync-wallet` | command-line wallet (create, list, send) |
-| `coincync-miner` | standalone solo miner (talks to a node via RPC) |
-| `coincync-tui-miner` | terminal UI for monitoring the miner |
-| `coincync-tui-operator` | terminal UI for monitoring node health |
+| `coincync-rig` | solo miner with a live TUI dashboard (`run-solo --tui`) |
 
 ## Feature flags
 
