@@ -803,12 +803,32 @@ mod tests {
         assert!(d_reset.as_secs_f64() < d3.as_secs_f64());
     }
 
-    #[test]
-    fn test_fragmented_message() {
-        // TODO: Requires async runtime + mock AsyncRead to test partial message
-        // reassembly through MessageFramer. Skipping due to complex mocking.
-        // Verify header size constant is consistent
+    #[tokio::test]
+    async fn test_fragmented_message() {
+        // Feed a complete wire message ONE BYTE AT A TIME so read_message must
+        // accumulate the 13-byte header and the payload across many partial reads
+        // — the fragmented-TCP-segment reassembly path that header_buf/payload_buf
+        // exist for. A tokio_test Mock that returns one byte per read forces it.
         assert_eq!(HEADER_SIZE, 13); // 4 magic + 1 type + 4 length + 4 checksum
+
+        let magic = [1, 2, 3, 4];
+        let payload: Vec<u8> = (0u8..40).collect();
+        let wire = wire_message(magic, &payload);
+        assert!(wire.len() > HEADER_SIZE, "wire must span header + payload");
+
+        let mut builder = tokio_test::io::Builder::new();
+        for b in &wire {
+            builder.read(std::slice::from_ref(b));
+        }
+        let reader = builder.build();
+        let mut framer = MessageFramer::new(reader, tokio::io::sink(), magic);
+
+        let (ty, got) = framer
+            .read_message()
+            .await
+            .expect("message reassembles across 1-byte reads");
+        assert_eq!(got, payload, "payload reassembled intact");
+        assert!(matches!(MessageType::try_from(ty), Ok(MessageType::Blocks)));
     }
 
     #[tokio::test]
