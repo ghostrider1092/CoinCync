@@ -1,231 +1,131 @@
 # Bootstrap a new node from a chaindata snapshot
 
-**TL;DR:** Download a tarball, verify its SHA256, untar to your data
-dir, start the node. You'll be at the chain tip in ~30 seconds instead
-of waiting 1-2 hours for initial sync.
+**TL;DR:** start the node with `--fast-sync` on a fresh data dir. It
+fetches a **signed** chaindata snapshot, verifies it, and imports it
+before initial sync — so you resume near the chain tip in seconds
+instead of RandomX-verifying every block from genesis.
 
 This is a **stopgap** until trustless warp sync ships per
-[CIP-015](../../cip/CIP-015-warp-sync-utxo-snapshot.md) in v2.0. If
-you want zero trust, sync from genesis instead — see
+[CIP-015](../../cip/CIP-015-warp-sync-utxo-snapshot.md) in v2.0. If you
+want zero trust, sync from genesis instead — see
 [run-a-node.md](../getting-started/run-a-node.md).
 
 ## When to use this
 
-**Use snapshot bootstrap if:**
+**Use fast-sync if:**
 
-- You're a new community member who wants to start mining or running
-  a node without waiting for initial sync.
+- You're a new community member who wants to start mining or running a
+  node without waiting for initial sync.
 - You're recovering a node after data loss and don't want to re-sync
   from genesis.
-- You're spinning up a test node and don't care about historical
-  verification.
+- You're spinning up a test node and don't need historical verification.
 
-**Do NOT use snapshot bootstrap if:**
+**Do NOT use fast-sync if:**
 
-- You want trustless validation of the chain from genesis to tip.
-  Sync normally instead.
+- You want trustless validation of the chain from genesis to tip. Sync
+  normally instead.
 - You're operating an exchange or any infrastructure that holds user
   funds. Always sync from genesis.
-- The snapshot is more than 14 days old — too much chain progress
-  since the snapshot; you'd still have a long catch-up to do.
 
 ## What trust you're placing
 
-The snapshot is a packed copy of someone else's already-synced
-RocksDB. When you untar it, you're trusting:
+The snapshot is a packed copy of an already-synced chain database. Your
+binary defends the import three ways:
 
-1. **The tarball wasn't tampered with in transit.** Defended by the
-   SHA256 you'll verify against the manifest.
-2. **The fleet node that produced the snapshot wasn't malicious.**
-   Defended by your binary's hardcoded checkpoints (see
-   `src/testnet.rs`) — when you start the node, it re-checks the
-   imported chain head against ~80 hardcoded (height, hash) pairs.
-   A tampered snapshot would fail at the first checkpoint above the
-   snapshot's tip height, and your node would refuse to extend that
-   chain.
+1. **Signature (fail-closed).** The snapshot manifest must be signed by a
+   trusted signer baked into this binary, or fast-sync refuses it and
+   falls back to full sync from genesis.
+2. **Hardcoded checkpoints.** The imported chain head is re-checked
+   against the binary's hardcoded `(height, hash)` checkpoints (see
+   `src/testnet.rs`) plus a snapshot re-anchor point. A tampered or
+   wrong-fork snapshot fails here and the node refuses to extend it.
+3. **Integrity hash.** A blake3 hash over the database catches corruption
+   or tampering in transit.
 
-This is **trust-minimized**, not **trustless**. The mainnet binary
-ships with the same checkpoint defense, but the snapshot itself comes
-from us. If you don't trust us, sync from genesis.
+This is **trust-minimized**, not **trustless** — the snapshot's contents
+still come from whoever produced it, bounded by the checks above. If you
+don't trust that, sync from genesis. CIP-015 warp sync (v2.0) removes
+this trust by verifying snapshots against block-header-committed state
+roots instead of post-hoc checkpoint matching.
 
-CIP-015 warp sync (v2.0) removes this trust — snapshots will be
-verified against block-header-committed state roots instead of
-post-hoc checkpoint matching.
+## Fast path — `--fast-sync` (recommended)
 
-## Procedure
-
-### 1. Get the snapshot URL + expected SHA256
-
-Check the Discord `#announcements` channel or the GitHub release page
-for the latest bootstrap pack. You're looking for three files:
-
-```
-coincync-chaindata-testnet-h<N>.tar.gz       # the data
-coincync-chaindata-testnet-h<N>.manifest.json # height + hash + sha256
-coincync-chaindata-testnet-h<N>.sha256        # just the sha256 line
-```
-
-Where `<N>` is the snapshot's tip height (e.g. `h14800`).
-
-### 2. Download all three files
+On a **fresh data dir**, add `--fast-sync`:
 
 ```bash
-mkdir -p ~/coincync-bootstrap
-cd ~/coincync-bootstrap
-
-BASE="coincync-chaindata-testnet-h14800"
-RELEASE="https://github.com/ghostrider1092/CoinCync/releases/download/v1.0.9.1-testnet"
-
-wget "$RELEASE/${BASE}.tar.gz"
-wget "$RELEASE/${BASE}.manifest.json"
-wget "$RELEASE/${BASE}.sha256"
-```
-
-### 3. Verify SHA256
-
-```bash
-sha256sum -c "${BASE}.sha256"
-# Expected output:  coincync-chaindata-testnet-h14800.tar.gz: OK
-```
-
-**If you see `FAILED`, STOP.** The tarball is corrupt or has been
-tampered with. Do not import it. Re-download or report to the
-maintainer.
-
-### 4. Stop your node (if running)
-
-```bash
-sudo systemctl stop coincync-node            # if installed as a service
-# OR
-pkill -x coincync-node                       # if running manually
-```
-
-### 5. Back up your existing data dir
-
-```bash
-# Default data dir locations:
-#   Linux:   ~/.coincync/testnet
-#   Windows: %APPDATA%\coincync\testnet
-#   macOS:   ~/Library/Application Support/coincync/testnet
-
-mv ~/.coincync/testnet ~/.coincync/testnet.backup-$(date +%F)
-```
-
-This is a defensive step: if the bootstrap fails for any reason, you
-can restore your old chain by moving the backup back. Once the
-imported chain successfully extends past the snapshot tip and you've
-seen "applied block at height N" for several N > snapshot tip, the
-backup is safe to delete.
-
-### 6. Untar the snapshot
-
-```bash
-mkdir -p ~/.coincync
-cd ~/.coincync
-tar -xzf ~/coincync-bootstrap/${BASE}.tar.gz
-# Tarball contains a `testnet/` directory, so this creates ~/.coincync/testnet
-ls testnet/   # should show CURRENT, MANIFEST-*, LOG, *.sst, *.log, etc.
-```
-
-### 7. Start the node
-
-```bash
-coincync-node --network testnet \
+coincync-node --network testnet --fast-sync \
   --addnode 2.29.34.197:28080
 ```
 
-(The `--addnode` flag points at the public testnet seed — same as in
-[run-a-node.md](../getting-started/run-a-node.md). Drop it after
-first sync if you want. Add more `--addnode` peers as the community
-brings up additional seeds.)
+That's the whole procedure. The node:
 
-### 8. Verify success
+1. Reads the signed snapshot pointer. Default for testnet:
+   `https://github.com/ghostrider1092/CoinCync/releases/download/bootstrap-snapshots/snapshot-latest-testnet.json`
+   (override with the `COINCYNC_FAST_SYNC_POINTER_URL` env var).
+2. Downloads the snapshot tarball the pointer names.
+3. Verifies the signature (fail-closed), the hardcoded checkpoints, and
+   the blake3 integrity hash.
+4. Imports it, then syncs the remaining blocks from the seed.
 
-Watch the log. You should see:
+Any fetch, download, or verification error **falls back to a full sync
+from genesis** — fast-sync never leaves you on an unverified chain. It
+only runs on a fresh data dir; a node that already has chain data syncs
+normally and ignores the flag.
 
+## Manual path — `snapshot-import`
+
+If you already have a snapshot directory (from `snapshot-export`, or one
+an operator handed you), import it directly. **Stop the node first.**
+
+```bash
+sudo systemctl stop coincync-node        # or: pkill -x coincync-node
+
+coincync-node snapshot-import --input /path/to/snapshot
 ```
-INFO  Loaded chain database at height 14800
-INFO  Tip hash: <matches manifest>
-INFO  Verifying against hardcoded checkpoints...
-INFO  Checkpoint match at height 14000 ✓
-INFO  Connected to peer 2.29.34.197:28080
-INFO  Sync started — target height 14823
-INFO  Applied block at height 14801
-INFO  Applied block at height 14802
-...
+
+The snapshot directory contains `db/` and `manifest.json`.
+`snapshot-import` verifies the snapshot's network + genesis hash (it
+refuses a wrong-chain snapshot) and the blake3 integrity hash, backs up
+any existing chaindata to a reversible `.pre-snapshot-<timestamp>`
+sibling, then installs the snapshot. Restart the node afterward.
+
+## Producing a snapshot (operators)
+
+Fleet operators generate the published snapshot with the node itself —
+there is no separate script:
+
+```bash
+# Node stopped. Exports a consistent copy of the chain DB.
+coincync-node snapshot-export --out /path/to/out
+
+# Optionally sign the manifest — REQUIRED for others' --fast-sync to accept it:
+COINCYNC_SNAPSHOT_SIGN_SEED_HEX=<64-char-hex> \
+  coincync-node snapshot-export --out /path/to/out
 ```
 
-The "Checkpoint match" line is the critical safety check. If you see
-`Checkpoint MISMATCH at height N`, the snapshot was tampered with and
-your node correctly refused to extend it. Delete the imported data
-dir, restore your backup, and report to the maintainer.
-
-Once you see "Applied block at height N" for several N above the
-snapshot tip, you're fully bootstrapped and on the live chain.
-
-## Procedure (Windows)
-
-Same steps, PowerShell syntax for the file operations:
-
-```powershell
-# 1-3: download + verify
-$base = "coincync-chaindata-testnet-h14800"
-$release = "https://github.com/ghostrider1092/CoinCync/releases/download/v1.0.9.1-testnet"
-$dest = "$env:USERPROFILE\coincync-bootstrap"
-New-Item -ItemType Directory -Force -Path $dest | Out-Null
-Set-Location $dest
-Invoke-WebRequest -Uri "$release/${base}.tar.gz" -OutFile "${base}.tar.gz"
-Invoke-WebRequest -Uri "$release/${base}.manifest.json" -OutFile "${base}.manifest.json"
-Invoke-WebRequest -Uri "$release/${base}.sha256" -OutFile "${base}.sha256"
-
-# 3: SHA256 verify
-$expected = (Get-Content "${base}.sha256").Split(' ')[0].ToLower()
-$actual = (Get-FileHash "${base}.tar.gz" -Algorithm SHA256).Hash.ToLower()
-if ($expected -ne $actual) { throw "SHA256 mismatch — STOP" }
-Write-Host "SHA256 OK"
-
-# 4: stop node (if running)
-Get-Process coincync-node -ErrorAction SilentlyContinue | Stop-Process
-
-# 5-6: backup + untar
-$dataParent = "$env:APPDATA\coincync"
-$dataDir = "$dataParent\testnet"
-$backup = "$dataDir.backup-$(Get-Date -Format 'yyyy-MM-dd')"
-if (Test-Path $dataDir) { Move-Item $dataDir $backup }
-New-Item -ItemType Directory -Force -Path $dataParent | Out-Null
-Set-Location $dataParent
-tar -xzf "$dest\${base}.tar.gz"
-
-# 7: start node (with the public seed — same as Linux)
-coincync-node --network testnet `
-  --addnode 2.29.34.197:28080
-```
+Sign **offline** — the signing seed must never live on an
+internet-facing node. Publish the exported directory (packed as
+`snapshot.tar`) and update the `snapshot-latest-testnet.json` pointer on
+the release so `--fast-sync` clients pick it up.
 
 ## FAQ
 
-**Q: How often will new snapshots be published?**
-A: Currently ad-hoc, generally weekly during the testnet phase. We'll
-formalize a cadence (probably every 2,000 blocks, or weekly,
-whichever comes first) before mainnet.
-
-**Q: Can I use a snapshot from a different binary version?**
-A: Same-major-version-or-newer ONLY. RocksDB column-family
-definitions sometimes change across releases. The manifest lists the
-binary version the snapshot was made with; your binary must be
-that version or newer. If in doubt, sync from genesis.
+**Q: How often are new snapshots published?**
+A: Ad-hoc during the testnet phase. The `--fast-sync` pointer always
+resolves to the latest published snapshot, so you don't track versions
+by hand.
 
 **Q: What's in the snapshot besides the chain?**
-A: Just the chain database (`~/.coincync/testnet/`). It does NOT
-include any wallet files, peer ban list, RPC tokens, or operator
-config. Those stay yours.
+A: Just the chain database. It does NOT include wallet files, peer ban
+lists, RPC tokens, or operator config — those stay yours.
 
-**Q: Why not just provide a block-by-block download from a CDN?**
-A: Because that's still O(chain length) work to import and verify.
-The tarball approach lets RocksDB skip rebuilding its index files
-and you go straight to a usable database state.
+**Q: Can I use a snapshot from a different binary version?**
+A: Same-major-version-or-newer only; RocksDB column-family definitions
+can change across releases. The manifest records the version it was made
+with. If in doubt, sync from genesis.
 
 **Q: When will this be replaced by warp sync?**
-A: v2.0 (probably Q2 2027). See [CIP-015](../../cip/CIP-015-warp-sync-utxo-snapshot.md).
+A: v2.0. See [CIP-015](../../cip/CIP-015-warp-sync-utxo-snapshot.md).
 
 ## Related
 
@@ -233,5 +133,3 @@ A: v2.0 (probably Q2 2027). See [CIP-015](../../cip/CIP-015-warp-sync-utxo-snaps
   (sync-from-genesis) install flow.
 - [CIP-015](../../cip/CIP-015-warp-sync-utxo-snapshot.md) — trustless
   warp sync design (the future replacement for this procedure).
-- [scripts/create-chaindata-snapshot.sh](../../../scripts/create-chaindata-snapshot.sh)
-  — the script fleet operators use to generate these snapshots.
