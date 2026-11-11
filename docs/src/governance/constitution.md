@@ -6,7 +6,7 @@
 **Ratified:** Block 0 (Genesis)
 **Network:** CoinCync Mainnet
 
-The authoritative source is [`CONSTITUTION.md`](https://git.coincync.network/coincync/cync-protocol/blob/main/CONSTITUTION.md) at the repository root. This page reproduces it in full and adds, below each article, a **code-enforcement** note pointing at the exact source line where that article is mechanically enforced (where possible). **If this page ever drifts from the repository file, trust the repository file.**
+The authoritative source is [`CONSTITUTION.md`](https://github.com/ghostrider1092/CoinCync/blob/main/CONSTITUTION.md) at the repository root. This page reproduces it in full and adds, below each article, a **code-enforcement** note pointing at the exact source line where that article is mechanically enforced (where possible). **If this page ever drifts from the repository file, trust the repository file.**
 
 See also the companion [Bill of Rights](./bill-of-rights.md) — the user-facing rights guarantee that complements these operator-facing articles.
 
@@ -367,7 +367,7 @@ The constitution is your defense against your own future maintainers being wrong
 
 ## See also
 
-- [`CONSTITUTION.md`](https://git.coincync.network/coincync/cync-protocol/blob/main/CONSTITUTION.md) — the authoritative source at the repository root
+- [`CONSTITUTION.md`](https://github.com/ghostrider1092/CoinCync/blob/main/CONSTITUTION.md) — the authoritative source at the repository root
 - [Bill of Rights](./bill-of-rights.md) — the user-facing rights complement
 - [Disclaimer](./disclaimer.md) — what the project does and doesn't promise
 - [Emission curve](../protocol/emission.md) — the geometric-decay curve (100M asymptote, 0.6 CYNC perpetual tail) that honors Article I

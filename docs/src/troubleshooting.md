@@ -294,13 +294,6 @@ Most often a Cloudflare-level block. Try the same URL with a
 different IP (mobile hotspot, VPN). If only your IP is blocked,
 contact `CyncLabs@proton.me` — we'll add an exception.
 
-### `git.coincync.network` redirects to GitHub
-
-That's expected, pre-launch. The Forgejo instance isn't deployed
-yet; redirects keep all the existing references in the announcement
-working. Post-launch, the redirect will be replaced with the real
-Forgejo (and `git.coincync.network` will be the canonical source).
-
 ---
 
 ## Where to file what
