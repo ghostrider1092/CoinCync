@@ -130,6 +130,10 @@ The full method inventory is in [JSON-RPC reference](../api/json-rpc.md).
 | `mainnet` | 19080 | 19081 | October 1, 2026 | pre-launch |
 | `regtest` | (any) | (any) | local-only | for isolated dev |
 
+> The mainnet **Genesis** date above is a pre-launch placeholder baked into
+> the code; the final genesis timestamp is set at launch (mainnet is targeted
+> for ~March 2027).
+
 ## Try the local explorer
 
 If you want to see the block explorer alongside your node, pass `--explorer`:
