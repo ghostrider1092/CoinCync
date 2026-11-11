@@ -192,7 +192,7 @@ async function loadChainHealth(){
 
   // 6. Ring size (5pts)
   score+=5;
-  metrics.push({label:'Ring size',val:'×11 (compliant)',pts:5,max:5,icon:'',ok:true});
+  metrics.push({label:'Ring size',val:'×11 (meets floor)',pts:5,max:5,icon:'',ok:true});
 
   // Render
   const scoreEl=$('chain-score');const gradeEl=$('chain-grade');const barEl=$('chain-bar');
