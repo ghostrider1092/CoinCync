@@ -17,30 +17,26 @@ account.
 
 ## Quick start
 
-All testnet binaries are published as a single GitHub release at
-[`v1.0.2-testnet`](https://github.com/ghostrider1092/CoinCync/releases/tag/v1.0.2-testnet)
-along with `SHA256SUMS.txt`. Verify after download with
-`sha256sum -c SHA256SUMS.txt`.
+The easiest way to mine on **Windows** is
+[CyncHub](https://github.com/ghostrider1092/CoinCync/releases/tag/cynchub-v0.1.0-testnet) —
+the desktop suite bundles the node, wallet, and CPU miner in one
+installer. Install it, open the **Mining** tab, paste your `tCYNC…`
+address, and start. No command line needed. (The installer is
+unsigned, so Windows SmartScreen will warn; verify the SHA256 on the
+release page first.)
+
+For the command line, the standalone node and miner are published on
+the chain release
+[`v1.1.2-testnet`](https://github.com/ghostrider1092/CoinCync/releases/tag/v1.1.2-testnet)
+with a signed `SHA256SUMS`. Verify after download with
+`sha256sum -c SHA256SUMS`.
 
 ### Windows
 
-Download the node binary:
-
-|Binary|URL|
-|---|---|
-|coincync-node|<https://github.com/ghostrider1092/CoinCync/releases/download/v1.0.2-testnet/coincync-node.exe>|
-|coincync-rig (miner)|<https://github.com/ghostrider1092/CoinCync/releases/download/v1.0.2-testnet/coincync-rig.exe>|
-
-Open PowerShell in the folder where you saved them and run:
-
-```powershell
-# Start a node (leave this window running)
-.\coincync-node.exe --network testnet
-
-# In a second window, start mining (replace tCYNC… with your address)
-.\coincync-rig.exe run-solo --node http://127.0.0.1:28081 `
-    --address tCYNC3Z6jt428m... --threads 4 --tui
-```
+Use **CyncHub** (above) — its **Mining** tab runs the miner for you, no
+terminal required. The `v1.1.2-testnet` release ships Linux binaries
+only, so there is no standalone Windows `.exe` to download; if you'd
+rather not use CyncHub, [build from source](./build.md).
 
 The `--tui` flag opens a live ratatui dashboard (stats bar +
 scrolling log). Press `q` or `Esc` to quit.
@@ -48,17 +44,17 @@ scrolling log). Press `q` or `Esc` to quit.
 ### Linux
 
 ```bash
-BASE=https://github.com/ghostrider1092/CoinCync/releases/download/v1.0.2-testnet
-curl -L -O $BASE/coincync-node-linux-x86_64
-curl -L -O $BASE/coincync-rig-linux-x86_64
-curl -L -O $BASE/SHA256SUMS.txt
-chmod +x coincync-node-linux-x86_64 coincync-rig-linux-x86_64
+BASE=https://github.com/ghostrider1092/CoinCync/releases/download/v1.1.2-testnet
+curl -L -O $BASE/coincync-node
+curl -L -O $BASE/coincync-rig
+curl -L -O $BASE/SHA256SUMS
+chmod +x coincync-node coincync-rig
 
 # (optional) verify
-sha256sum -c SHA256SUMS.txt 2>/dev/null | grep -E "node|rig"
+sha256sum -c SHA256SUMS 2>/dev/null | grep -E "node|rig"
 
-./coincync-node-linux-x86_64 --network testnet &
-./coincync-rig-linux-x86_64 run-solo --node http://127.0.0.1:28081 \
+./coincync-node --network testnet &
+./coincync-rig run-solo --node http://127.0.0.1:28081 \
     --address tCYNC3Z6jt428m... --threads 4 --tui
 ```
 
@@ -104,7 +100,7 @@ purpose-built rig.
 
 Testnet CYNC has no monetary value. Treat mining rewards as a way to
 verify your wallet works, send transactions, and stress-test the
-network. **Mainnet launch** is targeted for October 2026; testnet
+network. **Mainnet launch** is targeted for ~March 2027; testnet
 mining is preparation, not income.
 
 ## Stopping the miner
