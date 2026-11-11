@@ -3,16 +3,15 @@
 # ─────────────────────────────────────────────────────────────────────
 #
 # Source files live in `src/` (Markdown + a SUMMARY.md table of
-# contents). `mdbook build` produces a static HTML site under `book/`
-# that drops directly into `/var/www/docs/` on the NYC landing host
-# (see deploy/landing/README.md).
+# contents). `mdbook build` produces a static HTML site under `book/`.
 #
 # Build: `cd docs && mdbook build`            → output under `book/`
 # Serve locally: `mdbook serve --open`        → http://localhost:3000
 #
-# Deploy (from a dev machine):
-#   cd docs && mdbook build && \
-#     rsync -avz --delete book/ root@docs.coincync.network:/var/www/docs/
+# Deploy: docs.coincync.network is a Cloudflare Pages project
+# (`coincync-docs`). Publish the built book with:
+#   cd docs && mdbook build
+#   npx wrangler pages deploy book --project-name=coincync-docs --branch=main
 
 [book]
 title       = "CoinCync Documentation"
@@ -28,8 +27,8 @@ create-missing  = false   # never silently create empty files for missing SUMMAR
 [output.html]
 default-theme       = "navy"
 preferred-dark-theme = "navy"
-git-repository-url  = "https://git.coincync.network/coincync/cync-protocol"
-edit-url-template   = "https://git.coincync.network/coincync/cync-protocol/edit/main/docs/{path}"
+git-repository-url  = "https://github.com/ghostrider1092/CoinCync"
+edit-url-template   = "https://github.com/ghostrider1092/CoinCync/edit/main/docs/src/{path}"
 no-section-label    = false
 mathjax-support     = false       # we don't render math in the docs (yet)
 additional-css      = ["theme/coincync.css"]
