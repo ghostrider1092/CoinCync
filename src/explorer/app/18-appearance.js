@@ -1,8 +1,8 @@
 // THEME SYSTEM — 9 CoinCync brand themes
 //
-const THEMES = ['paper','dark','brass','cream','midnight','forge','vault','mono','contrast'];
-const THEME_LABELS = {paper:'Paper',dark:'Dark',brass:'Brass',cream:'Cream',midnight:'Midnight',forge:'Forge',vault:'Vault',mono:'Mono',contrast:'Contrast'};
-const DARK_THEMES = ['dark','midnight','forge','vault','mono','contrast'];
+const THEMES = ['paper','dark','brass','cream','midnight','forge','vault','mono','contrast','black'];
+const THEME_LABELS = {paper:'Paper',dark:'Dark',brass:'Brass',cream:'Cream',midnight:'Midnight',forge:'Forge',vault:'Vault',mono:'Mono',contrast:'Contrast',black:'Black'};
+const DARK_THEMES = ['dark','midnight','forge','vault','mono','contrast','black'];
 // Per-theme SVG icon for the pill thumb. Single-colour (currentColor)
 // so the theme's --ac2 paints them. Designed for 14×14 — keep paths
 // simple, avoid sub-pixel detail.
@@ -71,6 +71,11 @@ function setTheme(name, keepOpen, skipAnimation) {
   }
   localStorage.setItem('cync-theme', name);
 }
+
+// User-pickable text color — overrides the active theme's --t var.
+// Persisted separately so it survives theme switches.
+function setTextColor(hex){ try{ document.documentElement.style.setProperty('--t', hex); localStorage.setItem('cync-text-color', hex); }catch(e){} }
+function resetTextColor(){ try{ document.documentElement.style.removeProperty('--t'); localStorage.removeItem('cync-text-color'); var p=document.getElementById('text-color-picker'); if(p)p.value=getComputedStyle(document.documentElement).getPropertyValue('--t').trim()||'#ffffff'; }catch(e){} }
 
 function cycleTheme(dir) {
   const cur = document.documentElement.getAttribute('data-theme') || 'paper';
@@ -178,6 +183,15 @@ function syncAppearanceState() {
   } else {
     setTheme('paper', true, true);
   }
+  // Restore a user-picked text color AFTER setTheme so the override wins.
+  try {
+    var savedText = localStorage.getItem('cync-text-color');
+    if (savedText) {
+      setTextColor(savedText);
+      var picker = document.getElementById('text-color-picker');
+      if (picker) picker.value = savedText;
+    }
+  } catch (e) {}
 })();
 
 //

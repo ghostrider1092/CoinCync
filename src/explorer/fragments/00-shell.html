@@ -86,6 +86,9 @@
       <button class="theme-opt" data-theme="dark" onclick="setTheme('dark')">
         <span class="t-swatch" style="background:#0A0A09"><span class="t-dot" style="background:#D4A059"></span></span>Dark
       </button>
+      <button class="theme-opt" data-theme="black" onclick="setTheme('black')">
+        <span class="t-swatch" style="background:#000000"><span class="t-dot" style="background:#D4A059"></span></span>Black
+      </button>
       <button class="theme-opt" data-theme="brass" onclick="setTheme('brass')">
         <span class="t-swatch" style="background:#D4A059"><span class="t-dot" style="background:#3A3328"></span></span>Brass
       </button>
@@ -107,6 +110,11 @@
       <button class="theme-opt" data-theme="contrast" onclick="setTheme('contrast')">
         <span class="t-swatch" style="background:#000000"><span class="t-dot" style="background:#FFB840"></span></span>Contrast
       </button>
+      <div style="border-top:1px solid var(--b);margin-top:8px;padding-top:8px">
+        <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.08em;margin:0 0 6px 4px">Text color</div>
+        <input type="color" id="text-color-picker" oninput="setTextColor(this.value)" style="width:100%;height:28px;border:1px solid var(--b);border-radius:6px;background:var(--s2);cursor:pointer">
+        <button class="theme-opt" onclick="resetTextColor()" style="justify-content:center;font-size:11px">Reset text color</button>
+      </div>
       <div style="height:1px;background:var(--b);margin:6px 0"></div>
       <div style="padding:4px 12px 2px;font-size:9px;font-weight:600;color:var(--t3);letter-spacing:.08em;text-transform:uppercase;font-family:var(--mono)">Wallpaper</div>
       <div class="wp-grid" id="wp-grid">
