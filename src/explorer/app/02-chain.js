@@ -22,7 +22,10 @@ async function poll(){
   const peerCount  = info.peer_count || 0;
   _updateDecayClock(tipAgeSecs);
 
-  // STALE CHAIN WARNING — show banner if tip is older than 10 minutes
+  // STALE CHAIN WARNING — show banner only if the latest block is older than
+  // 30 minutes. This reflects slow block production (low hashrate), NOT node
+  // sync state; the node can be fully synced to the tip while the tip itself
+  // is old. Threshold kept generous so normal testnet block variance is quiet.
   let staleBanner = document.getElementById('stale-banner');
   if (!staleBanner) {
     staleBanner = document.createElement('div');
@@ -30,9 +33,9 @@ async function poll(){
     staleBanner.style.cssText = 'display:none;background:#92400E;color:#FEF3C7;text-align:center;padding:8px 16px;font-size:12px;font-weight:600;font-family:var(--mono);position:fixed;top:0;left:0;right:0;z-index:9999';
     document.body.prepend(staleBanner);
   }
-  if (tipAgeSecs > 600) {
+  if (tipAgeSecs > 1800) {
     const mins = Math.floor(tipAgeSecs / 60);
-    staleBanner.textContent = `⚠ Chain data is ${mins} minutes old — node is syncing`;
+    staleBanner.textContent = `⚠ Latest block is ${mins} min old (slow block production)`;
     staleBanner.style.display = 'block';
     _pushOperatorAlert('warn', `stale tip: ${Math.floor(tipAgeSecs/60)}m old`);
   } else {
