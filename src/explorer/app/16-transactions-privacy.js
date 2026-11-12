@@ -285,10 +285,10 @@ if (!localStorage.getItem('cync-seen')) {
 setInterval(()=>{
   const el=document.getElementById('mainnet-teaser-countdown');
   if(!el)return;
-  const launch=1790812800;
+  const launch=1803859200;
   const now=Math.floor(Date.now()/1000);
   const diff=launch-now;
-  if(diff<=0){el.textContent='LIVE NOW';return;}
+  if(diff<=0){el.textContent='Target date reached';return;}
   const d=Math.floor(diff/86400);
   const h=Math.floor((diff%86400)/3600);
   const m=Math.floor((diff%3600)/60);

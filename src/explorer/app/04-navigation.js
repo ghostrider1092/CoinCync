@@ -80,7 +80,7 @@ function applyExplorerMode(){
 
 // ── COUNTDOWN ───────────────────────────────────────────────
 function updateCountdown(){
-  const target=new Date('2026-10-01T00:00:00Z');
+  const target=new Date('2027-03-01T00:00:00Z');
   const now=new Date();
   const diff=Math.max(0,target-now);
   const d=Math.floor(diff/86400000);
