@@ -18,7 +18,7 @@
 //! - Rate limiting via X-RateLimit headers
 
 use axum::{
-    extract::{ws, Path, Query, State, WebSocketUpgrade},
+    extract::{ws, ConnectInfo, Path, Query, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
     routing::{get, post},
@@ -63,8 +63,8 @@ const MAX_WS_PER_IP: u32 = 5;
 static ACTIVE_WS_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 /// Per-IP websocket connection counters. Keyed by whatever
-/// `client_ip_from_headers` returns — a real client IP when proxy
-/// headers are trusted, "unknown" otherwise.
+/// `client_ip` returns: the forwarded client IP when proxy
+/// headers are trusted, the peer address otherwise.
 static ACTIVE_WS_PER_IP: parking_lot::Mutex<Option<HashMap<String, u32>>> =
     parking_lot::Mutex::new(None);
 
@@ -91,8 +91,12 @@ fn ws_per_ip_decrement(ip: &str) {
     }
 }
 
-/// Dependency-free fixed-window guards for high-risk endpoints.
+/// Dependency-free fixed-window guards for high-risk endpoints. The per-IP
+/// window is the real limit; the global window on the two heavy endpoints is a
+/// process-wide backstop at ten times it, so one client at full rate cannot
+/// starve everyone else.
 const RPC_PROXY_MAX_REQ_PER_SEC: u32 = 60;
+const RPC_PROXY_GLOBAL_MAX_REQ_PER_SEC: u32 = 10 * RPC_PROXY_MAX_REQ_PER_SEC;
 const STATS_MAX_REQ_PER_SEC: u32 = 20;
 const EMISSION_MAX_REQ_PER_SEC: u32 = 20;
 const RECENT_MAX_REQ_PER_SEC: u32 = 20;
@@ -122,6 +126,7 @@ static RECENT_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, 
 // NO self-rate-limit. Give it the same global + per-IP fixed-window limiter,
 // tighter than the read endpoints since each request is heavy validation.
 const SUBMIT_MAX_REQ_PER_SEC: u32 = 5;
+const SUBMIT_GLOBAL_MAX_REQ_PER_SEC: u32 = 10 * SUBMIT_MAX_REQ_PER_SEC;
 static SUBMIT_WINDOW_SEC: AtomicU64 = AtomicU64::new(0);
 static SUBMIT_WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
 static SUBMIT_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, (u64, u32)>>> =
@@ -283,13 +288,14 @@ const RPC_ALLOWED_METHODS: &[&str] = &[
 async fn rpc_proxy(
     State(st): State<RestState>,
     headers: HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
     body: String,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let client_ip = client_ip_from_headers(&headers);
+    let client_ip = client_ip(&headers, peer);
     enforce_fixed_window_limit(
         &RPC_PROXY_WINDOW_SEC,
         &RPC_PROXY_WINDOW_COUNT,
-        RPC_PROXY_MAX_REQ_PER_SEC,
+        RPC_PROXY_GLOBAL_MAX_REQ_PER_SEC,
     )?;
     enforce_ip_fixed_window_limit(&RPC_IP_WINDOW, &client_ip, RPC_PROXY_MAX_REQ_PER_SEC)?;
 
@@ -492,14 +498,20 @@ fn trust_proxy_headers() -> bool {
     })
 }
 
-fn client_ip_from_headers(headers: &HeaderMap) -> String {
-    // When proxy headers are not explicitly trusted, treat every
-    // request as "unknown" so the per-IP rate limit collapses into a
-    // global rate limit (all callers share one bucket). This is the
-    // safer default than letting an unauthenticated client spoof
-    // X-Forwarded-For to rotate through buckets.
+/// The key for the per-IP windows: the forwarded client address when proxy
+/// headers are trusted, else the TCP peer address. `peer` is `None` only when
+/// the router is driven without connect info (unit tests), in which case every
+/// caller shares one bucket.
+fn client_ip(headers: &HeaderMap, peer: Option<ConnectInfo<SocketAddr>>) -> String {
+    let peer_ip = || {
+        peer.map(|ConnectInfo(addr)| addr.ip().to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    // When proxy headers are not explicitly trusted, key on the peer
+    // address so an unauthenticated client cannot spoof X-Forwarded-For
+    // to rotate through buckets.
     if !trust_proxy_headers() {
-        return "unknown".to_string();
+        return peer_ip();
     }
     headers
         .get("x-forwarded-for")
@@ -514,7 +526,7 @@ fn client_ip_from_headers(headers: &HeaderMap) -> String {
                 .map(|v| v.trim().to_string())
         })
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+        .unwrap_or_else(peer_ip)
 }
 
 /// Cap on entries retained in a per-IP rate-limit map. Beyond this
@@ -821,10 +833,11 @@ async fn get_block_transactions(
 async fn get_recent_blocks(
     State(st): State<RestState>,
     headers: HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // N-2: rate-limit before the fan-out (up to `limit` backend calls/request).
-    let client_ip = client_ip_from_headers(&headers);
+    let client_ip = client_ip(&headers, peer);
     enforce_fixed_window_limit(
         &RECENT_WINDOW_SEC,
         &RECENT_WINDOW_COUNT,
@@ -934,15 +947,16 @@ struct SubmitTxBody {
 async fn submit_transaction(
     State(st): State<RestState>,
     headers: HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
     Json(body): Json<SubmitTxBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // SEC: rate-limit before the expensive backend verification (unauthenticated
     // endpoint driving full CLSAG + Bulletproofs+ validation).
-    let client_ip = client_ip_from_headers(&headers);
+    let client_ip = client_ip(&headers, peer);
     enforce_fixed_window_limit(
         &SUBMIT_WINDOW_SEC,
         &SUBMIT_WINDOW_COUNT,
-        SUBMIT_MAX_REQ_PER_SEC,
+        SUBMIT_GLOBAL_MAX_REQ_PER_SEC,
     )?;
     enforce_ip_fixed_window_limit(&SUBMIT_IP_WINDOW, &client_ip, SUBMIT_MAX_REQ_PER_SEC)?;
 
@@ -1142,8 +1156,9 @@ async fn get_peers(State(st): State<RestState>) -> Result<Json<Value>, (StatusCo
 async fn get_chain_stats(
     State(st): State<RestState>,
     headers: HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let client_ip = client_ip_from_headers(&headers);
+    let client_ip = client_ip(&headers, peer);
     enforce_fixed_window_limit(
         &STATS_WINDOW_SEC,
         &STATS_WINDOW_COUNT,
@@ -1260,9 +1275,10 @@ async fn get_chain_stats(
 async fn get_emission(
     State(st): State<RestState>,
     headers: HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
     Query(query): Query<EmissionQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let client_ip = client_ip_from_headers(&headers);
+    let client_ip = client_ip(&headers, peer);
     enforce_fixed_window_limit(
         &EMISSION_WINDOW_SEC,
         &EMISSION_WINDOW_COUNT,
@@ -1393,11 +1409,12 @@ fn assets_gone() -> (StatusCode, Json<Value>) {
 async fn ws_upgrade(
     State(st): State<RestState>,
     headers: HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     // Per-IP cap first — cheaper than the global atomic CAS dance and
     // closes the easier DoS (one attacker eating all 128 slots).
-    let client_ip = client_ip_from_headers(&headers);
+    let client_ip = client_ip(&headers, peer);
     if !ws_per_ip_check_and_increment(&client_ip) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
@@ -1781,9 +1798,12 @@ pub async fn run_rest_api(
         .await
         .map_err(|e| crate::error::Error::RpcError(format!("REST bind failed: {}", e)))?;
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| crate::error::Error::RpcError(format!("REST server error: {}", e)))?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| crate::error::Error::RpcError(format!("REST server error: {}", e)))?;
 
     Ok(())
 }
@@ -1936,6 +1956,19 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn client_ip_keys_on_the_peer_unless_proxy_headers_are_trusted() {
+        // Default: proxy headers are not trusted, so a spoofed
+        // X-Forwarded-For must not pick the bucket; the peer does.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        let peer: SocketAddr = "198.51.100.4:4242".parse().unwrap();
+        assert_eq!(client_ip(&headers, Some(ConnectInfo(peer))), "198.51.100.4");
+        // Without connect info (router driven in-process) everyone shares one
+        // bucket, as before.
+        assert_eq!(client_ip(&headers, None), "unknown");
     }
 
     #[test]
