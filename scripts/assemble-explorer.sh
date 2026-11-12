@@ -53,5 +53,28 @@ if [ "$part_count" -eq 0 ]; then
   echo "explorer source manifest contains no parts: $MANIFEST" >&2
   exit 1
 fi
+
+# ── CACHE-BUSTING ────────────────────────────────────────────────────────────
+# Stamp every first-party asset URL in the assembled HTML with a per-build
+# ?v=<token>. The token is a content hash of the bundle (assembled HTML + all
+# app/*.js + explorer.css + theme-init.js), so it changes ONLY when something
+# actually changed. Because the HTML itself is served uncached (Cloudflare
+# cf-cache-status: DYNAMIC for text/html), a new deploy ships new asset URLs,
+# which Cloudflare/browsers treat as fresh (cache MISS) — so deploys go live
+# without any manual "Purge Everything". nginx ignores the query string when
+# serving the static file, so the files themselves are installed unchanged.
+set +e
+VBUST=$( { cat "$temporary"; cat "$SOURCE_ROOT"/app/*.js "$SOURCE_ROOT/explorer.css" "$SOURCE_ROOT/theme-init.js" 2>/dev/null; } | sha256sum 2>/dev/null | cut -c1-12 )
+set -e
+[ -n "$VBUST" ] || VBUST="$(date +%s)"
+sed -i \
+  -e 's|src="app/\([^"?]*\.js\)"|src="app/\1?v='"$VBUST"'"|g' \
+  -e 's|href="explorer\.css"|href="explorer.css?v='"$VBUST"'"|g' \
+  -e 's|src="theme-init\.js"|src="theme-init.js?v='"$VBUST"'"|g' \
+  -e 's|src="/static/vendor/\([^"?]*\)"|src="/static/vendor/\1?v='"$VBUST"'"|g' \
+  -e 's|href="/assets/\([^"?]*\.css\)"|href="/assets/\1?v='"$VBUST"'"|g' \
+  "$temporary"
+echo "assemble-explorer: cache-bust token v=$VBUST" >&2
+
 mv "$temporary" "$DESTINATION"
 trap - EXIT
