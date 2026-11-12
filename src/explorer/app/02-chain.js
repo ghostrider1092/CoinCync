@@ -371,6 +371,18 @@ function renderHomeBlocks(){
     <td><span class="badge" style="font-size:8px" title="CLSAG ring sig + Pedersen commitment + Bulletproofs+ + stealth address">🛡4/4</span></td>
   </tr>`).join('');
 }
+// Robust clipboard copy with an execCommand fallback — navigator.clipboard
+// can reject silently under some browser/extension clipboard policies, and the
+// shared copyText() has no .catch, so the copy would fail with no feedback.
+function fallbackCopy(text){
+  try{ const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.top='-9999px'; ta.style.opacity='0'; document.body.appendChild(ta); ta.focus(); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); return true; }catch(e){ return false; }
+}
+function copyFingerprint(text, btn){
+  const done=()=>{ if(btn){ btn.textContent='✓ copied'; setTimeout(()=>{ btn.textContent='copy'; }, 1500); } };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(done).catch(()=>{ fallbackCopy(text); done(); });
+  } else { fallbackCopy(text); done(); }
+}
 // Shielded-activation countdown (to h29,000) + verify-it-yourself consensus
 // fingerprint. Replaces the old anonymity-set particle animation. Reads from
 // the get_info poll object (height + consensus_fingerprint); no animation.
@@ -391,7 +403,7 @@ function renderShieldedCountdown(info){
     if(rem) rem.textContent=num(remaining);
     if(eta){ const secs=remaining*120, d=Math.floor(secs/86400), h=Math.floor((secs%86400)/3600); eta.textContent='~'+(d>0?d+'d ':'')+h+'h at 120s/block'; }
   }
-  if(fp && info.consensus_fingerprint){ const f=info.consensus_fingerprint; fp.textContent=f.slice(0,32)+'…'; if(cp) cp.onclick=()=>copyText(f,cp); }
+  if(fp && info.consensus_fingerprint){ const f=info.consensus_fingerprint; fp.textContent=f.slice(0,32)+'…'; fp.title='Click to copy — '+f; fp.style.cursor='pointer'; fp.onclick=()=>copyFingerprint(f,cp); if(cp) cp.onclick=()=>copyFingerprint(f,cp); }
 }
 function renderAllBlocks(){
   const tb=$('all-blocks');if(!tb)return;
