@@ -60,8 +60,9 @@ async function renderPrivacyMetrics(){
   const cnt = $('pm-block-count');
   if(cnt) cnt.textContent = String(tip - start + 1);
 
-  // Bucket counters. Decoy: 11 ring positions × count. Age: by hour bucket.
-  const decoyHist = new Array(11).fill(0);
+  // Bucket counters. Decoy positions are sized to the largest ring seen
+  // (ring size is height-dependent: 11 during bootstrap, 16 after). Age: by hour bucket.
+  let decoyHist = [];
   const ageHist = new Array(24).fill(0); // 24 hour-buckets
 
   // Fetch in parallel batches of 10 to avoid hammering the RPC.
@@ -78,10 +79,13 @@ async function renderPrivacyMetrics(){
       for(const tx of block.transactions){
         if(!tx.inputs) continue;
         for(const inp of tx.inputs){
-          // Each ring input contributes to all 11 ring positions equally.
-          // Without seeing which is real, we count the structural distribution.
-          if(Array.isArray(inp.ring_offsets) && inp.ring_offsets.length === 11){
-            for(let j = 0; j < 11; j++) decoyHist[j]++;
+          // Each ring input contributes to all its ring positions equally.
+          // Without seeing which is real, we count the structural distribution
+          // across however many ring members the input carries.
+          if(Array.isArray(inp.ring_offsets) && inp.ring_offsets.length >= 2){
+            const r = inp.ring_offsets.length;
+            for(let k = decoyHist.length; k < r; k++) decoyHist[k] = 0;
+            for(let j = 0; j < r; j++) decoyHist[j]++;
           }
         }
         // Age histogram — per-output age in hour buckets.
