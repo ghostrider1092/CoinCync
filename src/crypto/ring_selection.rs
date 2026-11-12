@@ -5,7 +5,7 @@
 //! **uniformly from the pool it is given**.
 //!
 //! The network age policy is applied **upstream at the source**
-//! (`src/storage/utxos.rs::select_decoys`), which
+//! (`src/wallet/decoy_selection/sampling.rs::sample_candidate_locators`), which
 //! applies CoinCync's V1 log-gamma target-height policy
 //! (`DECOY_GAMMA_SHAPE`). Real spends are often recent, so uniform selection
 //! over all history can leave a recent real input as the young outlier in its
@@ -16,7 +16,7 @@
 //! This assembler therefore draws uniformly *from the already-gamma-shaped
 //! pool*. Re-imposing a distribution here would double-bias it, and shuffling a
 //! pool cannot add an age distribution the pool does not already carry. See the
-//! mapping contract in `src/storage/utxos.rs::select_decoys`.
+//! mapping contract in `src/wallet/decoy_selection/sampling.rs::sample_candidate_locators`.
 //!
 //! ## Constitutional note
 //!
