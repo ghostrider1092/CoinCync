@@ -13,6 +13,13 @@
 > gated and activation-locked until independently reviewed and hardened. This paper is written to
 > invite scrutiny of the design, not to announce a product.
 
+> **CoinCync's stance — the motto.**
+> *"We didn't invent the cryptography — RandomX and CLSAG are Monero's, Spark is
+> Firo's, the gamma selection is Monero's, the batched-multiexp algorithms are
+> standard. What we did is make them fast, choose honest parameters, and engineer
+> them into private-by-default money with real disclosure and a clean exit. We're
+> not first. We're trying to be the best-built."*
+
 ---
 
 ## Abstract
@@ -151,6 +158,14 @@ its own right.
   **public, reproducible verifier with test vectors contributed back** to the
   Spark ecosystem, and a formal / machine-checked specification of the security
   properties the chain relies on.
+- **Performance:** batched multi-exponentiation (Pippenger/Straus, parallelized
+  across CPU cores) applied to both sides of the native one-of-many proof —
+  generation *and* verification. Measured on a 32,768-member set: verification
+  ~900 ms → ~40 ms (≈15×) and proof generation ~11.8 s → ~0.95 s (≈12×); the
+  gains scale with set size and hold proportionally at production parameters.
+  Each step is locked by an equivalence test to a byte-identical result, so it
+  is a software optimization — no change to proof semantics, security, or
+  consensus.
 
 ---
 
