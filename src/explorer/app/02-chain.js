@@ -155,6 +155,7 @@ async function poll(){
   trackHashrate(chainDiff);
   renderHrHistChart();
   updateStatusPage(info);
+  renderShieldedCountdown(info);
 
   // Privacy stats (Spark + Shielded pool). Stash on window so the
   // home-tab constellation can read the anonymity-set sizes without
@@ -369,6 +370,28 @@ function renderHomeBlocks(){
     <td><span class="badge badge-amber" style="font-size:9px">${algoName(b.algorithm||0)}</span></td>
     <td><span class="badge" style="font-size:8px" title="CLSAG ring sig + Pedersen commitment + Bulletproofs+ + stealth address">🛡4/4</span></td>
   </tr>`).join('');
+}
+// Shielded-activation countdown (to h29,000) + verify-it-yourself consensus
+// fingerprint. Replaces the old anonymity-set particle animation. Reads from
+// the get_info poll object (height + consensus_fingerprint); no animation.
+function renderShieldedCountdown(info){
+  if(!info) return;
+  const FORK=29000;
+  const tip=info.height||0;
+  const bar=$('sa-progress-bar'), rem=$('sa-blocks-remaining'), eta=$('sa-eta');
+  const tipEl=$('sa-tip'), fp=$('sa-fingerprint'), cp=$('sa-fp-copy');
+  if(tipEl) tipEl.textContent='#'+num(tip);
+  if(tip>=FORK){
+    if(bar) bar.style.width='100%';
+    if(rem) rem.textContent='activated';
+    if(eta) eta.textContent='shielded pool live';
+  }else{
+    const remaining=FORK-tip;
+    if(bar) bar.style.width=Math.max(1,Math.min(100,tip/FORK*100)).toFixed(1)+'%';
+    if(rem) rem.textContent=num(remaining);
+    if(eta){ const secs=remaining*120, d=Math.floor(secs/86400), h=Math.floor((secs%86400)/3600); eta.textContent='~'+(d>0?d+'d ':'')+h+'h at 120s/block'; }
+  }
+  if(fp && info.consensus_fingerprint){ const f=info.consensus_fingerprint; fp.textContent=f.slice(0,32)+'…'; if(cp) cp.onclick=()=>copyText(f,cp); }
 }
 function renderAllBlocks(){
   const tb=$('all-blocks');if(!tb)return;

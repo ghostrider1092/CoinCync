@@ -186,12 +186,27 @@
          appears as part of the 3D depth (camera moves and the plane
          parallaxes naturally). Both particle colour and backdrop swap
          live when the user picks a new theme/wallpaper. -->
-    <div class="constellation-panel" id="constellation-panel">
-      <canvas id="constellation-canvas"></canvas>
-      <button class="constellation-btn constellation-expand" id="constellation-expand" type="button" title="Expand (drag to rotate, scroll to zoom)" aria-label="Expand constellation">&#9974;</button>
-      <button class="constellation-btn constellation-close" id="constellation-close" type="button" title="Close (Esc)" aria-label="Close fullscreen">&times;</button>
-      <div class="constellation-label" id="constellation-label">Live anonymity set</div>
-      <div class="constellation-hint">Drag to rotate &middot; scroll to zoom &middot; Esc to close</div>
+    <!--  SHIELDED ACTIVATION COUNTDOWN + VERIFY-IT-YOURSELF  (replaced the anonymity-set animation) -->
+    <div class="panel" id="shielded-activation-panel" style="margin-top:20px">
+      <div class="panel-head">Shielded activation</div>
+      <div style="padding:16px 20px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+          <div style="font-family:var(--mono);font-size:12px;color:var(--t2)">Lelantus-Spark &middot; activates at block <strong style="color:var(--ac2)">29,000</strong></div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--t3)">tip <span id="sa-tip">&mdash;</span></div>
+        </div>
+        <div style="height:8px;background:var(--s2);border:1px solid var(--b);border-radius:6px;overflow:hidden;margin-bottom:10px">
+          <div id="sa-progress-bar" style="height:100%;width:0%;background:var(--ac2);transition:width .4s"></div>
+        </div>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--t)"><span id="sa-blocks-remaining" style="color:var(--ac2);font-weight:600">&mdash;</span> <span style="color:var(--t3)">blocks to activation</span> &middot; <span id="sa-eta" style="color:var(--t3)">&mdash;</span></div>
+      </div>
+      <div style="border-top:1px solid var(--b);padding:16px 20px">
+        <div class="sec-label" style="margin-top:0">Verify it yourself</div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--t2);line-height:1.6;margin-bottom:10px">This chain's live consensus fingerprint. Run your own node and compare &mdash; it's the chain's identity, not ours to fake.</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <code id="sa-fingerprint" style="font-family:var(--mono);font-size:11px;color:var(--ac2);word-break:break-all;background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:6px 10px">&mdash;</code>
+          <button id="sa-fp-copy" class="btn btn-outline" style="font-size:10px;padding:4px 10px">copy</button>
+        </div>
+      </div>
     </div>
     <!--  LIVE BLOCK FEED  -->
     <div class="live-feed">
