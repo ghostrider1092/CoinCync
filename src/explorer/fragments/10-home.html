@@ -7,11 +7,6 @@
       <div style="font-family:var(--mono);font-size:10px;color:var(--t3);margin-top:10px;text-align:right;letter-spacing:.1em">— THE COINCYNC MANIFESTO</div>
     </div>
 
-    <div style="max-width:620px;margin:0 auto 28px;padding:18px 24px;background:rgba(212,160,89,.04);border-right:2px solid var(--ac2);text-align:right">
-      <div style="font-family:var(--serif);font-size:14px;font-style:italic;font-weight:300;color:var(--t2);line-height:1.7">"Privacy money that doesn't depend on permission to participate. CYNC&harr;BTC atomic swaps are a constitutional mainnet-launch commitment, not a roadmap item to be deferred. Whether this combination works is what testnet and mainnet are for."</div>
-      <div style="font-family:var(--mono);font-size:10px;color:var(--t3);margin-top:10px;text-align:left;letter-spacing:.1em">— THE COINCYNC THESIS</div>
-    </div>
-
     <!--  CONSTITUTIONAL STATUS PANEL  -->
     <!-- Every flag below is a compile-time tripwire in src/constants.rs.
          The binary running this fleet either passed all of them or it
@@ -114,7 +109,7 @@
       <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b);background:linear-gradient(180deg,rgba(212,160,89,.06),transparent)">
         <div>
           <div style="font-family:var(--mono);font-size:10px;color:var(--ac);letter-spacing:.16em;text-transform:uppercase">Release</div>
-          <div style="font-family:var(--display);font-size:18px;font-weight:400;color:var(--t);margin-top:2px">v1.0.12-rc3 &middot; Hard Fork Release Candidate</div>
+          <div style="font-family:var(--display);font-size:18px;font-weight:400;color:var(--t);margin-top:2px">v1.1.2-testnet &middot; Shielded activation at block 29,000</div>
         </div>
         <div style="display:flex;align-items:center;gap:10px">
           <span id="v108-status-dot" style="width:10px;height:10px;border-radius:50%;background:var(--t3);transition:background .3s"></span>
@@ -123,21 +118,16 @@
         </div>
       </div>
 
-      <!-- What's new in v1.0.12-rc3, collapsed by default -->
+      <!-- What's new, collapsed by default -->
       <div id="v108-whatsnew" class="hidden" style="padding:14px 18px;border-bottom:1px solid var(--b);background:rgba(212,160,89,.02)">
         <div style="font-size:12px;color:var(--t2);line-height:1.7">
-          <strong style="color:var(--ac2)">Testnet hard fork.</strong> Activates at testnet height <strong>13,000</strong> (~2026-07-05). CIP-007 Mode A &mdash; static-height flag day, no signaling window. All five rules are <em>tightening</em>: honest miners producing well-formed blocks pre-activation continue to produce valid blocks post-activation. Please upgrade all nodes to <a href="https://github.com/ghostrider1092/CoinCync/releases/tag/v1.0.12-rc3" style="color:var(--ac2)">v1.0.12-rc3</a> by <strong>2026-07-03</strong>.
+          <strong style="color:var(--ac2)">Shielded pool &mdash; Lelantus-Spark.</strong> Activates on <strong>testnet</strong> at block <strong>29,000</strong>. Until then, every transfer is private by default: CLSAG ring signatures, stealth one-time addresses, Pedersen commitments and Bulletproofs+ range proofs, with Dandelion++ propagation. Current release: <a href="https://github.com/ghostrider1092/CoinCync/releases" style="color:var(--ac2)">v1.1.2-testnet</a>.
         </div>
         <ul style="margin:8px 0 4px;padding-left:20px;font-size:11px;color:var(--t3);line-height:1.7">
-          <li><strong style="color:var(--t2)">encrypted_amount tightened</strong> to exactly 8 bytes (no over/under-size acceptance).</li>
-          <li><strong style="color:var(--t2)">Per-output size caps</strong> enforced at block validation, not just mempool admission.</li>
-          <li><strong style="color:var(--t2)">Duplicate stealth addresses rejected within a tx</strong> &mdash; closes the same-output-twice class of malleability.</li>
-          <li><strong style="color:var(--t2)">Cross-tx stealth-address dedup within a block</strong> &mdash; prevents two txs in the same block from colliding on a stealth output.</li>
-          <li><strong style="color:var(--t2)">Ring-size enforcement</strong> via monotonic <code>total_outputs_ever()</code>, so ring decoys cannot reference future outputs.</li>
+          <li><strong style="color:var(--t2)">Private by default</strong> &mdash; sender, amount and receiver are cryptographically hidden on every transaction.</li>
+          <li><strong style="color:var(--t2)">100,000,000 CYNC</strong> max supply &middot; CPU-only RandomX mining &middot; 0% dev tax &middot; 0% premine.</li>
+          <li><strong style="color:var(--t2)">Testnet only.</strong> Mainnet is a target of March 1, 2027 and is not yet launched.</li>
         </ul>
-        <div style="margin-top:8px;font-size:10px;color:var(--t3)">
-          Shipping in rc3: PR #112 peer-aging (purges dead IPs from <code>AddressManager</code> after 5 failed dials), PR #117 legacy-DB migration (existing v1.0.11.x operators upgrade without wiping chaindata &mdash; run <code>coincync-node --network testnet migrate-legacy-db</code> once before starting on rc3), 12-PR hardening marathon (#90-101, Bitcoin-Core-equivalent defense-in-depth), 2 new gossip-resilience relay nodes, second miner randomx2 (closes single-miner SPOF), miner-stall watchdog. Binary SHA-256: <code>6fcf9d91c46&hellip;</code>. Full ledger: <a href="https://github.com/ghostrider1092/CoinCync/blob/main/docs/operations/CHANGES-2026-06-26.md" style="color:var(--ac2)">CHANGES-2026-06-26.md</a>.
-        </div>
       </div>
 
       <!-- 4-tile grid: finality / phase-2 / health / metrics -->

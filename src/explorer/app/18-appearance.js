@@ -15,7 +15,8 @@ const THEME_ICONS = {
   forge:    '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c-4 0-7-2.7-7-6.5 0-2.5 2-4 3-5.5C9 9 9 7 9 4c1 1 5 4 6 8 0 0 1-1 1-3 1.5 1.5 4 4 4 7.5 0 3.8-3 5.5-8 5.5z"/></svg>',
   vault:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.5 19.2 3c.6 4.5-1 12-9.2 16M2 22c1-4 5-8 9-9"/></svg>',
   mono:     '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"/></svg>',
-  contrast: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3 A9 9 0 0 1 12 21 Z" fill="currentColor"/></svg>'
+  contrast: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3 A9 9 0 0 1 12 21 Z" fill="currentColor"/></svg>',
+  black:    '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="4"/></svg>'
 };
 
 function renderThumbIcon(name) {
