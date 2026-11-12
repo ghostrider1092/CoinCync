@@ -1834,19 +1834,20 @@ async fn start_node(
                             let needs_full_revalidation = {
                                 let is_reorg =
                                     matches!(status, BlockStatus::AcceptedReorg { .. });
+                                // A pending shielded tx can stop being minable
+                                // under a NEW BLOCK without a key-image collision
+                                // (its tag gets spent, its mint coins land, the
+                                // pool value moves), which the #149 fast-path does
+                                // not catch. Only a shielded tx in the block does
+                                // any of that, so sweep when the block carries one
+                                // while a shielded tx is pending.
                                 coincync::mempool::needs_full_revalidation_after_block(
                                     is_reorg,
                                     event_chain.network(),
                                     event_chain.height(),
+                                    block_txs.iter().any(|t| t.is_shielded()),
+                                    event_mempool.has_shielded(),
                                 )
-                                // A pending shielded tx's validity can change under
-                                // a NEW BLOCK without a key-image collision (its tag
-                                // gets spent, or a confirmed tx is re-added by
-                                // Dandelion fluff and would re-mine), which the
-                                // #149 fast-path does not catch — so sweep every
-                                // block while one is pending. Self-heals within a
-                                // block instead of stalling/halting the miner.
-                                || event_mempool.has_shielded()
                             };
                             // Keep mempool aligned with chain state: remove mined txs and
                             // advance mempool height so activation-gated checks stay correct.
