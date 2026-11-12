@@ -13,6 +13,13 @@
 > gated and activation-locked until independently reviewed and hardened. This paper is written to
 > invite scrutiny of the design, not to announce a product.
 
+> **CoinCync's stance — the motto.**
+> *"We didn't invent the cryptography — RandomX and CLSAG are Monero's, Spark is
+> Firo's, the gamma selection is Monero's, the batched-multiexp algorithms are
+> standard. What we did is make them fast, choose honest parameters, and engineer
+> them into private-by-default money with real disclosure and a clean exit. We're
+> not first. We're trying to be the best-built."*
+
 ---
 
 ## Abstract
