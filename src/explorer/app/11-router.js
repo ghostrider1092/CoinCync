@@ -15,18 +15,8 @@ function globeResetView(){
 
 // Map pages to their parent dropdown
 const DROP_MAP={
-  rawblock:'explorer',
-  peerexp:'network',chainhealth:'network',
-  hashrate:'tools',diffpredict:'tools',addrval:'tools',emissioncalc:'tools',countdown:'tools',
-  github:'learn',
-
   blocks:'explorer',mempool:'explorer',supply:'explorer',search:'explorer',tx:'explorer',
-  balancelookup:'explorer',richlist:'explorer',
-  status:'network',livestream:'network',webhooks:'network',
-  governance:'learn',miningtutorial:'docs',apilive:'tools',txbuilder:'tools',multisig:'tools',
-  network:'network',globe:'network',health:'network',
-  mining:'tools',wallet:'tools',api:'tools',apifull:'tools',
-  '4thamendment':'learn'
+  network:'network',health:'network'
 };
 function go(id){
   if(!PAGES.includes(id))id='home';
@@ -45,7 +35,6 @@ function go(id){
   if(id==='blocks'){renderAllBlocks();void ensureBlocksBackfillToGenesis();}
   if(id==='mempool'){loadMempool();}else{if(_mpAutoInterval){clearInterval(_mpAutoInterval);_mpAutoInterval=null;const cb=$('mp-auto-sync');if(cb)cb.checked=false;}}
   if(id==='network'){loadPeers();setTimeout(renderHrHistChart,300);}
-  if(id==='globe'){setTimeout(()=>{initGlobe().catch(()=>{});},200);}
   if(id==='home'){
     setTimeout(()=>{try{initConstellation();}catch(_){}}, 200);
     // Kick the v1.0.10 status panel; will start its own 15s interval
@@ -65,11 +54,6 @@ function go(id){
   if(id==='soak'){loadSoakStatus();}
   if(id==='leaderboard'){loadFleetLeaderboard();}
   if(id==='privacymetrics'){setTimeout(renderPrivacyMetrics,300);}
-  if(id==='anonset'){setTimeout(renderAnonSetDepth,200);}
-  if(id==='reorghistory'){setTimeout(renderReorgHistory,200);}
-  if(id==='mininglive'){startMiningLivePoll();}else{stopMiningLivePoll();}
-  if(id==='feemarket'){setTimeout(renderFeeMarket,200);}
-  if(id==='privacypools'){setTimeout(renderPrivacyPools,200);}
 
 
   if(id==='status'){setTimeout(renderVersionChart,200);renderMinersLeaderboard();}

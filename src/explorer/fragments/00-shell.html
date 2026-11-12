@@ -35,7 +35,7 @@
 </div>
 
 
-<div class="top"><strong>TESTNET</strong> CoinCync is a privacy tool, not an investment — No central authority — 0% dev tax — Fully decentralized — Orchard/Spark/Kernel phase-2 stores dormant (reorg-rewind machinery wired, trees not yet appended to)</div>
+<div class="top"><strong>TESTNET</strong> CoinCync is a privacy tool, not an investment — No central authority — 0% dev tax — Fully decentralized — private by default (ring signatures · stealth addresses · confidential amounts)</div>
 
 <div id="block-pulse-bar" style="position:fixed;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--ac2),transparent);z-index:999;transform-origin:left;transform:scaleX(0);opacity:0"></div>
 <nav>
@@ -53,15 +53,8 @@
     <button class="nav-btn" id="nb-blocks" onclick="go('blocks')">Blocks</button>
     <button class="nav-btn" id="nb-mempool" onclick="go('mempool')">Mempool</button>
     <button class="nav-btn" id="nb-network" onclick="go('network')">Network</button>
-    <button class="nav-btn" id="nb-globe" onclick="go('globe')">Globe</button>
     <button class="nav-btn" id="nb-health" onclick="go('health')">Node Health</button>
     <button class="nav-btn" id="nb-supply" onclick="go('supply')">Supply</button>
-    <button class="nav-btn" id="nb-anonset" onclick="go('anonset')">Anonymity</button>
-    <button class="nav-btn" id="nb-reorghistory" onclick="go('reorghistory')">Reorgs</button>
-    <button class="nav-btn" id="nb-feemarket" onclick="go('feemarket')">Fees</button>
-    <button class="nav-btn" id="nb-mininglive" onclick="go('mininglive')">Mining</button>
-    <button class="nav-btn" id="nb-compare" onclick="go('compare')">Features</button>
-    <button class="nav-btn" id="nb-privacypools" onclick="go('privacypools')">Pools</button>
     <button class="nav-btn" id="nb-block" style="display:none">Block</button>
     <button class="nav-btn" id="nb-search" style="display:none">Search</button>
   </div>
@@ -74,7 +67,7 @@
     Persists choice in localStorage('cync-net'). The active selection
     drives the value of the JS `RPC` variable (see setNetwork() below)
     so all rpc() calls hit the right backend pool. Mainnet is greyed
-    out and shows a launch-countdown banner until 2026-10-01 00:00:00 UTC,
+    out and shows a launch-countdown banner until 2027-03-01 00:00:00 UTC,
     matching `mainnet_genesis()` in src/mainnet.rs.
   -->
   <div class="net-toggle" id="net-toggle" title="Switch between testnet and mainnet">
@@ -92,6 +85,9 @@
       </button>
       <button class="theme-opt" data-theme="dark" onclick="setTheme('dark')">
         <span class="t-swatch" style="background:#0A0A09"><span class="t-dot" style="background:#D4A059"></span></span>Dark
+      </button>
+      <button class="theme-opt" data-theme="black" onclick="setTheme('black')">
+        <span class="t-swatch" style="background:#000000"><span class="t-dot" style="background:#D4A059"></span></span>Black
       </button>
       <button class="theme-opt" data-theme="brass" onclick="setTheme('brass')">
         <span class="t-swatch" style="background:#D4A059"><span class="t-dot" style="background:#3A3328"></span></span>Brass
@@ -114,6 +110,11 @@
       <button class="theme-opt" data-theme="contrast" onclick="setTheme('contrast')">
         <span class="t-swatch" style="background:#000000"><span class="t-dot" style="background:#FFB840"></span></span>Contrast
       </button>
+      <div style="border-top:1px solid var(--b);margin-top:8px;padding-top:8px">
+        <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.08em;margin:0 0 6px 4px">Text color</div>
+        <input type="color" id="text-color-picker" oninput="setTextColor(this.value)" style="width:100%;height:28px;border:1px solid var(--b);border-radius:6px;background:var(--s2);cursor:pointer">
+        <button class="theme-opt" onclick="resetTextColor()" style="justify-content:center;font-size:11px">Reset text color</button>
+      </div>
       <div style="height:1px;background:var(--b);margin:6px 0"></div>
       <div style="padding:4px 12px 2px;font-size:9px;font-weight:600;color:var(--t3);letter-spacing:.08em;text-transform:uppercase;font-family:var(--mono)">Wallpaper</div>
       <div class="wp-grid" id="wp-grid">
@@ -180,7 +181,7 @@
 <div id="mainnet-countdown-banner" style="display:none;position:sticky;top:0;z-index:40;background:linear-gradient(90deg,#1a1a1a,#2a2a2a);color:#e5e5e5;padding:14px 24px;border-bottom:2px solid #f0c040;text-align:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
   <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#f0c040;font-weight:600">CoinCync Mainnet — Pre-Launch</div>
   <div style="margin-top:4px;font-size:18px;font-weight:600">Launches in <span id="mainnet-countdown-value">—</span></div>
-  <div style="margin-top:2px;font-size:11px;color:#888">Genesis: October 1, 2026 00:00:00 UTC · Until then, only testnet data is queryable</div>
+  <div style="margin-top:2px;font-size:11px;color:#888">Genesis target: March 1, 2027 00:00:00 UTC · Until then, only testnet data is queryable</div>
 </div>
 
 <!-- MOBILE MENU -->
@@ -193,17 +194,8 @@
   <button class="mob-btn" id="mob-blocks" onclick="go('blocks');closeMobile()">Blocks</button>
   <button class="mob-btn" id="mob-mempool" onclick="go('mempool');closeMobile()">Mempool</button>
   <button class="mob-btn" id="mob-network" onclick="go('network');closeMobile()">Network</button>
-  <button class="mob-btn" id="mob-globe" onclick="go('globe');closeMobile()">Globe</button>
   <button class="mob-btn" id="mob-health" onclick="go('health');closeMobile()">Node Health</button>
   <button class="mob-btn" id="mob-supply" onclick="go('supply');closeMobile()">Supply</button>
-  <div style="height:1px;background:var(--b);margin:8px 0"></div>
-  <div style="padding:6px 14px 4px;font-size:9px;font-weight:700;color:var(--t3);letter-spacing:.08em;text-transform:uppercase;font-family:var(--mono)">Privacy stats</div>
-  <button class="mob-btn" id="mob-anonset" onclick="go('anonset');closeMobile()">Anonymity-set viewer</button>
-  <button class="mob-btn" id="mob-reorghistory" onclick="go('reorghistory');closeMobile()">Reorg history</button>
-  <button class="mob-btn" id="mob-feemarket" onclick="go('feemarket');closeMobile()">Fee estimator</button>
-  <button class="mob-btn" id="mob-mininglive" onclick="go('mininglive');closeMobile()">Live mining</button>
-  <button class="mob-btn" id="mob-compare" onclick="go('compare');closeMobile()">Privacy features</button>
-  <button class="mob-btn" id="mob-privacypools" onclick="go('privacypools');closeMobile()">Privacy pools (Phase 2)</button>
   <div style="height:1px;background:var(--b);margin:8px 0"></div>
   <button class="mob-btn" onclick="closeMobile();openAppearance()" style="color:var(--ac2)">Appearance</button>
   <div style="border-top:1px solid var(--b);margin-top:8px;padding-top:8px"></div>

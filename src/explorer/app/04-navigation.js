@@ -21,9 +21,9 @@ function toggleMobile(){$('mobile-menu').classList.toggle('open');}
 function closeMobile(){$('mobile-menu').classList.remove('open');}
 
 // ── PAGE NAV ──────────────────────────────────────────────────
-const PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy','anonset','reorghistory','compare','mininglive','feemarket','privacypools'];
+const PAGES=['home','blocks','block','mempool','network','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy'];
 const DEV_ONLY_PAGES=[];
-const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','globe','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy','anonset','reorghistory','compare','mininglive','feemarket','privacypools'];
+const PUBLIC_EXPLORER_PAGES=['home','blocks','block','mempool','network','health','supply','4thamendment','search','tx','api','soak','broadcast','leaderboard','privacymetrics','proposals','privacy'];
 const EXPLORER_DEV_MODE=(
   new URLSearchParams(window.location.search).get('dev_explorer')==='1' &&
   IS_LOCALHOST
@@ -80,7 +80,7 @@ function applyExplorerMode(){
 
 // ── COUNTDOWN ───────────────────────────────────────────────
 function updateCountdown(){
-  const target=new Date('2026-10-01T00:00:00Z');
+  const target=new Date('2027-03-01T00:00:00Z');
   const now=new Date();
   const diff=Math.max(0,target-now);
   const d=Math.floor(diff/86400000);

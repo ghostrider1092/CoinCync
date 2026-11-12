@@ -22,7 +22,10 @@ async function poll(){
   const peerCount  = info.peer_count || 0;
   _updateDecayClock(tipAgeSecs);
 
-  // STALE CHAIN WARNING — show banner if tip is older than 10 minutes
+  // STALE CHAIN WARNING — show banner only if the latest block is older than
+  // 30 minutes. This reflects slow block production (low hashrate), NOT node
+  // sync state; the node can be fully synced to the tip while the tip itself
+  // is old. Threshold kept generous so normal testnet block variance is quiet.
   let staleBanner = document.getElementById('stale-banner');
   if (!staleBanner) {
     staleBanner = document.createElement('div');
@@ -30,9 +33,9 @@ async function poll(){
     staleBanner.style.cssText = 'display:none;background:#92400E;color:#FEF3C7;text-align:center;padding:8px 16px;font-size:12px;font-weight:600;font-family:var(--mono);position:fixed;top:0;left:0;right:0;z-index:9999';
     document.body.prepend(staleBanner);
   }
-  if (tipAgeSecs > 600) {
+  if (tipAgeSecs > 1800) {
     const mins = Math.floor(tipAgeSecs / 60);
-    staleBanner.textContent = `⚠ Chain data is ${mins} minutes old — node is syncing`;
+    staleBanner.textContent = `⚠ Latest block is ${mins} min old (slow block production)`;
     staleBanner.style.display = 'block';
     _pushOperatorAlert('warn', `stale tip: ${Math.floor(tipAgeSecs/60)}m old`);
   } else {
@@ -152,6 +155,7 @@ async function poll(){
   trackHashrate(chainDiff);
   renderHrHistChart();
   updateStatusPage(info);
+  renderShieldedCountdown(info);
 
   // Privacy stats (Spark + Shielded pool). Stash on window so the
   // home-tab constellation can read the anonymity-set sizes without
@@ -366,6 +370,40 @@ function renderHomeBlocks(){
     <td><span class="badge badge-amber" style="font-size:9px">${algoName(b.algorithm||0)}</span></td>
     <td><span class="badge" style="font-size:8px" title="CLSAG ring sig + Pedersen commitment + Bulletproofs+ + stealth address">🛡4/4</span></td>
   </tr>`).join('');
+}
+// Robust clipboard copy with an execCommand fallback — navigator.clipboard
+// can reject silently under some browser/extension clipboard policies, and the
+// shared copyText() has no .catch, so the copy would fail with no feedback.
+function fallbackCopy(text){
+  try{ const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.top='-9999px'; ta.style.opacity='0'; document.body.appendChild(ta); ta.focus(); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); return true; }catch(e){ return false; }
+}
+function copyFingerprint(text, btn){
+  const done=()=>{ if(btn){ btn.textContent='✓ copied'; setTimeout(()=>{ btn.textContent='copy'; }, 1500); } };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(done).catch(()=>{ fallbackCopy(text); done(); });
+  } else { fallbackCopy(text); done(); }
+}
+// Shielded-activation countdown (to h29,000) + verify-it-yourself consensus
+// fingerprint. Replaces the old anonymity-set particle animation. Reads from
+// the get_info poll object (height + consensus_fingerprint); no animation.
+function renderShieldedCountdown(info){
+  if(!info) return;
+  const FORK=29000;
+  const tip=info.height||0;
+  const bar=$('sa-progress-bar'), rem=$('sa-blocks-remaining'), eta=$('sa-eta');
+  const tipEl=$('sa-tip'), fp=$('sa-fingerprint'), cp=$('sa-fp-copy');
+  if(tipEl) tipEl.textContent='#'+num(tip);
+  if(tip>=FORK){
+    if(bar) bar.style.width='100%';
+    if(rem) rem.textContent='activated';
+    if(eta) eta.textContent='shielded pool live';
+  }else{
+    const remaining=FORK-tip;
+    if(bar) bar.style.width=Math.max(1,Math.min(100,tip/FORK*100)).toFixed(1)+'%';
+    if(rem) rem.textContent=num(remaining);
+    if(eta){ const secs=remaining*120, d=Math.floor(secs/86400), h=Math.floor((secs%86400)/3600); eta.textContent='~'+(d>0?d+'d ':'')+h+'h at 120s/block'; }
+  }
+  if(fp && info.consensus_fingerprint){ const f=info.consensus_fingerprint; fp.textContent=f.slice(0,32)+'…'; fp.title='Click to copy — '+f; fp.style.cursor='pointer'; fp.onclick=()=>copyFingerprint(f,cp); if(cp) cp.onclick=()=>copyFingerprint(f,cp); }
 }
 function renderAllBlocks(){
   const tb=$('all-blocks');if(!tb)return;
