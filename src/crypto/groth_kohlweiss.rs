@@ -264,9 +264,15 @@ pub fn prove_one_of_many_gen_ctx<R: CryptoRng + RngCore>(
     // The degree-m coefficient equals δ(i,l); we need coefficients 0..m-1.
     let mut gk = Vec::with_capacity(m);
     let rho: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
-    // Accumulate Σ_i p_{i,k}·c_i for k in 0..m into `coeff_sum[k]`.
-    let mut coeff_sum = vec![RistrettoPoint::default(); m];
-    for (i, c_i) in commitments.iter().enumerate() {
+    // Σ_i p_{i,k}·c_i for each k is a multi-exponentiation over all N members —
+    // the same `Σ sᵢ·Pᵢ` shape the verifier batches. Build the scalar columns
+    // `p_{i,k}` first, then one batched MSM per k, instead of N·m per-term point
+    // multiplications. The commitment `gk[k]` is identical; this is purely a
+    // prover-cost optimization (the proof verifies the same, locked by the
+    // prove→verify round-trip tests). `parallel_multiscalar_mul` is the same
+    // equivalence-locked MSM used on the verify path.
+    let mut coeff_cols: Vec<Vec<Scalar>> = vec![Vec::with_capacity(n); m];
+    for i in 0..n {
         let mut poly = vec![Scalar::ONE]; // degree-0: 1
         for j in 0..m {
             let i_j = (i >> j) & 1;
@@ -279,11 +285,12 @@ pub fn prove_one_of_many_gen_ctx<R: CryptoRng + RngCore>(
         }
         // poly has degree m (length m+1); use coefficients 0..m-1.
         for k in 0..m {
-            coeff_sum[k] += c_i * poly[k];
+            coeff_cols[k].push(poly[k]);
         }
     }
     for k in 0..m {
-        gk.push((coeff_sum[k] + k_gen * rho[k]).compress().to_bytes());
+        let coeff_sum_k = parallel_multiscalar_mul(&coeff_cols[k], commitments);
+        gk.push((coeff_sum_k + k_gen * rho[k]).compress().to_bytes());
     }
 
     let x = challenge(context, commitments, &cl, &ca, &cb, &gk);
@@ -532,9 +539,12 @@ pub fn prove_one_of_many_ki_gen_ctx<R: CryptoRng + RngCore>(
     // Accumulate Σ_i p_{i,k}·C_i AND Σ_i p_{i,k}·P_i with the SAME p_{i,k}.
     let rho: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
     let sigma: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
-    let mut coeff_c = vec![RistrettoPoint::default(); m];
-    let mut coeff_p = vec![RistrettoPoint::default(); m];
-    for (i, (c_i, p_i)) in commitments.iter().zip(pubkeys.iter()).enumerate() {
+    // Batched: Σ_i p_{i,k}·C_i and Σ_i p_{i,k}·P_i share the same scalar columns
+    // p_{i,k}; one MSM per k over each point set instead of N·m point mults.
+    // Identical commitments (prover-cost only; locked by the round-trip tests).
+    let np = commitments.len();
+    let mut coeff_cols: Vec<Vec<Scalar>> = vec![Vec::with_capacity(np); m];
+    for i in 0..np {
         let mut poly = vec![Scalar::ONE];
         for j in 0..m {
             let i_j = (i >> j) & 1;
@@ -546,10 +556,13 @@ pub fn prove_one_of_many_ki_gen_ctx<R: CryptoRng + RngCore>(
             poly = poly_mul_linear(&poly, c0, c1);
         }
         for k in 0..m {
-            coeff_c[k] += c_i * poly[k];
-            coeff_p[k] += p_i * poly[k];
+            coeff_cols[k].push(poly[k]);
         }
     }
+    let coeff_c: Vec<RistrettoPoint> =
+        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &commitments[..])).collect();
+    let coeff_p: Vec<RistrettoPoint> =
+        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &pubkeys[..])).collect();
     let mut gk = Vec::with_capacity(m);
     let mut gkp = Vec::with_capacity(m);
     let mut gkt = Vec::with_capacity(m);
@@ -1227,8 +1240,9 @@ pub fn prove_one_of_many_hk_ctx<R: CryptoRng + RngCore>(
     // Polynomial coefficient sums Σ_i p_{i,k}·c_i, then blind on BOTH H and K.
     let rho_h: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
     let rho_k: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
-    let mut coeff_sum = vec![RistrettoPoint::default(); m];
-    for (i, c_i) in commitments.iter().enumerate() {
+    let np = commitments.len();
+    let mut coeff_cols: Vec<Vec<Scalar>> = vec![Vec::with_capacity(np); m];
+    for i in 0..np {
         let mut poly = vec![Scalar::ONE];
         for j in 0..m {
             let i_j = (i >> j) & 1;
@@ -1236,9 +1250,11 @@ pub fn prove_one_of_many_hk_ctx<R: CryptoRng + RngCore>(
             poly = poly_mul_linear(&poly, c0, c1);
         }
         for k in 0..m {
-            coeff_sum[k] += c_i * poly[k];
+            coeff_cols[k].push(poly[k]);
         }
     }
+    let coeff_sum: Vec<RistrettoPoint> =
+        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &commitments[..])).collect();
     let mut gk = Vec::with_capacity(m);
     for k in 0..m {
         gk.push((coeff_sum[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k]).compress().to_bytes());
@@ -1517,9 +1533,9 @@ pub fn prove_spend_full<R: CryptoRng + RngCore>(
     let rho_h: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
     let rho_k: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
     let sigma: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
-    let mut coeff_w = vec![RistrettoPoint::default(); m];
-    let mut coeff_p = vec![RistrettoPoint::default(); m];
-    for (i, (w_i, p_i)) in shifted.iter().zip(pubkeys.iter()).enumerate() {
+    let np = shifted.len();
+    let mut coeff_cols: Vec<Vec<Scalar>> = vec![Vec::with_capacity(np); m];
+    for i in 0..np {
         let mut poly = vec![Scalar::ONE];
         for j in 0..m {
             let i_j = (i >> j) & 1;
@@ -1527,10 +1543,13 @@ pub fn prove_spend_full<R: CryptoRng + RngCore>(
             poly = poly_mul_linear(&poly, c0, c1);
         }
         for k in 0..m {
-            coeff_w[k] += w_i * poly[k];
-            coeff_p[k] += p_i * poly[k];
+            coeff_cols[k].push(poly[k]);
         }
     }
+    let coeff_w: Vec<RistrettoPoint> =
+        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &shifted[..])).collect();
+    let coeff_p: Vec<RistrettoPoint> =
+        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &pubkeys[..])).collect();
     let (mut gk, mut gkp, mut gkt) = (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
     for k in 0..m {
         gk.push((coeff_w[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k]).compress().to_bytes());
@@ -1825,8 +1844,9 @@ pub fn prove_spend_spark<R: CryptoRng + RngCore>(
 
     let rho_h: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
     let rho_k: Vec<Scalar> = (0..m).map(|_| Scalar::random(&mut *rng)).collect();
-    let mut coeff_w = vec![RistrettoPoint::default(); m];
-    for (i, w_i) in shifted.iter().enumerate() {
+    let np = shifted.len();
+    let mut coeff_cols: Vec<Vec<Scalar>> = vec![Vec::with_capacity(np); m];
+    for i in 0..np {
         let mut poly = vec![Scalar::ONE];
         for j in 0..m {
             let i_j = (i >> j) & 1;
@@ -1834,9 +1854,11 @@ pub fn prove_spend_spark<R: CryptoRng + RngCore>(
             poly = poly_mul_linear(&poly, c0, c1);
         }
         for k in 0..m {
-            coeff_w[k] += w_i * poly[k];
+            coeff_cols[k].push(poly[k]);
         }
     }
+    let coeff_w: Vec<RistrettoPoint> =
+        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &shifted[..])).collect();
     let (mut gk, mut gkt) = (Vec::with_capacity(m), Vec::with_capacity(m));
     for k in 0..m {
         gk.push((coeff_w[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k]).compress().to_bytes());
@@ -2168,6 +2190,34 @@ mod tests {
     /// math is identical in both paths, so this isolates the change. N=32768
     /// matches the audited Firo/Lelantus-Spark anon set and the earlier bench's
     /// ~3,324 ms naïve baseline.
+    /// Measurement (ignored): proving time vs the (already-optimized) verify
+    /// time at production and large anon-set sizes.
+    #[test]
+    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
+    fn bench_prove_vs_verify() {
+        use std::time::Instant;
+        for &n in &[512usize, 4096, 32768] {
+            let mut rng = ChaCha20Rng::seed_from_u64(n as u64);
+            let l = n / 2;
+            let r = Scalar::random(&mut rng);
+            let mut comms: Vec<RistrettoPoint> = (0..n).map(|s| filler(s as u64)).collect();
+            comms[l] = zero_commitment(&r);
+
+            let t0 = Instant::now();
+            let proof = prove_one_of_many_ctx(&comms, l, &r, b"bench", &mut rng).unwrap();
+            let prove_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+            let t1 = Instant::now();
+            verify_one_of_many_ctx(&comms, &proof, b"bench").expect("valid proof must verify");
+            let verify_ms = t1.elapsed().as_secs_f64() * 1e3;
+
+            println!(
+                "[prove vs verify] N={n:>6}  prove = {prove_ms:>8.1} ms   verify = {verify_ms:>7.1} ms   prove/verify = {:.2}x",
+                prove_ms / verify_ms
+            );
+        }
+    }
+
     #[test]
     #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
     fn bench_anonset_msm_vs_naive() {
