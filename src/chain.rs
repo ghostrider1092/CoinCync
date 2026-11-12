@@ -729,12 +729,17 @@ impl Blockchain {
     /// `checkpoint_phase2_stores` before this block's apply, so a reorg rewinds
     /// these mutations in lock-step.
     ///
-    /// PRE-ACTIVATION TODO (2c): the serial-tag double-spend must ALSO be
-    /// checked in validation (contextual, against the store) so an invalid block
-    /// is rejected pre-apply, mirroring the transparent key-image check. Here a
-    /// fault mid-apply can only mean validation admitted an invalid block, so we
-    /// HALT (panic) to preserve on-disk state — consistent with the
-    /// supply-accumulator corruption arms in `add_block`.
+    /// CONTEXTUAL DOUBLE-SPEND CHECK (2c) — DONE. The serial-tag double-spend is
+    /// rejected PRE-APPLY in validation, contextual against the store, mirroring
+    /// the transparent key-image check. v1 (native) shielded txs go through
+    /// `consensus::shielded::check_block_shielded_double_spends` (wired at the
+    /// extend connect path and BOTH reorg connect paths in `add_block`); v2
+    /// (libspark) Spark txs through `verify_block_spark_v2` (`T ∉ spent-set` via
+    /// the batched `verify_solvency`, plus an intra-block duplicate-linking-tag
+    /// guard), wired at the same three connect sites and at mempool admission.
+    /// So reaching a double-spend HERE at apply can only mean validation admitted
+    /// an invalid block — we HALT (panic) to preserve on-disk state, a backstop
+    /// consistent with the supply-accumulator corruption arms in `add_block`.
     fn apply_shielded_txs(&self, transactions: &[Transaction], height: u64) {
         let store = match self.shielded_store {
             Some(ref s) => s,
