@@ -1,7 +1,7 @@
 # CoinCync: Disclaimer, Limitations, and Prohibited Uses
 
-**Last Updated:** 2026-05-18
-**Version:** 1.1
+**Last Updated:** 2026-11-11
+**Version:** 1.2
 
 **Privacy money that requires no permission.** The promise is intentional. The limitations below are also intentional. They are not bugs to fix — they are properties to preserve. See [docs/explicitly-not-doing.md](explicitly-not-doing.md) for the canonical "we will not add this" list.
 
@@ -10,6 +10,8 @@
 ## 1. Nature of the Software
 
 CoinCync is experimental, open-source cryptocurrency software provided "AS IS" without warranty of any kind. CoinCync is a decentralized protocol -- there is no company, corporation, or legal entity that operates, controls, or is responsible for the network.
+
+**EXPERIMENTAL SOFTWARE & ASSUMPTION OF RISK.** YOU EXPRESSLY ACKNOWLEDGE AND AGREE THAT THE SOFTWARE IS EXPERIMENTAL, UNDER ACTIVE DEVELOPMENT, AND MAY CONTAIN BUGS, ERRORS, OR VULNERABILITIES. YOUR USE OF THE SOFTWARE IS AT YOUR SOLE AND EXCLUSIVE RISK. YOU VOLUNTARILY ASSUME ALL RISKS ASSOCIATED WITH USING THE SOFTWARE, INCLUDING BUT NOT LIMITED TO THE RISK OF HARDWARE FAILURE, SOFTWARE MALFUNCTION, DATA LOSS, OR LOSS OF DIGITAL ASSETS. THE SOFTWARE IS TESTNET-STAGE; TESTNET UNITS HAVE NO MONETARY VALUE.
 
 ---
 
@@ -49,7 +51,7 @@ CoinCync contributors do NOT provide:
 - Investment advice
 - Financial planning
 - Regulatory compliance consulting
-- Security audits or guarantees
+- Security assessments or guarantees
 
 ---
 
@@ -57,7 +59,7 @@ CoinCync contributors do NOT provide:
 
 ### 3.1 No Warranty
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+THE SOFTWARE AND ANY RELATED SERVICES ARE PROVIDED ON AN "AS IS" AND "AS AVAILABLE" BASIS, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS, DEVELOPERS, CONTRIBUTORS, OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### 3.2 No Liability for Losses
 
@@ -81,6 +83,10 @@ No contributor, developer, or maintainer of CoinCync owes any fiduciary duty to 
 ### 3.4 Indemnification
 
 Users agree to indemnify and hold harmless all CoinCync contributors from any claims, damages, or expenses arising from their use of the software.
+
+### 3.5 Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE DEVELOPERS, CONTRIBUTORS, OR AFFILIATED PERSONS BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE, DATA, OR DIGITAL ASSETS, INCURRED BY YOU OR ANY THIRD PARTY, WHETHER IN AN ACTION IN CONTRACT OR TORT, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. WHERE LIABILITY CANNOT BE WHOLLY EXCLUDED, IT SHALL BE LIMITED TO THE MINIMUM AMOUNT PERMITTED BY APPLICABLE LAW.
 
 ---
 
@@ -163,7 +169,7 @@ CoinCync has NOT been:
 - Approved by any financial regulator
 - Licensed as a money transmitter
 - Certified by any government agency
-- Audited by any regulatory body
+- Certified by any regulatory body
 
 ### 6.2 Regulatory Uncertainty
 

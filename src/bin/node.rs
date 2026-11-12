@@ -189,6 +189,12 @@ struct Cli {
     #[arg(long, short = 'v')]
     verbose: bool,
 
+    /// Accept the experimental-software risk disclaimer non-interactively
+    /// (for headless / automated runs; equivalent to COINCYNC_ACCEPT_RISK=1).
+    /// Full terms: docs/DISCLAIMER.md.
+    #[arg(long = "accept-risk")]
+    accept_risk: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -304,6 +310,57 @@ enum Command {
 // register_blocking_method so they run on the blocking thread pool,
 // not on tokio workers. Larger sweep of all 41 handlers is queued
 // for v1.0.11 — for now we covered the highest-traffic three.
+/// Print the experimental-software / AS-IS risk notice before the node starts,
+/// and obtain the operator's acknowledgement. SAFE MODE: the notice is always
+/// shown. On an interactive terminal it asks for `[y/N]` confirmation (unless
+/// `--accept-risk` or `COINCYNC_ACCEPT_RISK=1` is set); when there is no TTY
+/// (e.g. a systemd service), it logs the notice and continues so automated
+/// deployments are never blocked. Full terms: `docs/DISCLAIMER.md`.
+fn acknowledge_risk(accept_flag: bool) {
+    use std::io::{BufRead, IsTerminal, Write};
+    const NOTICE: &str = "\
+================================================================================
+                               NOTICE & DISCLAIMER
+================================================================================
+CoinCync is EXPERIMENTAL software provided \"AS IS\" and \"AS AVAILABLE\", WITHOUT
+WARRANTY OF ANY KIND. It is testnet-stage; testnet units have NO monetary value.
+Running this node carries inherent risk of bugs, network instability, sync
+failure, data loss, or loss of digital assets. By proceeding you ASSUME ALL RISK,
+and the developers and contributors are NOT LIABLE for any damages. Full terms:
+docs/DISCLAIMER.md
+================================================================================";
+    eprintln!("{NOTICE}");
+
+    let preaccepted = accept_flag
+        || std::env::var("COINCYNC_ACCEPT_RISK")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+            .unwrap_or(false);
+    if preaccepted {
+        eprintln!("Risk acknowledged via --accept-risk / COINCYNC_ACCEPT_RISK. Proceeding.\n");
+        return;
+    }
+
+    if std::io::stdin().is_terminal() {
+        eprint!("Do you accept these terms? [y/N]: ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        let n = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
+        let ans = line.trim();
+        if n == 0 || !(ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes")) {
+            eprintln!(
+                "Terms not accepted. Exiting. (Re-run with --accept-risk to accept non-interactively.)"
+            );
+            std::process::exit(0);
+        }
+        eprintln!("Terms accepted. Proceeding.\n");
+    } else {
+        eprintln!(
+            "Headless start (no terminal): notice logged, continuing. Set --accept-risk or \
+             COINCYNC_ACCEPT_RISK=1 to acknowledge explicitly.\n"
+        );
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
     let cli = Cli::parse();
@@ -674,6 +731,7 @@ async fn main() {
             // `chain` (and its Arc<Database>) dropped here → sled flush + unlock.
         }
         Command::Start => {
+            acknowledge_risk(cli.accept_risk);
             if let Err(e) = start_node(
                 network,
                 data_dir,
