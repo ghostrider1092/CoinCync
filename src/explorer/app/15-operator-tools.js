@@ -120,6 +120,7 @@ let hrHistChart = null;
 function renderHrHistChart() {
   const el = $('hr-history-canvas');
   if (!el || _hrHistory.length < 1) return;
+  if (typeof Chart === 'undefined') return; // chart lib optional — never let it abort the poll loop
   const isDark = document.documentElement.classList.contains('dark');
   const tc = isDark ? 'rgba(242,240,236,0.5)' : 'rgba(74,72,68,0.5)';
   if (hrHistChart) hrHistChart.destroy();

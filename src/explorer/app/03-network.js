@@ -388,6 +388,7 @@ function ensureV108Polling() {
 // ── DIFFICULTY CHART ──────────────────────────────────────────
 function renderDiffChart(){
   const el=$('home-diff-chart');if(!el)return;
+  if(typeof Chart==='undefined')return;
   const sorted=[...blockList].sort((a,b)=>a.height-b.height).slice(-50);
   if(sorted.length<2)return;
   const labels=sorted.map(b=>'#'+b.height);
@@ -423,6 +424,7 @@ function renderMiningChart(){
 let homeBtChart=null;
 function renderHomeBtChart(){
   const el=$('home-bt-chart');if(!el)return;
+  if(typeof Chart==='undefined')return;
   const sorted=[...blockList].sort((a,b)=>a.height-b.height).slice(-50);
   if(sorted.length<3)return;
   const labels=[];const data=[];
@@ -445,6 +447,7 @@ function renderHomeBtChart(){
 let homeSizeChart=null;
 function renderHomeSizeChart(){
   const el=$('home-size-chart');if(!el)return;
+  if(typeof Chart==='undefined')return;
   const sorted=[...blockList].sort((a,b)=>a.height-b.height).slice(-50);
   if(sorted.length<2)return;
   const labels=sorted.map(b=>'#'+b.height);
