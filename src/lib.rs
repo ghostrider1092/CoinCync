@@ -198,7 +198,10 @@ pub mod supply_live_breaker;
 pub mod shielded_live_breaker;
 
 // ── Re-exports ──────────────────────────────────────────────
-pub use config::{Network, NodeConfig};
+// NB: `config::NodeConfig` (the DEAD config-file tree, see config.rs) is
+// deliberately NOT re-exported here — at the crate root it collided with the
+// live `network::node::NodeConfig`. Reach the live type via its own path.
+pub use config::Network;
 pub use error::{Error, Result};
 
 /// Crate version string, used in P2P `user_agent` and diagnostics.
