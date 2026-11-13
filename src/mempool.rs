@@ -86,13 +86,23 @@ impl ShadowEvictChain for crate::chain::Blockchain {
 /// (testnet/regtest), so this reduces to `is_reorg` today; the age check is a
 /// forward-safe guard for any network that sets a finite mid-chain fork height.
 /// A FUTURE fork that gates mempool-tx validity MUST be added here.
+///
+/// 3. a block that **carries a shielded tx while one is pending**. A pending
+///    shielded tx stops being minable when its linking tag gets spent, when its
+///    mint coins land in the pool, or when the pool value moves under it, and
+///    only a shielded tx in a block does any of that. A block without one leaves
+///    the pool untouched, so the sweep (a full libspark verify per pending
+///    shielded tx, under the mempool write lock) is skipped for it.
 pub fn needs_full_revalidation_after_block(
     is_reorg: bool,
     net: crate::config::NetworkType,
     new_height: u64,
+    block_has_shielded: bool,
+    mempool_has_shielded: bool,
 ) -> bool {
     is_reorg
         || net.min_output_age(new_height) != net.min_output_age(new_height.saturating_sub(1))
+        || (block_has_shielded && mempool_has_shielded)
 }
 
 #[cfg(test)]
@@ -105,7 +115,7 @@ mod revalidation_gate_tests {
         // A reorg ALWAYS needs the full sweep (UTXO set changes under txs).
         for net in [NetworkType::Testnet, NetworkType::Regtest, NetworkType::Mainnet] {
             assert!(
-                needs_full_revalidation_after_block(true, net, 1_000),
+                needs_full_revalidation_after_block(true, net, 1_000, false, false),
                 "reorg must force a full mempool revalidation"
             );
         }
@@ -115,7 +125,7 @@ mod revalidation_gate_tests {
         let net = NetworkType::Testnet;
         for h in [1u64, 100, 10_000, 1_000_000] {
             assert!(
-                !needs_full_revalidation_after_block(false, net, h),
+                !needs_full_revalidation_after_block(false, net, h, false, false),
                 "normal tip extension at height {h} must skip the O(mempool) sweep"
             );
         }
@@ -123,9 +133,21 @@ mod revalidation_gate_tests {
         // h-1 and h: a network with a finite mid-chain output-age fork flips this
         // true at the crossing height even without a reorg.
         assert_eq!(
-            needs_full_revalidation_after_block(false, net, 5),
+            needs_full_revalidation_after_block(false, net, 5, false, false),
             net.min_output_age(5) != net.min_output_age(4),
         );
+    }
+
+    #[test]
+    fn needs_full_revalidation_only_for_shielded_blocks_while_shielded_pending() {
+        let net = NetworkType::Testnet;
+        // A shielded tx in the block while one is pending: sweep.
+        assert!(needs_full_revalidation_after_block(false, net, 100, true, true));
+        // A block without a shielded tx cannot change the pool, so a pending
+        // shielded tx stays minable: no sweep.
+        assert!(!needs_full_revalidation_after_block(false, net, 100, false, true));
+        // Nothing shielded pending: the block's shielded txs are irrelevant.
+        assert!(!needs_full_revalidation_after_block(false, net, 100, true, false));
     }
 }
 
@@ -1201,8 +1223,9 @@ impl Mempool {
     /// change under a NEW BLOCK without a key-image collision (its tag gets spent,
     /// or its mint's coins land in the pool, e.g. after Dandelion fluff re-adds a
     /// confirmed tx), which `remove_confirmed` + the `#149` reorg fast-path do NOT
-    /// catch — so the full `shadow_evict_invalid` sweep must run every block while
-    /// one is pending. Always false in the default (non-shielded) build.
+    /// catch, so the full `shadow_evict_invalid` sweep must run on every block
+    /// that carries a shielded tx while one is pending (only a shielded tx can
+    /// change the pool). Always false in the default (non-shielded) build.
     pub fn has_shielded(&self) -> bool {
         self.transactions.values().any(|e| e.tx.is_shielded())
     }
