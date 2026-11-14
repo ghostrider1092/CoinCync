@@ -150,6 +150,18 @@ pub const SHIELDED_TREE_DEPTH: u8 = 32;
 /// retention and the parallel side-table checkpoint stack.
 const MAX_CHECKPOINTS: usize = 1000;
 
+// Phase-2 reorg-durability invariant: the checkpoint stack must be at least as
+// deep as the deepest legal reorg on ANY network. On restart the stack is
+// reconstructed by `rebuild_phase2_stores` (replay the committed chain,
+// re-checkpointing every height), so it holds the last MAX_CHECKPOINTS
+// checkpoints exactly like a continuously-running node — which covers a
+// legal-depth reorg ONLY while MAX_CHECKPOINTS >= max_reorg_depth. The test
+// `checkpoint_stack_covers_max_reorg_depth` binds the two so neither can drift
+// in isolation (a `Stranded` rewind leaves the shielded pool inconsistent —
+// CYNC-STOR-001). A test, not a static assertion, so the deepest-network cap is
+// read from the live `finality::max_reorg_depth_for` without touching the
+// consensus-locked finality.rs.
+
 /// 32-byte hash wrapper used as both leaf and node in the shielded
 /// commitment tree. `combine` uses BLAKE3 with a level domain tag so
 /// that inner nodes at different tree levels hash into disjoint
@@ -870,6 +882,33 @@ impl Default for ShieldedStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase-2 reorg-durability invariant (CYNC-STOR-001): the checkpoint stack
+    /// must be at least as deep as the deepest legal reorg on ANY network, or a
+    /// legal-depth reorg after a restart-rebuild could strand shielded state
+    /// above the new tip. Reads the live `max_reorg_depth_for` so a change to the
+    /// consensus cap that outgrows MAX_CHECKPOINTS is caught here, without
+    /// coupling into the consensus-locked finality.rs.
+    #[test]
+    fn checkpoint_stack_covers_max_reorg_depth() {
+        use crate::config::NetworkType;
+        let deepest = [
+            NetworkType::Testnet,
+            NetworkType::Regtest,
+            NetworkType::Beta,
+            NetworkType::Mainnet,
+        ]
+        .into_iter()
+        .map(crate::consensus::finality::max_reorg_depth_for)
+        .max()
+        .unwrap();
+        assert!(
+            MAX_CHECKPOINTS as u64 >= deepest,
+            "shielded MAX_CHECKPOINTS={} < deepest max_reorg_depth={}",
+            MAX_CHECKPOINTS,
+            deepest,
+        );
+    }
 
     fn entry(commitment: [u8; 32], height: u64) -> NoteCommitmentEntry {
         NoteCommitmentEntry {

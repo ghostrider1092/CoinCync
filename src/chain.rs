@@ -1582,21 +1582,30 @@ impl Blockchain {
         // `rewind()` returns false ONLY when the in-memory checkpoint stack is
         // empty (see the store impls). That has two very different meanings we
         // must NOT conflate:
-        //   * the store is EMPTY (no Phase-2 data) — nothing to roll back. This
-        //     is the normal case today: shielded/spark/MW are dormant, so every
-        //     reorg used to spam a scary "state may be inconsistent" warning
-        //     (once per store per disconnected block) for a completely benign
-        //     no-op. Demote to debug.
-        //   * the store is NON-EMPTY but the checkpoint stack is gone (e.g. a
-        //     reorg reaching past a node restart — the stack is in-memory and
-        //     not yet restart-durable). Then a disconnected block's Phase-2
-        //     state is stranded above the new tip: a genuine inconsistency.
-        //     Make it a loud, unmistakable error that names the blocker.
+        //   * the store is EMPTY (no Phase-2 data) — nothing to roll back. The
+        //     normal case for any block with no shielded activity (and for every
+        //     block before the shielded activation height). A benign no-op,
+        //     demoted to debug, not a warning.
+        //   * the store is NON-EMPTY but has no checkpoint for the reorg's fork
+        //     height. The in-memory stack is REBUILT on restart by
+        //     `rebuild_phase2_stores` (it clears the stores and replays the
+        //     committed chain, re-checkpointing every height), so after a restart
+        //     it holds the last MAX_CHECKPOINTS checkpoints exactly like a
+        //     continuously-running node. A `Stranded` outcome therefore means the
+        //     reorg ran DEEPER than MAX_CHECKPOINTS — which cannot happen for a
+        //     legal reorg, because `MAX_CHECKPOINTS >= max_reorg_depth` is bound
+        //     by the `checkpoint_stack_covers_max_reorg_depth` tests in
+        //     storage::shielded / storage::spark_pool (each reads the live
+        //     `finality::max_reorg_depth_for` across every network). Kept as a
+        //     loud, unmistakable error (CYNC-STOR-001) if that invariant ever
+        //     breaks.
         //
-        // The full fix (restart-durable rewind checkpoints for the three
-        // Phase-2 stores) is a prerequisite for activating shielded/spark/MW —
-        // tracked as the phase-2-reorg-rewind mainnet blocker. Until then the
-        // stores stay dormant and this only ever hits the benign branch.
+        // NOTE: shielded/spark IS live on testnet (activation h29000), so these
+        // stores are NOT dormant. Reorg durability across a restart is provided by
+        // `rebuild_phase2_stores` (rebuild-on-restart), NOT by persisting the
+        // rewind checkpoints — persisting them instead remains a possible future
+        // optimization. The `Stranded` branch is held off by the depth invariant
+        // above, not by dormancy.
         use crate::storage::RewindOutcome;
         let stores = self.phase2_stores();
         for (name, outcome) in crate::storage::phase2::rewind_all(&stores) {
