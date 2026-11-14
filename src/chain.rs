@@ -833,6 +833,16 @@ impl Blockchain {
         // and offsets its ops by the running tree count.
         #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
         if let Some(s) = &self.spark_pool_store {
+            // Self-check: an initialized store always has `begin_staging` called
+            // before this block's apply, so staging must be active at drain. If a
+            // future block-apply path skips it, `apply_pool_write` would have
+            // written to disk immediately (re-opening the non-atomic window #384/
+            // #386 closed) and `staging_trees()` would be None — fail loudly in
+            // debug/test rather than silently drain nothing.
+            debug_assert!(
+                s.staging_trees().is_some(),
+                "spark_pool_store: block commit reached drain without begin_staging"
+            );
             if let Some(t) = s.staging_trees() {
                 let base = trees.len();
                 trees.extend_from_slice(&t);
@@ -846,6 +856,14 @@ impl Blockchain {
             }
         }
         if let Some(s) = &self.shielded_store {
+            // F3 self-check (mirrors the spark_pool branch above): an initialized
+            // store always has begin_staging called before this block's apply, so
+            // staging must be active at drain — else a block-apply path skipped it
+            // and apply_shielded_write direct-wrote outside the atomic batch.
+            debug_assert!(
+                s.staging_trees().is_some(),
+                "shielded_store: block commit reached drain without begin_staging"
+            );
             if let Some(t) = s.staging_trees() {
                 let base = trees.len();
                 trees.extend_from_slice(&t);
@@ -857,6 +875,14 @@ impl Blockchain {
             }
         }
         if let Some(s) = &self.spark_store {
+            // F3 self-check (mirrors the spark_pool branch above): staging must be
+            // active at drain for an initialized store, else a block-apply path
+            // skipped begin_staging and apply_spark_write direct-wrote outside the
+            // atomic batch.
+            debug_assert!(
+                s.staging_trees().is_some(),
+                "spark_store: block commit reached drain without begin_staging"
+            );
             if let Some(t) = s.staging_trees() {
                 let base = trees.len();
                 trees.extend_from_slice(&t);
@@ -868,6 +894,14 @@ impl Blockchain {
             }
         }
         if let Some(s) = &self.kernel_store {
+            // F3 self-check (mirrors the spark_pool branch above): staging must be
+            // active at drain for an initialized store, else a block-apply path
+            // skipped begin_staging and apply_kernel_write direct-wrote outside the
+            // atomic batch.
+            debug_assert!(
+                s.staging_trees().is_some(),
+                "kernel_store: block commit reached drain without begin_staging"
+            );
             if let Some(t) = s.staging_trees() {
                 let base = trees.len();
                 trees.extend_from_slice(&t);
