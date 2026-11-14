@@ -447,7 +447,11 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         // can't monopolize a tokio worker (matches the other DB-scan handlers).
         const MAX_CHECKPOINTS: u64 = 512;
         let min_stride = chain_height.div_ceil(MAX_CHECKPOINTS).max(1);
-        let stride = requested.max(min_stride).min(50_000);
+        // PN3: clamp so the min_stride FLOOR always wins. The old
+        // `.max(min_stride).min(50_000)` let the 50k ceiling pull the stride back
+        // BELOW min_stride once chain_height > 25.6M, yielding >MAX_CHECKPOINTS
+        // entries and breaking the bound this guard documents.
+        let stride = requested.clamp(min_stride, min_stride.max(50_000));
         let checkpoints = tokio::task::block_in_place(|| {
             let mut checkpoints = Vec::new();
             let mut h = stride;

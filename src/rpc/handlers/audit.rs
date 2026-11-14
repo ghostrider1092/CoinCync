@@ -562,7 +562,12 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // at the transport layer by the RPC server's Bearer auth (set a token to
     // fail closed to maintainers), matching the Colony live-security tier.
     module
-        .register_method("get_pool_security", |_params, state, _ext| {
+        // PN2: register_blocking_method (not register_method) — this handler runs a
+        // full live security sweep (security_sweep + utxo/supply security +
+        // phase2_root_integrity, O(sum of contents)) and takes parking_lot locks,
+        // which would block a tokio worker for its whole duration. Every sibling
+        // audit scan already uses register_blocking_method for the same reason.
+        .register_blocking_method("get_pool_security", |_params, state, _ext| {
             let log = &state.chain.security_log;
             let incident_json = |i: &crate::security::Incident| {
                 json!({
