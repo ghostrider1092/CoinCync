@@ -516,9 +516,24 @@ pub fn recover_interrupted_install(chaindata_dir: &Path) -> Result<bool> {
                 backup.display()
             );
         }
-        _ => {
-            // No backup (fresh install interrupted). Whatever is in chaindata_dir
-            // is an untrusted half-copy — remove it so the node starts clean.
+        Some(backup) => {
+            // The marker recorded a backup path, but it does NOT exist: the
+            // destructive rename (chaindata -> backup) never completed, so
+            // `chaindata_dir` still holds the ORIGINAL, intact DB. Do NOT remove
+            // it. This case was previously folded into the catch-all below, which
+            // wiped the live chain — the exact data-loss this recovery path exists
+            // to prevent (the "moved aside, never deleted" guarantee). Leave the
+            // original in place; the marker is cleared below.
+            tracing::warn!(
+                "Recovered interrupted snapshot install: planned backup {} was never \
+                 created (install crashed before the rename); original chaindata left intact",
+                backup.display()
+            );
+        }
+        None => {
+            // No backup recorded — a genuine fresh install was interrupted, so
+            // whatever is in chaindata_dir is an untrusted half-copy. Remove it
+            // so the node starts clean.
             if chaindata_dir.exists() {
                 std::fs::remove_dir_all(chaindata_dir)
                     .map_err(|e| io_err("recovery: remove half-installed snapshot", e))?;
@@ -615,6 +630,35 @@ mod snapshot_hardening_tests {
         std::fs::write(chaindata.join("REAL"), b"live").unwrap();
         assert!(!recover_interrupted_install(&chaindata).unwrap());
         assert!(chaindata.join("REAL").exists(), "live data untouched");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn recover_does_not_wipe_original_when_backup_rename_never_ran() {
+        // SPN1 regression: import writes the marker (backup=Some(path)) BEFORE the
+        // destructive rename, so a crash in that window leaves the marker pointing
+        // at a backup that was never created while chaindata still holds the
+        // ORIGINAL intact DB. Recovery must PRESERVE it — the pre-fix catch-all arm
+        // deleted it (high-severity data loss).
+        let tmp = scratch("recover-no-rename");
+        let chaindata = tmp.join("chaindata");
+        let backup = tmp.join("chaindata.pre-snapshot-42"); // never created
+
+        std::fs::create_dir_all(&chaindata).unwrap();
+        std::fs::write(chaindata.join("REAL"), b"operators-real-chaindata").unwrap();
+        write_install_marker(&marker_path_for(&chaindata), Some(&backup)).unwrap();
+        assert!(!backup.exists(), "precondition: the backup was never created");
+
+        let recovered = recover_interrupted_install(&chaindata).unwrap();
+        assert!(recovered, "must report a recovery happened");
+        assert!(
+            chaindata.join("REAL").exists(),
+            "original chaindata MUST be preserved (the pre-SPN1-fix code wiped it)"
+        );
+        assert!(
+            !marker_path_for(&chaindata).exists(),
+            "marker cleared after recovery"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
