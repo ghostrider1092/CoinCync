@@ -1,0 +1,67 @@
+# .cirrus.yml — macOS release build for CoinCync.
+#
+# Cirrus CI runs on real Apple hardware via its own infrastructure, independent
+# of GitHub Actions (which is runner-blocked for this org — every queued run
+# stalls indefinitely). This reproduces the proven macOS build that shipped the
+# v1.0.x mac binaries, i.e. the `build-macos-arm` job in
+# .github/workflows/release.yml, including its tarball layout.
+#
+# One-time setup:
+#   1. Install the Cirrus CI GitHub app on ghostrider1092/CoinCync:
+#        https://github.com/marketplace/cirrus-ci   (grant this repo)
+#   2. Ensure the repo has compute (free tier for public repos, or macOS
+#        compute credits): https://cirrus-ci.org/pricing/
+#   3. Commit + push this file.
+#
+# To build the current release: trigger a Cirrus build on the tag v1.1.3-testnet
+# from the web UI. Future *-testnet tag pushes build automatically.
+
+env:
+  RELEASE_TAG: v1.1.3-testnet
+  EXPECTED_FPR: fc428e8673379f07cc213b9a7aceb4c05d5433387113a02b818ba3e0ab3664ca
+
+macos_release_task:
+  only_if: $CIRRUS_TAG =~ '.*-testnet'
+  macos_instance:
+    image: ghcr.io/cirruslabs/macos-sonoma-xcode:latest   # Apple Silicon -> arm64
+  info_script:
+    - uname -m                 # expect: arm64
+    - xcrun --show-sdk-path    # the macOS SDK (CoreServices etc.) is present here
+  deps_script:
+    # Matches release.yml build-macos-arm: cmake + openssl@3 (the SDK provides
+    # libclang/headers, so no SPARK_OPENSSL_DIR/LIBCLANG_PATH is needed on macOS).
+    - brew install cmake openssl@3
+    - command -v cargo >/dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  build_script:
+    - source "$HOME/.cargo/env" 2>/dev/null || true
+    - git checkout "${CIRRUS_TAG:-$RELEASE_TAG}"
+    - cargo build --release --locked --features "randomx testnet" --bin coincync-node --bin coincync-wallet
+    # NOTE: release.yml builds rig WITHOUT --features testnet; we pass it so the
+    # miner carries testnet (not mainnet) consensus constants, matching the
+    # Linux/Windows release binaries. Drop it if you want byte-parity with the
+    # old mac job instead.
+    - cargo build --release --locked -p coincync-rig --features testnet
+    - cargo build --release --locked -p coincync-swap --bin cyncswap
+  verify_script:
+    - source "$HOME/.cargo/env" 2>/dev/null || true
+    - ./target/release/coincync-node --version | tee version.txt
+    - grep -qi "$EXPECTED_FPR" version.txt   # fail the build on a wrong fingerprint
+  package_script:
+    # Same layout as release.yml build-macos-arm.
+    - mkdir pkg
+    - cp target/release/coincync-node target/release/coincync-rig target/release/coincync-wallet target/release/cyncswap pkg/
+    - cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
+    - cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
+    - chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
+    - cd pkg && shasum -a 256 * > SHA256SUMS.txt && cd ..
+    - tar czf coincync-macos-arm64.tar.gz -C pkg .
+  binaries_artifacts:
+    path: coincync-macos-arm64.tar.gz
+
+  # OPTIONAL — push straight to the GitHub release (needs a repo-scoped GitHub PAT
+  # encrypted in the Cirrus UI, pasted as ENCRYPTED[...]):
+  #   env:
+  #     GH_TOKEN: ENCRYPTED[...]
+  #   release_upload_script:
+  #     - brew install gh
+  #     - gh release upload "${CIRRUS_TAG:-$RELEASE_TAG}" coincync-macos-arm64.tar.gz --repo ghostrider1092/CoinCync --clobber
