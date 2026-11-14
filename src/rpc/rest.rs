@@ -53,10 +53,10 @@ const MAX_EMISSION_POINTS: u64 = 1000;
 const MAX_WS_CONNECTIONS: usize = 128;
 
 /// Per-IP cap on concurrent websocket clients. Stops a single IP
-/// (or a single trusted-proxy-forwarded IP) from monopolising the
-/// 128 global slots. When proxy headers aren't trusted, every caller
-/// shares the "unknown" bucket and this collapses to a global cap —
-/// fine, the global cap above already handles that case.
+/// (the TCP peer, or a trusted-proxy-forwarded IP) from monopolising
+/// the 128 global slots. Only when the router is driven without connect
+/// info (unit tests) do callers share the "unknown" bucket and this
+/// collapses to a global cap — fine, the global cap above handles that.
 const MAX_WS_PER_IP: u32 = 5;
 
 /// Global websocket connection counter for this process.
@@ -91,15 +91,19 @@ fn ws_per_ip_decrement(ip: &str) {
     }
 }
 
-/// Dependency-free fixed-window guards for high-risk endpoints. The per-IP
-/// window is the real limit; the global window on the two heavy endpoints is a
-/// process-wide backstop at ten times it, so one client at full rate cannot
-/// starve everyone else.
+/// Dependency-free fixed-window guards for high-risk endpoints. For every
+/// limited endpoint the per-IP window is the real limit, and a process-wide
+/// global window sits behind it at ten times the per-IP rate as a backstop, so
+/// one client at full rate cannot starve everyone else while the process is
+/// still protected against an aggregate flood across many IPs.
 const RPC_PROXY_MAX_REQ_PER_SEC: u32 = 60;
 const RPC_PROXY_GLOBAL_MAX_REQ_PER_SEC: u32 = 10 * RPC_PROXY_MAX_REQ_PER_SEC;
 const STATS_MAX_REQ_PER_SEC: u32 = 20;
+const STATS_GLOBAL_MAX_REQ_PER_SEC: u32 = 10 * STATS_MAX_REQ_PER_SEC;
 const EMISSION_MAX_REQ_PER_SEC: u32 = 20;
+const EMISSION_GLOBAL_MAX_REQ_PER_SEC: u32 = 10 * EMISSION_MAX_REQ_PER_SEC;
 const RECENT_MAX_REQ_PER_SEC: u32 = 20;
+const RECENT_GLOBAL_MAX_REQ_PER_SEC: u32 = 10 * RECENT_MAX_REQ_PER_SEC;
 
 static RPC_PROXY_WINDOW_SEC: AtomicU64 = AtomicU64::new(0);
 static RPC_PROXY_WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -841,7 +845,7 @@ async fn get_recent_blocks(
     enforce_fixed_window_limit(
         &RECENT_WINDOW_SEC,
         &RECENT_WINDOW_COUNT,
-        RECENT_MAX_REQ_PER_SEC,
+        RECENT_GLOBAL_MAX_REQ_PER_SEC,
     )?;
     enforce_ip_fixed_window_limit(&RECENT_IP_WINDOW, &client_ip, RECENT_MAX_REQ_PER_SEC)?;
 
@@ -1162,7 +1166,7 @@ async fn get_chain_stats(
     enforce_fixed_window_limit(
         &STATS_WINDOW_SEC,
         &STATS_WINDOW_COUNT,
-        STATS_MAX_REQ_PER_SEC,
+        STATS_GLOBAL_MAX_REQ_PER_SEC,
     )?;
     enforce_ip_fixed_window_limit(&STATS_IP_WINDOW, &client_ip, STATS_MAX_REQ_PER_SEC)?;
 
@@ -1282,7 +1286,7 @@ async fn get_emission(
     enforce_fixed_window_limit(
         &EMISSION_WINDOW_SEC,
         &EMISSION_WINDOW_COUNT,
-        EMISSION_MAX_REQ_PER_SEC,
+        EMISSION_GLOBAL_MAX_REQ_PER_SEC,
     )?;
     enforce_ip_fixed_window_limit(&EMISSION_IP_WINDOW, &client_ip, EMISSION_MAX_REQ_PER_SEC)?;
 
