@@ -189,7 +189,11 @@ pub fn search_nonce(
         let end = if tid + 1 == n {
             u64::MAX
         } else {
-            ((tid + 1) as u64).saturating_mul(slice)
+            // Offset by nonce_base to match `start`, so consecutive threads tile
+            // [tid*slice + base, (tid+1)*slice + base) with no gap between them.
+            // Without this the §3 no-gap invariant broke whenever nonce_base != 0
+            // (and the caller advances nonce_base by 1_000_000 every round).
+            ((tid + 1) as u64).saturating_mul(slice).wrapping_add(nonce_base)
         };
         let stop = stop.clone();
         let tx = tx.clone();
