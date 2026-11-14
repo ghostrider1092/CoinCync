@@ -1574,10 +1574,27 @@ async fn handle_stratum_message(
             {
                 (NonceClaim::Accepted, Some(j)) => j,
                 (NonceClaim::Duplicate, _) => {
-                    let mut wr = workers.write().await;
-                    if let Some(w) = wr.get_mut(&worker_id) {
-                        w.invalid_shares += 1;
-                        w.invalid_breaker.record_failure();
+                    // Enforce the breaker (not just record) on the native path, as the
+                    // legacy path does — a flood of replayed nonces must deauthorize
+                    // and strike the worker, not merely tick a counter.
+                    let mut deauthorized = false;
+                    {
+                        let mut wr = workers.write().await;
+                        if let Some(w) = wr.get_mut(&worker_id) {
+                            w.invalid_shares += 1;
+                            w.invalid_breaker.record_failure();
+                            if w.invalid_breaker.is_open() {
+                                w.authorized = false;
+                                deauthorized = true;
+                                warn!(
+                                    "Worker {} hit invalid-share threshold; deauthorizing",
+                                    worker_id
+                                );
+                            }
+                        }
+                    }
+                    if deauthorized {
+                        register_stratum_strike(bans, banlist_path, client_ip, 3).await;
                     }
                     return Some(
                         serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",
@@ -1617,9 +1634,28 @@ async fn handle_stratum_message(
             // hashes behind that target.
             let effective = effective_share_difficulty(difficulty, &job.target);
             if !pow.meets_difficulty(&Hash::from_difficulty(effective)) {
-                let mut wr = workers.write().await;
-                if let Some(w) = wr.get_mut(&worker_id) {
-                    w.invalid_shares += 1;
+                // Native path: feed AND enforce the invalid-share breaker, mirroring
+                // the legacy submit path. Without the enforcement an authorized worker
+                // could stream junk low-difficulty shares — each costing a full RandomX
+                // verify above — and never be struck or deauthorized.
+                let mut deauthorized = false;
+                {
+                    let mut wr = workers.write().await;
+                    if let Some(w) = wr.get_mut(&worker_id) {
+                        w.invalid_shares += 1;
+                        w.invalid_breaker.record_failure();
+                        if w.invalid_breaker.is_open() {
+                            w.authorized = false;
+                            deauthorized = true;
+                            warn!(
+                                "Worker {} hit invalid-share threshold; deauthorizing",
+                                worker_id
+                            );
+                        }
+                    }
+                }
+                if deauthorized {
+                    register_stratum_strike(bans, banlist_path, client_ip, 3).await;
                 }
                 return Some(
                     serde_json::json!({"id": id.clone(), "jsonrpc": "2.0",

@@ -157,9 +157,10 @@ impl ColonyGuards {
         if !self.kill.is_armed() {
             return self.denied(action, "kill_switch");
         }
-        // Rate limit is checked before the diversity floor so a denied-by-floor
-        // action doesn't also burn a token (avoids double-penalizing a caste
+        // The diversity floor is checked before the rate limit so a denied-by-floor
+        // action doesn't also burn a rate token (avoids double-penalizing a caste
         // whose action the floor rejects for reasons outside its control).
+        // Order: kill switch -> diversity floor -> rate limit.
         if !self.floor.permits(census, action) {
             return self.denied(action, "diversity_floor");
         }
