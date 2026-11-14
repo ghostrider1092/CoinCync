@@ -93,8 +93,11 @@ mod tests {
     fn embedded_explorer_is_non_trivial() {
         let html = explorer_html(28081);
         let total_len: usize = embedded_sources().iter().map(|source| source.len()).sum();
+        // Floor tracks the lean embedded build: #414 (Explorer lean) trimmed the
+        // embedded set to ~348 KB. This guards against a gutted/empty embed, not
+        // a size target — raise it only if the embedded set is meant to grow.
         assert!(
-            total_len > 500_000,
+            total_len > 250_000,
             "embedded explorer assets must be substantial ({total_len}B is too small)"
         );
         assert!(html.contains("<!DOCTYPE html>"));
@@ -204,11 +207,13 @@ mod tests {
     ///   an operator who wants full air-gap can comment out the
     ///   single `fetch('https://api.github.com/...')` call in
     ///   the embedded asset set.
+    /// - Lean build (#414): the GitHub recent-commits feed was removed
+    ///   outright, so the embedded explorer now references no external
+    ///   origin at all. The positive enumeration below is therefore empty.
     #[test]
     fn explorer_html_lists_external_cdns() {
         let known_external_origins: &[&str] = &[
-            // Recent commits feed (optional, degrades gracefully).
-            "https://api.github.com",
+            // api.github.com REMOVED — recent-commits feed dropped in the lean build (#414)
             // cdn.jsdelivr.net REMOVED — Chart.js, D3, Three.js vendored under /static/vendor/
             // fonts.googleapis.com REMOVED — self-hosted at /assets/fonts/ (privacy fix)
         ];
