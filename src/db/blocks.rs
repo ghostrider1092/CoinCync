@@ -193,8 +193,18 @@ impl BlockDb {
             match item {
                 Ok((key, _)) => keys_to_remove.push(key.to_vec()),
                 Err(e) => {
-                    tracing::warn!("Error scanning height index: {}", e);
-                    break;
+                    // Propagate, don't break-and-commit-partial (SPN2): a swallowed
+                    // scan error would leave the stale height->hash entries ABOVE this
+                    // point in place, and height() takes last() on this index, so the
+                    // tip would point at an orphaned block after the reorg — the exact
+                    // "old height still points to orphaned block" corruption this
+                    // function exists to prevent. Abort so the caller retries/halts
+                    // instead of believing cleanup succeeded.
+                    return Err(Error::DatabaseError(format!(
+                        "remove_heights_above: height-index scan failed at/after height {}: {}",
+                        max_valid_height + 1,
+                        e
+                    )));
                 }
             }
         }

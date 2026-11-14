@@ -622,7 +622,7 @@ impl ShieldedStore {
         // checkpoint where the BridgeTree checkpoint AND the side-
         // table push must land together, but nothing binds them into
         // a single atomic op. A panic between the `tree.checkpoint(...)`
-        // return and the `cps.push(...)` acquire+push at L308-309
+        // return and the `cps.push(...)` acquire+push below
         // (e.g. an OOM allocating the Vec growth, or another thread
         // panicking while holding a lock the current thread is about
         // to acquire) leaves the two stacks desynchronised: the tree
@@ -793,7 +793,14 @@ impl ShieldedStore {
             }
         }
 
-        tree_rewound
+        // Return true: this store rewound its side-table checkpoint and realigned
+        // entries / nullifiers / persistence to the boundary — which is exactly what
+        // the caller's "did this store rewind?" contract asks, and what the sibling
+        // SparkStore / KernelStore / SparkPoolStore return whenever they pop a
+        // checkpoint. A tree/side-table desync is surfaced by the warn! above, NOT by
+        // a false here: returning `tree_rewound` made phase2::rewind_all classify this
+        // store as `Stranded` even though it had rewound correctly (ST2).
+        true
     }
 
     /// Mark a nullifier as spent. Returns `false` if the nullifier
@@ -1587,8 +1594,11 @@ mod tests {
         // directly, then prove rewind still drives the side tables
         // (entries + nullifiers + tree_size) back to the checkpoint
         // boundary — "leaving them ahead of the tree is strictly
-        // worse" is the contract — and reports `false` (the tree could
-        // not be rolled back), which the chain path treats as a warn.
+        // worse" is the contract — and reports `true` (ST2): the return
+        // value reflects the SIDE-TABLE rewind, which succeeded. The
+        // tree desync is surfaced via the warn log, NOT a `false`
+        // return — a false here wrongly flagged this store as Stranded
+        // in phase2::rewind_all even though it rewound correctly.
         let store = ShieldedStore::new();
         // Two commitments and one nullifier applied WITHOUT taking a
         // BridgeTree checkpoint, so the tree has nothing to rewind to.
@@ -1609,8 +1619,10 @@ mod tests {
         // false (no tree checkpoint) → the desync warn branch. Side
         // tables are still aligned to the boundary.
         assert!(
-            !store.rewind(),
-            "tree could not be rewound → rewind returns false"
+            store.rewind(),
+            "ST2: the side-table checkpoint was popped and side tables realigned, so \
+             rewind() returns true even though the tree declined (the desync is logged, \
+             not signalled by a false return)"
         );
         assert_eq!(
             store.tree_size(),
