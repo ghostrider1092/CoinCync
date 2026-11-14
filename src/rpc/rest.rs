@@ -364,30 +364,44 @@ async fn rpc_proxy(
     // exactly N") that they would otherwise have to compute themselves.
     // Local node RPC keeps the full payload; only the externally-fronted
     // public proxy redacts.
-    if method == "get_info" {
-        if let Some(result) = json.get_mut("result").and_then(Value::as_object_mut) {
+    // PN1: operator-only / version-fingerprint / transport-posture fields are never
+    // user-relevant, so strip them from EVERY public-proxied result. The get_info
+    // redaction below missed that get_blockchain_info / get_vitals /
+    // get_difficulty_health (also in RPC_ALLOWED_METHODS) return the same fields
+    // unredacted — an unauth client could read the build commit, whether RPC auth
+    // is on, and the full stratum posture through those aliases.
+    const ALWAYS_REDACT: &[&str] = &[
+        "build_commit", // version fingerprinting
+        "build_dirty",
+        "build_profile",
+        "metadata_minimized",
+        "rpc_auth_enabled", // whether the node has auth at all
+        "stratum_native_tls_enabled",
+        "stratum_public_bind_ack",
+        "stratum_public_bind_requested",
+        "stratum_tls_proxy_ack",
+        "stratum_transport_hardened",
+        "process_count", // operator-only stat
+        "process_count_available",
+        "has_zombies",
+        "health_score",
+        "clock_available",
+    ];
+    if let Some(result) = json.get_mut("result").and_then(Value::as_object_mut) {
+        for redacted in ALWAYS_REDACT {
+            result.remove(*redacted);
+        }
+        // get_info additionally redacts anonymity-set / network-state correlators.
+        // These are the stated PURPOSE of get_vitals / get_difficulty_health, so
+        // they are stripped only from get_info, not globally.
+        if method == "get_info" {
             for redacted in &[
                 "available_outputs",   // anonymity-set size; correlator for ring sizes
                 "anonymity_set",       // alias of the same metric
-                "effective_ring_size", // tells analyst what ring the wallet is actually using
-                "mempool_size",        // useful for spam fingerprinting
+                "effective_ring_size", // what ring the wallet is actually using
+                "mempool_size",        // spam fingerprinting
                 "tx_pool_size",        // alias
-                "peer_count",          // network-state snapshot, not user-relevant
-                "process_count",       // operator-only stat
-                "process_count_available",
-                "build_commit", // version fingerprinting
-                "build_dirty",
-                "build_profile",
-                "metadata_minimized",
-                "rpc_auth_enabled", // tells whether the node has auth at all
-                "stratum_native_tls_enabled",
-                "stratum_public_bind_ack",
-                "stratum_public_bind_requested",
-                "stratum_tls_proxy_ack",
-                "stratum_transport_hardened",
-                "has_zombies",
-                "health_score",
-                "clock_available",
+                "peer_count",          // network-state snapshot
                 "total_difficulty",
             ] {
                 result.remove(*redacted);
