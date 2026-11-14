@@ -293,9 +293,19 @@ pub enum ChainEventType {
 /// Older blocks are evicted (LRU by height) and fall back to database lookup.
 const MAX_BLOCK_CACHE: usize = 500;
 
+/// How many blocks below the tip to retain in the in-memory block cache,
+/// canonical or not. Non-canonical blocks (forks, raced/unapplied main blocks,
+/// rollback-orphaned bodies) older than this are below the reorg horizon and can
+/// never become canonical, so they are safe to drop from the in-memory cache —
+/// the authoritative copy remains on disk in `db.blocks`.
+const BLOCK_CACHE_KEEP_DEPTH: u64 = 200;
+
 /// Internal mutable state
 struct BlockchainInner {
-    /// Block storage by hash (in-memory cache, bounded to MAX_BLOCK_CACHE)
+    /// Block storage by hash (in-memory cache). Bounded by `evict_block_cache`:
+    /// canonical blocks to MAX_BLOCK_CACHE, and non-canonical blocks (forks,
+    /// raced/unapplied main blocks, rollback-orphaned bodies) to the last
+    /// BLOCK_CACHE_KEEP_DEPTH heights. The authoritative copy lives in `db.blocks`.
     blocks: HashMap<Hash, Block>,
     /// Height to hash mapping (in-memory cache)
     height_to_hash: HashMap<u64, Hash>,
@@ -315,6 +325,21 @@ impl BlockchainInner {
     /// Evict blocks from the in-memory cache to stay within MAX_BLOCK_CACHE.
     /// Keeps the most recent blocks (by height) and always retains genesis.
     fn evict_block_cache(&mut self) {
+        // First drop non-canonical blocks below the reorg horizon. These have NO
+        // `height_to_hash` entry — fork blocks ("never get height mappings"),
+        // raced/unapplied main blocks, and bodies orphaned by `rollback_to_height`
+        // (which clears the height mapping but not the body) — so the canonical
+        // eviction below can NEVER reach them. Without this pass they accumulate
+        // without bound (every competing fork block that passes PoW), defeating
+        // the MAX_BLOCK_CACHE bound. The bodies remain on disk in `db.blocks`.
+        let tip_height = self.tip.height;
+        let canonical: std::collections::HashSet<Hash> =
+            self.height_to_hash.values().copied().collect();
+        self.blocks.retain(|hash, block| {
+            let h = block.header.height.as_u64();
+            h == 0 || canonical.contains(hash) || h + BLOCK_CACHE_KEEP_DEPTH >= tip_height
+        });
+
         if self.blocks.len() <= MAX_BLOCK_CACHE {
             return;
         }
@@ -335,7 +360,7 @@ impl BlockchainInner {
             if height == 0 {
                 continue;
             }
-            if height + 200 >= self.tip.height {
+            if height + BLOCK_CACHE_KEEP_DEPTH >= self.tip.height {
                 continue;
             }
             self.blocks.remove(&hash);
