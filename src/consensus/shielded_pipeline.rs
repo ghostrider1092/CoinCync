@@ -650,7 +650,20 @@ pub mod gk {
         let bridge = BulletproofSparkBridge;
 
         let mut v_ins = Vec::with_capacity(payload.inputs.len());
+        // Defense-in-depth (CYNC-STOR-001 family): reject duplicate nullifiers
+        // WITHIN this payload so the verify fn is self-sufficient — it does not
+        // rely on the block-level `check_block_shielded_double_spends` pre-check
+        // to catch a tx that spends the same note twice. Without this, two inputs
+        // sharing a nullifier would each pass their per-input proof check and the
+        // balance proof would double-count the input (the downstream block/apply
+        // guards reject it, but the verifier should stand on its own). Duplicates
+        // across txs/blocks remain enforced by the spent-set downstream.
+        let mut seen_nullifiers =
+            std::collections::HashSet::with_capacity(payload.inputs.len());
         for inp in &payload.inputs {
+            if !seen_nullifiers.insert(inp.nullifier) {
+                return Err(Error::DuplicateNullifier);
+            }
             let anon = StoreAnonSetResolver::new(store).resolve_bucket(inp.bucket_index)?;
             let coins = decode_set(&anon)?;
             let v3 = SparkSpendProofV3::from_bytes(&inp.spend_proof)
@@ -666,7 +679,14 @@ pub mod gk {
         }
 
         let mut v_outs = Vec::with_capacity(payload.outputs.len());
+        // Defense-in-depth: reject duplicate note commitments within the payload
+        // (apply would otherwise append two identical leaves to the accumulator).
+        let mut seen_commitments =
+            std::collections::HashSet::with_capacity(payload.outputs.len());
         for out in &payload.outputs {
+            if !seen_commitments.insert(out.note_commitment) {
+                return Err(Error::SparkVerifyFailed);
+            }
             let v_out = PeerPoint::decode_non_identity(out.value_commitment)
                 .map_err(|_| Error::SparkVerifyFailed)?
                 .into_point();
@@ -1312,5 +1332,52 @@ mod tests {
         // Builder rejects a non-conserving tx up front.
         let bad = vec![NewNote { value: 9999, serial: Scalar::random(&mut rng), coin_blinding: Scalar::random(&mut rng) }];
         assert!(build_shielded_payload(&store, &inputs, &bad, fee, 0, &mut rng).is_err());
+    }
+
+    /// Defense-in-depth: the verifier rejects a payload that spends the same note
+    /// twice WITHIN one tx (duplicate nullifier), standing on its own rather than
+    /// relying on the block-level double-spend pre-check.
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn verify_rejects_duplicate_nullifier_within_payload() {
+        use super::gk::{build_shielded_payload, verify_shielded_payload, NewNote, SpendNote};
+        use crate::crypto::groth_kohlweiss::bound_coin_commitment;
+        use curve25519_dalek::scalar::Scalar;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        let mut rng = ChaCha20Rng::seed_from_u64(31415);
+        let store = ShieldedStore::new();
+        let mut openings = Vec::new();
+        for i in 0..5u64 {
+            let value = (i + 1) * 1000;
+            let serial = Scalar::random(&mut rng);
+            let blinding = Scalar::random(&mut rng);
+            store.append_commitment(NoteCommitmentEntry {
+                commitment: bound_coin_commitment(value, &serial, &blinding).compress().to_bytes(),
+                height: 1,
+                tx_index: 0,
+                position: 0,
+            });
+            openings.push((value, serial, blinding));
+        }
+        let inputs = vec![
+            SpendNote { bucket_index: 0, member_index: 1, value: openings[1].0, serial: openings[1].1, blinding: openings[1].2 },
+            SpendNote { bucket_index: 0, member_index: 3, value: openings[3].0, serial: openings[3].1, blinding: openings[3].2 },
+        ];
+        let fee = 500u64;
+        let outputs = vec![NewNote { value: 5500, serial: Scalar::random(&mut rng), coin_blinding: Scalar::random(&mut rng) }];
+        let payload = build_shielded_payload(&store, &inputs, &outputs, fee, 0, &mut rng).unwrap();
+        assert!(verify_shielded_payload(&store, &payload, fee).is_ok(), "control payload verifies");
+
+        // Collapse the second input onto the first: both now carry the same
+        // nullifier. Input 0 still verifies fully; input 1 is caught by the
+        // intra-payload dedup before its proof is even checked.
+        let mut dup = payload.clone();
+        dup.inputs[1] = dup.inputs[0].clone();
+        assert!(
+            matches!(verify_shielded_payload(&store, &dup, fee), Err(Error::DuplicateNullifier)),
+            "a payload spending the same note twice must be rejected as a duplicate nullifier",
+        );
     }
 }
