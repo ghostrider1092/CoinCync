@@ -300,9 +300,16 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         // spend is in the mempool but not yet mined is not in the on-chain spent
         // set — without it the wallet re-picks the note and the node rejects the
         // double-spend ("duplicate shielded linking tag in mempool").
+        //
+        // F2: read the MEMPOOL FIRST, then the chain — the same no-gap order
+        // get_spark_spent_tags documents. Block connect adds a tag to the chain
+        // spent set BEFORE removing it from the mempool, so chain-then-mempool
+        // has a window where a spend being mined is in NEITHER read (chain too
+        // early, mempool too late) and this returns `false` for a tag that is in
+        // fact being spent.
         #[cfg(feature = "sketch-gk-proof")]
         let spent =
-            state.chain.spark_pool_tag_spent(&bytes) || state.mempool.contains_linking_tag(&bytes);
+            state.mempool.contains_linking_tag(&bytes) || state.chain.spark_pool_tag_spent(&bytes);
         #[cfg(not(feature = "sketch-gk-proof"))]
         let spent = {
             let _ = (&bytes, &state);
