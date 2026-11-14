@@ -34,6 +34,87 @@ fn page_spent_tags(sorted: &[Vec<u8>], offset: usize, limit: usize) -> (usize, V
     (sorted.len(), page)
 }
 
+/// Per-response cap on a spent-tag page: bounds the serialized response size
+/// (a DoS guard). A larger request is clamped and the wallet pages the rest.
+#[cfg(feature = "sketch-gk-proof")]
+const MAX_SPENT_TAGS_PAGE: usize = 50_000;
+
+/// Clamp a caller-supplied `limit` to `[1, MAX_SPENT_TAGS_PAGE]`; `None` → the
+/// cap. The upper bound caps the serialized response; the lower bound of 1
+/// guarantees a paging client always makes progress — a `limit` of 0 would
+/// otherwise return `count=0` with `total>0` forever, spinning the client.
+#[cfg(feature = "sketch-gk-proof")]
+fn clamp_spent_tags_limit(requested: Option<u64>) -> usize {
+    match requested {
+        Some(l) => (l as usize).clamp(1, MAX_SPENT_TAGS_PAGE),
+        None => MAX_SPENT_TAGS_PAGE,
+    }
+}
+
+/// Page the spent-tag set as `chain_sorted` (the per-height cached, sorted
+/// on-chain set) overlaid with `mempool_tags` (snapshotted LIVE on this call).
+///
+/// F1: the on-chain set is immutable within a chain height, so it is sorted
+/// once per block and cached. The mempool is NOT cached — a spend admitted
+/// after the cache was built must still be visible, or a wallet that just sent
+/// and then refreshes its balance would see the note as unspent and could
+/// re-select it. So the live mempool tags are unioned in on EVERY call. Returns
+/// `(total, page)` with the page hex-encoded in global sorted order over
+/// `[offset, offset + limit)`.
+#[cfg(feature = "sketch-gk-proof")]
+fn spent_tags_overlay_page(
+    chain_sorted: &[Vec<u8>],
+    mempool_tags: &[Vec<u8>],
+    offset: usize,
+    limit: usize,
+) -> (usize, Vec<String>) {
+    // The pending tags the per-height chain cache cannot see: mempool tags not
+    // already on chain. `chain_sorted` is sorted, so membership is a binary
+    // search; the mempool is small, so this overlay is cheap.
+    let mut extra: Vec<Vec<u8>> = mempool_tags
+        .iter()
+        .filter(|&t| chain_sorted.binary_search(t).is_err())
+        .cloned()
+        .collect();
+    if extra.is_empty() {
+        // Common case (no pending shielded spends not yet mined): page straight
+        // from the cached, already-sorted chain set — no per-call O(N) merge.
+        return page_spent_tags(chain_sorted, offset, limit);
+    }
+    extra.sort_unstable();
+    extra.dedup();
+    let total = chain_sorted.len() + extra.len();
+    // Merge the two disjoint sorted sequences, emitting only the requested
+    // window — linear in the window, not a re-sort of the whole set.
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut skipped = 0usize;
+    let mut page: Vec<String> = Vec::new();
+    while (i < chain_sorted.len() || j < extra.len()) && page.len() < limit {
+        let take_chain = match (i < chain_sorted.len(), j < extra.len()) {
+            (true, true) => chain_sorted[i] <= extra[j],
+            (true, false) => true,
+            (false, true) => false,
+            (false, false) => break,
+        };
+        let next = if take_chain {
+            let x = &chain_sorted[i];
+            i += 1;
+            x
+        } else {
+            let x = &extra[j];
+            j += 1;
+            x
+        };
+        if skipped < offset {
+            skipped += 1;
+            continue;
+        }
+        page.push(hex::encode(next));
+    }
+    (total, page)
+}
+
 /// Sort + slice in one shot: returns `(total, page)` where `page` is the
 /// hex-encoded tags in sorted order sliced to `[offset, offset + limit)`. Kept
 /// so the paging invariant (pages tile the whole set with no gap or overlap) is
@@ -244,7 +325,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // note whose spend is pending is excluded too). Read-only.
     //
     // PAGINATED: params `[offset, limit]`, both optional (default offset 0,
-    // limit `MAX_PAGE`). `limit` is clamped to `MAX_PAGE`, which bounds a single
+    // limit `MAX_SPENT_TAGS_PAGE`). `limit` is clamped to that cap, which bounds a single
     // response (the DoS guard) WITHOUT a whole-set error: the response carries
     // `total` and the wallet pages until it has all of it. An earlier version
     // returned an error past a 100k whole-set cap and bricked balance/send —
@@ -254,10 +335,11 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // Tags are returned SORTED so pages tile the set deterministically within a
     // call; a spend mined between pages shifts the set by one tag, which the
     // wallet's next scan reconciles.
-    // F1: cache the sorted spent-tag snapshot per chain height, so paging the
-    // global set re-sorts it ONCE per block instead of once per page. Within a
-    // height the pages come from the cached vec and are mutually consistent; a
-    // new block (height change) rebuilds it.
+    // F1: cache the sorted ON-CHAIN spent set per chain height (it is immutable
+    // within a height, so it is sorted once per block, not once per page). The
+    // MEMPOOL is deliberately NOT cached — it is snapshotted live on every call
+    // and unioned in (see `spent_tags_overlay_page`), so a spend admitted to the
+    // mempool after the cache was built is never invisible to a paging wallet.
     #[cfg(feature = "sketch-gk-proof")]
     let spent_tags_cache: std::sync::Arc<
         std::sync::RwLock<Option<(u64, std::sync::Arc<Vec<Vec<u8>>>)>>,
@@ -271,28 +353,20 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             let offset = args.first().copied().unwrap_or(0) as usize;
             // Per-response cap bounds the serialized size; a larger request is
             // clamped and the wallet pages through the remainder.
-            const MAX_PAGE: usize = 50_000;
-            // Clamp to [1, MAX_PAGE]: the upper bound caps the serialized
-            // response (DoS guard); the lower bound of 1 guarantees a paging
-            // client always makes progress — a limit of 0 would otherwise return
-            // count=0 with total>0 forever, spinning the client (and re-sorting
-            // the whole set each spin).
-            let limit = args
-                .get(1)
-                .map(|&l| (l as usize).clamp(1, MAX_PAGE))
-                .unwrap_or(MAX_PAGE);
-            // Snapshot the MEMPOOL FIRST, then the on-chain spent set. Block
-            // connect adds a tag to the chain spent set BEFORE removing it from
-            // the mempool, so this order guarantees a spend being mined
-            // concurrently is in at least one of the two snapshots. The reverse
-            // order (chain then mempool) has a window where a just-mined spend is
-            // in NEITHER — the chain read is too early, the mempool read too late
-            // — and the wallet would briefly treat a spent note as available.
-            // Reuse the sorted snapshot while the chain tip is unchanged;
-            // otherwise rebuild it — mempool FIRST, then chain (see the window
-            // note above) — sort once, and cache under the new height.
+            let limit = clamp_spent_tags_limit(args.get(1).copied());
+            // Snapshot the MEMPOOL FIRST (live, every call), THEN read the chain.
+            // Block connect adds a tag to the chain spent set BEFORE removing it
+            // from the mempool, so mempool-first guarantees a spend being mined
+            // concurrently is in at least one of the two views; the reverse order
+            // has a window where a just-mined spend is in NEITHER.
+            let mempool_tags = state.mempool.linking_tags_snapshot();
+            // The on-chain set is immutable within a height, so sort it once and
+            // cache it under the height; a new block (height change) rebuilds it.
+            // If a block lands between the height read and the snapshot, the new
+            // set is merely labelled with the old height — harmless: the next
+            // call at the new height rebuilds, and the mempool overlay is live.
             let height = state.chain.height();
-            let sorted: std::sync::Arc<Vec<Vec<u8>>> = {
+            let chain_sorted: std::sync::Arc<Vec<Vec<u8>>> = {
                 let hit = spent_tags_cache.read().ok().and_then(|g| match &*g {
                     Some((h, v)) if *h == height => Some(v.clone()),
                     _ => None,
@@ -300,9 +374,8 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 match hit {
                     Some(v) => v,
                     None => {
-                        let mut set: HashSet<Vec<u8>> =
-                            state.mempool.linking_tags_snapshot().into_iter().collect();
-                        set.extend(state.chain.spark_pool_spent_tags());
+                        let set: HashSet<Vec<u8>> =
+                            state.chain.spark_pool_spent_tags().into_iter().collect();
                         let v = std::sync::Arc::new(sort_spent_tags(set));
                         if let Ok(mut g) = spent_tags_cache.write() {
                             *g = Some((height, v.clone()));
@@ -311,7 +384,9 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                     }
                 }
             };
-            let (total, tags) = page_spent_tags(&sorted, offset, limit);
+            // Overlay the LIVE mempool tags on the cached chain set (F1).
+            let (total, tags) =
+                spent_tags_overlay_page(&chain_sorted, &mempool_tags, offset, limit);
             Ok::<_, ErrorObjectOwned>(json!({
                 "total": total,
                 "offset": offset,
@@ -479,5 +554,70 @@ mod tests {
         let (total, page) = paginate_spent_tags(set, 100, 3);
         assert_eq!(total, 10);
         assert!(page.is_empty());
+    }
+
+    #[test]
+    fn clamp_spent_tags_limit_bounds_the_page() {
+        // None → the cap; 0 → 1 (so a paging client always makes progress);
+        // a request over the cap is clamped down to it.
+        assert_eq!(clamp_spent_tags_limit(None), MAX_SPENT_TAGS_PAGE);
+        assert_eq!(clamp_spent_tags_limit(Some(0)), 1);
+        assert_eq!(clamp_spent_tags_limit(Some(10)), 10);
+        assert_eq!(
+            clamp_spent_tags_limit(Some(MAX_SPENT_TAGS_PAGE as u64 + 1)),
+            MAX_SPENT_TAGS_PAGE
+        );
+    }
+
+    #[test]
+    fn mempool_overlay_makes_a_pending_spend_visible() {
+        // F1 regression: a spend sitting in the mempool (not yet on chain) MUST
+        // appear in the result on every call — not only when the cache was built.
+        // If it were invisible, a wallet that just sent and then refreshed its
+        // balance would treat the note as unspent and could re-select it.
+        let chain_sorted = vec![vec![1u8; 34], vec![3u8; 34]];
+        let pending = vec![2u8; 34]; // in the mempool, not yet on chain
+        let (total, page) = spent_tags_overlay_page(&chain_sorted, &[pending], 0, 10);
+        assert_eq!(total, 3, "pending mempool tag counts toward the total");
+        assert_eq!(
+            page,
+            vec![
+                hex::encode([1u8; 34]),
+                hex::encode([2u8; 34]),
+                hex::encode([3u8; 34])
+            ],
+            "pending tag appears in global sorted position"
+        );
+
+        // A mempool tag already mined onto the chain is deduped, not counted twice.
+        let (total, page) = spent_tags_overlay_page(&chain_sorted, &[vec![1u8; 34]], 0, 10);
+        assert_eq!(total, 2, "a mempool tag already on chain is deduped");
+        assert_eq!(
+            page,
+            vec![hex::encode([1u8; 34]), hex::encode([3u8; 34])]
+        );
+    }
+
+    #[test]
+    fn overlay_pages_tile_the_union_of_chain_and_mempool() {
+        // Chain {0,2,4,6,8} overlaid with mempool {1,3,5} (none on chain) → a
+        // union of 8 tags that paging must cover exactly once, pending included.
+        let chain_sorted: Vec<Vec<u8>> = (0u8..5).map(|i| vec![i * 2; 34]).collect();
+        let mempool: Vec<Vec<u8>> = [1u8, 3, 5].iter().map(|&i| vec![i; 34]).collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut offset = 0usize;
+        let total = loop {
+            let (total, page) = spent_tags_overlay_page(&chain_sorted, &mempool, offset, 3);
+            let got = page.len();
+            for t in page {
+                assert!(seen.insert(t), "a tag must not appear on two pages");
+            }
+            offset += got;
+            if offset >= total || got == 0 {
+                break total;
+            }
+        };
+        assert_eq!(total, 8, "union total independent of paging");
+        assert_eq!(seen.len(), 8, "every chain+mempool tag fetched exactly once");
     }
 }
