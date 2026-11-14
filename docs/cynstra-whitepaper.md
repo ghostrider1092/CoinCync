@@ -314,6 +314,20 @@ Reading it honestly:
 - **Mandatory + constitutional:** privacy that cannot be toggled off, on a chain
   whose compiler refuses to build a non-private or admin-controlled variant.
 
+**A note on network privacy.** On-chain cryptography — ring signatures, stealth
+addresses, confidential amounts — cannot protect the *transport* layer: when a node
+broadcasts a transaction, a network observer can often see which IP announced it
+first and tie a location to on-chain activity. It is the hardest privacy surface to
+close, and the one where even Monero pulled back — its Kovri project to route node
+traffic over I2P was shelved around 2019, leaving most privacy chains at Dandelion++
+alone. Cynstra treats it as a first-class ring (Ring 4): **Dandelion++** hides which
+node originated a transaction, and integrated **traffic shaping** — randomized timing
+jitter and cover packets — blurs the timing and volume patterns Dandelion++ by itself
+leaves exposed (size normalization is specified but not yet wired into the send path).
+The honest limit: this is origin obfuscation and traffic blurring, not the full
+transport anonymization a bundled I2P router would give — broader than the field here,
+but also younger and less adversarially tested than the on-chain primitives beside it.
+
 **The caveat that belongs *with* this table, not in a footnote:** a ✓ here means
 *the mechanism is present and active* — not that it has survived a decade of
 adversarial academic attack. Monero's ✓s are battle-tested; several of
