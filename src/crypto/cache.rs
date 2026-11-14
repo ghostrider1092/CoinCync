@@ -292,9 +292,16 @@ pub struct CacheStats {
 pub fn proof_cache_key(proof_data: &[u8], commitment_data: &[u8]) -> [u8; 32] {
     use blake3::Hasher;
     let mut hasher = Hasher::new();
-    hasher.update(b"COINCYNC_PROOF_CACHE_v1");
-    hasher.update(proof_data);
-    hasher.update(commitment_data);
+    hasher.update(b"COINCYNC_PROOF_CACHE_v2");
+    // CR1: length-prefix each variable-length field. Without framing, two distinct
+    // statements whose (proof ‖ commitments) byte-concatenations coincide map to the
+    // SAME key; since only POSITIVE verdicts are cached, a collision hit would make
+    // the verifier SKIP real verification for an unverified statement. Mirrors the
+    // framing in ring_sig_statement_cache_key below.
+    for field in [proof_data, commitment_data] {
+        hasher.update(&(field.len() as u64).to_le_bytes());
+        hasher.update(field);
+    }
     *hasher.finalize().as_bytes()
 }
 
@@ -302,9 +309,12 @@ pub fn proof_cache_key(proof_data: &[u8], commitment_data: &[u8]) -> [u8; 32] {
 pub fn ring_sig_cache_key(message: &[u8], sig_data: &[u8]) -> [u8; 32] {
     use blake3::Hasher;
     let mut hasher = Hasher::new();
-    hasher.update(b"COINCYNC_RINGSIG_CACHE_v1");
-    hasher.update(message);
-    hasher.update(sig_data);
+    hasher.update(b"COINCYNC_RINGSIG_CACHE_v2");
+    // CR1: length-prefix each variable-length field (see proof_cache_key).
+    for field in [message, sig_data] {
+        hasher.update(&(field.len() as u64).to_le_bytes());
+        hasher.update(field);
+    }
     *hasher.finalize().as_bytes()
 }
 

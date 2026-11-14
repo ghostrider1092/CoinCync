@@ -709,6 +709,14 @@ pub fn verify_range_proofs_bp_plus(commitments: &[PedersenCommitment], proof: &R
     if commitments.is_empty() {
         return proof.is_empty();
     }
+    // CRPN1: cap the aggregation size on the VERIFY path too (create caps at the
+    // `amounts.len() > MAX_AGGREGATION` check). Without this, a peer-controlled
+    // commitment count drives next_power_of_two() + bp_plus_params() to derive
+    // 64 * padded generators BEFORE any proof-size mismatch is detected — an
+    // unbounded CPU/memory amplification from a message carrying >16 commitments.
+    if commitments.len() > MAX_AGGREGATION {
+        return false;
+    }
     if proof.is_empty() || proof.version != RANGE_PROOF_VERSION_BP_PLUS {
         return false;
     }
@@ -784,6 +792,10 @@ pub fn verify_range_proofs_batch(items: &[(&[PedersenCommitment], &RangeProof)])
 
     for (commitments, proof) in items {
         if commitments.is_empty()
+            // CRPN1: cap the aggregation size before next_power_of_two() +
+            // bp_plus_params() derive 64 * padded generators from a peer-controlled
+            // commitment count (matches the create-side and single-verify caps).
+            || commitments.len() > MAX_AGGREGATION
             || proof.is_empty()
             || proof.version != RANGE_PROOF_VERSION_BP_PLUS
         {
