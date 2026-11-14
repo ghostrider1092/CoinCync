@@ -878,18 +878,19 @@ async fn get_recent_blocks(
         }
     }
 
-    let total_pages = if chain_height == 0 {
-        1
-    } else {
-        (chain_height + limit - 1) / limit
-    };
+    // There are chain_height + 1 blocks (heights 0..=chain_height), so total_pages
+    // must be the ceiling of total_blocks/limit, not of chain_height/limit —
+    // otherwise the last page falls one block short and the genesis block is
+    // never reachable via pagination (has_next on the final page is false).
+    let total_blocks = chain_height.saturating_add(1);
+    let total_pages = total_blocks.div_ceil(limit.max(1));
 
     Ok(Json(serde_json::json!({
         "blocks": blocks,
         "pagination": {
             "page": pagination.page(),
             "limit": limit,
-            "total_blocks": chain_height + 1,
+            "total_blocks": total_blocks,
             "total_pages": total_pages,
             "has_next": pagination.page() < total_pages,
             "has_prev": pagination.page() > 1,
@@ -1194,7 +1195,9 @@ async fn get_chain_stats(
 
     let mut timestamps: Vec<u64> = Vec::with_capacity(window_size as usize + 1);
     let mut total_txs: u64 = 0;
-    let mut algo_counts = [0u64; 3]; // [blake3, randomx, yescrypt]
+    // CoinCync is RandomX-only (algorithm index 0); there are no other algorithms
+    // on this chain, so we only tally RandomX blocks.
+    let mut randomx_blocks: u64 = 0;
 
     for h in window_start..=chain_height {
         if let Ok(block) = jsonrpc_call(
@@ -1210,10 +1213,10 @@ async fn get_chain_stats(
             if let Some(tc) = block["tx_count"].as_u64() {
                 total_txs += tc;
             }
-            // Algorithm distribution
+            // Algorithm distribution — RandomX-only chain (index 0).
             if let Some(algo) = block["algorithm"].as_u64() {
-                if (algo as usize) < algo_counts.len() {
-                    algo_counts[algo as usize] += 1;
+                if algo == 0 {
+                    randomx_blocks += 1;
                 }
             }
         }
@@ -1258,9 +1261,7 @@ async fn get_chain_stats(
         "total_transactions_in_window": total_txs,
         "tx_per_block": (tx_per_block * 100.0).round() / 100.0,
         "algorithm_distribution": {
-            "randomx": algo_counts[0],
-            "yescrypt_heavy": algo_counts[1],
-            "yescrypt_light": algo_counts[2],
+            "randomx": randomx_blocks,
         },
         "target_block_time_secs": 30,
     })))
@@ -1401,6 +1402,23 @@ fn assets_gone() -> (StatusCode, Json<Value>) {
 // HANDLERS — WebSocket (real-time streaming)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// RAII release for the two WebSocket admission counters (global + per-IP).
+/// Held from `ws_upgrade` (where the reservations are taken) and MOVED into the
+/// `on_upgrade` callback, so if the upgrade never completes and axum drops the
+/// callback un-run, both reservations are still released on drop. Previously the
+/// guard was constructed inside `ws_handler`, which only runs on a completed
+/// upgrade — so a client that passed admission then aborted the TCP connection
+/// before the 101 leaked both counters, and 128 such aborts exhausted the pool.
+struct WsConnGuard {
+    client_ip: String,
+}
+impl Drop for WsConnGuard {
+    fn drop(&mut self) {
+        ACTIVE_WS_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+        ws_per_ip_decrement(&self.client_ip);
+    }
+}
+
 /// GET /api/v1/ws — WebSocket upgrade for real-time block/tx streaming
 ///
 /// Streams events:
@@ -1438,27 +1456,22 @@ async fn ws_upgrade(
             break;
         }
     }
-    ws.on_upgrade(move |socket| ws_handler(socket, st, client_ip))
+    // Bind both reservations to the RAII guard and move it into the callback, so
+    // they are released even if the upgrade never completes (callback dropped
+    // un-run) — not only when `ws_handler` reaches its own end.
+    let guard = WsConnGuard { client_ip };
+    ws.on_upgrade(move |socket| ws_handler(socket, st, guard))
 }
 
-async fn ws_handler(mut socket: ws::WebSocket, state: RestState, client_ip: String) {
+async fn ws_handler(mut socket: ws::WebSocket, state: RestState, _guard: WsConnGuard) {
     use tokio::time::{interval, Duration, Instant};
 
     // Close a client that hasn't sent us anything in this long. Prevents
     // an attacker from holding 128/128 WS slots open by reading bytes
     // but never speaking — TCP keepalives alone are slow and OS-tuned.
     const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-
-    struct WsConnGuard {
-        client_ip: String,
-    }
-    impl Drop for WsConnGuard {
-        fn drop(&mut self) {
-            ACTIVE_WS_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
-            ws_per_ip_decrement(&self.client_ip);
-        }
-    }
-    let _guard = WsConnGuard { client_ip };
+    // `_guard` (the admission reservations) is owned by this task now and
+    // released when it ends — or earlier, if the upgrade never ran.
 
     let mut tick = interval(Duration::from_secs(3));
     let mut idle_check = interval(Duration::from_secs(30));

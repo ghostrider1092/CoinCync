@@ -120,6 +120,10 @@ pub struct Subscription {
     pub event_types: Vec<EventType>,
     /// Sender for this subscription
     sender: broadcast::Sender<Event>,
+    /// The client that created this subscription, recorded so `unsubscribe`
+    /// releases the per-client count against the real owner rather than a
+    /// caller-supplied id.
+    owner: Option<String>,
 }
 
 /// WebSocket subscription manager
@@ -182,6 +186,7 @@ impl SubscriptionManager {
             id,
             event_types,
             sender,
+            owner: client_id.map(|s| s.to_string()),
         };
 
         subs.insert(id, subscription);
@@ -196,22 +201,28 @@ impl SubscriptionManager {
     }
 
     /// Unsubscribe
-    pub async fn unsubscribe(&self, id: SubscriptionId, client_id: Option<&str>) -> bool {
-        let removed = self.subscriptions.write().await.remove(&id).is_some();
-        if removed {
-            // Decrement per-client count
-            if let Some(cid) = client_id {
+    pub async fn unsubscribe(&self, id: SubscriptionId, _client_id: Option<&str>) -> bool {
+        // Release the per-client count against the OWNER recorded at subscribe
+        // time, not the caller-supplied `_client_id`: an unsubscribe with `None`
+        // or a mismatched id would otherwise remove the subscription yet leak the
+        // count, eventually locking the client out ("Maximum subscriptions per
+        // client reached") with its entry never draining.
+        let removed = self.subscriptions.write().await.remove(&id);
+        if let Some(sub) = removed {
+            if let Some(cid) = sub.owner {
                 let mut counts = self.client_sub_counts.write().await;
-                if let Some(count) = counts.get_mut(cid) {
+                if let Some(count) = counts.get_mut(&cid) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
-                        counts.remove(cid);
+                        counts.remove(&cid);
                     }
                 }
             }
             tracing::debug!("Subscription removed: {}", id);
+            true
+        } else {
+            false
         }
-        removed
     }
 
     /// Broadcast event to relevant subscribers
