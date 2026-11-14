@@ -1779,6 +1779,12 @@ impl Blockchain {
             inner.stats.tip_hash = tip_hash;
             inner.stats.total_difficulty = total_difficulty;
         }
+        // NOTE (CHPN3): load_from_database() below is AUTHORITATIVE — it reloads tip
+        // + all stats from the DB (and recompute_total_difficulty overwrites the
+        // difficulty), so the (height, tip_hash, total_difficulty) args set above do
+        // NOT force a lower state when the DB records a higher one; they are advisory
+        // today. Flagged rather than changed, since making load honor them — or
+        // dropping the args — alters recovery semantics callers may depend on.
         self.load_from_database()
     }
 
@@ -4634,11 +4640,25 @@ impl Blockchain {
     /// Async wrapper around [`Blockchain::add_block`]. Runs full block
     /// validation + DB write on `tokio::task::spawn_blocking`.
     pub async fn add_block_async(self: Arc<Self>, block: Block) -> Result<BlockStatus> {
-        tokio::task::spawn_blocking(move || self.add_block(block))
+        let chain = Arc::clone(&self);
+        let status = tokio::task::spawn_blocking(move || chain.add_block(block))
             .await
             .map_err(|e| {
                 Error::Internal(format!("spawn_blocking join error in add_block: {}", e))
-            })?
+            })??;
+        // CHPN1: this is the peer-sourced (P2P) acceptance path, so record the
+        // arrival per `record_block_received`'s documented "called from add_block"
+        // contract (it had zero callers, leaving last_block_received_at pinned at
+        // 0). NOTE: the consumers (is_phantom_stall / secs_since_last_block) are
+        // themselves currently unwired, so this has no live effect today — it makes
+        // the writer correct for whenever the staleness gate is actually wired.
+        if matches!(
+            status,
+            BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+        ) {
+            self.record_block_received();
+        }
+        Ok(status)
     }
 
     /// Async wrapper around [`Blockchain::process_block`]. Equivalent to
