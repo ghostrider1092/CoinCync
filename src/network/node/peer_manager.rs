@@ -277,9 +277,10 @@ pub(super) fn spawn_listener_acceptor(
                                 // the parity claim is downgraded to
                                 // qualitative.)
                                 acceptor_senders.remove(&victim_id);
-                                if let Some((_, victim)) = acceptor_peers.remove(&victim_id) {
-                                    acceptor_tracker.untrack_connection(&victim.addr);
-                                }
+                                // Dropping the victim's sender ends its inbound task,
+                                // whose teardown untracks the per-IP slot — untracking
+                                // here too would double-decrement the counter (N1).
+                                acceptor_peers.remove(&victim_id);
                                 // Slot freed; fall through to accept.
                             }
                             None => {
@@ -1140,6 +1141,9 @@ pub(super) fn load_anchors_from_disk(data_dir: &std::path::Path) -> Vec<SocketAd
 pub(super) struct BanPeerContext<'a> {
     pub(super) peers: &'a DashMap<PeerId, PeerInfo>,
     pub(super) senders: &'a DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
+    // Retained for parity with the other peer-management contexts; per-IP
+    // untracking now happens solely at the inbound task teardown (N1/N1b).
+    #[allow(dead_code)]
     pub(super) tracker: &'a ConnectionTracker,
     pub(super) scorer: &'a RwLock<PeerScorer>,
     pub(super) dandelion: &'a RwLock<DandelionRouter>,
@@ -1153,7 +1157,9 @@ pub(super) struct BanPeerContext<'a> {
 pub(super) async fn ban_peer(peer_id: &PeerId, context: BanPeerContext<'_>) {
     let peer_addr = context.peers.get(peer_id).map(|peer| peer.addr);
     if let Some(addr) = peer_addr {
-        context.tracker.untrack_connection(&addr);
+        // Per-IP untracking is done by the inbound task's teardown once its sender
+        // is dropped below (outbound peers were never per-IP tracked), so untracking
+        // here would double-decrement inbound and wrongly decrement outbound (N1/N1b).
         context.scorer.write().await.ban(addr);
     }
     if let Some(mut peer) = context.peers.get_mut(peer_id) {
@@ -1182,6 +1188,9 @@ pub(super) async fn ban_peer(peer_id: &PeerId, context: BanPeerContext<'_>) {
 pub(super) struct DisconnectPeerContext<'a> {
     pub(super) peers: &'a DashMap<PeerId, PeerInfo>,
     pub(super) senders: &'a DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
+    // Retained for parity with the other peer-management contexts; per-IP
+    // untracking now happens solely at the inbound task teardown (N1/N1b).
+    #[allow(dead_code)]
     pub(super) tracker: &'a ConnectionTracker,
     pub(super) dandelion: &'a RwLock<DandelionRouter>,
     pub(super) sync: &'a RwLock<ChainSync>,
@@ -1190,9 +1199,9 @@ pub(super) struct DisconnectPeerContext<'a> {
 
 /// Remove a normally disconnected peer without applying a reputation penalty.
 pub(super) async fn disconnect_peer(peer_id: &PeerId, context: DisconnectPeerContext<'_>) {
-    if let Some(peer) = context.peers.get(peer_id) {
-        context.tracker.untrack_connection(&peer.addr);
-    }
+    // Per-IP untracking is done by the inbound task's teardown once its sender is
+    // dropped below (outbound peers were never per-IP tracked), so untracking here
+    // would double-decrement inbound / wrongly decrement outbound (N1/N1b).
     context.senders.remove(peer_id);
     context.peers.remove(peer_id);
     context
@@ -1352,11 +1361,83 @@ mod tests {
         assert!(scorer.read().await.is_banned(&addr));
         assert!(peers.get(&peer_id).is_none());
         assert!(senders.get(&peer_id).is_none());
-        assert_eq!(tracker.connections_from(&addr.ip()), 0);
+        // N1: ban_peer does NOT untrack the connection. For an inbound peer the
+        // per-IP Sybil slot is released exactly once — by the connection task's
+        // teardown (peer_manager.rs:358) when its loop ends — not here. Untracking
+        // here too double-decremented the IP and could steal a sibling
+        // connection's slot (see `ban_peer_does_not_steal_sibling_slot`). So the
+        // slot is still held immediately after ban; the teardown (not wired in
+        // this unit test) performs the single release.
+        assert_eq!(
+            tracker.connections_from(&addr.ip()),
+            1,
+            "ban_peer must not untrack — the inbound task teardown owns the release"
+        );
         assert!(matches!(
             event_rx.try_recv(),
             Ok(NodeEvent::PeerDisconnected(id)) if id == peer_id
         ));
+    }
+
+    /// N1 regression: with >1 inbound connection from one IP, banning one peer
+    /// must not release the IP's slot — the double-untrack it replaced (ban_peer
+    /// + task teardown) decremented twice and stole the sibling's slot, silently
+    /// weakening the per-IP Sybil cap.
+    #[tokio::test]
+    async fn ban_peer_does_not_steal_sibling_slot() {
+        let peers = DashMap::new();
+        let senders = DashMap::new();
+        let peer_id = [7u8; 32];
+        let addr: std::net::SocketAddr = "127.0.0.1:12050".parse().unwrap();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, true));
+        let (sender, _receiver) = mpsc::channel(1);
+        senders.insert(peer_id, sender);
+
+        // Two inbound connections from the same IP (e.g. two ports): counter = 2.
+        let tracker = ConnectionTracker::new(1024);
+        assert!(tracker.try_track_connection(&addr));
+        assert!(tracker.try_track_connection(&"127.0.0.1:12051".parse().unwrap()));
+        assert_eq!(tracker.connections_from(&addr.ip()), 2);
+
+        let scorer = RwLock::new(PeerScorer::new());
+        let dandelion = RwLock::new(DandelionRouter::new());
+        let orphan_flood = RwLock::new(OrphanFloodTracker::new());
+        let sync = RwLock::new(ChainSync::new(
+            0,
+            crate::primitives::Hash::from_bytes([0u8; 32]),
+        ));
+        let (event_tx, _event_rx) = broadcast::channel(1);
+
+        ban_peer(
+            &peer_id,
+            BanPeerContext {
+                peers: &peers,
+                senders: &senders,
+                tracker: &tracker,
+                scorer: &scorer,
+                dandelion: &dandelion,
+                orphan_flood: &orphan_flood,
+                sync: &sync,
+                event_tx: &event_tx,
+            },
+        )
+        .await;
+
+        // ban_peer must leave the counter untouched: the banned connection's own
+        // teardown is the single release. The sibling slot is preserved.
+        assert_eq!(
+            tracker.connections_from(&addr.ip()),
+            2,
+            "ban_peer must not decrement the IP's connection count"
+        );
+        // Simulate ONLY the banned connection's teardown: counter drops to 1, the
+        // sibling still holds its slot (old double-untrack would have hit 0).
+        tracker.untrack_connection(&addr);
+        assert_eq!(
+            tracker.connections_from(&addr.ip()),
+            1,
+            "the sibling connection keeps its Sybil slot"
+        );
     }
 
     #[tokio::test]

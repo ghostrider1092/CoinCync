@@ -326,7 +326,7 @@ pub(super) fn spawn_maintenance(
                     discover_inbound_peers(&maint_peers, &maint_addresses, discovery_port).await;
                 }
                 _ = outbound_rotate_interval.tick() => {
-                    rotate_outbound_peer(&maint_peers, &maint_senders, &maint_tracker);
+                    rotate_outbound_peer(&maint_peers, &maint_senders);
                 }
                 _ = heartbeat_interval.tick() => {
                     heartbeat_ticks = heartbeat_ticks.saturating_add(1);
@@ -494,7 +494,7 @@ async fn run_cleanup_tick(context: CleanupTick<'_>) {
         sync,
         event_tx,
         mempool,
-        tracker,
+        tracker: _, // untracking now happens solely at the inbound task teardown (N1)
         scorer,
         orphan_flood,
     } = context;
@@ -504,9 +504,8 @@ async fn run_cleanup_tick(context: CleanupTick<'_>) {
         .map(|peer| peer.id)
         .collect();
     for peer_id in stale {
-        if let Some(peer) = peers.get(&peer_id) {
-            tracker.untrack_connection(&peer.addr);
-        }
+        // The inbound task's teardown untracks the per-IP slot once its sender is
+        // dropped below (outbound peers were never tracked), so no untrack here (N1).
         peers.remove(&peer_id);
         senders.remove(&peer_id);
         sync.write().await.on_peer_disconnected(&peer_id);
@@ -693,7 +692,6 @@ fn emit_heartbeat(peers: &DashMap<PeerId, PeerInfo>, tick: u64) {
 fn rotate_outbound_peer(
     peers: &DashMap<PeerId, PeerInfo>,
     senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
-    tracker: &ConnectionTracker,
 ) {
     let outbound: Vec<(PeerId, std::time::Instant, std::net::SocketAddr)> = peers
         .iter()
@@ -715,9 +713,10 @@ fn rotate_outbound_peer(
         addr
     );
     senders.remove(&peer_id);
-    if let Some((_, peer)) = peers.remove(&peer_id) {
-        tracker.untrack_connection(&peer.addr);
-    }
+    // This rotates an OUTBOUND peer, which was never per-IP tracked (it holds a /16
+    // subnet slot, not a connections_per_ip entry), so there is nothing to untrack —
+    // doing so wrongly decremented a co-IP inbound peer (N1b).
+    peers.remove(&peer_id);
 }
 
 async fn evaporate_relay_scores(relay_scores: &RwLock<RelayScoreMap>) {
