@@ -163,7 +163,7 @@
     <ul>
       <li><strong>Ring 4 · Network.</strong> Where a transaction entered the P2P network, from what address, at what instant — guarded by Dandelion++ and traffic shaping (timing jitter and cover packets today; size normalization is specified but not yet wired into the send path). <em>Break it, and you learn a transaction exists — not what it says.</em></li>
       <li><strong>Ring 3 · Linkability.</strong> Can outputs be connected, a wallet clustered, value followed over time? Guarded by decoy defense, key images, view tags, and automatic churn. <em>Break it, and you may cluster activity — not identity or amount.</em></li>
-      <li><strong>Ring 2 · Transaction content.</strong> Sender, receiver, amount — guarded by CLSAG ring-16, stealth addresses, and Bulletproofs+ commitments. <em>The ring monolithic designs stake everything on; alone, one crack is fatal.</em></li>
+      <li><strong>Ring 2 · Transaction content.</strong> Sender, receiver, amount — guarded by CLSAG ring-16, stealth addresses, and Bulletproofs+ commitments. <em>The ring monolithic designs stake everything on; alone, one crack is fatal.</em> <strong>On testnet (block 29,000) this ring gains a Lelantus-Spark shielded pool</strong> — a zero-knowledge shielded set hiding sender, receiver, and amount without a decoy ring. By the rule that the last wall be the most-proven mechanism and not the newest, it is a maturing strengthening here under composition-safety review, not the backstop; CLSAG ring signatures stay the live default, and the pool is disabled on mainnet until finished.</li>
       <li><strong>Ring 1 · The user.</strong> Even with all the above intact — can the person be coerced or their wallet exploited? Live today: encrypted memos and watch-only view keys. Specified and in progress: scoped view keys, deniable wallets (creation currently disabled pending a structural rewrite), and a dead-man's switch (recovery metadata is carried on-chain; consensus enforcement not yet wired). <em>The ring almost no chain even attempts — marked here honestly as design ahead of implementation.</em></li>
     </ul>
     <p>The arrangement is not decoration. Its purpose is <strong>graceful degradation</strong>: each ring stands on its own, so the failure of any one leaves the others holding. The layers must be <strong>connected in coverage</strong> (each guards a different door) but <strong>independent in failure</strong> (none is load-bearing on another). A lattice whose walls hold each other up collapses in a chain reaction; concentric, independent rings do not.</p>
@@ -232,6 +232,7 @@
     <ul>
       <li><strong>Ring size 16</strong> (<code>RING_SIZE</code>) from block 10,000 onward; an 11-member bootstrap floor (<code>BOOTSTRAP_MIN_RING_SIZE</code>) applies earlier when a young chain lacks outputs to form a full ring. Ceiling 32; an increase above 16 is specified in CIP-017.</li>
       <li>Pedersen commitments with Bulletproofs+ range proofs; one-time stealth addresses; 1-byte view tags.</li>
+      <li><strong>Shielded pool (testnet):</strong> a Lelantus-Spark zero-knowledge shielded pool activates on testnet at block 29,000 (<code>SHIELDED_TESTNET_ACTIVATION_HEIGHT</code>); disabled on mainnet (<code>u64::MAX</code>) until complete. Ring-based privacy above remains the live default.</li>
     </ul>
   </section>
 
@@ -241,11 +242,16 @@
     <p>Most cryptocurrency governance is <em>social</em> — a promise, a foundation's goodwill, a multisig's restraint. Cynstra's founding guarantees are <strong>mechanical</strong>: enforced by the build system and the compiler, so violating them is not a policy dispute but a <strong>build failure.</strong></p>
     <p>The project ships a <strong>Constitution</strong> (nineteen Articles) and a <strong>Bill of Rights</strong> (fifteen Rights) as protocol documents — Fixed Supply (I), No Pre-mine / No Dev Tax (II), Mandatory Privacy (III), Open Mining (V), No Surveillance Infrastructure (IX), and more.</p>
     <h3>Two mechanical enforcement layers</h3>
-    <p><strong>Hash-locked consensus files.</strong> Eight files are pinned by SHA-256 in <code>critical_files.lock</code>:</p>
-    <pre><code>CONSTITUTION.md        src/consensus/difficulty.rs
-docs/BILL_OF_RIGHTS.md src/consensus/pow.rs
-src/testnet.rs         src/consensus/validation.rs
-src/constants.rs       src/emission/curve.rs</code></pre>
+    <p><strong>Hash-locked consensus files.</strong> Every consensus-critical file is pinned by SHA-256 in <code>critical_files.lock</code> — seventeen at this writing:</p>
+    <pre><code>CONSTITUTION.md             src/consensus/header.rs
+docs/BILL_OF_RIGHTS.md      src/consensus/block.rs
+src/testnet.rs              src/consensus/finality.rs
+src/mainnet.rs              src/consensus/mod.rs
+src/constants.rs            src/primitives/hash.rs
+src/config.rs               src/emission/curve.rs
+src/consensus/difficulty.rs src/emission/mod.rs
+src/consensus/pow.rs        src/emission/supply.rs
+src/consensus/validation.rs</code></pre>
     <p><code>build.rs</code> recomputes each hash (line endings normalized) at the start of <em>every</em> build; if any drifts, the build fails. Changing one requires an explicit, reviewed refresh — the emission curve, the validation rules, and the Constitution itself cannot be altered <em>silently.</em></p>
     <p><strong>Compile-time tripwires.</strong> The substantive invariants are also encoded as <code>const</code> assertions the compiler evaluates:</p>
     <pre><code>const _: () = assert!(DEV_TAX_PERCENT == 0, …);        <span class="cmt">// Article II</span>
@@ -293,6 +299,39 @@ const _: () = assert!(NO_ALGORITHMIC_PEG, …);          <span class="cmt">// th
     <span class="snum">09</span>
     <h2>Conclusion</h2>
     <p>Cynstra's thesis is a single sentence: <strong>privacy in concentric layers, where no single break exposes the whole.</strong> It does not rest its guarantees on one clever mechanism; it layers independent defenses so a failure in any one degrades the margin without collapsing the whole, keeps consensus alive while refusing to ship weakened privacy, and takes seriously the discipline of keeping those layers from interfering. It is offered not as a competitor to the projects that proved this fight can be won, but as a fellow traveler exploring a corner they left open — and as one more independent line of defense for a cause that is safer for having many.</p>
+  </section>
+
+  <section>
+    <h2>Prior work &amp; credits</h2>
+    <p>Cynstra's contribution is architectural; nearly every primitive it composes was invented, proven, and hardened by others. We use their work with gratitude and name them plainly.</p>
+    <ul>
+      <li><strong>CryptoNote</strong> — ring signatures, one-time stealth addresses, the mandatory-privacy model — Nicolas van Saberhagen.</li>
+      <li><strong>RingCT</strong> — confidential amounts with ring signatures — Shen Noether and the Monero Research Lab.</li>
+      <li><strong>CLSAG ring signatures</strong> — Brandon Goodell and Sarang Noether (Monero Research Lab).</li>
+      <li><strong>RandomX</strong> — CPU-friendly, ASIC-resistant proof of work — tevador and the Monero community.</li>
+      <li><strong>View tags, output churn, and much of the ring-signature privacy lineage</strong> — the Monero project and its research community.</li>
+      <li><strong>Pedersen commitments</strong> — Torben Pryds Pedersen.</li>
+      <li><strong>Bulletproofs</strong> — range proofs without trusted setup — Benedikt Bünz, Jonathan Bootle, Dan Boneh, Andrew Poelstra, Pieter Wuille, and Greg Maxwell.</li>
+      <li><strong>Bulletproofs+</strong> — shorter range proofs — Heewon Chung, Kyoohyung Han, Chanyang Ju, Myungsun Kim, and Jae Hong Seo.</li>
+      <li><strong>One-of-many (set-membership) proofs</strong> — Jens Groth and Markulf Kohlweiss — the basis of the shielded-pool construction.</li>
+      <li><strong>Lelantus and Lelantus Spark</strong> — the shielded pool — Aram Jivanyan, and (for Spark) Aram Jivanyan and Aaron Feickert, developed in the Firo project.</li>
+      <li><strong>Dandelion++</strong> — transaction-origin obfuscation — Giulia Fanti, Shaileshh Bojja Venkatakrishnan, Surya Bakshi, Bradley Denby, Shruti Bhargava, Andrew Miller, and Pramod Viswanath.</li>
+      <li><strong>ASERT difficulty adjustment</strong> (<code>aserti3-2d</code>) — Mark Lundeberg, as adopted by the Bitcoin Cash community.</li>
+      <li><strong>Bitcoin</strong> — Satoshi Nakamoto — proof-of-work consensus and the open, permissionless model everything here builds on.</li>
+    </ul>
+    <p>The open-source libraries Cynstra depends on are enumerated in the project's <code>Cargo.lock</code>. Any error or weakness in how Cynstra <em>composes</em> these mechanisms is Cynstra's own — not theirs.</p>
+  </section>
+
+  <section>
+    <h2>Acknowledgements</h2>
+    <p>CoinCync/Cynstra is built and hardened in the open. Privacy infrastructure is only as trustworthy as the people who review it, run it, and try to break it — these contributors are a core part of that.</p>
+    <ul>
+      <li><strong>Ghost</strong> (<a href="https://github.com/ghostrider1092">@ghostrider1092</a>) — lead maintainer; protocol, consensus, and releases.</li>
+      <li><strong>Jun</strong> (<a href="https://github.com/junbyjun1238">@junbyjun1238</a>) — maintainer; consensus, cryptography, and wallet code review.</li>
+      <li><strong>x0</strong> (<a href="https://github.com/0x4D-5A">@0x4D-5A</a>) — maintainer; consensus, cryptography, and wallet code review.</li>
+      <li><strong>Barns</strong> (<a href="https://github.com/Blackpagan3">@Blackpagan3</a>) — maintainer, tester, and node operator; testnet stability and bug reports.</li>
+      <li><strong>Version1</strong> — maintainer and node operator.</li>
+    </ul>
   </section>
 
   <p class="foot">Draft v0.1 · Sections 6–8 cite named constants in <code>src/constants.rs</code>; the emission table reproduces that file's own worked example. This document is written to be scrutinized. Corrections, attacks, and hard questions are the point.</p>

@@ -64,7 +64,7 @@ Two principles govern the geometry:
 
 **Ring 3 — Linkability.** Even when each transaction is opaque, can an observer connect outputs, cluster a wallet, or follow value over time? Guarded by decoy selection and decoy defense, key images (which prevent double-spends without revealing the spend), view tags, and automatic churn (which breaks temporal linkage). *Breaking this ring may permit clustering — not identity or amount.*
 
-**Ring 2 — Transaction content.** The classic three: sender, receiver, amount. Guarded by CLSAG ring signatures (the sender hidden among decoys), stealth addresses (the receiver unlinkable to any public address), and Pedersen commitments with Bulletproofs+ range proofs (the amount hidden while provably valid). *This is the ring monolithic designs stake everything on — and where, alone, one crack is fatal.*
+**Ring 2 — Transaction content.** The classic three: sender, receiver, amount. Guarded by CLSAG ring signatures (the sender hidden among decoys), stealth addresses (the receiver unlinkable to any public address), and Pedersen commitments with Bulletproofs+ range proofs (the amount hidden while provably valid). *This is the ring monolithic designs stake everything on — and where, alone, one crack is fatal.* **On testnet (block 29,000) this ring gains a Lelantus-Spark shielded pool** — a zero-knowledge shielded anonymity set that hides sender, receiver, and amount without a decoy ring. By the §3.1 rule that the last wall be the *most-proven* mechanism and not the newest, the pool is counted as a maturing strengthening of this ring under §5 composition-safety review — not the backstop. CLSAG ring signatures remain the live default, and the shielded pool stays disabled on mainnet until it is finished.
 
 **Ring 1 — The user.** Even with all of the above intact, can the person or their wallet be coerced, subpoenaed, or exploited? This is the operational layer, and it is the most forward-looking ring — the one where the design reaches furthest ahead of the current implementation. **Live today:** encrypted memos, and watch-only view keys (read-only disclosure of a wallet). **Specified and in progress:** *scoped* view keys (bounded disclosure — reveal only what must be revealed); deniable wallets (plausible deniability under coercion — the earlier implementation is currently disabled pending a structural rewrite that removes an intermediate on-disk plaintext artifact); and a dead-man's switch (recovery metadata is already carried on-chain in `tx.extra`, but the consensus recovery-spend path that would enforce it is not yet wired). *This is the ring almost no chain even attempts — it aims to protect the human, not merely the transaction, and this paper marks honestly how much of it is built versus specified.*
 
@@ -175,6 +175,10 @@ No figure here is approximated.
 - **Amounts:** Pedersen commitments with Bulletproofs+ range proofs.
 - **Addresses:** one-time stealth addresses, with 1-byte view tags for scan
   efficiency.
+- **Shielded pool (testnet):** a Lelantus-Spark zero-knowledge shielded pool
+  activates on **testnet at block 29,000** (`SHIELDED_TESTNET_ACTIVATION_HEIGHT`);
+  on mainnet it is held disabled (`u64::MAX`) until complete. Ring-based privacy
+  (above) remains the live default.
 
 *(The emission table above reproduces the worked example documented in
 `src/constants.rs` itself; every other figure is the cited constant.)*
@@ -204,12 +208,16 @@ A representative set (verified against `CONSTITUTION.md`):
 
 ### 7.2 Two mechanical enforcement layers
 
-**Layer 1 — Hash-locked consensus files.** Eight consensus-critical files are
-pinned by SHA-256 in `critical_files.lock`:
+**Layer 1 — Hash-locked consensus files.** Every consensus-critical file is
+pinned by SHA-256 in `critical_files.lock` — seventeen at this writing:
 
 > `CONSTITUTION.md`, `docs/BILL_OF_RIGHTS.md`, `src/testnet.rs`,
-> `src/constants.rs`, `src/consensus/difficulty.rs`, `src/consensus/pow.rs`,
-> `src/consensus/validation.rs`, `src/emission/curve.rs`.
+> `src/mainnet.rs`, `src/constants.rs`, `src/config.rs`,
+> `src/consensus/difficulty.rs`, `src/consensus/pow.rs`,
+> `src/consensus/validation.rs`, `src/consensus/header.rs`,
+> `src/consensus/block.rs`, `src/consensus/finality.rs`,
+> `src/consensus/mod.rs`, `src/primitives/hash.rs`, `src/emission/curve.rs`,
+> `src/emission/mod.rs`, `src/emission/supply.rs`.
 
 `build.rs` recomputes each file's hash (line endings normalized, so Windows and
 Linux agree) at the start of **every** build. If any hash drifts, the build
@@ -320,6 +328,59 @@ explicitly disclaims the latter.
 ## 9. Conclusion
 
 Cynstra's thesis is a single sentence: **privacy in concentric layers, where no single break exposes the whole.** It does not rest its guarantees on one clever mechanism; it layers independent defenses so that a failure in any one degrades the margin without collapsing the whole, keeps consensus alive while refusing to ship weakened privacy, and takes seriously the discipline of keeping those layers from interfering with one another. It is offered not as a competitor to the projects that proved this fight can be won, but as a fellow traveler exploring a corner they left open — and as one more independent line of defense for a cause that is safer for having many.
+
+---
+
+## Prior work and credits
+
+Cynstra's contribution is architectural; nearly every primitive it composes was
+invented, proven, and hardened by others. We use their work with gratitude and
+name them plainly.
+
+- **CryptoNote** — ring signatures, one-time stealth addresses, and the
+  mandatory-privacy model — Nicolas van Saberhagen.
+- **RingCT** — confidential amounts with ring signatures — Shen Noether and the
+  Monero Research Lab.
+- **CLSAG** ring signatures — Brandon Goodell and Sarang Noether (Monero Research
+  Lab).
+- **RandomX** — CPU-friendly, ASIC-resistant proof of work — tevador and the
+  Monero community.
+- **View tags, output churn, and much of the ring-signature privacy lineage** —
+  the Monero project and its research community.
+- **Pedersen commitments** — Torben Pryds Pedersen.
+- **Bulletproofs** — range proofs without trusted setup — Benedikt Bünz, Jonathan
+  Bootle, Dan Boneh, Andrew Poelstra, Pieter Wuille, and Greg Maxwell.
+- **Bulletproofs+** — shorter range proofs — Heewon Chung, Kyoohyung Han,
+  Chanyang Ju, Myungsun Kim, and Jae Hong Seo.
+- **One-of-many (set-membership) proofs** — Jens Groth and Markulf Kohlweiss —
+  the basis of the shielded-pool construction.
+- **Lelantus and Lelantus Spark** — the shielded pool — Aram Jivanyan, and (for
+  Spark) Aram Jivanyan and Aaron Feickert, developed in the Firo project.
+- **Dandelion++** — transaction-origin obfuscation — Giulia Fanti, Shaileshh
+  Bojja Venkatakrishnan, Surya Bakshi, Bradley Denby, Shruti Bhargava, Andrew
+  Miller, and Pramod Viswanath.
+- **ASERT difficulty adjustment** (`aserti3-2d`) — Mark Lundeberg, as adopted by
+  the Bitcoin Cash community.
+- **Bitcoin** — Satoshi Nakamoto — for proof-of-work consensus and the open,
+  permissionless model everything here builds on.
+
+The open-source libraries Cynstra depends on are enumerated in the project's
+`Cargo.lock`. Any error or weakness in how Cynstra *composes* these mechanisms is
+Cynstra's own — not theirs.
+
+---
+
+## Acknowledgements
+
+CoinCync/Cynstra is built and hardened in the open. Privacy infrastructure is only
+as trustworthy as the people who review it, run it, and try to break it — these
+contributors are a core part of that.
+
+- **Ghost** ([@ghostrider1092](https://github.com/ghostrider1092)) — lead maintainer; protocol, consensus, and releases.
+- **Jun** ([@junbyjun1238](https://github.com/junbyjun1238)) — maintainer; consensus, cryptography, and wallet code review.
+- **x0** ([@0x4D-5A](https://github.com/0x4D-5A)) — maintainer; consensus, cryptography, and wallet code review.
+- **Barns** ([@Blackpagan3](https://github.com/Blackpagan3)) — maintainer, tester, and node operator; testnet stability and bug reports.
+- **Version1** — maintainer and node operator.
 
 ---
 
