@@ -489,17 +489,80 @@ impl AddressManager {
     /// addrv2 entries belong in the IP book via [`Self::add`]; this stores only
     /// the non-IP (onion/i2p) addresses. Dedup'd by `(net_id, addr)` and capped
     /// at `max_addresses`. Non-routable / IP entries are dropped here.
+    ///
+    /// Hardening (store-level anti-staleness / anti-eclipse):
+    /// - **Refresh on re-advertisement.** A duplicate carrying a newer timestamp
+    ///   bumps the stored entry's timestamp, so a live, still-gossiped onion is
+    ///   not later aged out by [`Self::prune_v2`].
+    /// - **Freshness eviction when full.** At capacity, a new entry is admitted
+    ///   only if it is *newer* than the current stalest entry, which it evicts.
+    ///   This stops a store that filled early from freezing out fresher honest
+    ///   onions; a stale flood cannot displace fresh entries.
+    ///
+    /// Caller clamps the timestamp to local time on ingest (see
+    /// `dispatch::address::handle_addr_v2`), so a far-future timestamp cannot
+    /// pin an entry here.
     pub fn add_v2(&mut self, a: crate::network::protocol::NetAddrV2) {
         use crate::network::protocol::net_id;
         if !a.is_routable() || a.net_id == net_id::IPV4 || a.net_id == net_id::IPV6 {
             return;
         }
         let key = (a.net_id, a.addr.clone());
-        if self.v2_seen.contains(&key) || self.addrs_v2.len() >= self.max_addresses {
+
+        // Re-advertisement of a known address: keep it, but refresh its timestamp
+        // to the newer value so an actively-gossiped onion stays "fresh".
+        if self.v2_seen.contains(&key) {
+            if let Some(existing) = self
+                .addrs_v2
+                .iter_mut()
+                .find(|e| e.net_id == a.net_id && e.addr == a.addr)
+            {
+                if a.timestamp > existing.timestamp {
+                    existing.timestamp = a.timestamp;
+                }
+            }
             return;
         }
+
+        // At capacity: admit only if fresher than the current stalest entry,
+        // evicting that stalest one. Otherwise drop the newcomer.
+        if self.addrs_v2.len() >= self.max_addresses {
+            let Some((oldest_idx, oldest_ts)) = self
+                .addrs_v2
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (i, e.timestamp))
+                .min_by_key(|&(_, ts)| ts)
+            else {
+                return;
+            };
+            if a.timestamp <= oldest_ts {
+                return;
+            }
+            let evicted = self.addrs_v2.swap_remove(oldest_idx);
+            self.v2_seen.remove(&(evicted.net_id, evicted.addr));
+        }
+
         self.v2_seen.insert(key);
         self.addrs_v2.push(a);
+    }
+
+    /// Age out onion/I2P addresses last advertised before `cutoff` (unix secs),
+    /// returning how many were dropped. Called periodically (maintenance) so a
+    /// long-lived node stops dialing onions that went quiet long ago. The dedup
+    /// set is kept in sync. Our own `self_v2` entries live in a separate store
+    /// and are never aged.
+    pub fn prune_v2(&mut self, cutoff: u64) -> usize {
+        let before = self.addrs_v2.len();
+        let seen = &mut self.v2_seen;
+        self.addrs_v2.retain(|e| {
+            let keep = e.timestamp >= cutoff;
+            if !keep {
+                seen.remove(&(e.net_id, e.addr.clone()));
+            }
+            keep
+        });
+        before - self.addrs_v2.len()
     }
 
     /// Number of stored onion/I2P (addrv2) addresses.
@@ -1780,6 +1843,76 @@ mod tests {
                 seed
             );
         }
+    }
+
+    // ── addrv2 store hardening ─────────────────────────────────────────
+
+    fn onion(byte: u8, ts: u64) -> crate::network::protocol::NetAddrV2 {
+        crate::network::protocol::NetAddrV2 {
+            services: 0,
+            timestamp: ts,
+            net_id: crate::network::protocol::net_id::ONION_V3,
+            addr: vec![byte; 32],
+            port: 28080,
+        }
+    }
+
+    #[test]
+    fn add_v2_refreshes_timestamp_on_readvertisement() {
+        let mut m = AddressManager::new(10);
+        m.add_v2(onion(0x01, 1_000));
+        // Same address re-advertised with a newer timestamp: no new entry, but
+        // the stored timestamp advances (so it won't be aged out prematurely).
+        m.add_v2(onion(0x01, 5_000));
+        assert_eq!(m.v2_len(), 1, "a re-advertisement is not a new entry");
+        assert_eq!(m.get_v2(1)[0].timestamp, 5_000, "timestamp refreshed");
+        // An older re-advertisement never moves the timestamp backward.
+        m.add_v2(onion(0x01, 2_000));
+        assert_eq!(m.get_v2(1)[0].timestamp, 5_000, "older dup does not regress");
+    }
+
+    #[test]
+    fn add_v2_at_capacity_evicts_stalest_for_a_fresher_entry() {
+        let mut m = AddressManager::new(2);
+        m.add_v2(onion(0x01, 1_000)); // stalest
+        m.add_v2(onion(0x02, 2_000));
+        assert_eq!(m.v2_len(), 2);
+
+        // Full + fresher than the stalest (ts 1_000) => evict 0x01, admit 0x03.
+        m.add_v2(onion(0x03, 3_000));
+        assert_eq!(m.v2_len(), 2, "store stays capped");
+        let keys: Vec<u8> = m.get_v2(10).iter().map(|e| e.addr[0]).collect();
+        assert!(keys.contains(&0x03), "the fresher entry was admitted");
+        assert!(!keys.contains(&0x01), "the stalest entry was evicted");
+        assert!(!m.contains_v2(crate::network::protocol::net_id::ONION_V3, &[0x01; 32]),
+            "dedup set drops the evicted key");
+    }
+
+    #[test]
+    fn add_v2_at_capacity_drops_an_entry_no_fresher_than_the_stalest() {
+        let mut m = AddressManager::new(2);
+        m.add_v2(onion(0x01, 5_000));
+        m.add_v2(onion(0x02, 6_000));
+        // Not fresher than the stalest (5_000) => a stale flood can't evict.
+        m.add_v2(onion(0x03, 4_000));
+        let keys: Vec<u8> = m.get_v2(10).iter().map(|e| e.addr[0]).collect();
+        assert_eq!(m.v2_len(), 2);
+        assert!(!keys.contains(&0x03), "a non-fresher newcomer is dropped");
+    }
+
+    #[test]
+    fn prune_v2_ages_out_only_entries_before_cutoff() {
+        let mut m = AddressManager::new(10);
+        m.add_v2(onion(0x01, 1_000)); // stale
+        m.add_v2(onion(0x02, 9_000)); // fresh
+        let dropped = m.prune_v2(5_000);
+        assert_eq!(dropped, 1);
+        assert_eq!(m.v2_len(), 1);
+        assert_eq!(m.get_v2(1)[0].addr[0], 0x02, "the fresh entry survives");
+        assert!(
+            !m.contains_v2(crate::network::protocol::net_id::ONION_V3, &[0x01; 32]),
+            "pruned key leaves the dedup set"
+        );
     }
 }
 

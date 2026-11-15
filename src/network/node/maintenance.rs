@@ -128,6 +128,13 @@ use super::TxAbsenceCache;
 /// cadence, so the book stays fresh without adding meaningful traffic.
 const ADDRV2_GOSSIP_INTERVAL_SECS: u64 = 90;
 
+/// Age horizon for learned onion/I2P addresses. A peer re-advertises on our
+/// GetAddrV2 requests and its own gossip (refreshing the stored timestamp), so
+/// an address older than this has not been seen in many gossip rounds and is
+/// pruned. 3 h tolerates normal churn while bounding how long a dead onion
+/// lingers in the dial set.
+const ADDRV2_MAX_AGE_SECS: u64 = 3 * 60 * 60;
+
 pub(super) struct MaintenanceContext {
     pub peers: Arc<DashMap<PeerId, PeerInfo>>,
     pub dandelion: Arc<RwLock<DandelionRouter>>,
@@ -337,7 +344,7 @@ pub(super) fn spawn_maintenance(
                     discover_inbound_peers(&maint_peers, &maint_addresses, discovery_port).await;
                 }
                 _ = addrv2_gossip_interval.tick() => {
-                    run_addrv2_gossip_tick(&maint_senders, &maint_peers, magic).await;
+                    run_addrv2_gossip_tick(&maint_senders, &maint_peers, &maint_addresses, magic).await;
                 }
                 _ = outbound_rotate_interval.tick() => {
                     rotate_outbound_peer(&maint_peers, &maint_senders);
@@ -644,9 +651,27 @@ async fn discover_inbound_peers(
 async fn run_addrv2_gossip_tick(
     senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
     peers: &DashMap<PeerId, PeerInfo>,
+    addresses: &RwLock<AddressManager>,
     magic: [u8; 4],
 ) {
     use super::super::protocol::MessageType;
+
+    // Age out onion/I2P addresses that stopped being gossiped, bounding the
+    // staleness of the dial set before we re-request fresh ones below.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cutoff = now.saturating_sub(ADDRV2_MAX_AGE_SECS);
+    let pruned = addresses.write().await.prune_v2(cutoff);
+    if pruned > 0 {
+        tracing::debug!(
+            target: "node::addrv2",
+            "addrv2 gossip: pruned {} stale onion/I2P address(es) older than {}s",
+            pruned, ADDRV2_MAX_AGE_SECS,
+        );
+    }
+
     let Ok(data) = Message::new(magic, MessageType::GetAddrV2, Vec::new()).to_bytes() else {
         return;
     };
@@ -1002,7 +1027,8 @@ mod addrv2_gossip_tests {
             rxs.insert(n, rx);
         }
 
-        run_addrv2_gossip_tick(&senders, &peers, MAGIC).await;
+        let addresses = RwLock::new(AddressManager::new(1000));
+        run_addrv2_gossip_tick(&senders, &peers, &addresses, MAGIC).await;
 
         // Only peer 1 got a frame, and it is a GetAddrV2 (type byte at offset 4).
         let frame = rxs
@@ -1019,6 +1045,39 @@ mod addrv2_gossip_tests {
             rxs.get_mut(&3).unwrap().try_recv().is_err(),
             "a not-yet-Connected peer is skipped"
         );
+    }
+
+    /// The tick also ages out onion addresses older than ADDRV2_MAX_AGE_SECS,
+    /// while keeping fresh ones.
+    #[tokio::test]
+    async fn gossip_tick_prunes_stale_onion_addresses() {
+        use crate::network::protocol::{net_id, NetAddrV2};
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut book = AddressManager::new(1000);
+        let onion = |byte: u8, ts: u64| NetAddrV2 {
+            services: 0,
+            timestamp: ts,
+            net_id: net_id::ONION_V3,
+            addr: vec![byte; 32],
+            port: 28080,
+        };
+        book.add_v2(onion(0x11, now)); // fresh — kept
+        book.add_v2(onion(0x22, now - ADDRV2_MAX_AGE_SECS - 10)); // stale — pruned
+        assert_eq!(book.v2_len(), 2);
+
+        let addresses = RwLock::new(book);
+        let peers: DashMap<PeerId, PeerInfo> = DashMap::new();
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        run_addrv2_gossip_tick(&senders, &peers, &addresses, MAGIC).await;
+
+        let kept = addresses.read().await.get_v2(10);
+        assert_eq!(kept.len(), 1, "the stale onion was pruned");
+        assert_eq!(kept[0].addr, vec![0x11; 32], "the fresh onion survived");
     }
 }
 
