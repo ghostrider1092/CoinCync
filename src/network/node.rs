@@ -959,6 +959,9 @@ impl P2PNode {
             .as_ref()
             .map(|proxy| proxy.onion_only)
             .unwrap_or(false);
+        // Publish the anonymity mode process-wide so the addrv2 gossip path can
+        // refuse to advertise our clearnet peer book over an onion/I2P link.
+        crate::network::proxy::set_onion_only(onion_only);
         let proxy_active = self.config.proxy.is_some();
 
         if self.addresses.read().await.is_empty() {

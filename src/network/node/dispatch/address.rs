@@ -356,19 +356,25 @@ pub(super) async fn handle_get_addr_v2(
             a
         })
         .collect();
-    // Then the verified IP book (mapped to addrv2) and learned onion/i2p peers.
-    out.extend(addrs.get_for_gossip(100).iter().map(|pa| {
-        let na = NetAddr {
-            services: pa.services,
-            ip: match pa.addr.ip() {
-                std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
-                std::net::IpAddr::V6(v6) => v6.octets(),
-            },
-            port: pa.addr.port(),
-            timestamp: pa.last_seen,
-        };
-        NetAddrV2::from(&na)
-    }));
+    // Then the verified IP book (mapped to addrv2) — but NEVER in onion-only
+    // mode: advertising our clearnet peer set over an onion/I2P link would hand
+    // an anonymity-network peer our clearnet contacts (app-layer IP leak). In
+    // onion-only we gossip ONLY onion/I2P addresses.
+    if !crate::network::proxy::is_onion_only() {
+        out.extend(addrs.get_for_gossip(100).iter().map(|pa| {
+            let na = NetAddr {
+                services: pa.services,
+                ip: match pa.addr.ip() {
+                    std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+                    std::net::IpAddr::V6(v6) => v6.octets(),
+                },
+                port: pa.addr.port(),
+                timestamp: pa.last_seen,
+            };
+            NetAddrV2::from(&na)
+        }));
+    }
+    // Learned onion/I2P peers are always safe to gossip.
     out.extend(addrs.get_v2(100));
     drop(addrs);
 
@@ -642,6 +648,53 @@ mod handler_tests {
                 .iter()
                 .any(|a| a.net_id == net_id::ONION_V3 && a.addr == onion_key),
             "our own onion address is advertised in the GetAddrV2 response"
+        );
+    }
+
+    /// App-layer IP-scrub: in onion-only mode the GetAddrV2 response must carry
+    /// ONLY onion/I2P addresses — never the clearnet IP book (which would hand an
+    /// anonymity-network peer our clearnet contacts).
+    #[tokio::test]
+    async fn onion_only_response_omits_the_clearnet_ip_book() {
+        use crate::network::protocol::{net_id, AddrV2Message, NetAddrV2};
+
+        let peer_id = [6u8; 32];
+        let peers = DashMap::new();
+        let mut pi = PeerInfo::new(peer_id, addr_for(33066), false);
+        pi.encrypted = true;
+        peers.insert(peer_id, pi);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let addresses = RwLock::new(AddressManager::new(1000));
+        {
+            let mut book = addresses.write().await;
+            // A routable clearnet peer in the IP book + our own onion.
+            book.add(crate::network::bootstrap::PeerAddress::new(
+                "45.33.2.2:28080".parse().unwrap(),
+            ));
+            let onion_host = crate::network::protocol::onion_v3_host_from_pubkey(&[0x55u8; 32]);
+            book.add_self_v2(NetAddrV2::onion_v3_self(&onion_host, 28080, 0).unwrap());
+        }
+
+        crate::network::proxy::set_onion_only(true);
+        handle_get_addr_v2(peer_id, MAGIC, &peers, &senders, &addresses)
+            .await
+            .unwrap();
+        crate::network::proxy::set_onion_only(false); // reset the process-global
+
+        let frame = srx.try_recv().expect("an AddrV2 response was sent");
+        let payload = &frame[crate::network::framing::HEADER_SIZE..];
+        let msg: AddrV2Message = borsh::from_slice(payload).unwrap();
+        assert!(
+            msg.addresses.iter().any(|a| a.net_id == net_id::ONION_V3),
+            "our onion is still advertised in onion-only mode"
+        );
+        assert!(
+            !msg.addresses
+                .iter()
+                .any(|a| a.net_id == net_id::IPV4 || a.net_id == net_id::IPV6),
+            "onion-only must NOT advertise the clearnet IP book"
         );
     }
 
