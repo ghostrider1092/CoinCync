@@ -284,9 +284,32 @@ fn download_to_file(url: &str, path: &Path, max: u64) -> Result<u64, FastSyncErr
     Ok(n)
 }
 
+/// SOCKS proxy the fast-sync downloads route through, when set. Under `--tor` /
+/// `--proxy` this hides the operator's IP from the snapshot server; `socks5h`
+/// resolves the host at the proxy too, so there is no clearnet DNS leak either.
+/// Set once before `fetch_and_stage`. (Onion-only refuses fast-sync entirely —
+/// a clearnet snapshot URL can't be served anonymously — so it never reaches
+/// here.)
+static FAST_SYNC_PROXY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Route subsequent fast-sync HTTP through `proxy_url` (e.g.
+/// `socks5h://127.0.0.1:9050`), or clear it with `None`.
+pub fn set_fetch_proxy(proxy_url: Option<String>) {
+    *FAST_SYNC_PROXY.lock().unwrap_or_else(|e| e.into_inner()) = proxy_url;
+}
+
 fn http_client() -> Result<reqwest::blocking::Client, FastSyncError> {
-    reqwest::blocking::Client::builder()
-        .timeout(HTTP_TIMEOUT)
+    let mut builder = reqwest::blocking::Client::builder().timeout(HTTP_TIMEOUT);
+    if let Some(url) = FAST_SYNC_PROXY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        let proxy = reqwest::Proxy::all(&url)
+            .map_err(|e| FastSyncError::DownloadFailed(format!("bad fast-sync proxy: {e}")))?;
+        builder = builder.proxy(proxy);
+    }
+    builder
         .build()
         .map_err(|e| FastSyncError::DownloadFailed(e.to_string()))
 }
@@ -316,6 +339,17 @@ pub fn log_fallback(reason: &dyn std::fmt::Display) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_proxy_is_applied_to_the_http_client() {
+        // A configured SOCKS proxy builds a client (fast-sync routes through it);
+        // clearing it returns to direct. Proves the proxy wiring is live so a
+        // --tor/--proxy node does not download the snapshot over raw clearnet.
+        set_fetch_proxy(Some("socks5h://127.0.0.1:9050".to_string()));
+        assert!(http_client().is_ok(), "a valid SOCKS proxy builds the client");
+        set_fetch_proxy(None);
+        assert!(http_client().is_ok(), "no proxy -> direct client still builds");
+    }
 
     #[test]
     fn default_pointer_url_is_network_scoped() {

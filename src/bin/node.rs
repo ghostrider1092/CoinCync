@@ -1429,8 +1429,26 @@ async fn start_node(
     // trust (snapshot::import refuses an unsigned/untrusted/wrong-fork
     // snapshot). Runs on a blocking thread — blocking HTTP + RocksDB I/O must
     // not run on a tokio worker.
-    if fast_sync {
+    if fast_sync && onion_only {
+        // Leak guard: the snapshot download is clearnet HTTPS and cannot be
+        // served anonymously from a clearnet URL, so refuse it in onion-only
+        // mode rather than expose the operator's IP. Sync via IBD over Tor, or
+        // import a snapshot fetched out-of-band with `snapshot-import`.
+        warn!("--fast-sync disabled in onion-only mode (its snapshot download is clearnet HTTPS and would leak your IP); use IBD over Tor or `snapshot-import` instead");
+    } else if fast_sync {
         if coincync::network::snapshot_fetch::is_fresh_datadir(&data_dir, network) {
+            // Route the download through the SOCKS proxy when one is configured
+            // (--tor/--proxy), so even dual-stack hides the operator IP from the
+            // snapshot server; socks5h resolves the host at the proxy (no DNS
+            // leak). None = direct (no proxy configured).
+            let fetch_proxy = if let Some(ref p) = proxy_arg {
+                Some(format!("socks5h://{p}"))
+            } else if tor_shortcut {
+                Some("socks5h://127.0.0.1:9050".to_string())
+            } else {
+                None
+            };
+            coincync::network::snapshot_fetch::set_fetch_proxy(fetch_proxy);
             let dd = data_dir.clone();
             match tokio::task::spawn_blocking(move || fast_sync_bootstrap(network, &dd)).await {
                 Ok(Some(h)) => {
