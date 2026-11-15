@@ -341,6 +341,11 @@ pub(super) async fn handle_connection(
     // the skip-cleanup branch (where peers.remove is intentionally
     // not called to preserve a concurrent reconnection).
     eclipse_slot: Option<Arc<OutboundSubnetSlot>>,
+    // Set for a peer reached over Tor/I2P through the SOCKS proxy: the onion/I2P
+    // host we dialed. `stream.peer_addr()` is then the proxy, not the peer, so
+    // this host (plus the Noise key) is the peer's identity. None for normal
+    // IP peers (inbound accepts and clearnet dials).
+    onion_host: Option<String>,
 ) -> Result<()> {
     let addr = stream
         .peer_addr()
@@ -355,6 +360,7 @@ pub(super) async fn handle_connection(
 
     let mut info = PeerInfo::new(peer_id, addr, outbound);
     info.eclipse_slot = eclipse_slot;
+    info.onion_host = onion_host;
 
     // ─── Noise_XX Encryption ────────────────────────────────────────────
     //

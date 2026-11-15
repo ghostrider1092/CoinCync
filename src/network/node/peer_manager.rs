@@ -143,6 +143,55 @@ struct OutboundAttempt {
     our_nonce: u64,
 }
 
+// ── Onion/I2P outbound dialing (addrv2) ──────────────────────────────────────
+// Learned onion/I2P peers are dialed through the SOCKS proxy on their own small
+// budget, keyed by host (not SocketAddr — their transport addr is the proxy).
+// Backoff and in-flight dedup are host-keyed; they never touch the IP per-/16
+// eclipse accounting.
+
+/// Max concurrent onion/I2P outbound peers. Small and separate from the IP
+/// outbound budget so slow Tor dials can never starve clearnet slots.
+const ONION_OUTBOUND_BUDGET: usize = 4;
+/// How many learned onions to scan per tick when choosing one to dial.
+const ONION_DIAL_SCAN: usize = 16;
+/// Onion dials go through Tor and are slow; give them a longer ceiling than the
+/// clearnet CONNECT_TIMEOUT.
+const ONION_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+type OnionBackoffMap = Arc<
+    tokio::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            (
+                crate::clock::MonoInstant,
+                super::super::framing::ExponentialBackoff,
+            ),
+        >,
+    >,
+>;
+type OnionLastAttempt =
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, crate::clock::MonoInstant>>>;
+
+struct OnionOutboundAttempt {
+    onion: crate::network::protocol::NetAddrV2,
+    host: String,
+    proxy: ProxyConfig,
+    peers: Arc<DashMap<PeerId, PeerInfo>>,
+    senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
+    event_tx: broadcast::Sender<NodeEvent>,
+    msg_tx: mpsc::Sender<PeerMessage>,
+    handshake_tx: mpsc::Sender<PeerMessage>,
+    height: u64,
+    tip: crate::primitives::Hash,
+    identity: Arc<NodeIdentity>,
+    encryption: P2PEncryptionConfig,
+    tracker: Arc<ConnectionTracker>,
+    traffic_shaper: Arc<TrafficShaper>,
+    backoffs: OnionBackoffMap,
+    magic: [u8; 4],
+    our_nonce: u64,
+}
+
 pub(super) struct AcceptorContext {
     pub peers: Arc<DashMap<PeerId, PeerInfo>>,
     pub event_tx: broadcast::Sender<NodeEvent>,
@@ -351,6 +400,7 @@ pub(super) fn spawn_listener_acceptor(
                             conn_encryption,
                             conn_traffic_shaper,
                             None, // inbound — no per-/16 slot to track
+                            None, // inbound — IP peer, not an onion
                         )
                         .await;
 
@@ -457,6 +507,11 @@ pub(super) fn spawn_outbound_connector(
         let last_attempt: LastAttemptMap =
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         const MIN_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+        // Onion/I2P dialing state (host-keyed), separate from the IP maps above.
+        let onion_backoffs: OnionBackoffMap =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let onion_last_attempt: OnionLastAttempt =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
         // RE-BOOTSTRAP-ON-ISOLATION (#147): state for re-resolving DNS seeds
         // when the address book drains to nothing while under-meshed. `None`
@@ -538,6 +593,75 @@ pub(super) fn spawn_outbound_connector(
             // path.
             if outbound_count >= max_outbound {
                 continue;
+            }
+
+            // ── Onion/I2P outbound (addrv2) ──────────────────────────────────
+            // Dial a learned onion through the SOCKS proxy on its own small
+            // budget, so slow Tor dials never starve the clearnet slots. Runs
+            // before the IP dial so both get a turn per tick. Requires a proxy —
+            // onions aren't dialable on clearnet. Identity is the onion host +
+            // Noise key, so these never enter the IP per-/16 eclipse accounting.
+            if let Some(ref proxy) = connector_proxy {
+                if proxy.is_active() {
+                    let onion_outbound = connector_peers
+                        .iter()
+                        .filter(|p| p.outbound && p.onion_host.is_some())
+                        .count();
+                    if onion_outbound < ONION_OUTBOUND_BUDGET {
+                        let candidates = connector_addresses.read().await.get_v2(ONION_DIAL_SCAN);
+                        let mut chosen = None;
+                        for c in candidates {
+                            let Some(host) = c.onion_host() else {
+                                continue; // not onion-v3 (e.g. I2P) — SAM not yet wired
+                            };
+                            if connector_peers
+                                .iter()
+                                .any(|p| p.onion_host.as_deref() == Some(host.as_str()))
+                            {
+                                continue; // already connected to / dialing this onion
+                            }
+                            if onion_attempt_deferred(
+                                &host,
+                                &onion_last_attempt,
+                                &onion_backoffs,
+                                MIN_RECONNECT_DELAY,
+                            )
+                            .await
+                            {
+                                continue;
+                            }
+                            chosen = Some((c, host));
+                            break;
+                        }
+                        if let Some((onion, host)) = chosen {
+                            debug!("Attempting outbound onion connection to {}", host);
+                            onion_last_attempt
+                                .lock()
+                                .await
+                                .insert(host.clone(), crate::clock::mono_now());
+                            let (height, tip) = connector_chain_state.snapshot().await;
+                            connections.spawn(run_onion_outbound_attempt(OnionOutboundAttempt {
+                                onion,
+                                host,
+                                proxy: proxy.clone(),
+                                peers: connector_peers.clone(),
+                                senders: connector_senders.clone(),
+                                event_tx: connector_event_tx.clone(),
+                                msg_tx: connector_msg_tx.clone(),
+                                handshake_tx: connector_handshake_tx.clone(),
+                                height,
+                                tip,
+                                identity: connector_identity.clone(),
+                                encryption: connector_encryption.clone(),
+                                tracker: connector_tracker.clone(),
+                                traffic_shaper: Arc::clone(&connector_traffic_shaper),
+                                backoffs: onion_backoffs.clone(),
+                                magic,
+                                our_nonce,
+                            }));
+                        }
+                    }
+                }
             }
 
             // Get next address to try
@@ -796,6 +920,14 @@ async fn observe_outbound_health(
     tracker: &ConnectionTracker,
 ) -> usize {
     let outbound_count = peers.iter().filter(|peer| peer.outbound).count();
+    // Onion/I2P outbound peers hold no per-/16 eclipse slot (their `addr` is the
+    // proxy, not a routable IP), so the subnet accounting only tracks IP peers.
+    // Use an IP-only count for the eclipse drift comparison below, or every
+    // onion peer would read as phantom drift and trigger a reconcile each tick.
+    let ip_outbound_count = peers
+        .iter()
+        .filter(|peer| peer.outbound && peer.onion_host.is_none())
+        .count();
     let total_peers = peers.len();
     let inbound_count = total_peers.saturating_sub(outbound_count);
     let address_count = addresses.read().await.len();
@@ -843,18 +975,18 @@ async fn observe_outbound_health(
             format!("{}.{}/16={}", hi, lo, count)
         })
         .collect();
-    let drift = (subnet_sum as i64 - outbound_count as i64).abs();
+    let drift = (subnet_sum as i64 - ip_outbound_count as i64).abs();
     if drift >= 2 {
         let live_outbound: Vec<SocketAddr> = peers
             .iter()
-            .filter(|peer| peer.outbound)
+            .filter(|peer| peer.outbound && peer.onion_host.is_none())
             .map(|peer| peer.addr)
             .collect();
         let (old_sum, new_sum) = tracker.reconcile_outbound_subnets(&live_outbound);
         warn!(
-            "eclipse-defense: significant drift — subnet_sum={} but outbound_count={} (diff={}) :: {} :: RECONCILED {}→{} from {} live outbound",
+            "eclipse-defense: significant drift — subnet_sum={} but ip_outbound_count={} (diff={}) :: {} :: RECONCILED {}→{} from {} live outbound",
             subnet_sum,
-            outbound_count,
+            ip_outbound_count,
             drift,
             pretty.join(", "),
             old_sum,
@@ -863,9 +995,9 @@ async fn observe_outbound_health(
         );
     } else if drift == 1 {
         debug!(
-            "eclipse-defense: minor drift (cosmetic) — subnet_sum={} but outbound_count={} :: {}",
+            "eclipse-defense: minor drift (cosmetic) — subnet_sum={} but ip_outbound_count={} :: {}",
             subnet_sum,
-            outbound_count,
+            ip_outbound_count,
             pretty.join(", ")
         );
     } else {
@@ -938,6 +1070,7 @@ async fn run_outbound_attempt(attempt: OutboundAttempt) {
                 encryption,
                 traffic_shaper,
                 Some(outbound_slot),
+                None, // clearnet IP dial — not an onion
             )
             .await;
             if let Err(error) = result {
@@ -997,6 +1130,104 @@ async fn connection_attempt_deferred(
         .lock()
         .await
         .get(&addr)
+        .map(|(next_attempt, _)| crate::clock::mono_now() < *next_attempt)
+        .unwrap_or(false)
+}
+
+/// Dial a learned onion/I2P peer through the SOCKS proxy and run the handshake.
+/// Mirrors `run_outbound_attempt` but: dials via `dial_v2` (onion → Tor), carries
+/// NO per-/16 eclipse slot (onions have no IP netgroup), and tags the resulting
+/// PeerInfo with its onion host so it is excluded from IP-address logic.
+async fn run_onion_outbound_attempt(attempt: OnionOutboundAttempt) {
+    let OnionOutboundAttempt {
+        onion,
+        host,
+        proxy,
+        peers,
+        senders,
+        event_tx,
+        msg_tx,
+        handshake_tx,
+        height,
+        tip,
+        identity,
+        encryption,
+        tracker,
+        traffic_shaper,
+        backoffs,
+        magic,
+        our_nonce,
+    } = attempt;
+
+    match crate::network::proxy::dial_v2(&onion, &proxy, ONION_CONNECT_TIMEOUT).await {
+        Ok(stream) => {
+            let stream = crate::network::transport::NetStream::tcp(stream);
+            let result = handle_connection(
+                stream,
+                generate_peer_id(),
+                true,
+                magic,
+                our_nonce,
+                height,
+                tip,
+                peers,
+                senders,
+                event_tx,
+                msg_tx,
+                handshake_tx,
+                tracker,
+                identity,
+                encryption,
+                traffic_shaper,
+                None,               // onion peers hold no per-/16 eclipse slot
+                Some(host.clone()), // onion identity (addr is the proxy)
+            )
+            .await;
+            if let Err(error) = result {
+                warn!("Onion outbound connection error ({}): {}", host, error);
+                record_onion_backoff(&backoffs, &host).await;
+            } else {
+                backoffs.lock().await.remove(&host);
+            }
+        }
+        Err(error) => {
+            debug!("Onion dial to {} failed: {}", host, error);
+            record_onion_backoff(&backoffs, &host).await;
+        }
+    }
+}
+
+/// Host-keyed analog of `record_connect_backoff` for onion/I2P dials.
+async fn record_onion_backoff(backoffs: &OnionBackoffMap, host: &str) {
+    let mut backoffs = backoffs.lock().await;
+    let (next_attempt, backoff) = backoffs.entry(host.to_string()).or_insert_with(|| {
+        (
+            crate::clock::mono_now(),
+            super::super::framing::ExponentialBackoff::new(),
+        )
+    });
+    let delay = backoff.next_delay();
+    *next_attempt = crate::clock::mono_now() + delay;
+    debug!("Onion backoff for {}: next retry in {:?}", host, delay);
+}
+
+/// Host-keyed analog of `connection_attempt_deferred`: true while an onion host
+/// is within its min-reconnect window or its backoff.
+async fn onion_attempt_deferred(
+    host: &str,
+    last_attempt: &OnionLastAttempt,
+    backoffs: &OnionBackoffMap,
+    minimum_delay: Duration,
+) -> bool {
+    if let Some(attempted_at) = last_attempt.lock().await.get(host) {
+        if attempted_at.elapsed() < minimum_delay {
+            return true;
+        }
+    }
+    backoffs
+        .lock()
+        .await
+        .get(host)
         .map(|(next_attempt, _)| crate::clock::mono_now() < *next_attempt)
         .unwrap_or(false)
 }

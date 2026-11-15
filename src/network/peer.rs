@@ -191,6 +191,12 @@ pub struct PeerInfo {
     /// end while the peers entry stays. See ConnectionTracker for
     /// the slot's RAII semantics.
     pub eclipse_slot: Option<Arc<crate::network::connection_tracker::OutboundSubnetSlot>>,
+    /// Set when this peer was reached over an anonymity network (Tor onion /
+    /// I2P) through the local SOCKS proxy. `addr` then holds the proxy's socket,
+    /// not a routable peer IP, so onion peers are excluded from IP-address logic
+    /// (the per-/16 eclipse accounting and address-based dedup) and are instead
+    /// identified by their Noise static key (the `peers` map key) and this host.
+    pub onion_host: Option<String>,
 }
 
 impl PeerInfo {
@@ -218,6 +224,7 @@ impl PeerInfo {
             queue_full_since: Arc::new(AtomicU64::new(0)),
             connection_token: Arc::new(()),
             eclipse_slot: None,
+            onion_host: None,
         }
     }
 

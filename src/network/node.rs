@@ -539,6 +539,14 @@ impl P2PNode {
         self.addresses.write().await.add_manual(addr);
     }
 
+    /// Seed a learned onion/I2P peer directly into the addrv2 store (e.g. from
+    /// `--addnode <host>.onion:<port>`), so a Tor-only node can bootstrap its
+    /// first hidden-service peer: the outbound connector dials it through the
+    /// configured SOCKS proxy on the next tick.
+    pub async fn add_onion_seed(&self, v2: crate::network::protocol::NetAddrV2) {
+        self.addresses.write().await.add_v2(v2);
+    }
+
     /// Get connection tracker statistics
     pub fn connection_stats(&self) -> ConnectionStats {
         ConnectionStats {

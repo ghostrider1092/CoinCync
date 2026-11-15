@@ -320,6 +320,7 @@ mod tests {
             queue_full_since: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             connection_token: std::sync::Arc::new(()),
             eclipse_slot: None,
+            onion_host: None,
         }
     }
 
