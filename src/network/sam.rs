@@ -238,6 +238,34 @@ impl SamSession {
         }
         Ok(data)
     }
+
+    /// Wait for ONE inbound I2P peer via `STREAM ACCEPT`, making us DIALABLE over
+    /// I2P. `setup_timeout` bounds the HELLO + ACCEPT registration; the wait for
+    /// a peer afterward is UNbounded (an accept socket may idle indefinitely). On
+    /// an inbound connection SAM sends the remote destination line, after which
+    /// the socket is the raw peer stream — hand it to the Noise handshake like
+    /// any inbound TCP accept. Returns `(stream, remote_destination)`. Callers
+    /// run a POOL of these so simultaneous inbound handshakes don't queue.
+    pub async fn stream_accept(&self, setup_timeout: Duration) -> Result<(TcpStream, String)> {
+        if !self.is_alive() {
+            return Err(Error::ConnectionFailed(
+                "I2P SAM session is dead (control socket closed)".into(),
+            ));
+        }
+        let mut data = dial(&self.sam_addr, setup_timeout).await?;
+        sam_hello(&mut data, setup_timeout).await?;
+        let cmd = format!("STREAM ACCEPT ID={} SILENT=false\n", self.session_id);
+        let reply = sam_cmd(&mut data, cmd.as_bytes(), setup_timeout).await?;
+        if !reply.contains("RESULT=OK") {
+            return Err(Error::ConnectionFailed(format!(
+                "SAM STREAM ACCEPT failed: {reply}"
+            )));
+        }
+        // Block (NO timeout) until a peer connects; SAM then sends one line with
+        // the remote destination, and the socket becomes the data stream.
+        let remote = read_line(&mut data).await?;
+        Ok((data, remote))
+    }
 }
 
 /// Extract the value of a `KEY=VALUE` token from a SAM reply line (the reply is
@@ -401,6 +429,22 @@ mod tests {
                                 }
                             }
                         }
+                    } else if cmd.starts_with("STREAM ACCEPT") {
+                        let _ = sock.write_all(b"STREAM STATUS RESULT=OK\n").await;
+                        // Simulate an inbound peer arriving: send its destination
+                        // line, then act as that peer by echoing.
+                        let _ = sock.write_all(b"REMOTEpeerDESTbase64==\n").await;
+                        let mut buf = [0u8; 1024];
+                        loop {
+                            match sock.read(&mut buf).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    if sock.write_all(&buf[..n]).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
                 });
             }
@@ -436,6 +480,27 @@ mod tests {
         let mut buf = [0u8; 8];
         stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"i2p-dial", "the I2P stream round-trips bytes");
+    }
+
+    #[tokio::test]
+    async fn sam_session_accepts_an_inbound_stream_and_round_trips() {
+        let sam = spawn_mock_sam().await;
+        let t = Duration::from_secs(5);
+        let dir = tempfile::tempdir().unwrap();
+        let session = SamSession::connect(&sam.to_string(), dir.path(), t, t)
+            .await
+            .unwrap();
+
+        // STREAM ACCEPT yields an inbound peer (the mock presents one immediately).
+        let (mut stream, remote) = session
+            .stream_accept(t)
+            .await
+            .expect("STREAM ACCEPT should yield an inbound peer");
+        assert!(!remote.is_empty(), "the remote destination line is returned");
+        stream.write_all(b"i2p-in").await.unwrap();
+        let mut buf = [0u8; 6];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"i2p-in", "the inbound I2P stream round-trips bytes");
     }
 
     #[tokio::test]

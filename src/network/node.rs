@@ -1096,6 +1096,33 @@ impl P2PNode {
             }
             None => None,
         };
+        // I2P inbound: if the SAM session is up, run the STREAM ACCEPT pool so
+        // the node is DIALABLE over I2P, not just dialing out. (`ref` borrows;
+        // the session Arc is still moved into the connector context below.)
+        if let Some(ref session) = i2p_sam {
+            node_runtime.track(
+                "i2p-accept-pool",
+                peer_manager::spawn_i2p_accept_pool(
+                    peer_manager::I2pAcceptContext {
+                        session: session.clone(),
+                        peers: self.peers.clone(),
+                        senders: self.peer_senders.clone(),
+                        event_tx: self.event_tx.clone(),
+                        msg_tx: msg_tx.clone(),
+                        handshake_tx: handshake_tx.clone(),
+                        chain_state: self.chain_state.reader(),
+                        identity: self.identity.clone(),
+                        encryption: self.config.encryption.clone(),
+                        tracker: self.conn_tracker.clone(),
+                        traffic_shaper: self.traffic_shaper.clone(),
+                        magic: self.config.magic,
+                        our_nonce: self.version_nonce,
+                    },
+                    node_runtime.shutdown_receiver(),
+                ),
+            );
+            info!("I2P inbound STREAM ACCEPT pool started — node is dialable over I2P");
+        }
         node_runtime.track(
             "outbound-connector",
             peer_manager::spawn_outbound_connector(

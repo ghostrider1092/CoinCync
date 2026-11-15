@@ -949,6 +949,143 @@ pub(super) fn spawn_outbound_connector(
     })
 }
 
+// ── Inbound I2P (SAM STREAM ACCEPT pool) ─────────────────────────────────────
+
+/// Concurrent `STREAM ACCEPT` waiters — a POOL so simultaneous inbound Noise
+/// handshakes don't queue behind one slow peer.
+const I2P_ACCEPT_POOL_SIZE: usize = 6;
+/// Total inbound I2P peers admitted. I2P peers share the SAM bridge addr, so the
+/// per-IP inbound cap can't bound them; this total cap does instead (an
+/// unbounded accept loop would be a DoS vector).
+const MAX_I2P_INBOUND: usize = 16;
+/// Bounds the HELLO + STREAM ACCEPT registration (not the wait for a peer).
+const I2P_ACCEPT_SETUP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Backoff between failed accept-socket setups (e.g. SAM bridge hiccup).
+const I2P_ACCEPT_RETRY_BACKOFF: Duration = Duration::from_secs(5);
+
+pub(super) struct I2pAcceptContext {
+    pub session: Arc<SamSession>,
+    pub peers: Arc<DashMap<PeerId, PeerInfo>>,
+    pub senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
+    pub event_tx: broadcast::Sender<NodeEvent>,
+    pub msg_tx: mpsc::Sender<PeerMessage>,
+    pub handshake_tx: mpsc::Sender<PeerMessage>,
+    pub chain_state: ChainStateReader,
+    pub identity: Arc<NodeIdentity>,
+    pub encryption: P2PEncryptionConfig,
+    pub tracker: Arc<ConnectionTracker>,
+    pub traffic_shaper: Arc<TrafficShaper>,
+    pub magic: [u8; 4],
+    pub our_nonce: u64,
+}
+
+/// Spawn a pool of `STREAM ACCEPT` loops so the node is DIALABLE over I2P.
+/// Several accept sockets wait concurrently on the SAM session; each accepts one
+/// inbound stream, hands it to `handle_connection` as an inbound anon peer
+/// (tagged with the remote destination, excluded from IP logic), then loops to
+/// accept the next. I2P peers are NOT per-IP tracked (they share the SAM addr —
+/// the acceptor's per-IP cap would be wrong); a total `MAX_I2P_INBOUND` cap
+/// bounds them instead. Loops stop when the session dies or on shutdown.
+pub(super) fn spawn_i2p_accept_pool(
+    ctx: I2pAcceptContext,
+    mut shutdown: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut waiters = JoinSet::new();
+        for _ in 0..I2P_ACCEPT_POOL_SIZE {
+            let session = ctx.session.clone();
+            let peers = ctx.peers.clone();
+            let senders = ctx.senders.clone();
+            let event_tx = ctx.event_tx.clone();
+            let msg_tx = ctx.msg_tx.clone();
+            let handshake_tx = ctx.handshake_tx.clone();
+            let chain_state = ctx.chain_state.clone();
+            let identity = ctx.identity.clone();
+            let encryption = ctx.encryption.clone();
+            let tracker = ctx.tracker.clone();
+            let traffic_shaper = ctx.traffic_shaper.clone();
+            let magic = ctx.magic;
+            let our_nonce = ctx.our_nonce;
+            waiters.spawn(async move {
+                loop {
+                    if !session.is_alive() {
+                        break;
+                    }
+                    match session.stream_accept(I2P_ACCEPT_SETUP_TIMEOUT).await {
+                        Ok((stream, remote)) => {
+                            // Total inbound-I2P admission cap (shared SAM addr).
+                            let inbound_i2p = peers
+                                .iter()
+                                .filter(|p| !p.outbound && p.onion_host.is_some())
+                                .count();
+                            if inbound_i2p >= MAX_I2P_INBOUND {
+                                debug!("I2P inbound at cap ({MAX_I2P_INBOUND}); dropping new stream");
+                                drop(stream); // close; keep accepting
+                                continue;
+                            }
+                            let (height, tip) = chain_state.snapshot().await;
+                            let net = crate::network::transport::NetStream::tcp(stream);
+                            // Detached so this accept slot frees immediately to
+                            // wait for the next inbound peer (pool semantics).
+                            let (peers, senders, event_tx, msg_tx, handshake_tx) = (
+                                peers.clone(),
+                                senders.clone(),
+                                event_tx.clone(),
+                                msg_tx.clone(),
+                                handshake_tx.clone(),
+                            );
+                            let (identity, encryption, tracker, traffic_shaper) = (
+                                identity.clone(),
+                                encryption.clone(),
+                                tracker.clone(),
+                                traffic_shaper.clone(),
+                            );
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_connection(
+                                    net,
+                                    generate_peer_id(),
+                                    false, // inbound
+                                    magic,
+                                    our_nonce,
+                                    height,
+                                    tip,
+                                    peers,
+                                    senders,
+                                    event_tx,
+                                    msg_tx,
+                                    handshake_tx,
+                                    tracker,
+                                    identity,
+                                    encryption,
+                                    traffic_shaper,
+                                    None,          // inbound — no per-/16 eclipse slot
+                                    Some(remote),  // I2P identity marker
+                                )
+                                .await
+                                {
+                                    debug!("inbound I2P connection ended: {e}");
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            if !session.is_alive() {
+                                break;
+                            }
+                            debug!("I2P STREAM ACCEPT setup failed: {e}; retrying");
+                            tokio::time::sleep(I2P_ACCEPT_RETRY_BACKOFF).await;
+                        }
+                    }
+                }
+            });
+        }
+        tokio::select! {
+            _ = wait_for_shutdown(&mut shutdown) => {}
+            _ = async { while waiters.join_next().await.is_some() {} } => {}
+        }
+        waiters.abort_all();
+    })
+}
+
 /// Decide whether the outbound connector should re-bootstrap from DNS this
 /// tick, given it already found nothing to dial (`get_next() == None`). Pure
 /// and synchronous so the isolation gating and backoff timing are unit-tested
