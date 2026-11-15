@@ -547,6 +547,47 @@ impl AddressManager {
         self.addrs_v2.push(a);
     }
 
+    /// Persist the LEARNED onion/I2P addresses to `<data_dir>/onions.dat` so a
+    /// restart keeps its hidden-service peers instead of relearning from an
+    /// empty book (a `peers.dat` for onions). Our own `self_v2` is re-derived
+    /// from `--onion-address` each start, so it is not persisted. Best-effort:
+    /// a write failure is logged, never fatal. An empty store removes the file.
+    pub fn save_v2_to_disk(&self, data_dir: &std::path::Path) {
+        let path = data_dir.join("onions.dat");
+        if self.addrs_v2.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        match borsh::to_vec(&self.addrs_v2) {
+            Ok(bytes) => {
+                if let Err(e) = std::fs::write(&path, bytes) {
+                    warn!("Failed to save onion/I2P addresses: {}", e);
+                }
+            }
+            Err(e) => warn!("Failed to serialize onion/I2P addresses: {}", e),
+        }
+    }
+
+    /// Load persisted onion/I2P addresses from `<data_dir>/onions.dat` into the
+    /// store at startup. Each goes through [`Self::add_v2`] (so the routable /
+    /// cap / dedup guards apply); the aging tick prunes any that are now stale.
+    /// A missing or malformed file is ignored — the node simply relearns.
+    pub fn load_v2_from_disk(&mut self, data_dir: &std::path::Path) -> usize {
+        let path = data_dir.join("onions.dat");
+        let Ok(bytes) = std::fs::read(&path) else {
+            return 0;
+        };
+        let Ok(list) = borsh::from_slice::<Vec<crate::network::protocol::NetAddrV2>>(&bytes) else {
+            warn!("Ignoring malformed {}", path.display());
+            return 0;
+        };
+        let before = self.addrs_v2.len();
+        for a in list {
+            self.add_v2(a);
+        }
+        self.addrs_v2.len().saturating_sub(before)
+    }
+
     /// Age out onion/I2P addresses last advertised before `cutoff` (unix secs),
     /// returning how many were dropped. Called periodically (maintenance) so a
     /// long-lived node stops dialing onions that went quiet long ago. The dedup
@@ -1939,6 +1980,33 @@ mod tests {
             !m.contains_v2(crate::network::protocol::net_id::ONION_V3, &[0x01; 32]),
             "pruned key leaves the dedup set"
         );
+    }
+
+    #[test]
+    fn v2_persistence_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = AddressManager::new(100);
+        m.add_v2(onion(0x01, 1_000));
+        m.add_v2(onion(0x02, 2_000));
+        m.save_v2_to_disk(dir.path());
+
+        // A fresh book restores both learned onions.
+        let mut restored = AddressManager::new(100);
+        assert_eq!(restored.load_v2_from_disk(dir.path()), 2);
+        let keys: Vec<u8> = restored.get_v2(10).iter().map(|e| e.addr[0]).collect();
+        assert!(keys.contains(&0x01) && keys.contains(&0x02));
+
+        // Saving an empty store removes the file; a later load finds nothing.
+        AddressManager::new(100).save_v2_to_disk(dir.path());
+        let mut after = AddressManager::new(100);
+        assert_eq!(after.load_v2_from_disk(dir.path()), 0);
+    }
+
+    #[test]
+    fn load_v2_from_missing_file_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = AddressManager::new(100);
+        assert_eq!(m.load_v2_from_disk(dir.path()), 0, "missing file → no entries");
     }
 }
 

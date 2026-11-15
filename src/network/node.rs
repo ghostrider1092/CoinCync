@@ -911,6 +911,17 @@ impl P2PNode {
             self.addresses.write().await.set_anchors(anchors);
         }
 
+        // Restore learned onion/I2P peers so a restart keeps its hidden-service
+        // book instead of relearning from scratch.
+        let restored_v2 = self
+            .addresses
+            .write()
+            .await
+            .load_v2_from_disk(&self.config.data_dir);
+        if restored_v2 > 0 {
+            info!("Restored {restored_v2} onion/I2P peer(s) from disk");
+        }
+
         {
             let mut scorer = self.peer_scorer.write().await;
             match scorer.load_bans_from_file(&ban_list_path) {
@@ -1092,6 +1103,47 @@ impl P2PNode {
                 node_runtime.shutdown_receiver(),
             ),
         );
+
+        // Reachability self-check: if we advertise an onion and have a proxy,
+        // confirm (best-effort, after a delay so the Tor hidden-service
+        // descriptor has had time to publish) that our own service is actually
+        // reachable, and WARN if not — so an operator never silently advertises
+        // a dead service. Advisory only: it dials and drops, never handshakes.
+        if let (Some(host), Some(proxy)) =
+            (self.config.onion_address.clone(), self.config.proxy.clone())
+        {
+            if proxy.is_active() {
+                let port = self.config.listen_addr.port();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let Some(self_v2) =
+                        crate::network::protocol::NetAddrV2::onion_v3_self(&host, port, now)
+                    else {
+                        return;
+                    };
+                    match crate::network::proxy::dial_v2(
+                        &self_v2,
+                        &proxy,
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+                    {
+                        Ok(_stream) => info!(
+                            "Reachability: our hidden service {host} is reachable over Tor"
+                        ),
+                        Err(e) => warn!(
+                            "Reachability: our hidden service {host} is NOT reachable over Tor \
+                             ({e}) — peers cannot dial us back. Check that your torrc \
+                             HiddenServicePort maps to our P2P port {port}."
+                        ),
+                    }
+                });
+            }
+        }
         node_runtime.track(
             "message-processor",
             runtime::spawn_message_processor(
@@ -1212,6 +1264,11 @@ impl P2PNode {
 
         // ANCHORS: persist known-good outbound peers for fast reconnect next start.
         peer_manager::save_anchors_to_disk(&self.peers, &self.config.data_dir);
+        // Persist the learned onion/I2P book too, so a restart keeps it.
+        self.addresses
+            .read()
+            .await
+            .save_v2_to_disk(&self.config.data_dir);
         peer_manager::disconnect_all(&self.peers, &self.peer_senders, &self.event_tx);
 
         info!("P2P node stopped");

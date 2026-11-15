@@ -609,6 +609,12 @@ pub(super) fn spawn_outbound_connector(
             anchor_save_tick = anchor_save_tick.wrapping_add(1);
             if anchor_save_tick % 6 == 0 {
                 save_anchors_to_disk(&connector_peers, &connector_data_dir);
+                // Persist the learned onion/I2P book on the same cadence so a
+                // hard kill keeps it (not just a graceful stop).
+                connector_addresses
+                    .read()
+                    .await
+                    .save_v2_to_disk(&connector_data_dir);
             }
 
             let outbound_count =
