@@ -210,6 +210,167 @@ pub(super) async fn handle_addr(
     Ok(())
 }
 
+/// Receive-side handler for `AddrV2`: ingest a peer's typed addresses. IPv4/IPv6
+/// entries feed the hardened IP book (routability + last_seen clamp, exactly like
+/// [`handle_addr`]); onion/I2P entries go to the addrv2 side store. Same freshness
+/// and size guards as `handle_addr`.
+pub(super) async fn handle_addr_v2(
+    peer_id: PeerId,
+    payload: &[u8],
+    peers: &DashMap<PeerId, PeerInfo>,
+    addresses: &RwLock<AddressManager>,
+    scorer: &RwLock<PeerScorer>,
+) -> Result<()> {
+    use crate::network::protocol::AddrV2Message;
+
+    // Per-type size cap bounds the borsh allocation (256 KB, same as the frame).
+    if payload.len() > MessageType::AddrV2.max_size() {
+        warn!(
+            "AddrV2 message too large from peer {}",
+            hex::encode(&peer_id[..8])
+        );
+        if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+            scorer
+                .write()
+                .await
+                .get_or_create(addr)
+                .record_misbehavior(crate::network::scoring::MisbehaviorType::OversizedMessage);
+        }
+        return Ok(());
+    }
+
+    match borsh::from_slice::<AddrV2Message>(payload) {
+        Ok(msg) => {
+            if let Err(e) = msg.validate() {
+                warn!(
+                    "Invalid AddrV2Message from peer {}: {}",
+                    hex::encode(&peer_id[..8]),
+                    e
+                );
+                if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                    scorer.write().await.get_or_create(addr).record_misbehavior(
+                        crate::network::scoring::MisbehaviorType::InvalidAddress,
+                    );
+                }
+                return Ok(());
+            }
+
+            let now = super::unix_now();
+            let max_future = now + 600;
+            let max_age = 7 * 24 * 3600;
+
+            let mut addrs = addresses.write().await;
+            let mut accepted = 0usize;
+            for a in &msg.addresses {
+                // Freshness (same policy as handle_addr) + undialable guard.
+                if a.timestamp > max_future || now.saturating_sub(a.timestamp) > max_age {
+                    continue;
+                }
+                if a.port == 0 {
+                    continue;
+                }
+                match a.to_net_addr() {
+                    // IPv4/IPv6 → the hardened IP book.
+                    Some(na) => {
+                        if let Some(socket_addr) = to_socket_addr(&na) {
+                            if !is_routable(socket_addr.ip()) {
+                                continue;
+                            }
+                            let mut pa = PeerAddress::new(socket_addr);
+                            pa.last_seen = a.timestamp.min(now);
+                            pa.services = a.services;
+                            addrs.add(pa);
+                            accepted += 1;
+                        }
+                    }
+                    // onion / i2p → the addrv2 side store (routable net_id only).
+                    None if a.is_routable() => {
+                        let mut v2 = a.clone();
+                        v2.timestamp = a.timestamp.min(now);
+                        addrs.add_v2(v2);
+                        accepted += 1;
+                    }
+                    // unknown net_id → dropped (forward-compat relay is future work).
+                    None => {}
+                }
+            }
+            if accepted > 0 {
+                debug!(
+                    "Added {} addrv2 addresses from {}",
+                    accepted,
+                    hex::encode(&peer_id[..8])
+                );
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Failed to deserialize AddrV2Message from peer {}: {}",
+                hex::encode(&peer_id[..8]),
+                e
+            );
+            if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
+                scorer
+                    .write()
+                    .await
+                    .get_or_create(addr)
+                    .record_misbehavior(crate::network::scoring::MisbehaviorType::InvalidAddress);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Respond to `GetAddrV2` with our known addresses as addrv2 — the verified IP
+/// book (mapped to addrv2) plus the onion/I2P side store. Veil: only to
+/// authenticated (Noise-encrypted) peers.
+pub(super) async fn handle_get_addr_v2(
+    peer_id: PeerId,
+    magic: [u8; 4],
+    peers: &DashMap<PeerId, PeerInfo>,
+    senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
+    addresses: &RwLock<AddressManager>,
+) -> Result<()> {
+    use crate::network::protocol::{AddrV2Message, NetAddr, NetAddrV2};
+
+    let peer_encrypted = peers.get(&peer_id).map(|p| p.encrypted).unwrap_or(false);
+    if !peer_encrypted {
+        debug!(
+            "Veil: ignoring GetAddrV2 from plaintext peer {:?}",
+            &peer_id[..4]
+        );
+        return Ok(());
+    }
+
+    let addrs = addresses.read().await;
+    let mut out: Vec<NetAddrV2> = addrs
+        .get_for_gossip(100)
+        .iter()
+        .map(|pa| {
+            let na = NetAddr {
+                services: pa.services,
+                ip: match pa.addr.ip() {
+                    std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+                    std::net::IpAddr::V6(v6) => v6.octets(),
+                },
+                port: pa.addr.port(),
+                timestamp: pa.last_seen,
+            };
+            NetAddrV2::from(&na)
+        })
+        .collect();
+    out.extend(addrs.get_v2(100));
+    drop(addrs);
+
+    if !out.is_empty() {
+        let msg = AddrV2Message { addresses: out };
+        if let Ok(payload) = borsh::to_vec(&msg) {
+            let m = Message::new(magic, MessageType::AddrV2, payload);
+            let _ = send_to_peer(senders, &peer_id, m.to_bytes()?).await;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod handler_tests {
     use super::*;
@@ -372,5 +533,63 @@ mod handler_tests {
 
         assert!(scorer.read().await.get(&addr).unwrap().reputation < 100);
         assert_eq!(addresses.read().await.len(), 0);
+    }
+
+    /// REAL RESULT: a node that receives an `AddrV2` from a peer actually stores
+    /// the peer's `.onion` and `.i2p` addresses in its address manager (and the
+    /// routable IPv4 in the IP book), while rejecting unroutable / future-dated
+    /// entries — the whole real receive path (`handle_addr_v2` → `AddressManager`).
+    #[tokio::test]
+    async fn handle_addr_v2_stores_onion_and_i2p_from_a_received_message() {
+        use crate::network::protocol::{net_id, AddrV2Message, NetAddrV2};
+
+        let peer_id = [9u8; 32];
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr_for(33009), false));
+        let addresses = RwLock::new(AddressManager::new(1000));
+        let scorer = RwLock::new(PeerScorer::new());
+
+        let now = now_secs();
+        let onion_key = [0x33u8; 32];
+        let i2p_dest = [0x44u8; 32];
+        let mk = |nid: u8, addr: Vec<u8>, ts: u64, port: u16| NetAddrV2 {
+            services: 1,
+            timestamp: ts,
+            net_id: nid,
+            addr,
+            port,
+        };
+        let msg = AddrV2Message {
+            addresses: vec![
+                mk(net_id::IPV4, vec![8, 8, 8, 8], now - 10, 30333), // routable IP → IP book
+                mk(net_id::ONION_V3, onion_key.to_vec(), now - 10, 28080), // onion → side store
+                mk(net_id::I2P, i2p_dest.to_vec(), now - 10, 28080), // i2p → side store
+                mk(net_id::IPV4, vec![127, 0, 0, 1], now - 10, 30333), // loopback → rejected
+                mk(net_id::ONION_V3, vec![0x55u8; 32], now + 10_000, 28080), // future → rejected
+            ],
+        };
+        let payload = borsh::to_vec(&msg).unwrap();
+
+        handle_addr_v2(peer_id, &payload, &peers, &addresses, &scorer)
+            .await
+            .unwrap();
+
+        let book = addresses.read().await;
+        // The node now actually holds the peer's onion + i2p addresses.
+        assert_eq!(
+            book.v2_len(),
+            2,
+            "onion + i2p stored; the future-dated onion was rejected"
+        );
+        assert!(
+            book.contains_v2(net_id::ONION_V3, &onion_key),
+            "the exact .onion key the peer sent is in the store"
+        );
+        assert!(
+            book.contains_v2(net_id::I2P, &i2p_dest),
+            "the exact .i2p destination is in the store"
+        );
+        // The routable IPv4 went to the IP book; loopback was rejected.
+        assert_eq!(book.len(), 1, "routable IPv4 accepted, loopback rejected");
     }
 }

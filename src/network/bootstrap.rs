@@ -452,6 +452,12 @@ pub struct AddressManager {
     /// with addresses from one group and crowding out honest, diverse peers
     /// (an address-table eclipse). Operator `manual` peers are exempt.
     max_per_group: usize,
+    /// Routable addrv2 (onion / I2P) addresses learned via `AddrV2` gossip.
+    /// They have no `SocketAddr`, so they can't live in the IP-centric book
+    /// above — this is a small, dedup'd, capped side store.
+    addrs_v2: Vec<crate::network::protocol::NetAddrV2>,
+    /// Dedup set for `addrs_v2`, keyed `(net_id, addr bytes)`.
+    v2_seen: HashSet<(u8, Vec<u8>)>,
 }
 
 impl AddressManager {
@@ -470,7 +476,41 @@ impl AddressManager {
             // No single netgroup may hold more than ~1/8 of the book (floor 8
             // for tiny books), so honest diversity always keeps a majority.
             max_per_group: (max_addresses / 8).max(8),
+            addrs_v2: Vec::new(),
+            v2_seen: HashSet::new(),
         }
+    }
+
+    /// Add a routable onion/I2P address learned from `AddrV2` gossip. IPv4/IPv6
+    /// addrv2 entries belong in the IP book via [`Self::add`]; this stores only
+    /// the non-IP (onion/i2p) addresses. Dedup'd by `(net_id, addr)` and capped
+    /// at `max_addresses`. Non-routable / IP entries are dropped here.
+    pub fn add_v2(&mut self, a: crate::network::protocol::NetAddrV2) {
+        use crate::network::protocol::net_id;
+        if !a.is_routable() || a.net_id == net_id::IPV4 || a.net_id == net_id::IPV6 {
+            return;
+        }
+        let key = (a.net_id, a.addr.clone());
+        if self.v2_seen.contains(&key) || self.addrs_v2.len() >= self.max_addresses {
+            return;
+        }
+        self.v2_seen.insert(key);
+        self.addrs_v2.push(a);
+    }
+
+    /// Number of stored onion/I2P (addrv2) addresses.
+    pub fn v2_len(&self) -> usize {
+        self.addrs_v2.len()
+    }
+
+    /// Up to `max` stored onion/I2P addresses, for gossip / dialing.
+    pub fn get_v2(&self, max: usize) -> Vec<crate::network::protocol::NetAddrV2> {
+        self.addrs_v2.iter().take(max).cloned().collect()
+    }
+
+    /// True if a specific onion/I2P address is in the store.
+    pub fn contains_v2(&self, net_id: u8, addr: &[u8]) -> bool {
+        self.v2_seen.contains(&(net_id, addr.to_vec()))
     }
 
     /// Netgroup key for anti-eclipse book diversity: /16 for IPv4, /32 for
