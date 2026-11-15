@@ -477,6 +477,11 @@ pub struct AddressManager {
 struct V2Entry {
     addr: crate::network::protocol::NetAddrV2,
     source: [u8; 8],
+    /// `true` once we have completed a Noise handshake with this peer (the
+    /// "tried" bucket). A tried entry is NEVER evicted to make room for an
+    /// unverified ("new") gossip entry, so a Sybil flood of cheap fresh
+    /// identities cannot push out a peer we have actually connected to.
+    tried: bool,
 }
 
 /// Source sentinel for TRUSTED-local additions (operator `--addnode` seeds and
@@ -548,50 +553,81 @@ impl AddressManager {
         }
 
         // Per-source cap (gossip sources only; trusted-local is exempt). A source
-        // already at its cap may only REPLACE ITS OWN stalest entry with a fresher
-        // one — so a Sybil source churns its own slots, never an honest peer's,
-        // and cannot occupy more than `max_v2_per_source` of the store.
+        // already at its cap may only REPLACE ITS OWN stalest NEW (untried) entry
+        // with a fresher one — so a Sybil source churns its own unverified slots,
+        // never an honest peer's, never a TRIED peer, and cannot occupy more than
+        // `max_v2_per_source` of the store. If all its entries are tried, drop the
+        // newcomer.
         if source != V2_SOURCE_LOCAL {
-            let mine: Vec<(usize, u64)> = self
+            let from_source = self
                 .addrs_v2
                 .iter()
-                .enumerate()
-                .filter(|(_, e)| e.source == source)
-                .map(|(i, e)| (i, e.addr.timestamp))
-                .collect();
-            if mine.len() >= self.max_v2_per_source {
-                let Some(&(oldest_idx, oldest_ts)) = mine.iter().min_by_key(|&&(_, ts)| ts) else {
-                    return;
+                .filter(|e| e.source == source)
+                .count();
+            if from_source >= self.max_v2_per_source {
+                let victim = self
+                    .addrs_v2
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.source == source && !e.tried)
+                    .min_by_key(|(_, e)| e.addr.timestamp)
+                    .map(|(i, e)| (i, e.addr.timestamp));
+                let Some((idx, oldest_ts)) = victim else {
+                    return; // this source's slots are all TRIED — don't evict
                 };
                 if a.timestamp <= oldest_ts {
                     return; // not fresher than our own stalest from this source
                 }
-                let evicted = self.addrs_v2.swap_remove(oldest_idx);
+                let evicted = self.addrs_v2.swap_remove(idx);
                 self.v2_seen.remove(&(evicted.addr.net_id, evicted.addr.addr));
             }
         }
 
-        // Overall capacity: admit only if fresher than the current stalest entry,
-        // evicting that stalest one. Otherwise drop the newcomer.
+        // Overall capacity: evict the stalest NEW (untried) entry for a fresher
+        // newcomer. A TRIED peer is never evicted for unverified gossip; if the
+        // store is full of tried peers, drop the newcomer.
         if self.addrs_v2.len() >= self.max_addresses {
-            let Some((oldest_idx, oldest_ts)) = self
+            let victim = self
                 .addrs_v2
                 .iter()
                 .enumerate()
-                .map(|(i, e)| (i, e.addr.timestamp))
-                .min_by_key(|&(_, ts)| ts)
-            else {
-                return;
+                .filter(|(_, e)| !e.tried)
+                .min_by_key(|(_, e)| e.addr.timestamp)
+                .map(|(i, e)| (i, e.addr.timestamp));
+            let Some((idx, oldest_ts)) = victim else {
+                return; // store is all TRIED peers — don't evict for new gossip
             };
             if a.timestamp <= oldest_ts {
                 return;
             }
-            let evicted = self.addrs_v2.swap_remove(oldest_idx);
+            let evicted = self.addrs_v2.swap_remove(idx);
             self.v2_seen.remove(&(evicted.addr.net_id, evicted.addr.addr));
         }
 
         self.v2_seen.insert(key);
-        self.addrs_v2.push(V2Entry { addr: a, source });
+        self.addrs_v2.push(V2Entry {
+            addr: a,
+            source,
+            tried: false,
+        });
+    }
+
+    /// Promote a learned onion/I2P address to the "tried" bucket after a
+    /// completed Noise handshake, and refresh its timestamp so a connected peer
+    /// is not aged out. `host` is the `.onion` / `.b32.i2p` the peer was dialed
+    /// by. No-op if we don't hold that address (e.g. an inbound peer we never
+    /// gossiped). Returns true if an entry was promoted.
+    pub fn mark_v2_tried(&mut self, host: &str, now: u64) -> bool {
+        for e in self.addrs_v2.iter_mut() {
+            if e.addr.onion_host().as_deref() == Some(host) {
+                e.tried = true;
+                if now > e.addr.timestamp {
+                    e.addr.timestamp = now;
+                }
+                return true;
+            }
+        }
+        false
     }
 
     /// Persist the LEARNED onion/I2P addresses to `<data_dir>/onions.dat` so a
@@ -2073,6 +2109,37 @@ mod tests {
             "trusted-local additions exceed the per-source cap ({} > {cap})",
             m.v2_len()
         );
+    }
+
+    fn onion_host(byte: u8) -> String {
+        crate::network::protocol::onion_v3_host_from_pubkey(&[byte; 32])
+    }
+
+    #[test]
+    fn tried_entries_are_never_evicted_by_new_gossip() {
+        let now = 10_000u64;
+        // A verified (tried) peer + a new one fill a tiny store.
+        let mut m = AddressManager::new(2);
+        m.add_v2(onion(0x01, 1_000), SRC_A);
+        assert!(m.mark_v2_tried(&onion_host(0x01), now), "0x01 promoted to tried");
+        m.add_v2(onion(0x02, 2_000), SRC_B);
+        assert_eq!(m.v2_len(), 2);
+
+        // A fresh Sybil newcomer evicts the NEW entry (0x02), never the TRIED
+        // one (0x01) — even though 0x01 is the stalest by timestamp.
+        m.add_v2(onion(0x03, 9_000), SRC_A);
+        let keys: Vec<u8> = m.get_v2(10).iter().map(|e| e.addr[0]).collect();
+        assert!(keys.contains(&0x01), "the tried peer survives the flood");
+        assert!(keys.contains(&0x03), "the fresh newcomer was admitted");
+        assert!(!keys.contains(&0x02), "the NEW entry was evicted, not the tried one");
+
+        // A store full of TRIED peers drops a newcomer rather than evict one.
+        let mut t = AddressManager::new(1);
+        t.add_v2(onion(0x05, 1_000), SRC_A);
+        assert!(t.mark_v2_tried(&onion_host(0x05), now));
+        t.add_v2(onion(0x06, 9_000), SRC_B);
+        assert_eq!(t.v2_len(), 1);
+        assert_eq!(t.get_v2(1)[0].addr[0], 0x05, "tried kept; newcomer dropped");
     }
 
     #[test]

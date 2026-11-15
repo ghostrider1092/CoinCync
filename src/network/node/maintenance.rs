@@ -679,6 +679,20 @@ async fn run_addrv2_gossip_tick(
         );
     }
 
+    // Promote CONNECTED onion/I2P peers into the "tried" bucket: a peer we have
+    // completed a handshake with is verified and must never be evicted by
+    // unverified Sybil gossip. Also refreshes its timestamp so it is not aged.
+    {
+        let mut book = addresses.write().await;
+        for peer in peers.iter() {
+            if peer.state == PeerState::Connected {
+                if let Some(host) = peer.onion_host.as_deref() {
+                    book.mark_v2_tried(host, now);
+                }
+            }
+        }
+    }
+
     // Build both frames once. GetAddrV2 pulls; AddrV2 relays a bounded sample.
     let Ok(get_frame) = Message::new(magic, MessageType::GetAddrV2, Vec::new()).to_bytes() else {
         return;
