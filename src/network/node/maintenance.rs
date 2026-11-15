@@ -135,6 +135,10 @@ const ADDRV2_GOSSIP_INTERVAL_SECS: u64 = 90;
 /// lingers in the dial set.
 const ADDRV2_MAX_AGE_SECS: u64 = 3 * 60 * 60;
 
+/// Max onion/I2P addresses to push in one unsolicited relay (AddrV2). Bounded,
+/// Bitcoin-style, so periodic relay stays cheap and can't be used to amplify.
+const ADDRV2_RELAY_MAX: usize = 10;
+
 pub(super) struct MaintenanceContext {
     pub peers: Arc<DashMap<PeerId, PeerInfo>>,
     pub dandelion: Arc<RwLock<DandelionRouter>>,
@@ -641,13 +645,15 @@ async fn discover_inbound_peers(
     }
 }
 
-/// addrv2 gossip tick — send a `GetAddrV2` to every Connected peer that
-/// advertises `CAP_ADDRV2`, pulling their typed (onion-v3 / I2P) addresses into
-/// our book. Peers that predate addrv2 are skipped: they never set the cap and
-/// would reject the unknown message type. Best-effort `try_send` (a full or
-/// closed channel is dropped, never blocks the maintenance loop), mirroring the
-/// tip-announce tick. This is the ongoing half of peer-address-v2 gossip; the
-/// one-shot pull at handshake lives in `control::handle_verack`.
+/// addrv2 gossip tick — to every Connected `CAP_ADDRV2` peer, send BOTH a
+/// `GetAddrV2` (pull their onion/I2P addresses) and an unsolicited `AddrV2`
+/// relay carrying a bounded sample of the addresses WE know (our own first,
+/// then a sample of learned peers). The pull gathers; the relay forwards, so a
+/// learned onion propagates past our immediate neighbours instead of dying one
+/// hop out — the receiver's `handle_addr_v2` dedups, so re-receipt is cheap and
+/// there is no amplification. Peers that predate addrv2 never set the cap and
+/// are skipped (they would reject the unknown message types). Best-effort
+/// `try_send` — a full or closed channel is dropped, never blocks the loop.
 async fn run_addrv2_gossip_tick(
     senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
     peers: &DashMap<PeerId, PeerInfo>,
@@ -657,7 +663,7 @@ async fn run_addrv2_gossip_tick(
     use super::super::protocol::MessageType;
 
     // Age out onion/I2P addresses that stopped being gossiped, bounding the
-    // staleness of the dial set before we re-request fresh ones below.
+    // staleness of the dial set before we re-request / relay below.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -672,10 +678,24 @@ async fn run_addrv2_gossip_tick(
         );
     }
 
-    let Ok(data) = Message::new(magic, MessageType::GetAddrV2, Vec::new()).to_bytes() else {
+    // Build both frames once. GetAddrV2 pulls; AddrV2 relays a bounded sample.
+    let Ok(get_frame) = Message::new(magic, MessageType::GetAddrV2, Vec::new()).to_bytes() else {
         return;
     };
-    let mut sent = 0usize;
+    let relay_frame = {
+        let sample = addresses.read().await.relay_sample_v2(ADDRV2_RELAY_MAX, now);
+        if sample.is_empty() {
+            None
+        } else {
+            let msg = crate::network::protocol::AddrV2Message { addresses: sample };
+            borsh::to_vec(&msg)
+                .ok()
+                .and_then(|p| Message::new(magic, MessageType::AddrV2, p).to_bytes().ok())
+        }
+    };
+
+    let mut pulled = 0usize;
+    let mut relayed = 0usize;
     for peer in peers.iter() {
         if peer.state != PeerState::Connected
             || !crate::network::firework::has_cap(
@@ -685,17 +705,23 @@ async fn run_addrv2_gossip_tick(
         {
             continue;
         }
-        if let Some(sender) = senders.get(peer.key()) {
-            if sender.try_send(data.clone()).is_ok() {
-                sent += 1;
+        let Some(sender) = senders.get(peer.key()) else {
+            continue;
+        };
+        if sender.try_send(get_frame.clone()).is_ok() {
+            pulled += 1;
+        }
+        if let Some(ref relay) = relay_frame {
+            if sender.try_send(relay.clone()).is_ok() {
+                relayed += 1;
             }
         }
     }
-    if sent > 0 {
+    if pulled > 0 || relayed > 0 {
         tracing::trace!(
             target: "node::addrv2",
-            "addrv2 gossip: sent GetAddrV2 to {} capable peer(s)",
-            sent,
+            "addrv2 gossip: sent GetAddrV2 to {} peer(s), relayed AddrV2 to {} peer(s)",
+            pulled, relayed,
         );
     }
 }
@@ -1078,6 +1104,59 @@ mod addrv2_gossip_tests {
         let kept = addresses.read().await.get_v2(10);
         assert_eq!(kept.len(), 1, "the stale onion was pruned");
         assert_eq!(kept[0].addr, vec![0x11; 32], "the fresh onion survived");
+    }
+
+    /// The tick RELAYS our known onions: a capable peer receives an unsolicited
+    /// AddrV2 carrying an onion we learned, so it propagates past one hop.
+    #[tokio::test]
+    async fn gossip_tick_relays_known_onions_to_capable_peers() {
+        use crate::network::protocol::{net_id, AddrV2Message, NetAddrV2};
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut book = AddressManager::new(1000);
+        book.add_v2(NetAddrV2 {
+            services: 0,
+            timestamp: now,
+            net_id: net_id::ONION_V3,
+            addr: vec![0x33; 32],
+            port: 28080,
+        });
+        let addresses = RwLock::new(book);
+
+        let peers = DashMap::new();
+        let (id, p) = peer(1, true, CAP_ADDRV2);
+        peers.insert(id, p);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(id, tx);
+
+        run_addrv2_gossip_tick(&senders, &peers, &addresses, MAGIC).await;
+
+        // Peer gets a GetAddrV2 pull AND an AddrV2 relay that carries our onion.
+        let mut saw_get = false;
+        let mut saw_relayed_onion = false;
+        while let Ok(f) = rx.try_recv() {
+            match MessageType::try_from(f[4]).unwrap() {
+                MessageType::GetAddrV2 => saw_get = true,
+                MessageType::AddrV2 => {
+                    // Payload follows the 13-byte frame header.
+                    let msg: AddrV2Message = borsh::from_slice(&f[13..]).unwrap();
+                    if msg
+                        .addresses
+                        .iter()
+                        .any(|a| a.net_id == net_id::ONION_V3 && a.addr == vec![0x33; 32])
+                    {
+                        saw_relayed_onion = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_get, "GetAddrV2 pull was sent");
+        assert!(saw_relayed_onion, "AddrV2 relay carried our known onion");
     }
 }
 

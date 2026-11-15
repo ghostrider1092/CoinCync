@@ -575,6 +575,32 @@ impl AddressManager {
         self.addrs_v2.iter().take(max).cloned().collect()
     }
 
+    /// A bounded sample of onion/I2P addresses to RELAY to peers (unsolicited
+    /// `AddrV2` push): our own advertised addresses first — stamped `now` so they
+    /// stay fresh network-wide — then a sample of *learned* peers, so an onion
+    /// propagates past our immediate neighbours instead of dying one hop out.
+    /// Capped at `max`; learned entries keep their own timestamp (relaying must
+    /// not launder a stale peer as fresh).
+    pub fn relay_sample_v2(
+        &self,
+        max: usize,
+        now: u64,
+    ) -> Vec<crate::network::protocol::NetAddrV2> {
+        let mut out: Vec<crate::network::protocol::NetAddrV2> = self
+            .self_v2
+            .iter()
+            .take(max)
+            .cloned()
+            .map(|mut a| {
+                a.timestamp = now;
+                a
+            })
+            .collect();
+        let remaining = max.saturating_sub(out.len());
+        out.extend(self.addrs_v2.iter().take(remaining).cloned());
+        out
+    }
+
     /// True if a specific onion/I2P address is in the store.
     pub fn contains_v2(&self, net_id: u8, addr: &[u8]) -> bool {
         self.v2_seen.contains(&(net_id, addr.to_vec()))
