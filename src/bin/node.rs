@@ -1724,6 +1724,24 @@ async fn start_node(
         p2p_config.proxy = Some(cfg);
     }
 
+    // ── Onion-only leak guards (threat: clearnet IP leaks) ──────────────────
+    // When the operator demands Tor-only, make sure NOTHING can expose their
+    // clearnet IP: UPnP (punches a router port + announces presence) is forced
+    // off, and any --external-ip (a clearnet address) is dropped. Clearnet dials
+    // are already refused by the connector and DNS already routes over SOCKS.
+    if onion_only {
+        if p2p_config.upnp {
+            warn!("onion-only: disabling UPnP — it would open a clearnet router port and announce this node");
+            p2p_config.upnp = false;
+        }
+        if p2p_config.external_addr.take().is_some() {
+            warn!("onion-only: ignoring --external-ip — advertising a clearnet address would de-anonymize this node");
+        }
+        info!(
+            "onion-only leak guards active: clearnet dials refused, DNS via SOCKS, UPnP off, no external-ip — only .onion peers"
+        );
+    }
+
     // Open database
     let db_path = data_dir.join(match network {
         Network::Mainnet => "mainnet",

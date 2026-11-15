@@ -357,6 +357,7 @@ pub(super) fn spawn_maintenance(
                     heartbeat_ticks = heartbeat_ticks.saturating_add(1);
                     emit_heartbeat(&maint_peers, heartbeat_ticks);
                     update_mesh_floor(&maint_peers, &maint_mesh_degraded, &mut mesh_below_streak);
+                    check_clock_skew();
                 }
                 _ = self_heal_interval.tick() => {
                     run_self_heal_tick(
@@ -764,6 +765,31 @@ fn update_mesh_floor(
                 "mesh-floor: connected peers={} at/above floor={} — clearing mesh_degraded",
                 connected, MESH_FLOOR_PEERS,
             );
+        }
+    }
+}
+
+/// One-shot operator warning when the system clock is skewed enough to break
+/// I2P tunnel building (NTCP2/SSU2 reject > ~60 s drift, so the external SAM
+/// bridge silently fails to build tunnels) and to risk consensus block-timestamp
+/// rejection. Edge-triggered: warns once on entering skew, re-arms once the
+/// clock comes back into range. Uses the peer-sampled network median (net_time).
+fn check_clock_skew() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    match crate::net_time::clock_skew_secs() {
+        Some(skew) => {
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "System clock appears ~{skew}s off network time (peer median). \
+                     I2P NTCP2/SSU2 reject handshakes past ~60s skew — a SAM bridge \
+                     may silently fail to build tunnels — and block timestamps risk \
+                     rejection. Sync your clock (NTP / chrony)."
+                );
+            }
+        }
+        None => {
+            WARNED.store(false, Ordering::Relaxed);
         }
     }
 }
