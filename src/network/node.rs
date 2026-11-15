@@ -544,7 +544,11 @@ impl P2PNode {
     /// first hidden-service peer: the outbound connector dials it through the
     /// configured SOCKS proxy on the next tick.
     pub async fn add_onion_seed(&self, v2: crate::network::protocol::NetAddrV2) {
-        self.addresses.write().await.add_v2(v2);
+        // Operator-configured seeds are trusted-local — exempt from the per-source cap.
+        self.addresses
+            .write()
+            .await
+            .add_v2(v2, crate::network::bootstrap::V2_SOURCE_LOCAL);
     }
 
     /// Get connection tracker statistics

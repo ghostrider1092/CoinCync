@@ -455,13 +455,33 @@ pub struct AddressManager {
     /// Routable addrv2 (onion / I2P) addresses learned via `AddrV2` gossip.
     /// They have no `SocketAddr`, so they can't live in the IP-centric book
     /// above — this is a small, dedup'd, capped side store.
-    addrs_v2: Vec<crate::network::protocol::NetAddrV2>,
+    addrs_v2: Vec<V2Entry>,
     /// Dedup set for `addrs_v2`, keyed `(net_id, addr bytes)`.
     v2_seen: HashSet<(u8, Vec<u8>)>,
+    /// Per-source cap on `addrs_v2`: the most entries any single GOSSIP source
+    /// (keyed by the first 8 bytes of the relaying peer's id) may hold. Bounds a
+    /// Sybil flood of cheap onion/.b32.i2p identities from one source — on I2P
+    /// there is no IP netgroup to rate-limit by, so the source peer is the unit.
+    /// Trusted-local additions ([`V2_SOURCE_LOCAL`]) are exempt.
+    max_v2_per_source: usize,
     /// Our OWN advertisable onion/I2P addresses (operator-configured). Injected
     /// into `GetAddrV2` / `AddrV2` responses so peers can reach us over Tor/I2P.
     self_v2: Vec<crate::network::protocol::NetAddrV2>,
 }
+
+/// A learned onion/I2P address plus the compact id of the SOURCE that taught us
+/// about it (first 8 bytes of the relaying peer's id). The source lets us cap
+/// how much any one source contributes, so a single peer flooding cheap
+/// identities cannot eclipse the store.
+#[derive(Clone)]
+struct V2Entry {
+    addr: crate::network::protocol::NetAddrV2,
+    source: [u8; 8],
+}
+
+/// Source sentinel for TRUSTED-local additions (operator `--addnode` seeds and
+/// on-disk restores) — exempt from the per-source cap.
+pub const V2_SOURCE_LOCAL: [u8; 8] = [0u8; 8];
 
 impl AddressManager {
     pub fn new(max_addresses: usize) -> Self {
@@ -481,6 +501,9 @@ impl AddressManager {
             max_per_group: (max_addresses / 8).max(8),
             addrs_v2: Vec::new(),
             v2_seen: HashSet::new(),
+            // One source may hold at most ~1/8 of the v2 store (floor 2), so
+            // honest sources always keep a majority of the dial set.
+            max_v2_per_source: (max_addresses / 8).max(2),
             self_v2: Vec::new(),
         }
     }
@@ -502,36 +525,60 @@ impl AddressManager {
     /// Caller clamps the timestamp to local time on ingest (see
     /// `dispatch::address::handle_addr_v2`), so a far-future timestamp cannot
     /// pin an entry here.
-    pub fn add_v2(&mut self, a: crate::network::protocol::NetAddrV2) {
+    pub fn add_v2(&mut self, a: crate::network::protocol::NetAddrV2, source: [u8; 8]) {
         use crate::network::protocol::net_id;
         if !a.is_routable() || a.net_id == net_id::IPV4 || a.net_id == net_id::IPV6 {
             return;
         }
         let key = (a.net_id, a.addr.clone());
 
-        // Re-advertisement of a known address: keep it, but refresh its timestamp
-        // to the newer value so an actively-gossiped onion stays "fresh".
+        // Re-advertisement of a known address: keep it (and its original source),
+        // but refresh its timestamp so an actively-gossiped onion stays "fresh".
         if self.v2_seen.contains(&key) {
             if let Some(existing) = self
                 .addrs_v2
                 .iter_mut()
-                .find(|e| e.net_id == a.net_id && e.addr == a.addr)
+                .find(|e| e.addr.net_id == a.net_id && e.addr.addr == a.addr)
             {
-                if a.timestamp > existing.timestamp {
-                    existing.timestamp = a.timestamp;
+                if a.timestamp > existing.addr.timestamp {
+                    existing.addr.timestamp = a.timestamp;
                 }
             }
             return;
         }
 
-        // At capacity: admit only if fresher than the current stalest entry,
+        // Per-source cap (gossip sources only; trusted-local is exempt). A source
+        // already at its cap may only REPLACE ITS OWN stalest entry with a fresher
+        // one — so a Sybil source churns its own slots, never an honest peer's,
+        // and cannot occupy more than `max_v2_per_source` of the store.
+        if source != V2_SOURCE_LOCAL {
+            let mine: Vec<(usize, u64)> = self
+                .addrs_v2
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.source == source)
+                .map(|(i, e)| (i, e.addr.timestamp))
+                .collect();
+            if mine.len() >= self.max_v2_per_source {
+                let Some(&(oldest_idx, oldest_ts)) = mine.iter().min_by_key(|&&(_, ts)| ts) else {
+                    return;
+                };
+                if a.timestamp <= oldest_ts {
+                    return; // not fresher than our own stalest from this source
+                }
+                let evicted = self.addrs_v2.swap_remove(oldest_idx);
+                self.v2_seen.remove(&(evicted.addr.net_id, evicted.addr.addr));
+            }
+        }
+
+        // Overall capacity: admit only if fresher than the current stalest entry,
         // evicting that stalest one. Otherwise drop the newcomer.
         if self.addrs_v2.len() >= self.max_addresses {
             let Some((oldest_idx, oldest_ts)) = self
                 .addrs_v2
                 .iter()
                 .enumerate()
-                .map(|(i, e)| (i, e.timestamp))
+                .map(|(i, e)| (i, e.addr.timestamp))
                 .min_by_key(|&(_, ts)| ts)
             else {
                 return;
@@ -540,11 +587,11 @@ impl AddressManager {
                 return;
             }
             let evicted = self.addrs_v2.swap_remove(oldest_idx);
-            self.v2_seen.remove(&(evicted.net_id, evicted.addr));
+            self.v2_seen.remove(&(evicted.addr.net_id, evicted.addr.addr));
         }
 
         self.v2_seen.insert(key);
-        self.addrs_v2.push(a);
+        self.addrs_v2.push(V2Entry { addr: a, source });
     }
 
     /// Persist the LEARNED onion/I2P addresses to `<data_dir>/onions.dat` so a
@@ -558,7 +605,11 @@ impl AddressManager {
             let _ = std::fs::remove_file(&path);
             return;
         }
-        match borsh::to_vec(&self.addrs_v2) {
+        // Persist only the addresses — the source is a transient peer id with no
+        // meaning across restarts (restored entries are trusted-local).
+        let addrs: Vec<crate::network::protocol::NetAddrV2> =
+            self.addrs_v2.iter().map(|e| e.addr.clone()).collect();
+        match borsh::to_vec(&addrs) {
             Ok(bytes) => {
                 if let Err(e) = std::fs::write(&path, bytes) {
                     warn!("Failed to save onion/I2P addresses: {}", e);
@@ -583,7 +634,8 @@ impl AddressManager {
         };
         let before = self.addrs_v2.len();
         for a in list {
-            self.add_v2(a);
+            // Restored entries are trusted-local (we chose to persist them).
+            self.add_v2(a, V2_SOURCE_LOCAL);
         }
         self.addrs_v2.len().saturating_sub(before)
     }
@@ -597,9 +649,9 @@ impl AddressManager {
         let before = self.addrs_v2.len();
         let seen = &mut self.v2_seen;
         self.addrs_v2.retain(|e| {
-            let keep = e.timestamp >= cutoff;
+            let keep = e.addr.timestamp >= cutoff;
             if !keep {
-                seen.remove(&(e.net_id, e.addr.clone()));
+                seen.remove(&(e.addr.net_id, e.addr.addr.clone()));
             }
             keep
         });
@@ -613,7 +665,7 @@ impl AddressManager {
 
     /// Up to `max` stored onion/I2P addresses, for gossip / dialing.
     pub fn get_v2(&self, max: usize) -> Vec<crate::network::protocol::NetAddrV2> {
-        self.addrs_v2.iter().take(max).cloned().collect()
+        self.addrs_v2.iter().take(max).map(|e| e.addr.clone()).collect()
     }
 
     /// A bounded sample of onion/I2P addresses to RELAY to peers (unsolicited
@@ -638,7 +690,7 @@ impl AddressManager {
             })
             .collect();
         let remaining = max.saturating_sub(out.len());
-        out.extend(self.addrs_v2.iter().take(remaining).cloned());
+        out.extend(self.addrs_v2.iter().take(remaining).map(|e| e.addr.clone()));
         out
     }
 
@@ -1924,29 +1976,32 @@ mod tests {
         }
     }
 
+    const SRC_A: [u8; 8] = [0xAA; 8];
+    const SRC_B: [u8; 8] = [0xBB; 8];
+
     #[test]
     fn add_v2_refreshes_timestamp_on_readvertisement() {
         let mut m = AddressManager::new(10);
-        m.add_v2(onion(0x01, 1_000));
+        m.add_v2(onion(0x01, 1_000), V2_SOURCE_LOCAL);
         // Same address re-advertised with a newer timestamp: no new entry, but
         // the stored timestamp advances (so it won't be aged out prematurely).
-        m.add_v2(onion(0x01, 5_000));
+        m.add_v2(onion(0x01, 5_000), V2_SOURCE_LOCAL);
         assert_eq!(m.v2_len(), 1, "a re-advertisement is not a new entry");
         assert_eq!(m.get_v2(1)[0].timestamp, 5_000, "timestamp refreshed");
         // An older re-advertisement never moves the timestamp backward.
-        m.add_v2(onion(0x01, 2_000));
+        m.add_v2(onion(0x01, 2_000), V2_SOURCE_LOCAL);
         assert_eq!(m.get_v2(1)[0].timestamp, 5_000, "older dup does not regress");
     }
 
     #[test]
     fn add_v2_at_capacity_evicts_stalest_for_a_fresher_entry() {
         let mut m = AddressManager::new(2);
-        m.add_v2(onion(0x01, 1_000)); // stalest
-        m.add_v2(onion(0x02, 2_000));
+        m.add_v2(onion(0x01, 1_000), V2_SOURCE_LOCAL); // stalest
+        m.add_v2(onion(0x02, 2_000), V2_SOURCE_LOCAL);
         assert_eq!(m.v2_len(), 2);
 
         // Full + fresher than the stalest (ts 1_000) => evict 0x01, admit 0x03.
-        m.add_v2(onion(0x03, 3_000));
+        m.add_v2(onion(0x03, 3_000), V2_SOURCE_LOCAL);
         assert_eq!(m.v2_len(), 2, "store stays capped");
         let keys: Vec<u8> = m.get_v2(10).iter().map(|e| e.addr[0]).collect();
         assert!(keys.contains(&0x03), "the fresher entry was admitted");
@@ -1958,10 +2013,10 @@ mod tests {
     #[test]
     fn add_v2_at_capacity_drops_an_entry_no_fresher_than_the_stalest() {
         let mut m = AddressManager::new(2);
-        m.add_v2(onion(0x01, 5_000));
-        m.add_v2(onion(0x02, 6_000));
+        m.add_v2(onion(0x01, 5_000), V2_SOURCE_LOCAL);
+        m.add_v2(onion(0x02, 6_000), V2_SOURCE_LOCAL);
         // Not fresher than the stalest (5_000) => a stale flood can't evict.
-        m.add_v2(onion(0x03, 4_000));
+        m.add_v2(onion(0x03, 4_000), V2_SOURCE_LOCAL);
         let keys: Vec<u8> = m.get_v2(10).iter().map(|e| e.addr[0]).collect();
         assert_eq!(m.v2_len(), 2);
         assert!(!keys.contains(&0x03), "a non-fresher newcomer is dropped");
@@ -1970,8 +2025,8 @@ mod tests {
     #[test]
     fn prune_v2_ages_out_only_entries_before_cutoff() {
         let mut m = AddressManager::new(10);
-        m.add_v2(onion(0x01, 1_000)); // stale
-        m.add_v2(onion(0x02, 9_000)); // fresh
+        m.add_v2(onion(0x01, 1_000), V2_SOURCE_LOCAL); // stale
+        m.add_v2(onion(0x02, 9_000), V2_SOURCE_LOCAL); // fresh
         let dropped = m.prune_v2(5_000);
         assert_eq!(dropped, 1);
         assert_eq!(m.v2_len(), 1);
@@ -1983,11 +2038,49 @@ mod tests {
     }
 
     #[test]
+    fn per_source_cap_bounds_one_sybil_source_and_spares_honest() {
+        // max=100 -> per-source cap = 100/8 = 12. One Sybil source floods fresh
+        // identities; an honest source adds a few. The Sybil is capped; the
+        // honest entries are never evicted by the Sybil's flood.
+        let mut m = AddressManager::new(100);
+        let cap = (100usize / 8).max(2);
+        // Honest onions use bytes BELOW the Sybil range (0x40+) so the filter
+        // counts only the Sybil's entries.
+        m.add_v2(onion(0x01, 1_000), SRC_B); // honest
+        m.add_v2(onion(0x02, 1_000), SRC_B); // honest
+        // Sybil floods cap+20 ever-fresher onions from ONE source.
+        for i in 0..(cap as u8 + 20) {
+            m.add_v2(onion(0x40 + i, 2_000 + i as u64), SRC_A);
+        }
+        let entries = m.get_v2(1000);
+        let sybil = entries.iter().filter(|e| e.addr[0] >= 0x40).count();
+        assert!(sybil <= cap, "one source is capped at {cap}, held {sybil}");
+        // Both honest entries survive the Sybil flood.
+        assert!(m.contains_v2(crate::network::protocol::net_id::ONION_V3, &[0x01; 32]));
+        assert!(m.contains_v2(crate::network::protocol::net_id::ONION_V3, &[0x02; 32]));
+    }
+
+    #[test]
+    fn per_source_cap_exempts_trusted_local_seeds() {
+        // Operator --addnode / restore (LOCAL) is NOT per-source capped.
+        let mut m = AddressManager::new(100);
+        let cap = (100usize / 8).max(2);
+        for i in 0..(cap as u8 + 10) {
+            m.add_v2(onion(0x40 + i, 1_000 + i as u64), V2_SOURCE_LOCAL);
+        }
+        assert!(
+            m.v2_len() > cap,
+            "trusted-local additions exceed the per-source cap ({} > {cap})",
+            m.v2_len()
+        );
+    }
+
+    #[test]
     fn v2_persistence_round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
         let mut m = AddressManager::new(100);
-        m.add_v2(onion(0x01, 1_000));
-        m.add_v2(onion(0x02, 2_000));
+        m.add_v2(onion(0x01, 1_000), V2_SOURCE_LOCAL);
+        m.add_v2(onion(0x02, 2_000), V2_SOURCE_LOCAL);
         m.save_v2_to_disk(dir.path());
 
         // A fresh book restores both learned onions.

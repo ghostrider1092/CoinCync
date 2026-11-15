@@ -1092,8 +1092,9 @@ mod addrv2_gossip_tests {
             addr: vec![byte; 32],
             port: 28080,
         };
-        book.add_v2(onion(0x11, now)); // fresh — kept
-        book.add_v2(onion(0x22, now - ADDRV2_MAX_AGE_SECS - 10)); // stale — pruned
+        use crate::network::bootstrap::V2_SOURCE_LOCAL;
+        book.add_v2(onion(0x11, now), V2_SOURCE_LOCAL); // fresh — kept
+        book.add_v2(onion(0x22, now - ADDRV2_MAX_AGE_SECS - 10), V2_SOURCE_LOCAL); // stale
         assert_eq!(book.v2_len(), 2);
 
         let addresses = RwLock::new(book);
@@ -1117,13 +1118,16 @@ mod addrv2_gossip_tests {
             .unwrap()
             .as_secs();
         let mut book = AddressManager::new(1000);
-        book.add_v2(NetAddrV2 {
-            services: 0,
-            timestamp: now,
-            net_id: net_id::ONION_V3,
-            addr: vec![0x33; 32],
-            port: 28080,
-        });
+        book.add_v2(
+            NetAddrV2 {
+                services: 0,
+                timestamp: now,
+                net_id: net_id::ONION_V3,
+                addr: vec![0x33; 32],
+                port: 28080,
+            },
+            crate::network::bootstrap::V2_SOURCE_LOCAL,
+        );
         let addresses = RwLock::new(book);
 
         let peers = DashMap::new();

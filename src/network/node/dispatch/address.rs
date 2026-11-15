@@ -284,10 +284,14 @@ pub(super) async fn handle_addr_v2(
                         }
                     }
                     // onion / i2p → the addrv2 side store (routable net_id only).
+                    // Tag with the SOURCE peer so the per-source cap can bound a
+                    // Sybil flood of cheap onion/.b32.i2p identities from one peer.
                     None if a.is_routable() => {
                         let mut v2 = a.clone();
                         v2.timestamp = a.timestamp.min(now);
-                        addrs.add_v2(v2);
+                        let mut src = [0u8; 8];
+                        src.copy_from_slice(&peer_id[..8]);
+                        addrs.add_v2(v2, src);
                         accepted += 1;
                     }
                     // unknown net_id → dropped (forward-compat relay is future work).
