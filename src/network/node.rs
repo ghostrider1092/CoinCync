@@ -1075,7 +1075,9 @@ impl P2PNode {
             Some(addr) => {
                 match crate::network::sam::SamSession::connect(
                     addr,
-                    std::time::Duration::from_secs(30),
+                    &self.config.data_dir,
+                    std::time::Duration::from_secs(30), // control-socket connect
+                    std::time::Duration::from_secs(180), // SESSION CREATE (tunnel build) is slow
                 )
                 .await
                 {

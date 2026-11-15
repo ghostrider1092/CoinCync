@@ -23,6 +23,8 @@
 //! this module implements the outbound half that makes `dial_v2` reach I2P.
 
 use crate::error::{Error, Result};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -102,9 +104,13 @@ fn base32_lower_nopad(data: &[u8]) -> String {
 pub struct SamSession {
     sam_addr: String,
     session_id: String,
-    /// Kept alive for the session's lifetime — the SAM bridge tears the session
-    /// down when this socket closes. Never read/written after SESSION CREATE.
-    _control: TcpStream,
+    /// Cleared by the supervisor task when the control socket closes (the whole
+    /// session and every stream die with it). `stream_connect` fails fast when
+    /// this is false instead of hanging on a dead session.
+    alive: Arc<AtomicBool>,
+    /// Supervisor: owns the control socket (keeping the session alive), watches
+    /// it for EOF, and flags `alive=false` + logs CRITICAL when it dies.
+    _supervisor: tokio::task::JoinHandle<()>,
 }
 
 impl SamSession {
@@ -112,25 +118,95 @@ impl SamSession {
     /// CREATE` with a transient destination (dialing out needs no persistent
     /// identity — that is only required to ACCEPT inbound). The returned
     /// session's control socket is held open; drop it to close the session.
-    pub async fn connect(sam_addr: &str, timeout: Duration) -> Result<SamSession> {
+    pub async fn connect(
+        sam_addr: &str,
+        data_dir: &std::path::Path,
+        connect_timeout: Duration,
+        session_timeout: Duration,
+    ) -> Result<SamSession> {
+        // Randomized session id — a hardcoded id collides if the binary restarts
+        // before the previous control socket finishes closing.
         let session_id = format!("cync-{:08x}", rand::random::<u32>());
-        let mut control = dial(sam_addr, timeout).await?;
-        sam_hello(&mut control, timeout).await?;
-        let cmd = format!(
-            "SESSION CREATE STYLE=STREAM ID={} DESTINATION=TRANSIENT\n",
-            session_id
-        );
-        let reply = sam_cmd(&mut control, cmd.as_bytes(), timeout).await?;
+        let mut control = dial(sam_addr, connect_timeout).await?;
+        sam_hello(&mut control, connect_timeout).await?;
+
+        // Persistent destination: reuse the on-disk private key for a STABLE
+        // .b32.i2p across restarts (TRANSIENT would mint a new address each boot
+        // and poison peers' addrv2 tables with dead hashes). On first boot,
+        // create a fresh Ed25519 (SIGNATURE_TYPE=7 — never the weak DSA-SHA1
+        // default) and save the key SAM returns.
+        let key_path = data_dir.join("i2p_dest.key");
+        let saved = std::fs::read_to_string(&key_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let cmd = match &saved {
+            Some(priv_key) => {
+                format!("SESSION CREATE STYLE=STREAM ID={session_id} DESTINATION={priv_key}\n")
+            }
+            None => format!(
+                "SESSION CREATE STYLE=STREAM ID={session_id} DESTINATION=TRANSIENT SIGNATURE_TYPE=7\n"
+            ),
+        };
+        // SESSION CREATE blocks until the router builds initial tunnels — 30s to
+        // several minutes on a cold start — so read its reply with the generous
+        // session timeout, not the short per-command one.
+        let reply = sam_cmd(&mut control, cmd.as_bytes(), session_timeout).await?;
         if !reply.contains("RESULT=OK") {
             return Err(Error::ConnectionFailed(format!(
                 "SAM SESSION CREATE failed: {reply}"
             )));
         }
+        // A fresh (TRANSIENT) session returns our new DESTINATION (the full
+        // private key) — persist it so next boot keeps the same .b32.i2p.
+        if saved.is_none() {
+            if let Some(priv_key) = sam_value(&reply, "DESTINATION=") {
+                match std::fs::write(&key_path, &priv_key) {
+                    Ok(()) => tracing::info!(
+                        "Saved I2P destination key to {} — stable .b32.i2p across restarts",
+                        key_path.display()
+                    ),
+                    Err(e) => tracing::warn!("Could not persist I2P destination key: {e}"),
+                }
+            }
+        }
+
+        // Control-socket supervisor: the session (and every peer stream) dies
+        // with this socket, so a background task owns it, watches for EOF, and
+        // flags the session dead + logs CRITICAL. Full auto-rebuild is a
+        // follow-up; for now dialing fails fast instead of hanging.
+        let alive = Arc::new(AtomicBool::new(true));
+        let supervisor = {
+            let alive = alive.clone();
+            let sid = session_id.clone();
+            tokio::spawn(async move {
+                let mut control = control;
+                let mut buf = [0u8; 256];
+                loop {
+                    match control.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {} // async SAM notices (e.g. PING) — ignore
+                    }
+                }
+                alive.store(false, Ordering::Relaxed);
+                tracing::error!(
+                    "I2P SAM control socket (session {sid}) closed — the I2P session is DEAD; \
+                     .b32.i2p dialing fails until the SAM bridge is back and the node reconnects."
+                );
+            })
+        };
+
         Ok(SamSession {
             sam_addr: sam_addr.to_string(),
             session_id,
-            _control: control,
+            alive,
+            _supervisor: supervisor,
         })
+    }
+
+    /// Whether the session's control socket is still open (the session usable).
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
     }
 
     /// The session id the bridge knows us by (used in `STREAM CONNECT`).
@@ -143,6 +219,11 @@ impl SamSession {
     /// raw, bidirectional byte stream to the peer — hand it straight to the
     /// Noise handshake, exactly like a TCP or Tor stream.
     pub async fn stream_connect(&self, dest: &str, timeout: Duration) -> Result<TcpStream> {
+        if !self.is_alive() {
+            return Err(Error::ConnectionFailed(
+                "I2P SAM session is dead (control socket closed)".into(),
+            ));
+        }
         let mut data = dial(&self.sam_addr, timeout).await?;
         sam_hello(&mut data, timeout).await?;
         let cmd = format!(
@@ -157,6 +238,16 @@ impl SamSession {
         }
         Ok(data)
     }
+}
+
+/// Extract the value of a `KEY=VALUE` token from a SAM reply line (the reply is
+/// space-separated tokens). Used to read the DESTINATION a SESSION CREATE
+/// returns for a transient destination.
+fn sam_value(reply: &str, key: &str) -> Option<String> {
+    reply
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix(key))
+        .map(|v| v.to_string())
 }
 
 async fn dial(addr: &str, timeout: Duration) -> Result<TcpStream> {
@@ -323,10 +414,17 @@ mod tests {
         let t = Duration::from_secs(5);
 
         // Control socket: HELLO + SESSION CREATE.
-        let session = SamSession::connect(&sam.to_string(), t)
+        let dir = tempfile::tempdir().unwrap();
+        let session = SamSession::connect(&sam.to_string(), dir.path(), t, t)
             .await
             .expect("SAM session should be created against the mock bridge");
         assert!(session.session_id().starts_with("cync-"));
+        assert!(session.is_alive(), "session is alive while the control socket is open");
+        // First boot persisted the destination key for a stable .b32.i2p.
+        assert!(
+            dir.path().join("i2p_dest.key").exists(),
+            "the I2P destination key is saved on first boot"
+        );
 
         // Data socket: HELLO + STREAM CONNECT, then raw bytes to the "peer".
         let dest = i2p_b32_from_hash(&[0x42u8; 32]);
@@ -371,7 +469,10 @@ mod tests {
             }
         });
         let t = Duration::from_secs(5);
-        let session = SamSession::connect(&addr.to_string(), t).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let session = SamSession::connect(&addr.to_string(), dir.path(), t, t)
+            .await
+            .unwrap();
         let err = session
             .stream_connect("aaaa.b32.i2p", t)
             .await
