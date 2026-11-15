@@ -189,6 +189,46 @@ enum ConnectionCommand {
 const START_ONE_SHOT_ERROR: &str =
     "P2PNode is one-shot: start cannot be called again after a successful start";
 
+/// Soft open-file limit below which we warn. Each peer costs a file descriptor,
+/// and anonymity transports add one more per peer (the SAM/Tor stream) plus
+/// tunnel buffers, so a tight `ulimit -n` risks "too many open files" under
+/// heavy gossip. Combined with the stream caps (`MAX_I2P_INBOUND` inbound +
+/// `ONION_OUTBOUND_BUDGET` outbound onion/I2P) a busy node wants thousands.
+const FD_LIMIT_WARN: u64 = 4096;
+
+/// Parse the soft open-file limit from `/proc/self/limits` text. The relevant
+/// line is `Max open files   <soft>   <hard>   files`; the first token after the
+/// field name is the soft limit. Pure, so it is unit-tested without `/proc`.
+fn parse_fd_soft_limit(limits_text: &str) -> Option<u64> {
+    limits_text
+        .lines()
+        .find_map(|l| l.strip_prefix("Max open files"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// Linux-only startup diagnostic: warn if the soft open-file limit is low.
+/// Reads `/proc/self/limits` (no extra dependency); no-op off Linux.
+#[cfg(target_os = "linux")]
+fn check_fd_limit() {
+    let Ok(limits) = std::fs::read_to_string("/proc/self/limits") else {
+        return;
+    };
+    match parse_fd_soft_limit(&limits) {
+        Some(soft) if soft < FD_LIMIT_WARN => warn!(
+            "open-file limit (ulimit -n) is {soft} — low. Each Tor/I2P peer uses a file \
+             descriptor (SAM/Tor stream + tunnel buffers); under heavy gossip this risks \
+             'too many open files'. Raise it (e.g. `ulimit -n 65535`, or LimitNOFILE=65535 \
+             in the systemd unit)."
+        ),
+        Some(soft) => tracing::debug!("open-file limit (ulimit -n): {soft}"),
+        None => {}
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_fd_limit() {}
+
 // ConnectionTracker lives in `super::connection_tracker` — extracted
 // out of this monolithic file as the first step of splitting node.rs
 // by responsibility. See `super::connection_tracker::ConnectionTracker`
@@ -893,6 +933,7 @@ impl P2PNode {
         }
 
         info!("Starting P2P node on {}", self.config.listen_addr);
+        check_fd_limit();
 
         let addr_book_path = self.config.data_dir.join("address_book.json");
         let ban_list_path = self.config.data_dir.join("ban_list.json");
@@ -1497,6 +1538,17 @@ impl P2PNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_the_soft_open_file_limit() {
+        let sample = "Limit                     Soft Limit           Hard Limit           Units\n\
+             Max cpu time              unlimited            unlimited            seconds\n\
+             Max open files            1024                 1048576              files\n\
+             Max locked memory         65536                65536                bytes\n";
+        assert_eq!(parse_fd_soft_limit(sample), Some(1024));
+        assert_eq!(parse_fd_soft_limit("no such line here"), None);
+        assert!(FD_LIMIT_WARN >= 4096, "fd-limit warn floor is at least 4096");
+    }
 
     #[test]
     fn test_node_config_default() {
