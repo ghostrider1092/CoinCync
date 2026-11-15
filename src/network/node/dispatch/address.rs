@@ -618,8 +618,9 @@ mod handler_tests {
         senders.insert(peer_id, stx);
         let addresses = RwLock::new(AddressManager::new(1000));
 
-        // Configure our own onion self-address and register it.
-        let onion_host = "a".repeat(56); // decodes to a zero key (fine for a test)
+        // Configure our own onion self-address and register it. Build a host
+        // with a valid version + checksum (parse now verifies both).
+        let onion_host = crate::network::protocol::onion_v3_host_from_pubkey(&[0x42u8; 32]);
         let self_na = NetAddrV2::onion_v3_self(&onion_host, 28080, 0).unwrap();
         let onion_key = self_na.addr.clone();
         addresses.write().await.add_self_v2(self_na);

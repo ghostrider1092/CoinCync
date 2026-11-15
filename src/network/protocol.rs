@@ -824,10 +824,30 @@ impl AddrV2Message {
     }
 }
 
+/// Onion-v3 protocol version byte (Tor rend-spec-v3).
+pub const ONION_V3_VERSION: u8 = 0x03;
+
+/// The 2-byte onion-v3 checksum: `SHA3-256(".onion checksum" ‖ pubkey ‖
+/// version)[..2]`. Shared by the parser (to verify) and the encoder (to emit),
+/// so the two can never disagree.
+fn onion_v3_checksum(pubkey: &[u8; 32], version: u8) -> [u8; 2] {
+    use sha3::{Digest, Sha3_256};
+    let mut h = Sha3_256::new();
+    h.update(b".onion checksum");
+    h.update(pubkey);
+    h.update([version]);
+    let digest = h.finalize();
+    [digest[0], digest[1]]
+}
+
 /// Decode a Tor v3 `.onion` host to its 32-byte ed25519 public key.
-/// Onion v3 = base32(pubkey[32] ‖ checksum[2] ‖ version[1]) = 56 chars. The
-/// embedded checksum is not verified here (an operator advertising their own
-/// address); a malformed string simply fails to parse.
+/// Onion v3 = base32(pubkey[32] ‖ checksum[2] ‖ version[1]) = 56 chars.
+///
+/// The embedded version byte and 2-byte checksum are **verified**: the host
+/// must declare version 3 and carry the SHA3-256 checksum Tor computes over the
+/// pubkey. A host with a bad checksum (a typo, bit-rot, or a forged address)
+/// returns `None` rather than a garbage key, so we never advertise or dial a
+/// malformed onion.
 pub fn parse_onion_v3_pubkey(host: &str) -> Option<[u8; 32]> {
     let h = host.strip_suffix(".onion").unwrap_or(host);
     if h.len() != 56 || !h.is_ascii() {
@@ -852,6 +872,16 @@ pub fn parse_onion_v3_pubkey(host: &str) -> Option<[u8; 32]> {
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(&out[..32]);
+
+    // Verify version byte and checksum before trusting the key.
+    let version = out[34];
+    if version != ONION_V3_VERSION {
+        return None;
+    }
+    let expected = onion_v3_checksum(&key, version);
+    if out[32..34] != expected {
+        return None;
+    }
     Some(key)
 }
 
@@ -906,17 +936,11 @@ fn base32_encode_lower(data: &[u8]) -> String {
 /// Encode a 32-byte onion-v3 pubkey to its `.onion` host, with the SHA3-256
 /// checksum + version byte Tor requires. Inverse of [`parse_onion_v3_pubkey`].
 pub fn onion_v3_host_from_pubkey(pubkey: &[u8; 32]) -> String {
-    use sha3::{Digest, Sha3_256};
-    const VERSION: u8 = 0x03;
-    let mut h = Sha3_256::new();
-    h.update(b".onion checksum");
-    h.update(pubkey);
-    h.update([VERSION]);
-    let digest = h.finalize();
+    let checksum = onion_v3_checksum(pubkey, ONION_V3_VERSION);
     let mut data = Vec::with_capacity(35);
     data.extend_from_slice(pubkey);
-    data.extend_from_slice(&digest[..2]);
-    data.push(VERSION);
+    data.extend_from_slice(&checksum);
+    data.push(ONION_V3_VERSION);
     let mut host = base32_encode_lower(&data);
     host.push_str(".onion");
     host
@@ -1634,21 +1658,32 @@ mod tests {
 
     #[test]
     fn onion_v3_parse_round_trips_and_builds_self_addr() {
-        // 56 'a's = all-zero 5-bit groups → 35 zero bytes → key = [0u8; 32].
-        let host = "a".repeat(56);
-        assert_eq!(parse_onion_v3_pubkey(&host), Some([0u8; 32]));
-        // The ".onion" suffix is tolerated.
-        assert_eq!(
-            parse_onion_v3_pubkey(&format!("{host}.onion")),
-            Some([0u8; 32])
-        );
+        // A genuinely valid onion-v3 host (correct version byte + checksum).
+        let key = [0x11u8; 32];
+        let host = onion_v3_host_from_pubkey(&key); // includes ".onion"
+        assert_eq!(parse_onion_v3_pubkey(&host), Some(key));
+        // The ".onion" suffix is optional.
+        let bare = host.strip_suffix(".onion").unwrap();
+        assert_eq!(parse_onion_v3_pubkey(bare), Some(key));
         // Wrong length / out-of-alphabet chars → None.
         assert_eq!(parse_onion_v3_pubkey("tooshort.onion"), None);
         assert_eq!(parse_onion_v3_pubkey(&"1".repeat(56)), None); // '1' not in base32
+        // A well-formed base32 string with the WRONG version/checksum is
+        // rejected: 56 'a' decodes to version byte 0 and a zero checksum.
+        assert_eq!(parse_onion_v3_pubkey(&"a".repeat(56)), None);
+        // Corrupting a pubkey character breaks the embedded checksum → None.
+        let mut bytes: Vec<u8> = bare.bytes().collect();
+        bytes[0] = if bytes[0] == b'b' { b'c' } else { b'b' };
+        let corrupted = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            parse_onion_v3_pubkey(&corrupted),
+            None,
+            "a bad checksum is rejected"
+        );
         // The self-address builder yields a valid onion-v3 NetAddrV2.
-        let sa = NetAddrV2::onion_v3_self(&format!("{host}.onion"), 28080, 123).unwrap();
+        let sa = NetAddrV2::onion_v3_self(&host, 28080, 123).unwrap();
         assert_eq!(sa.net_id, net_id::ONION_V3);
-        assert_eq!(sa.addr, vec![0u8; 32]);
+        assert_eq!(sa.addr, key.to_vec());
         assert_eq!(sa.port, 28080);
         assert!(sa.validate().is_ok());
     }
