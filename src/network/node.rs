@@ -1034,6 +1034,30 @@ impl P2PNode {
                 node_runtime.shutdown_receiver(),
             ),
         );
+        // I2P SAM: if configured, open ONE shared session (its control socket is
+        // held for the node's lifetime) for the connector to dial `.b32.i2p`
+        // peers through. A bridge that isn't running is non-fatal — I2P dialing
+        // is simply disabled, never a hard stop (optional transport).
+        let i2p_sam = match &self.config.i2p_sam {
+            Some(addr) => {
+                match crate::network::sam::SamSession::connect(
+                    addr,
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                {
+                    Ok(session) => {
+                        info!("I2P SAM session established via {addr} — can dial .b32.i2p peers");
+                        Some(Arc::new(session))
+                    }
+                    Err(e) => {
+                        warn!("I2P SAM bridge at {addr} unreachable ({e}); I2P dialing disabled");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
         node_runtime.track(
             "outbound-connector",
             peer_manager::spawn_outbound_connector(
@@ -1063,6 +1087,7 @@ impl P2PNode {
                     magic: self.config.magic,
                     our_nonce: self.version_nonce,
                     bootstrap: self.config.bootstrap.clone(),
+                    i2p_sam,
                 },
                 node_runtime.shutdown_receiver(),
             ),

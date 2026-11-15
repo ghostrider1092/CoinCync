@@ -45,6 +45,37 @@ pub fn i2p_b32_from_hash(hash: &[u8; 32]) -> String {
     host
 }
 
+/// Decode a `.b32.i2p` host back to its 32-byte I2P destination hash (the
+/// inverse of [`i2p_b32_from_hash`]), for seeding an addrv2 entry from an
+/// `--addnode <host>.b32.i2p`. Returns `None` if the host is not a valid
+/// 52-char I2P b32 address.
+pub fn i2p_hash_from_b32(host: &str) -> Option<[u8; 32]> {
+    let h = host.strip_suffix(".b32.i2p").unwrap_or(host);
+    if h.len() != 52 || !h.is_ascii() {
+        return None;
+    }
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut acc: u16 = 0;
+    let mut bits: u8 = 0;
+    let mut out: Vec<u8> = Vec::with_capacity(32);
+    for c in h.bytes() {
+        let v = ALPHABET.iter().position(|&a| a == c.to_ascii_lowercase())? as u16;
+        acc = (acc << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1u16 << bits) - 1;
+        }
+    }
+    if out.len() != 32 {
+        return None;
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&out);
+    Some(hash)
+}
+
 /// RFC 4648 base32, lowercase, no `=` padding — the I2P `.b32` alphabet.
 fn base32_lower_nopad(data: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -202,6 +233,20 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a, i2p_b32_from_hash(&[0x11u8; 32])); // deterministic
         assert_eq!(a.strip_suffix(".b32.i2p").unwrap().len(), 52);
+    }
+
+    #[test]
+    fn b32_encode_decode_round_trips() {
+        for seed in [0x00u8, 0x11, 0x5a, 0xff] {
+            let hash = [seed; 32];
+            let host = i2p_b32_from_hash(&hash);
+            assert_eq!(i2p_hash_from_b32(&host), Some(hash), "round-trip with suffix");
+            let bare = host.strip_suffix(".b32.i2p").unwrap();
+            assert_eq!(i2p_hash_from_b32(bare), Some(hash), "round-trip bare");
+        }
+        // Wrong length / bad alphabet → None.
+        assert_eq!(i2p_hash_from_b32("tooshort.b32.i2p"), None);
+        assert_eq!(i2p_hash_from_b32(&"1".repeat(52)), None); // '1' not in base32
     }
 
     async fn read_sam_line(s: &mut tokio::net::TcpStream) -> String {

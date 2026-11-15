@@ -110,6 +110,10 @@ pub struct NodeConfig {
     /// CAP_ADDRV2 peers so they can dial us back over Tor. A malformed value is
     /// logged and ignored — never fatal.
     pub onion_address: Option<String>,
+    /// I2P SAM bridge address (e.g. `127.0.0.1:7656`). When set, the node opens a
+    /// SAM session at startup and dials `.b32.i2p` peers through it. A bridge
+    /// that isn't running disables I2P dialing — never fatal.
+    pub i2p_sam: Option<String>,
     /// Per-IP inbound connection cap (#193). Defaults to
     /// [`crate::network::connection_tracker::MAX_CONNECTIONS_PER_IP`] (2);
     /// raise it on a seed when several legitimate nodes share one public IP
@@ -133,6 +137,7 @@ impl Default for NodeConfig {
             encryption: crate::config::P2PEncryptionConfig::default(),
             external_addr: None,
             onion_address: None,
+            i2p_sam: None,
             max_connections_per_ip: crate::network::connection_tracker::MAX_CONNECTIONS_PER_IP,
         }
     }

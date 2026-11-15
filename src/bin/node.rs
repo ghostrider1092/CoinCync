@@ -92,6 +92,12 @@ struct Cli {
     #[arg(long = "onion-address", value_name = "ONION")]
     onion_address: Option<String>,
 
+    /// I2P SAM bridge address (e.g. `127.0.0.1:7656`). When set, the node opens
+    /// a SAM session at startup and dials `.b32.i2p` peers through it. A bridge
+    /// that isn't running disables I2P dialing (logged, not fatal).
+    #[arg(long = "i2p-sam", value_name = "HOST:PORT")]
+    i2p_sam: Option<String>,
+
     /// Disable all automatic peer discovery (for isolated tests).
     #[arg(long)]
     no_peers: bool,
@@ -750,6 +756,7 @@ async fn main() {
                 cli.addnode,
                 cli.external_ip,
                 cli.onion_address,
+                cli.i2p_sam,
                 cli.no_peers,
                 cli.explorer,
                 cli.proxy,
@@ -1345,6 +1352,20 @@ fn split_onion_addnode(raw: &str, default_port: u16) -> Option<(String, u16)> {
     None
 }
 
+/// Parse an I2P `--addnode` entry: `<host>.b32.i2p` or `<host>.b32.i2p:<port>`.
+/// The host is validated downstream by `sam::i2p_hash_from_b32`.
+fn split_i2p_addnode(raw: &str, default_port: u16) -> Option<(String, u16)> {
+    if let Some((host, port)) = raw.rsplit_once(':') {
+        if host.ends_with(".b32.i2p") {
+            return Some((host.to_string(), port.parse().ok()?));
+        }
+    }
+    if raw.ends_with(".b32.i2p") {
+        return Some((raw.to_string(), default_port));
+    }
+    None
+}
+
 async fn start_node(
     network: Network,
     data_dir: PathBuf,
@@ -1355,6 +1376,7 @@ async fn start_node(
     addnodes: Vec<String>,
     external_ip: Option<String>,
     onion_address: Option<String>,
+    i2p_sam: Option<String>,
     no_peers: bool,
     serve_explorer: bool,
     proxy_arg: Option<String>,
@@ -1502,6 +1524,26 @@ async fn start_node(
             }
             continue;
         }
+        // I2P addnode: "<host>.b32.i2p[:port]" -> an I2P addrv2 seed.
+        if let Some((host, port)) = split_i2p_addnode(raw, default_p2p_port) {
+            match coincync::network::sam::i2p_hash_from_b32(&host) {
+                Some(hash) => {
+                    info!("--addnode {:?}: I2P peer seeded into the addrv2 store", raw);
+                    onion_seeds.push(coincync::network::protocol::NetAddrV2 {
+                        services: 0,
+                        timestamp: seed_ts,
+                        net_id: coincync::network::protocol::net_id::I2P,
+                        addr: hash.to_vec(),
+                        port,
+                    });
+                }
+                None => warn!(
+                    "Ignoring --addnode {:?}: not a valid I2P host (52 base32 chars + .b32.i2p)",
+                    raw
+                ),
+            }
+            continue;
+        }
         // Fast path: already a numeric socket address.
         if let Ok(addr) = raw.parse::<std::net::SocketAddr>() {
             extra_peers.push(addr);
@@ -1573,6 +1615,12 @@ async fn start_node(
                 raw
             );
         }
+    }
+
+    // --i2p-sam: open a SAM session at startup to dial .b32.i2p peers.
+    if let Some(sam) = &i2p_sam {
+        info!("--i2p-sam: I2P dialing enabled via SAM bridge {}", sam);
+        p2p_config.i2p_sam = Some(sam.clone());
     }
 
     if no_peers {
@@ -1844,9 +1892,15 @@ async fn start_node(
     // Onion --addnode peers go into the addrv2 store; the connector dials them
     // through the SOCKS proxy. Without a proxy they sit unused (can't be dialed
     // on clearnet) — warn once so the operator isn't surprised.
-    if !onion_seeds.is_empty() && proxy_arg.is_none() && !tor_shortcut && !onion_only {
+    if !onion_seeds.is_empty()
+        && proxy_arg.is_none()
+        && !tor_shortcut
+        && !onion_only
+        && i2p_sam.is_none()
+    {
         warn!(
-            "{} onion --addnode peer(s) seeded but no proxy configured — they cannot be dialed; add --tor or --proxy",
+            "{} onion/I2P --addnode peer(s) seeded but no proxy or SAM bridge configured — \
+             they cannot be dialed; add --tor/--proxy or --i2p-sam",
             onion_seeds.len()
         );
     }

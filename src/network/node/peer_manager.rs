@@ -93,6 +93,7 @@ use super::super::dandelion::DandelionRouter;
 use super::super::noise::NodeIdentity;
 use super::super::peer::{generate_peer_id, PeerId, PeerInfo, PeerState};
 use super::super::relay_score::RelayScoreMap;
+use super::super::sam::SamSession;
 use super::super::scoring::{OrphanFloodTracker, PeerScorer};
 use super::super::sync::ChainSync;
 use super::super::traffic_shaping::TrafficShaper;
@@ -176,6 +177,33 @@ struct OnionOutboundAttempt {
     onion: crate::network::protocol::NetAddrV2,
     host: String,
     proxy: ProxyConfig,
+    peers: Arc<DashMap<PeerId, PeerInfo>>,
+    senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
+    event_tx: broadcast::Sender<NodeEvent>,
+    msg_tx: mpsc::Sender<PeerMessage>,
+    handshake_tx: mpsc::Sender<PeerMessage>,
+    height: u64,
+    tip: crate::primitives::Hash,
+    identity: Arc<NodeIdentity>,
+    encryption: P2PEncryptionConfig,
+    tracker: Arc<ConnectionTracker>,
+    traffic_shaper: Arc<TrafficShaper>,
+    backoffs: OnionBackoffMap,
+    magic: [u8; 4],
+    our_nonce: u64,
+}
+
+/// Which anonymity-network transport a chosen candidate dials through.
+enum AnonDial {
+    /// Onion-v3 via the SOCKS proxy (Tor). Carries the addrv2 entry.
+    Onion(crate::network::protocol::NetAddrV2),
+    /// I2P via the shared SAM session.
+    I2p,
+}
+
+struct I2pOutboundAttempt {
+    host: String,
+    session: Arc<SamSession>,
     peers: Arc<DashMap<PeerId, PeerInfo>>,
     senders: Arc<DashMap<PeerId, mpsc::Sender<Vec<u8>>>>,
     event_tx: broadcast::Sender<NodeEvent>,
@@ -452,6 +480,9 @@ pub(super) struct OutboundContext {
     /// the connector finds it exhausted while under-meshed (#147). Same config
     /// the startup bootstrap uses.
     pub bootstrap: BootstrapConfig,
+    /// Shared I2P SAM session (one per node) for dialing `.b32.i2p` peers.
+    /// `None` when I2P is not configured or the bridge was unreachable.
+    pub i2p_sam: Option<Arc<SamSession>>,
 }
 
 /// The connector wakes on its interval and then observes `running`, preserving
@@ -481,6 +512,7 @@ pub(super) fn spawn_outbound_connector(
         magic,
         our_nonce,
         bootstrap: connector_bootstrap,
+        i2p_sam: connector_i2p_sam,
     } = context;
 
     tokio::spawn(async move {
@@ -596,69 +628,118 @@ pub(super) fn spawn_outbound_connector(
             }
 
             // ── Onion/I2P outbound (addrv2) ──────────────────────────────────
-            // Dial a learned onion through the SOCKS proxy on its own small
-            // budget, so slow Tor dials never starve the clearnet slots. Runs
-            // before the IP dial so both get a turn per tick. Requires a proxy —
-            // onions aren't dialable on clearnet. Identity is the onion host +
-            // Noise key, so these never enter the IP per-/16 eclipse accounting.
-            if let Some(ref proxy) = connector_proxy {
-                if proxy.is_active() {
-                    let onion_outbound = connector_peers
-                        .iter()
-                        .filter(|p| p.outbound && p.onion_host.is_some())
-                        .count();
-                    if onion_outbound < ONION_OUTBOUND_BUDGET {
-                        let candidates = connector_addresses.read().await.get_v2(ONION_DIAL_SCAN);
-                        let mut chosen = None;
-                        for c in candidates {
-                            let Some(host) = c.onion_host() else {
-                                continue; // not onion-v3 (e.g. I2P) — SAM not yet wired
-                            };
-                            if connector_peers
-                                .iter()
-                                .any(|p| p.onion_host.as_deref() == Some(host.as_str()))
-                            {
-                                continue; // already connected to / dialing this onion
-                            }
-                            if onion_attempt_deferred(
-                                &host,
-                                &onion_last_attempt,
-                                &onion_backoffs,
-                                MIN_RECONNECT_DELAY,
-                            )
-                            .await
-                            {
-                                continue;
-                            }
-                            chosen = Some((c, host));
-                            break;
+            // Dial a learned onion (via the SOCKS proxy / Tor) or I2P peer (via
+            // the shared SAM session) on a small SHARED budget, so slow
+            // anonymity-network dials never starve the clearnet slots. Runs
+            // before the IP dial so both get a turn per tick. Identity is the
+            // host + Noise key, so these never enter the IP /16 eclipse
+            // accounting. Requires a proxy (onions) and/or a SAM session (I2P).
+            let proxy_active = connector_proxy
+                .as_ref()
+                .map(|p| p.is_active())
+                .unwrap_or(false);
+            if proxy_active || connector_i2p_sam.is_some() {
+                let anon_outbound = connector_peers
+                    .iter()
+                    .filter(|p| p.outbound && p.onion_host.is_some())
+                    .count();
+                if anon_outbound < ONION_OUTBOUND_BUDGET {
+                    use crate::network::protocol::net_id;
+                    let candidates = connector_addresses.read().await.get_v2(ONION_DIAL_SCAN);
+                    let mut chosen: Option<(AnonDial, String)> = None;
+                    for c in candidates {
+                        // Match each candidate to a transport we actually have.
+                        let target = if proxy_active && c.net_id == net_id::ONION_V3 {
+                            c.onion_host().map(|h| (AnonDial::Onion(c.clone()), h))
+                        } else if connector_i2p_sam.is_some()
+                            && c.net_id == net_id::I2P
+                            && c.addr.len() == 32
+                        {
+                            let mut k = [0u8; 32];
+                            k.copy_from_slice(&c.addr);
+                            Some((AnonDial::I2p, crate::network::sam::i2p_b32_from_hash(&k)))
+                        } else {
+                            None
+                        };
+                        let Some((kind, host)) = target else {
+                            continue;
+                        };
+                        if connector_peers
+                            .iter()
+                            .any(|p| p.onion_host.as_deref() == Some(host.as_str()))
+                        {
+                            continue; // already connected to / dialing this peer
                         }
-                        if let Some((onion, host)) = chosen {
-                            debug!("Attempting outbound onion connection to {}", host);
-                            onion_last_attempt
-                                .lock()
-                                .await
-                                .insert(host.clone(), crate::clock::mono_now());
-                            let (height, tip) = connector_chain_state.snapshot().await;
-                            connections.spawn(run_onion_outbound_attempt(OnionOutboundAttempt {
-                                onion,
-                                host,
-                                proxy: proxy.clone(),
-                                peers: connector_peers.clone(),
-                                senders: connector_senders.clone(),
-                                event_tx: connector_event_tx.clone(),
-                                msg_tx: connector_msg_tx.clone(),
-                                handshake_tx: connector_handshake_tx.clone(),
-                                height,
-                                tip,
-                                identity: connector_identity.clone(),
-                                encryption: connector_encryption.clone(),
-                                tracker: connector_tracker.clone(),
-                                traffic_shaper: Arc::clone(&connector_traffic_shaper),
-                                backoffs: onion_backoffs.clone(),
-                                magic,
-                                our_nonce,
-                            }));
+                        if onion_attempt_deferred(
+                            &host,
+                            &onion_last_attempt,
+                            &onion_backoffs,
+                            MIN_RECONNECT_DELAY,
+                        )
+                        .await
+                        {
+                            continue;
+                        }
+                        chosen = Some((kind, host));
+                        break;
+                    }
+                    if let Some((kind, host)) = chosen {
+                        debug!("Attempting outbound anonymity-network connection to {}", host);
+                        onion_last_attempt
+                            .lock()
+                            .await
+                            .insert(host.clone(), crate::clock::mono_now());
+                        let (height, tip) = connector_chain_state.snapshot().await;
+                        match kind {
+                            AnonDial::Onion(onion) => {
+                                if let Some(ref proxy) = connector_proxy {
+                                    connections.spawn(run_onion_outbound_attempt(
+                                        OnionOutboundAttempt {
+                                            onion,
+                                            host,
+                                            proxy: proxy.clone(),
+                                            peers: connector_peers.clone(),
+                                            senders: connector_senders.clone(),
+                                            event_tx: connector_event_tx.clone(),
+                                            msg_tx: connector_msg_tx.clone(),
+                                            handshake_tx: connector_handshake_tx.clone(),
+                                            height,
+                                            tip,
+                                            identity: connector_identity.clone(),
+                                            encryption: connector_encryption.clone(),
+                                            tracker: connector_tracker.clone(),
+                                            traffic_shaper: Arc::clone(&connector_traffic_shaper),
+                                            backoffs: onion_backoffs.clone(),
+                                            magic,
+                                            our_nonce,
+                                        },
+                                    ));
+                                }
+                            }
+                            AnonDial::I2p => {
+                                if let Some(ref session) = connector_i2p_sam {
+                                    connections.spawn(run_i2p_outbound_attempt(
+                                        I2pOutboundAttempt {
+                                            host,
+                                            session: session.clone(),
+                                            peers: connector_peers.clone(),
+                                            senders: connector_senders.clone(),
+                                            event_tx: connector_event_tx.clone(),
+                                            msg_tx: connector_msg_tx.clone(),
+                                            handshake_tx: connector_handshake_tx.clone(),
+                                            height,
+                                            tip,
+                                            identity: connector_identity.clone(),
+                                            encryption: connector_encryption.clone(),
+                                            tracker: connector_tracker.clone(),
+                                            traffic_shaper: Arc::clone(&connector_traffic_shaper),
+                                            backoffs: onion_backoffs.clone(),
+                                            magic,
+                                            our_nonce,
+                                        },
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
@@ -1192,6 +1273,69 @@ async fn run_onion_outbound_attempt(attempt: OnionOutboundAttempt) {
         }
         Err(error) => {
             debug!("Onion dial to {} failed: {}", host, error);
+            record_onion_backoff(&backoffs, &host).await;
+        }
+    }
+}
+
+/// Dial a learned I2P peer through the shared SAM session and run the handshake.
+/// The SAM data socket IS the raw stream to the peer (STREAM CONNECT), so after
+/// wrapping it is handled exactly like a Tor/TCP stream. No per-/16 eclipse slot
+/// (I2P has no IP netgroup); tagged with its `.b32.i2p` host so it is excluded
+/// from IP-address logic. Shares the onion host-keyed backoff map.
+async fn run_i2p_outbound_attempt(attempt: I2pOutboundAttempt) {
+    let I2pOutboundAttempt {
+        host,
+        session,
+        peers,
+        senders,
+        event_tx,
+        msg_tx,
+        handshake_tx,
+        height,
+        tip,
+        identity,
+        encryption,
+        tracker,
+        traffic_shaper,
+        backoffs,
+        magic,
+        our_nonce,
+    } = attempt;
+
+    match session.stream_connect(&host, ONION_CONNECT_TIMEOUT).await {
+        Ok(stream) => {
+            let stream = crate::network::transport::NetStream::tcp(stream);
+            let result = handle_connection(
+                stream,
+                generate_peer_id(),
+                true,
+                magic,
+                our_nonce,
+                height,
+                tip,
+                peers,
+                senders,
+                event_tx,
+                msg_tx,
+                handshake_tx,
+                tracker,
+                identity,
+                encryption,
+                traffic_shaper,
+                None,               // I2P peers hold no per-/16 eclipse slot
+                Some(host.clone()), // I2P identity (.b32.i2p); addr is the SAM bridge
+            )
+            .await;
+            if let Err(error) = result {
+                warn!("I2P outbound connection error ({}): {}", host, error);
+                record_onion_backoff(&backoffs, &host).await;
+            } else {
+                backoffs.lock().await.remove(&host);
+            }
+        }
+        Err(error) => {
+            debug!("I2P dial to {} failed: {}", host, error);
             record_onion_backoff(&backoffs, &host).await;
         }
     }
