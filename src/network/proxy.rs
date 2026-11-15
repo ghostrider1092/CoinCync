@@ -271,6 +271,40 @@ pub async fn connect_peer_hostname(
     Ok(stream.into_inner())
 }
 
+/// Dial a learned addrv2 peer. Onion-v3 addresses are reconstructed to their
+/// `.onion` host and dialed through the Tor SOCKS5 proxy (`connect_onion`),
+/// closing the loop from "stored a peer's onion" to "connected to it". IPv4/IPv6
+/// use the normal (optionally proxied) path; I2P (SAM) is not yet supported.
+pub async fn dial_v2(
+    a: &crate::network::protocol::NetAddrV2,
+    proxy: &ProxyConfig,
+    timeout: std::time::Duration,
+) -> Result<TcpStream> {
+    use crate::network::protocol::net_id;
+    match a.net_id {
+        net_id::ONION_V3 => {
+            let host = a
+                .onion_host()
+                .ok_or_else(|| Error::InvalidState("malformed onion-v3 addrv2".into()))?;
+            connect_onion(&host, a.port, proxy, timeout).await
+        }
+        net_id::IPV4 if a.addr.len() == 4 => {
+            let ip = std::net::Ipv4Addr::new(a.addr[0], a.addr[1], a.addr[2], a.addr[3]);
+            connect_peer(SocketAddr::from((ip, a.port)), Some(proxy), timeout).await
+        }
+        net_id::IPV6 if a.addr.len() == 16 => {
+            let mut o = [0u8; 16];
+            o.copy_from_slice(&a.addr);
+            let ip = std::net::Ipv6Addr::from(o);
+            connect_peer(SocketAddr::from((ip, a.port)), Some(proxy), timeout).await
+        }
+        net_id::I2P => Err(Error::ConfigError(
+            "I2P (SAM) dialing is not yet implemented".into(),
+        )),
+        _ => Err(Error::InvalidState("unroutable addrv2 net_id".into())),
+    }
+}
+
 /// Check if the proxy is reachable
 pub async fn check_proxy(proxy: &ProxyConfig) -> Result<bool> {
     if !proxy.is_active() {
@@ -405,5 +439,123 @@ mod tests {
         assert!(!proxy.onion_only);
         assert!(proxy.username.is_none());
         assert!(proxy.password.is_none());
+    }
+
+    // ── dial_v2: connect to a learned onion over the (mock) Tor proxy ────
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Minimal in-process SOCKS5 server: no-auth handshake + CONNECT (ATYP
+    /// v4/v6/domain), then splices the client to a fixed `upstream` — simulating
+    /// Tor routing a `.onion` to its hidden service. Returns its listen addr.
+    async fn spawn_mock_socks5(upstream: SocketAddr) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut cli, _)) = listener.accept().await {
+                let mut head = [0u8; 2];
+                if cli.read_exact(&mut head).await.is_err() {
+                    return;
+                }
+                let mut methods = vec![0u8; head[1] as usize];
+                let _ = cli.read_exact(&mut methods).await;
+                let _ = cli.write_all(&[0x05, 0x00]).await;
+                let mut req = [0u8; 4];
+                if cli.read_exact(&mut req).await.is_err() {
+                    return;
+                }
+                match req[3] {
+                    0x01 => {
+                        let mut a = [0u8; 4];
+                        let _ = cli.read_exact(&mut a).await;
+                    }
+                    0x04 => {
+                        let mut a = [0u8; 16];
+                        let _ = cli.read_exact(&mut a).await;
+                    }
+                    0x03 => {
+                        let mut l = [0u8; 1];
+                        let _ = cli.read_exact(&mut l).await;
+                        let mut d = vec![0u8; l[0] as usize];
+                        let _ = cli.read_exact(&mut d).await;
+                    }
+                    _ => return,
+                }
+                let mut port = [0u8; 2];
+                let _ = cli.read_exact(&mut port).await;
+                let mut up = match TcpStream::connect(upstream).await {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let _ = cli.write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+                        return;
+                    }
+                };
+                let _ = cli.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+                let _ = tokio::io::copy_bidirectional(&mut cli, &mut up).await;
+            }
+        });
+        addr
+    }
+
+    async fn spawn_echo() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                loop {
+                    match s.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if s.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        addr
+    }
+
+    fn mock_proxy(port: u16, proxy_type: crate::config::ProxyType) -> ProxyConfig {
+        ProxyConfig {
+            enabled: true,
+            address: "127.0.0.1".to_string(),
+            port,
+            username: None,
+            password: None,
+            onion_only: false,
+            proxy_type,
+        }
+    }
+
+    /// CLOSE THE LOOP: a learned onion addrv2 is dialed via `dial_v2` → the Tor
+    /// SOCKS5 proxy routes the `.onion` to its hidden service, and we get a
+    /// working connection (bytes round-trip).
+    #[tokio::test]
+    async fn dials_a_stored_onion_over_the_proxy() {
+        let echo = spawn_echo().await;
+        let proxy_addr = spawn_mock_socks5(echo).await;
+        let proxy = mock_proxy(proxy_addr.port(), crate::config::ProxyType::Socks5);
+
+        let key = [0x42u8; 32];
+        let onion = crate::network::protocol::NetAddrV2 {
+            services: 1,
+            timestamp: 0,
+            net_id: crate::network::protocol::net_id::ONION_V3,
+            addr: key.to_vec(),
+            port: 28080,
+        };
+        // The stored onion carries a valid .onion host (encoder round-trips).
+        assert!(onion.onion_host().unwrap().ends_with(".onion"));
+
+        let mut stream = dial_v2(&onion, &proxy, std::time::Duration::from_secs(5))
+            .await
+            .expect("dial_v2 of a learned onion over the proxy should connect");
+        stream.write_all(b"onion-dial").await.unwrap();
+        let mut buf = [0u8; 10];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"onion-dial");
     }
 }

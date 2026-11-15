@@ -868,6 +868,58 @@ impl NetAddrV2 {
             port,
         })
     }
+
+    /// The `.onion` host for an onion-v3 address, or `None` if this isn't one.
+    /// Used to dial a learned onion peer through the Tor SOCKS proxy.
+    pub fn onion_host(&self) -> Option<String> {
+        if self.net_id == net_id::ONION_V3 && self.addr.len() == 32 {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&self.addr);
+            Some(onion_v3_host_from_pubkey(&key))
+        } else {
+            None
+        }
+    }
+}
+
+/// Base32 (RFC4648, lowercase, no padding) encode — the alphabet Tor uses for
+/// `.onion` hosts.
+fn base32_encode_lower(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut out = String::with_capacity(data.len() * 8 / 5 + 1);
+    let mut acc: u32 = 0;
+    let mut nbits: u32 = 0;
+    for &b in data {
+        acc = (acc << 8) | b as u32;
+        nbits += 8;
+        while nbits >= 5 {
+            nbits -= 5;
+            out.push(ALPHABET[((acc >> nbits) & 0x1f) as usize] as char);
+        }
+    }
+    if nbits > 0 {
+        out.push(ALPHABET[((acc << (5 - nbits)) & 0x1f) as usize] as char);
+    }
+    out
+}
+
+/// Encode a 32-byte onion-v3 pubkey to its `.onion` host, with the SHA3-256
+/// checksum + version byte Tor requires. Inverse of [`parse_onion_v3_pubkey`].
+pub fn onion_v3_host_from_pubkey(pubkey: &[u8; 32]) -> String {
+    use sha3::{Digest, Sha3_256};
+    const VERSION: u8 = 0x03;
+    let mut h = Sha3_256::new();
+    h.update(b".onion checksum");
+    h.update(pubkey);
+    h.update([VERSION]);
+    let digest = h.finalize();
+    let mut data = Vec::with_capacity(35);
+    data.extend_from_slice(pubkey);
+    data.extend_from_slice(&digest[..2]);
+    data.push(VERSION);
+    let mut host = base32_encode_lower(&data);
+    host.push_str(".onion");
+    host
 }
 
 /// Reject message
@@ -1599,6 +1651,34 @@ mod tests {
         assert_eq!(sa.addr, vec![0u8; 32]);
         assert_eq!(sa.port, 28080);
         assert!(sa.validate().is_ok());
+    }
+
+    #[test]
+    fn onion_v3_encode_parse_round_trips() {
+        let key = [0x5a_u8; 32];
+        let host = onion_v3_host_from_pubkey(&key);
+        assert!(host.ends_with(".onion"));
+        assert_eq!(host.len(), 56 + ".onion".len());
+        // encode → parse recovers the key (the embedded checksum is valid base32).
+        assert_eq!(parse_onion_v3_pubkey(&host), Some(key));
+        // via the NetAddrV2 helper too.
+        let na = NetAddrV2 {
+            services: 0,
+            timestamp: 0,
+            net_id: net_id::ONION_V3,
+            addr: key.to_vec(),
+            port: 28080,
+        };
+        assert_eq!(na.onion_host(), Some(host));
+        // non-onion → no host.
+        let ip = NetAddrV2 {
+            services: 0,
+            timestamp: 0,
+            net_id: net_id::IPV4,
+            addr: vec![1, 2, 3, 4],
+            port: 1,
+        };
+        assert_eq!(ip.onion_host(), None);
     }
 
     /// DEMONSTRATION (run with `--nocapture`): an `AddrV2` message carrying a Tor
