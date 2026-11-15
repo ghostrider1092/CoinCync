@@ -84,6 +84,14 @@ struct Cli {
     #[arg(long = "external-ip", value_name = "IP[:PORT]")]
     external_ip: Option<String>,
 
+    /// Our own hidden-service address (`<56-char>.onion`, onion-v3) if we run
+    /// one. Provision the service in torrc (`HiddenServicePort <p2p-port>
+    /// 127.0.0.1:<listen>`), then pass the host here. CoinCync advertises it
+    /// over addrv2 so Tor-capable peers can dial us back. The listen port is
+    /// attached automatically; a malformed value is ignored with a warning.
+    #[arg(long = "onion-address", value_name = "ONION")]
+    onion_address: Option<String>,
+
     /// Disable all automatic peer discovery (for isolated tests).
     #[arg(long)]
     no_peers: bool,
@@ -741,6 +749,7 @@ async fn main() {
                 cli.rest_disable,
                 cli.addnode,
                 cli.external_ip,
+                cli.onion_address,
                 cli.no_peers,
                 cli.explorer,
                 cli.proxy,
@@ -1329,6 +1338,7 @@ async fn start_node(
     rest_disable: bool,
     addnodes: Vec<String>,
     external_ip: Option<String>,
+    onion_address: Option<String>,
     no_peers: bool,
     serve_explorer: bool,
     proxy_arg: Option<String>,
@@ -1504,6 +1514,22 @@ async fn start_node(
                 p2p_config.external_addr = Some(addr);
             }
             None => warn!("Ignoring bad --external-ip {:?}", raw),
+        }
+    }
+
+    // --onion-address: our own hidden service, advertised over addrv2 so
+    // Tor-capable peers can dial us back. Validate the host here for early
+    // operator feedback; the self addrv2 entry is built at node startup
+    // (P2PNode::new) and paired with our listen port.
+    if let Some(raw) = &onion_address {
+        if coincync::network::protocol::parse_onion_v3_pubkey(raw).is_some() {
+            info!("--onion-address: advertising hidden service {} over addrv2", raw);
+            p2p_config.onion_address = Some(raw.clone());
+        } else {
+            warn!(
+                "Ignoring bad --onion-address {:?}: expected a 56-char onion-v3 host ending in .onion",
+                raw
+            );
         }
     }
 

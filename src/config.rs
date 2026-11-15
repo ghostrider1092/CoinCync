@@ -536,6 +536,15 @@ pub struct P2PConfig {
     /// External IP (if known)
     pub external_ip: Option<String>,
 
+    /// Our own hidden-service address, if we run one, as `<56-char>.onion`
+    /// (onion-v3; no port — our P2P `port` is implied). When set, the node
+    /// advertises it over addrv2 so CAP_ADDRV2 peers can dial us back through
+    /// Tor. The operator provisions the hidden service (torrc `HiddenServicePort
+    /// <port> 127.0.0.1:<listen>`); CoinCync only publishes the name. A malformed
+    /// value is logged and ignored at startup, never fatal.
+    #[serde(default)]
+    pub onion_address: Option<String>,
+
     /// Offline mode (no P2P connections)
     #[serde(default)]
     pub offline: bool,
@@ -752,6 +761,7 @@ impl Default for P2PConfig {
             // Users who want incoming connections should enable this explicitly.
             upnp: false,
             external_ip: None,
+            onion_address: None,
             offline: false,
             proxy: None,
             encryption: P2PEncryptionConfig::default(),
