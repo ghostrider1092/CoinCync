@@ -534,6 +534,27 @@ pub(super) async fn handle_verack(
         let _ = send_to_peer(senders, &peer_id, data).await;
     }
 
+    // addrv2: if the peer already advertised CAP_ADDRV2 (via its Flare), pull its
+    // typed (onion-v3 / I2P) addresses too — the one-shot handshake pull. If the
+    // Flare hasn't arrived yet, the peer isn't skipped forever: the periodic
+    // addrv2 gossip tick (maintenance) re-requests once the cap is known. Pre-
+    // addrv2 peers never set the cap and are never sent the unknown message type.
+    let speaks_addrv2 = peers
+        .get(&peer_id)
+        .map(|p| {
+            crate::network::firework::has_cap(
+                p.capabilities,
+                crate::network::firework::CAP_ADDRV2,
+            )
+        })
+        .unwrap_or(false);
+    if speaks_addrv2 {
+        let getaddrv2 = Message::new(magic, MessageType::GetAddrV2, vec![]);
+        if let Ok(data) = getaddrv2.to_bytes() {
+            let _ = send_to_peer(senders, &peer_id, data).await;
+        }
+    }
+
     // Handshake complete — if this peer is ahead, send GetHeaders with nonce.
     let peer_height = peers.get(&peer_id).map(|p| p.height).unwrap_or(0);
     let our_height = chain.height();
@@ -1138,6 +1159,67 @@ mod handler_tests {
         assert!(!sync.read().await.headers_request_pending());
         assert!(srx.try_recv().is_ok(), "GetAddr sent");
         assert!(srx.try_recv().is_err(), "no GetHeaders when not behind");
+    }
+
+    #[tokio::test]
+    async fn handle_verack_from_addrv2_peer_also_sends_getaddrv2() {
+        let peer_id = [17u8; 32];
+        let addr = addr_for(30017);
+        let peers = DashMap::new();
+        let mut info = PeerInfo::new(peer_id, addr, false);
+        info.state = PeerState::VersionReceived;
+        info.height = 0;
+        // The peer advertised addrv2 in its Flare before verack.
+        info.capabilities = crate::network::firework::CAP_ADDRV2;
+        peers.insert(peer_id, info);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(peer_id, stx);
+        let dand = dandelion();
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let chain = genesis_chain();
+
+        handle_verack(peer_id, MAGIC, &peers, &senders, &dand, &sync, &chain)
+            .await
+            .unwrap();
+
+        // Not behind => no GetHeaders. We expect GetAddr then GetAddrV2, in order
+        // (type byte sits at offset 4, after the 4-byte magic).
+        let first = srx.try_recv().expect("GetAddr sent");
+        assert_eq!(first[4], crate::network::protocol::MessageType::GetAddr as u8);
+        let second = srx.try_recv().expect("GetAddrV2 sent to an addrv2 peer");
+        assert_eq!(
+            second[4],
+            crate::network::protocol::MessageType::GetAddrV2 as u8
+        );
+        assert!(srx.try_recv().is_err(), "nothing else is sent");
+    }
+
+    #[tokio::test]
+    async fn handle_verack_from_legacy_peer_sends_no_getaddrv2() {
+        let peer_id = [18u8; 32];
+        let addr = addr_for(30018);
+        let peers = DashMap::new();
+        let mut info = PeerInfo::new(peer_id, addr, false);
+        info.state = PeerState::VersionReceived;
+        info.height = 0;
+        info.capabilities = 0; // pre-addrv2 peer
+        peers.insert(peer_id, info);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(peer_id, stx);
+        let dand = dandelion();
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let chain = genesis_chain();
+
+        handle_verack(peer_id, MAGIC, &peers, &senders, &dand, &sync, &chain)
+            .await
+            .unwrap();
+
+        // Only GetAddr — a legacy peer is never sent the unknown GetAddrV2 type.
+        let first = srx.try_recv().expect("GetAddr sent");
+        assert_eq!(first[4], crate::network::protocol::MessageType::GetAddr as u8);
+        assert!(srx.try_recv().is_err(), "no GetAddrV2 for a pre-addrv2 peer");
     }
 
     #[tokio::test]

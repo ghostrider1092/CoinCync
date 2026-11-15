@@ -121,6 +121,13 @@ use super::runtime::wait_for_shutdown;
 use super::types::NodeEvent;
 use super::TxAbsenceCache;
 
+/// How often to re-request typed (onion/I2P) addresses from CAP_ADDRV2 peers.
+/// The handshake does a one-shot pull (control::handle_verack); this periodic
+/// re-request is what keeps a long-lived node learning hidden-service peers that
+/// joined after it did. 90 s is below PEER_TIMEOUT and well under the churn
+/// cadence, so the book stays fresh without adding meaningful traffic.
+const ADDRV2_GOSSIP_INTERVAL_SECS: u64 = 90;
+
 pub(super) struct MaintenanceContext {
     pub peers: Arc<DashMap<PeerId, PeerInfo>>,
     pub dandelion: Arc<RwLock<DandelionRouter>>,
@@ -260,6 +267,10 @@ pub(super) fn spawn_maintenance(
         // #284 inbound-peer discovery: periodically seed the address book with
         // connected inbound peers (assumed to listen on the network default port).
         let mut discovery_interval = interval(Duration::from_secs(60));
+        // addrv2 gossip: periodically pull onion/I2P addresses from peers that
+        // advertise CAP_ADDRV2 (the handshake only pulls once, at verack).
+        let mut addrv2_gossip_interval =
+            interval(Duration::from_secs(ADDRV2_GOSSIP_INTERVAL_SECS));
 
         loop {
             tokio::select! {
@@ -324,6 +335,9 @@ pub(super) fn spawn_maintenance(
                 }
                 _ = discovery_interval.tick() => {
                     discover_inbound_peers(&maint_peers, &maint_addresses, discovery_port).await;
+                }
+                _ = addrv2_gossip_interval.tick() => {
+                    run_addrv2_gossip_tick(&maint_senders, &maint_peers, magic).await;
                 }
                 _ = outbound_rotate_interval.tick() => {
                     rotate_outbound_peer(&maint_peers, &maint_senders);
@@ -620,6 +634,47 @@ async fn discover_inbound_peers(
     }
 }
 
+/// addrv2 gossip tick — send a `GetAddrV2` to every Connected peer that
+/// advertises `CAP_ADDRV2`, pulling their typed (onion-v3 / I2P) addresses into
+/// our book. Peers that predate addrv2 are skipped: they never set the cap and
+/// would reject the unknown message type. Best-effort `try_send` (a full or
+/// closed channel is dropped, never blocks the maintenance loop), mirroring the
+/// tip-announce tick. This is the ongoing half of peer-address-v2 gossip; the
+/// one-shot pull at handshake lives in `control::handle_verack`.
+async fn run_addrv2_gossip_tick(
+    senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
+    peers: &DashMap<PeerId, PeerInfo>,
+    magic: [u8; 4],
+) {
+    use super::super::protocol::MessageType;
+    let Ok(data) = Message::new(magic, MessageType::GetAddrV2, Vec::new()).to_bytes() else {
+        return;
+    };
+    let mut sent = 0usize;
+    for peer in peers.iter() {
+        if peer.state != PeerState::Connected
+            || !crate::network::firework::has_cap(
+                peer.capabilities,
+                crate::network::firework::CAP_ADDRV2,
+            )
+        {
+            continue;
+        }
+        if let Some(sender) = senders.get(peer.key()) {
+            if sender.try_send(data.clone()).is_ok() {
+                sent += 1;
+            }
+        }
+    }
+    if sent > 0 {
+        tracing::trace!(
+            target: "node::addrv2",
+            "addrv2 gossip: sent GetAddrV2 to {} capable peer(s)",
+            sent,
+        );
+    }
+}
+
 /// Track the sustained mesh-floor state with hysteresis. Increments a
 /// below-floor streak each heartbeat that connected peers are under
 /// `MESH_FLOOR_PEERS`; once the streak reaches `MESH_FLOOR_SUSTAIN_TICKS` the
@@ -905,6 +960,65 @@ async fn run_self_heal_tick(
         // Reset the stall clock so the next recovery must re-accumulate a full
         // stall window (belt-and-braces alongside the MIN_GAP rate-limit).
         state.last_progress_at = now;
+    }
+}
+
+#[cfg(test)]
+mod addrv2_gossip_tests {
+    use super::*;
+    use crate::network::firework::CAP_ADDRV2;
+    use crate::network::protocol::MessageType;
+
+    const MAGIC: [u8; 4] = [0xCA, 0xFE, 0xBA, 0xBE];
+
+    fn peer(n: u8, connected: bool, caps: u64) -> (PeerId, PeerInfo) {
+        let id = [n; 32];
+        let addr = format!("127.0.0.1:{}", 30000 + n as u16).parse().unwrap();
+        let mut p = PeerInfo::new(id, addr, true);
+        if connected {
+            p.state = PeerState::Connected;
+        }
+        p.capabilities = caps;
+        (id, p)
+    }
+
+    /// The tick pulls typed addresses ONLY from peers that are both Connected and
+    /// advertise CAP_ADDRV2 — a no-cap peer (would reject the unknown type) and a
+    /// still-handshaking peer are both left alone.
+    #[tokio::test]
+    async fn gossip_tick_requests_only_from_connected_addrv2_peers() {
+        let peers = DashMap::new();
+        let senders = DashMap::new();
+        let mut rxs = std::collections::HashMap::new();
+
+        // 1: connected + CAP_ADDRV2 -> should receive GetAddrV2
+        // 2: connected, no cap      -> skipped
+        // 3: CAP_ADDRV2 but handshaking (not Connected) -> skipped
+        for (n, connected, caps) in [(1u8, true, CAP_ADDRV2), (2, true, 0), (3, false, CAP_ADDRV2)] {
+            let (id, p) = peer(n, connected, caps);
+            peers.insert(id, p);
+            let (tx, rx) = mpsc::channel::<Vec<u8>>(4);
+            senders.insert(id, tx);
+            rxs.insert(n, rx);
+        }
+
+        run_addrv2_gossip_tick(&senders, &peers, MAGIC).await;
+
+        // Only peer 1 got a frame, and it is a GetAddrV2 (type byte at offset 4).
+        let frame = rxs
+            .get_mut(&1)
+            .unwrap()
+            .try_recv()
+            .expect("a capable connected peer is sent GetAddrV2");
+        assert_eq!(frame[4], MessageType::GetAddrV2 as u8);
+        assert!(
+            rxs.get_mut(&2).unwrap().try_recv().is_err(),
+            "a peer without CAP_ADDRV2 is skipped"
+        );
+        assert!(
+            rxs.get_mut(&3).unwrap().try_recv().is_err(),
+            "a not-yet-Connected peer is skipped"
+        );
     }
 }
 
