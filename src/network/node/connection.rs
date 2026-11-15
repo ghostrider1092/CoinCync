@@ -87,6 +87,17 @@ struct AbortOnDrop(JoinHandle<()>);
 
 const NOISE_WIRE_OVERHEAD: usize = NOISE_LENGTH_PREFIX_SIZE + NOISE_TAG_SIZE;
 
+/// The Noise handshake timeout for this connection: the generous anon timeout
+/// when the peer is reached over Tor/I2P (multi-hop tunnels), the short clearnet
+/// timeout otherwise. Pure, so the transport-aware choice is unit-tested.
+fn noise_handshake_timeout_secs(is_anon: bool) -> u64 {
+    if is_anon {
+        noise::NOISE_HANDSHAKE_TIMEOUT_ANON_SECS
+    } else {
+        noise::NOISE_HANDSHAKE_TIMEOUT_SECS
+    }
+}
+
 fn normalize_noise_record(traffic_shaper: &TrafficShaper, plaintext: &[u8]) -> Vec<u8> {
     traffic_shaper.normalize_size_with_overhead(plaintext, NOISE_WIRE_OVERHEAD)
 }
@@ -383,10 +394,16 @@ pub(super) async fn handle_connection(
 
     let mut stream = stream;
 
+    // A peer reached over Tor/I2P (onion_host set) gets a generous handshake
+    // timeout: the Noise round-trips traverse multi-hop tunnels and can take
+    // many seconds, far longer than a clearnet TCP handshake. Using the short
+    // clearnet timeout here would drop valid anon peers mid-handshake.
+    let handshake_timeout_secs = noise_handshake_timeout_secs(info.onion_host.is_some());
+
     let noise_result: Option<(NoiseTransport, PeerId)> =
         if encryption_config.preferred || encryption_config.required {
             let timeout_result = tokio::time::timeout(
-                Duration::from_secs(noise::NOISE_HANDSHAKE_TIMEOUT_SECS),
+                Duration::from_secs(handshake_timeout_secs),
                 noise::perform_noise_handshake(&mut stream, identity.clone(), outbound),
             )
             .await;
@@ -404,8 +421,7 @@ pub(super) async fn handle_connection(
                 Err(_) => {
                     warn!(
                         "Noise handshake timed out with {} after {}s",
-                        addr,
-                        noise::NOISE_HANDSHAKE_TIMEOUT_SECS
+                        addr, handshake_timeout_secs
                     );
                     return Err(Error::NoiseHandshakeFailed("timeout".into()));
                 }
@@ -705,6 +721,26 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn anon_peers_get_a_generous_handshake_timeout() {
+        // Clearnet keeps the short timeout; onion/I2P peers get the generous one,
+        // which must clear the recommended I2P floor (~30s) so a slow multi-hop
+        // handshake is not dropped.
+        assert_eq!(
+            noise_handshake_timeout_secs(false),
+            noise::NOISE_HANDSHAKE_TIMEOUT_SECS
+        );
+        assert_eq!(
+            noise_handshake_timeout_secs(true),
+            noise::NOISE_HANDSHAKE_TIMEOUT_ANON_SECS
+        );
+        assert!(
+            noise_handshake_timeout_secs(true) >= 30,
+            "anon handshake timeout must clear the I2P floor"
+        );
+        assert!(noise_handshake_timeout_secs(true) > noise_handshake_timeout_secs(false));
+    }
 
     /// #190: the duplicate tie-break must make BOTH ends keep the SAME physical
     /// connection. Model the two directions (A→B outbound on A / inbound on B,
