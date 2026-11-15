@@ -538,7 +538,10 @@ pub(super) async fn handle_verack(
         return Ok(());
     }
 
-    // Register outbound peers for Dandelion++ relay selection
+    // Register outbound peers for Dandelion++ relay selection. By PeerId, so
+    // onion/I2P peers join the stem/fluff pool like any other — a Tor/I2P node
+    // gets full Dandelion++ origin obfuscation (threat: block/tx origin
+    // fingerprinting). Do NOT exclude anon peers here.
     if is_outbound {
         dandelion.write().await.add_outbound_peer(peer_id);
         debug!(

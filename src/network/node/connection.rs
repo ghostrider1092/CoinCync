@@ -251,6 +251,12 @@ async fn noise_bridge_writer<W, R>(
                 remaining -= to_read;
             }
 
+            // Size padding (threat: traffic-analysis fingerprinting) is applied
+            // HERE, per connection, before the bytes hit the socket — so it is
+            // transport-agnostic: onion/I2P peers (a NetStream to the proxy/SAM
+            // bridge) get the same uniform bucket sizes as clearnet. Do NOT gate
+            // this on transport, or an ISP watching the proxy/SAM socket could
+            // distinguish txs, headers and invs by length.
             let record = normalize_noise_record(&traffic_shaper, &plaintext);
             if let Err(error) = state.write_encrypted(&mut tcp_writer, &record).await {
                 warn!("Noise bridge writer: {}", error);
