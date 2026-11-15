@@ -162,7 +162,9 @@ pub use constants::{
     TIP_REBROADCAST_INTERVAL_SECS,
 };
 pub use tx_absence::TxAbsenceCache;
-pub use types::{ChainUpdateToken, ConnectionStats, NetworkStats, NodeConfig, NodeEvent};
+pub use types::{
+    ChainUpdateToken, ConnectionStats, I2pTransportStatus, NetworkStats, NodeConfig, NodeEvent,
+};
 
 /// Message from peer connection
 struct PeerMessage {
@@ -308,6 +310,13 @@ pub struct P2PNode {
     /// `MESH_FLOOR_SUSTAIN_TICKS` consecutive heartbeats. Observational by
     /// default. See docs/design/runtime-mesh-floor.md.
     mesh_degraded: Arc<std::sync::atomic::AtomicBool>,
+    /// Retained handle to the I2P SAM transport, present only when the operator
+    /// configured `--i2p-sam`. Backs the read-only transport-health gauge in
+    /// `get_info` (alive / rebuild count); `None` when I2P is off, set by
+    /// `start()` once the session is established. Observability only — reading it
+    /// never changes node behavior, and when I2P is off the gauge is simply
+    /// absent, so an operator uses it or not.
+    i2p_transport: parking_lot::Mutex<Option<Arc<super::sam::SamSession>>>,
 }
 
 impl P2PNode {
@@ -456,6 +465,7 @@ impl P2PNode {
             dht: None,
             traffic_shaper: Arc::new(TrafficShaper::default_enabled()),
             mesh_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            i2p_transport: parking_lot::Mutex::new(None),
         }
     }
 
@@ -1141,6 +1151,9 @@ impl P2PNode {
         // the node is DIALABLE over I2P, not just dialing out. (`ref` borrows;
         // the session Arc is still moved into the connector context below.)
         if let Some(ref session) = i2p_sam {
+            // Retain a handle for the read-only transport-health gauge (get_info)
+            // before the Arc is moved into the outbound connector below.
+            *self.i2p_transport.lock() = Some(session.clone());
             node_runtime.track(
                 "i2p-accept-pool",
                 peer_manager::spawn_i2p_accept_pool(
@@ -1494,6 +1507,23 @@ impl P2PNode {
             bytes_sent: total_sent,
             mesh_degraded: self.mesh_degraded(),
         }
+    }
+
+    /// Read-only health of the I2P SAM transport, or `None` when the operator
+    /// did not configure `--i2p-sam` (I2P off → the gauge is simply absent, an
+    /// operator consults it or not). Observational: reading it never changes node
+    /// behavior. `alive` is false only during the brief window while the session
+    /// supervisor rebuilds a dropped control socket; `rebuilds` counts how many
+    /// times it has had to (0 = never dropped since start).
+    pub fn i2p_transport_status(&self) -> Option<I2pTransportStatus> {
+        self.i2p_transport.lock().as_ref().map(|s| {
+            let generation = s.generation();
+            I2pTransportStatus {
+                alive: s.is_alive(),
+                // generation is 1 after the first connect, +1 per rebuild.
+                rebuilds: generation.saturating_sub(1),
+            }
+        })
     }
 
     /// Sustained mesh-floor state: true when connected peers have been below

@@ -985,7 +985,9 @@ pub(super) struct I2pAcceptContext {
 /// (tagged with the remote destination, excluded from IP logic), then loops to
 /// accept the next. I2P peers are NOT per-IP tracked (they share the SAM addr —
 /// the acceptor's per-IP cap would be wrong); a total `MAX_I2P_INBOUND` cap
-/// bounds them instead. Loops stop when the session dies or on shutdown.
+/// bounds them instead. Waiters persist across in-place session rebuilds (they
+/// wait out the down window, then resume on the rebuilt session) and stop only
+/// on shutdown.
 pub(super) fn spawn_i2p_accept_pool(
     ctx: I2pAcceptContext,
     mut shutdown: watch::Receiver<bool>,
@@ -1009,7 +1011,12 @@ pub(super) fn spawn_i2p_accept_pool(
             waiters.spawn(async move {
                 loop {
                     if !session.is_alive() {
-                        break;
+                        // Session is down while the supervisor rebuilds it in
+                        // place. Wait and retry rather than exiting the pool, so
+                        // inbound I2P resumes once the rebuilt session is back
+                        // (the shared handle picks up its new id transparently).
+                        tokio::time::sleep(I2P_ACCEPT_RETRY_BACKOFF).await;
+                        continue;
                     }
                     match session.stream_accept(I2P_ACCEPT_SETUP_TIMEOUT).await {
                         Ok((stream, remote)) => {
@@ -1068,9 +1075,8 @@ pub(super) fn spawn_i2p_accept_pool(
                             });
                         }
                         Err(e) => {
-                            if !session.is_alive() {
-                                break;
-                            }
+                            // Backoff and retry; the top-of-loop is_alive check
+                            // handles the case where the session is being rebuilt.
                             debug!("I2P STREAM ACCEPT setup failed: {e}; retrying");
                             tokio::time::sleep(I2P_ACCEPT_RETRY_BACKOFF).await;
                         }

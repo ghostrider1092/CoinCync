@@ -19,12 +19,16 @@
 //! CONNECT`. Every reply is a single newline-terminated line, read with a bound
 //! and a timeout so a rogue bridge cannot stall or flood us before the reply.
 //!
-//! Inbound (`STREAM ACCEPT`, our own persistent destination) is a later step;
-//! this module implements the outbound half that makes `dial_v2` reach I2P.
+//! A background **supervisor** owns the control socket and rebuilds the session
+//! in place (same persistent destination, new id) if it dies, so a bridge
+//! restart or tunnel loss doesn't permanently sever I2P dialing. Inbound
+//! (`STREAM ACCEPT`) uses the same session; the accept pool and `dial_v2` share
+//! one `SamSession` and follow it across rebuilds without re-plumbing.
 
 use crate::error::{Error, Result};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -37,6 +41,12 @@ const SAM_HELLO: &[u8] = b"HELLO VERSION MIN=3.0 MAX=3.3\n";
 
 /// Max bytes we read while waiting for a single SAM reply line.
 const SAM_REPLY_CAP: usize = 4096;
+
+/// Reconnect backoff bounds for the session supervisor: after the control
+/// socket dies it retries `SESSION CREATE` starting at `MIN`, doubling to `MAX`,
+/// forever (the node keeps trying until the SAM bridge is back).
+const RECONNECT_BACKOFF_MIN: Duration = Duration::from_millis(500);
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// Reconstruct the `.b32.i2p` host from a 32-byte I2P destination hash. addrv2
 /// net_id 5 carries the 32-byte SHA-256 of the destination; the `.b32` address
@@ -99,119 +109,95 @@ fn base32_lower_nopad(data: &[u8]) -> String {
     out
 }
 
-/// A SAM v3 STREAM session for outbound dialing. Holds the control socket open;
-/// the I2P session lives exactly as long as this value.
+/// A SAM v3 STREAM session for dialing and accepting `.b32.i2p` peers. Holds the
+/// control socket open behind a background **supervisor** that rebuilds the
+/// session in place if the control socket dies (bridge restart, tunnel loss):
+/// the shared `Arc<SamSession>` the outbound connector and inbound accept pool
+/// hold never changes, so they transparently pick up the rebuilt session — with
+/// its new id — the moment it is back. While the session is down,
+/// `stream_connect`/`stream_accept` fail fast instead of hanging.
 pub struct SamSession {
+    /// The bridge we dial for every data socket; fixed for the session's life.
     sam_addr: String,
-    session_id: String,
-    /// Cleared by the supervisor task when the control socket closes (the whole
-    /// session and every stream die with it). `stream_connect` fails fast when
-    /// this is false instead of hanging on a dead session.
-    alive: Arc<AtomicBool>,
-    /// Supervisor: owns the control socket (keeping the session alive), watches
-    /// it for EOF, and flags `alive=false` + logs CRITICAL when it dies.
+    /// Shared, swappable session state; the supervisor swaps the live id in here.
+    state: Arc<SessionState>,
+    /// Supervisor task: owns the current control socket, watches it for EOF, and
+    /// on death reconnects (persistent key → same `.b32.i2p`) with capped
+    /// backoff, forever. Aborted when the `SamSession` is dropped.
     _supervisor: tokio::task::JoinHandle<()>,
 }
 
+/// The parts of a SAM session the supervisor swaps on a rebuild. Shared via
+/// `Arc` so every holder of the `SamSession` reads the current id and liveness
+/// without re-plumbing when the session is rebuilt.
+struct SessionState {
+    /// Current SAM session id. Re-randomized on every (re)connect so a stale
+    /// control socket lingering on the bridge can't collide with the new one.
+    session_id: Mutex<String>,
+    /// False while the session is down (control socket closed, rebuild pending);
+    /// `stream_connect`/`stream_accept` fail fast instead of hanging.
+    alive: AtomicBool,
+    /// Bumped on each successful (re)connect — 1 after the initial open, 2 after
+    /// the first rebuild, … Lets callers and tests observe a rebuild.
+    generation: AtomicU64,
+}
+
 impl SamSession {
-    /// Open a SAM session for outbound STREAM dialing: `HELLO`, then `SESSION
-    /// CREATE` with a transient destination (dialing out needs no persistent
-    /// identity — that is only required to ACCEPT inbound). The returned
-    /// session's control socket is held open; drop it to close the session.
+    /// Open a SAM session for I2P dialing/accepting: `HELLO`, then `SESSION
+    /// CREATE` with our persistent destination (stable `.b32.i2p` across
+    /// restarts). Fails if the bridge is unreachable at startup. Once open, a
+    /// supervisor keeps it alive and rebuilds it in place after any later drop.
     pub async fn connect(
         sam_addr: &str,
         data_dir: &std::path::Path,
         connect_timeout: Duration,
         session_timeout: Duration,
     ) -> Result<SamSession> {
-        // Randomized session id — a hardcoded id collides if the binary restarts
-        // before the previous control socket finishes closing.
-        let session_id = format!("cync-{:08x}", rand::random::<u32>());
-        let mut control = dial(sam_addr, connect_timeout).await?;
-        sam_hello(&mut control, connect_timeout).await?;
-
-        // Persistent destination: reuse the on-disk private key for a STABLE
-        // .b32.i2p across restarts (TRANSIENT would mint a new address each boot
-        // and poison peers' addrv2 tables with dead hashes). On first boot,
-        // create a fresh Ed25519 (SIGNATURE_TYPE=7 — never the weak DSA-SHA1
-        // default) and save the key SAM returns.
-        let key_path = data_dir.join("i2p_dest.key");
-        let saved = std::fs::read_to_string(&key_path)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let cmd = match &saved {
-            Some(priv_key) => {
-                format!("SESSION CREATE STYLE=STREAM ID={session_id} DESTINATION={priv_key}\n")
-            }
-            None => format!(
-                "SESSION CREATE STYLE=STREAM ID={session_id} DESTINATION=TRANSIENT SIGNATURE_TYPE=7\n"
-            ),
-        };
-        // SESSION CREATE blocks until the router builds initial tunnels — 30s to
-        // several minutes on a cold start — so read its reply with the generous
-        // session timeout, not the short per-command one.
-        let reply = sam_cmd(&mut control, cmd.as_bytes(), session_timeout).await?;
-        if !reply.contains("RESULT=OK") {
-            return Err(Error::ConnectionFailed(format!(
-                "SAM SESSION CREATE failed: {reply}"
-            )));
-        }
-        // A fresh (TRANSIENT) session returns our new DESTINATION (the full
-        // private key) — persist it so next boot keeps the same .b32.i2p.
-        if saved.is_none() {
-            if let Some(priv_key) = sam_value(&reply, "DESTINATION=") {
-                match std::fs::write(&key_path, &priv_key) {
-                    Ok(()) => tracing::info!(
-                        "Saved I2P destination key to {} — stable .b32.i2p across restarts",
-                        key_path.display()
-                    ),
-                    Err(e) => tracing::warn!("Could not persist I2P destination key: {e}"),
-                }
-            }
-        }
-
-        // Control-socket supervisor: the session (and every peer stream) dies
-        // with this socket, so a background task owns it, watches for EOF, and
-        // flags the session dead + logs CRITICAL. Full auto-rebuild is a
-        // follow-up; for now dialing fails fast instead of hanging.
-        let alive = Arc::new(AtomicBool::new(true));
-        let supervisor = {
-            let alive = alive.clone();
-            let sid = session_id.clone();
-            tokio::spawn(async move {
-                let mut control = control;
-                let mut buf = [0u8; 256];
-                loop {
-                    match control.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {} // async SAM notices (e.g. PING) — ignore
-                    }
-                }
-                alive.store(false, Ordering::Relaxed);
-                tracing::error!(
-                    "I2P SAM control socket (session {sid}) closed — the I2P session is DEAD; \
-                     .b32.i2p dialing fails until the SAM bridge is back and the node reconnects."
-                );
-            })
-        };
-
+        let sam_addr = sam_addr.to_string();
+        let data_dir = data_dir.to_path_buf();
+        // Initial session — connect() surfaces a startup bridge failure to the
+        // caller; the supervisor only takes over rebuilds after this succeeds.
+        let (control, session_id) =
+            create_session(&sam_addr, &data_dir, connect_timeout, session_timeout).await?;
+        let state = Arc::new(SessionState {
+            session_id: Mutex::new(session_id),
+            alive: AtomicBool::new(true),
+            generation: AtomicU64::new(1),
+        });
+        let supervisor = tokio::spawn(supervise(
+            control,
+            state.clone(),
+            sam_addr.clone(),
+            data_dir,
+            connect_timeout,
+            session_timeout,
+        ));
         Ok(SamSession {
-            sam_addr: sam_addr.to_string(),
-            session_id,
-            alive,
+            sam_addr,
+            state,
             _supervisor: supervisor,
         })
     }
 
-    /// Whether the session's control socket is still open (the session usable).
+    /// Whether the session is currently usable (control socket open). False
+    /// during the window between a control-socket death and the rebuild.
     pub fn is_alive(&self) -> bool {
-        self.alive.load(Ordering::Relaxed)
+        self.state.alive.load(Ordering::Relaxed)
     }
 
-    /// The session id the bridge knows us by (used in `STREAM CONNECT`).
-    pub fn session_id(&self) -> &str {
-        &self.session_id
+    /// The session id the bridge currently knows us by (changes across rebuilds).
+    pub fn session_id(&self) -> String {
+        self.state
+            .session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// How many times the session has (re)connected: 1 after the initial open,
+    /// incremented on every in-place rebuild. Observability / tests.
+    pub fn generation(&self) -> u64 {
+        self.state.generation.load(Ordering::Relaxed)
     }
 
     /// Open an outbound I2P stream to `dest` (a `.b32.i2p` host or a full base64
@@ -221,15 +207,13 @@ impl SamSession {
     pub async fn stream_connect(&self, dest: &str, timeout: Duration) -> Result<TcpStream> {
         if !self.is_alive() {
             return Err(Error::ConnectionFailed(
-                "I2P SAM session is dead (control socket closed)".into(),
+                "I2P SAM session is down (control socket closed, rebuild pending)".into(),
             ));
         }
+        let session_id = self.session_id();
         let mut data = dial(&self.sam_addr, timeout).await?;
         sam_hello(&mut data, timeout).await?;
-        let cmd = format!(
-            "STREAM CONNECT ID={} DESTINATION={} SILENT=false\n",
-            self.session_id, dest
-        );
+        let cmd = format!("STREAM CONNECT ID={session_id} DESTINATION={dest} SILENT=false\n");
         let reply = sam_cmd(&mut data, cmd.as_bytes(), timeout).await?;
         if !reply.contains("RESULT=OK") {
             return Err(Error::ConnectionFailed(format!(
@@ -249,12 +233,13 @@ impl SamSession {
     pub async fn stream_accept(&self, setup_timeout: Duration) -> Result<(TcpStream, String)> {
         if !self.is_alive() {
             return Err(Error::ConnectionFailed(
-                "I2P SAM session is dead (control socket closed)".into(),
+                "I2P SAM session is down (control socket closed, rebuild pending)".into(),
             ));
         }
+        let session_id = self.session_id();
         let mut data = dial(&self.sam_addr, setup_timeout).await?;
         sam_hello(&mut data, setup_timeout).await?;
-        let cmd = format!("STREAM ACCEPT ID={} SILENT=false\n", self.session_id);
+        let cmd = format!("STREAM ACCEPT ID={session_id} SILENT=false\n");
         let reply = sam_cmd(&mut data, cmd.as_bytes(), setup_timeout).await?;
         if !reply.contains("RESULT=OK") {
             return Err(Error::ConnectionFailed(format!(
@@ -265,6 +250,134 @@ impl SamSession {
         // the remote destination, and the socket becomes the data stream.
         let remote = read_line(&mut data).await?;
         Ok((data, remote))
+    }
+}
+
+/// Establish one SAM STREAM session: dial the bridge, `HELLO`, `SESSION CREATE`
+/// with our persistent destination (first boot mints an Ed25519 key — never the
+/// weak DSA-SHA1 default — and saves it; later boots reuse it for a STABLE
+/// `.b32.i2p`). Returns the held-open control socket and the new session id.
+/// Shared by the initial [`SamSession::connect`] and every supervisor rebuild.
+async fn create_session(
+    sam_addr: &str,
+    data_dir: &Path,
+    connect_timeout: Duration,
+    session_timeout: Duration,
+) -> Result<(TcpStream, String)> {
+    // Randomized session id — a fixed id collides if a prior control socket is
+    // still closing on the bridge (exactly the rebuild case).
+    let session_id = format!("cync-{:08x}", rand::random::<u32>());
+    let mut control = dial(sam_addr, connect_timeout).await?;
+    sam_hello(&mut control, connect_timeout).await?;
+
+    // Persistent destination: reuse the on-disk private key for a stable
+    // .b32.i2p across restarts AND rebuilds (TRANSIENT would mint a new address
+    // each time and poison peers' addrv2 tables with dead hashes).
+    let key_path = data_dir.join("i2p_dest.key");
+    let saved = std::fs::read_to_string(&key_path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let cmd = match &saved {
+        Some(priv_key) => {
+            format!("SESSION CREATE STYLE=STREAM ID={session_id} DESTINATION={priv_key}\n")
+        }
+        None => format!(
+            "SESSION CREATE STYLE=STREAM ID={session_id} DESTINATION=TRANSIENT SIGNATURE_TYPE=7\n"
+        ),
+    };
+    // SESSION CREATE blocks until the router builds initial tunnels — 30s to
+    // several minutes on a cold start — so read its reply with the generous
+    // session timeout, not the short per-command one.
+    let reply = sam_cmd(&mut control, cmd.as_bytes(), session_timeout).await?;
+    if !reply.contains("RESULT=OK") {
+        return Err(Error::ConnectionFailed(format!(
+            "SAM SESSION CREATE failed: {reply}"
+        )));
+    }
+    // A fresh (TRANSIENT) session returns our new DESTINATION (the full private
+    // key) — persist it so next boot/rebuild keeps the same .b32.i2p.
+    if saved.is_none() {
+        if let Some(priv_key) = sam_value(&reply, "DESTINATION=") {
+            match std::fs::write(&key_path, &priv_key) {
+                Ok(()) => tracing::info!(
+                    "Saved I2P destination key to {} — stable .b32.i2p across restarts",
+                    key_path.display()
+                ),
+                Err(e) => tracing::warn!("Could not persist I2P destination key: {e}"),
+            }
+        }
+    }
+    Ok((control, session_id))
+}
+
+/// Own the control socket until it closes. SAM may push async notices on it
+/// (e.g. `PING`) which we drain and ignore; EOF or error means the session died.
+async fn watch_control(control: &mut TcpStream) {
+    let mut buf = [0u8; 256];
+    loop {
+        match control.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {} // async SAM notices — ignore
+        }
+    }
+}
+
+/// Session supervisor: holds the control socket, and when it dies flags the
+/// session down, logs, then rebuilds it in place (same persistent destination,
+/// new id) with capped backoff — forever, so a bridge that comes back restores
+/// I2P dialing without a node restart. Runs until the `SamSession` is dropped.
+async fn supervise(
+    mut control: TcpStream,
+    state: Arc<SessionState>,
+    sam_addr: String,
+    data_dir: PathBuf,
+    connect_timeout: Duration,
+    session_timeout: Duration,
+) {
+    loop {
+        watch_control(&mut control).await;
+        // The control socket closed: the whole session and every peer stream
+        // died with it. Fail new dials fast until we rebuild.
+        state.alive.store(false, Ordering::Relaxed);
+        let dead_sid = state
+            .session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        tracing::error!(
+            "[{code}] I2P SAM control socket (session {dead_sid}) closed — the I2P session is \
+             DEAD; rebuilding (.b32.i2p dialing fails until the SAM bridge is back).",
+            code = crate::diagnostics::CYNC_NET_002,
+        );
+
+        let mut backoff = RECONNECT_BACKOFF_MIN;
+        loop {
+            tokio::time::sleep(backoff).await;
+            match create_session(&sam_addr, &data_dir, connect_timeout, session_timeout).await {
+                Ok((new_control, new_sid)) => {
+                    *state
+                        .session_id
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = new_sid.clone();
+                    state.alive.store(true, Ordering::Relaxed);
+                    let generation = state.generation.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::warn!(
+                        "I2P SAM session REBUILT (session {new_sid}, generation {generation}) — \
+                         .b32.i2p dialing restored."
+                    );
+                    control = new_control;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[{code}] I2P SAM reconnect failed ({e}); retrying in {backoff:?}.",
+                        code = crate::diagnostics::CYNC_NET_002,
+                    );
+                    backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+                }
+            }
+        }
     }
 }
 
@@ -543,5 +656,99 @@ mod tests {
             .await
             .expect_err("a non-OK STREAM STATUS must surface as an error");
         assert!(format!("{err}").contains("STREAM CONNECT"));
+    }
+
+    /// A SAM bridge that KILLS the control socket right after the first SESSION
+    /// CREATE (a bridge/tunnel drop), then serves a normal, held-open session on
+    /// the next SESSION CREATE — so the supervisor's in-place rebuild shows up.
+    async fn spawn_flaky_sam() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sessions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let sessions = sessions.clone();
+                tokio::spawn(async move {
+                    let hello = read_sam_line(&mut sock).await;
+                    if !hello.starts_with("HELLO VERSION") {
+                        return;
+                    }
+                    let _ = sock.write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n").await;
+                    let cmd = read_sam_line(&mut sock).await;
+                    if cmd.starts_with("SESSION CREATE") {
+                        let _ = sock
+                            .write_all(b"SESSION STATUS RESULT=OK DESTINATION=ZmFrZWRlc3Q=\n")
+                            .await;
+                        if sessions.fetch_add(1, Ordering::Relaxed) == 0 {
+                            // First session: drop the control socket at once to
+                            // force a rebuild.
+                            return;
+                        }
+                        // Later sessions: hold open like a healthy bridge.
+                        let mut sink = [0u8; 64];
+                        loop {
+                            match sock.read(&mut sink).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(_) => {}
+                            }
+                        }
+                    } else if cmd.starts_with("STREAM CONNECT") {
+                        let _ = sock.write_all(b"STREAM STATUS RESULT=OK\n").await;
+                        let mut buf = [0u8; 1024];
+                        loop {
+                            match sock.read(&mut buf).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    if sock.write_all(&buf[..n]).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn sam_session_rebuilds_in_place_after_the_control_socket_dies() {
+        let sam = spawn_flaky_sam().await;
+        let t = Duration::from_secs(5);
+        let dir = tempfile::tempdir().unwrap();
+        let session = SamSession::connect(&sam.to_string(), dir.path(), t, t)
+            .await
+            .unwrap();
+        assert_eq!(session.generation(), 1, "a fresh session is generation 1");
+
+        // The bridge killed the first control socket; the supervisor must notice,
+        // mark the session down, then rebuild it in place (generation 2, alive).
+        let mut rebuilt = false;
+        for _ in 0..100 {
+            if session.generation() >= 2 && session.is_alive() {
+                rebuilt = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            rebuilt,
+            "the supervisor rebuilds the session in place after its control socket dies"
+        );
+
+        // The rebuilt session is usable: STREAM CONNECT goes through its new id.
+        let dest = i2p_b32_from_hash(&[0x42u8; 32]);
+        let mut stream = session
+            .stream_connect(&dest, t)
+            .await
+            .expect("dialing works again through the rebuilt session");
+        stream.write_all(b"rebuilt!").await.unwrap();
+        let mut buf = [0u8; 8];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"rebuilt!", "the rebuilt I2P stream round-trips bytes");
     }
 }
