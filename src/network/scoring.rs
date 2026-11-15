@@ -988,6 +988,18 @@ pub struct PeerScorer {
     ban_duration: Duration,
     /// Minimum score to be considered for block download
     min_download_score: f64,
+    /// Addresses that must NEVER be scored or banned — the LOCAL proxy / SAM
+    /// bridge through which every onion / I2P peer is reached. Those peers all
+    /// share this one SocketAddr (`stream.peer_addr()` is the proxy, not the
+    /// peer), so addr-based scoring cannot tell them apart: a single bad onion,
+    /// or a routine I2P tunnel rotation (a ~5–15 s drop every ~10 min) counted
+    /// as a timeout, would otherwise ban the shared addr and disconnect EVERY
+    /// anonymity-network peer at once. Transport failures for these peers are
+    /// handled by the dial loop's host-keyed backoff + quiet re-dial instead.
+    exempt: std::collections::HashSet<SocketAddr>,
+    /// Throwaway score handed out for exempt addresses so `get_or_create(addr)
+    /// .record_misbehavior(..)` at the many call sites is a silent no-op.
+    scratch: PeerScore,
 }
 
 impl PeerScorer {
@@ -998,11 +1010,25 @@ impl PeerScorer {
             banned: HashMap::new(),
             ban_duration: Duration::from_secs(3600), // 1 hour default ban
             min_download_score: 0.3,
+            exempt: std::collections::HashSet::new(),
+            scratch: PeerScore::default(),
         }
     }
 
-    /// Get or create score for a peer
+    /// Register a shared-transport address (the local Tor SOCKS proxy or I2P SAM
+    /// bridge) as non-scorable. See [`PeerScorer::exempt`].
+    pub fn exempt_addr(&mut self, addr: SocketAddr) {
+        self.exempt.insert(addr);
+    }
+
+    /// Get or create score for a peer. Exempt (shared-transport) addresses get a
+    /// reset scratch score, so misbehavior recorded against them never
+    /// accumulates toward a ban of the shared addr.
     pub fn get_or_create(&mut self, addr: SocketAddr) -> &mut PeerScore {
+        if self.exempt.contains(&addr) {
+            self.scratch = PeerScore::default();
+            return &mut self.scratch;
+        }
         self.scores.entry(addr).or_insert_with(PeerScore::default)
     }
 
@@ -1131,6 +1157,11 @@ impl PeerScorer {
 
     /// Check if peer is banned
     pub fn is_banned(&self, addr: &SocketAddr) -> bool {
+        // The shared proxy / SAM addr is never banned — it is our own transport,
+        // and banning it would cut off every onion / I2P peer.
+        if self.exempt.contains(addr) {
+            return false;
+        }
         if let Some(expiry) = self.banned.get(addr) {
             if mono_now() < *expiry {
                 return true;
@@ -1157,6 +1188,16 @@ impl PeerScorer {
     /// — that identifier was not located in current upstream and is
     /// corrected to `SweepBanned()`.
     pub fn ban(&mut self, addr: SocketAddr) {
+        // Never ban the shared proxy / SAM addr (would disconnect all onion/I2P
+        // peers). The offending anon peer is still dropped by the caller's
+        // disconnect path; we just don't poison the shared transport address.
+        if self.exempt.contains(&addr) {
+            tracing::debug!(
+                "scorer: refusing to ban shared-transport addr {} (onion/I2P proxy)",
+                addr
+            );
+            return;
+        }
         self.cleanup_bans();
         let expiry = mono_now() + self.ban_duration;
         self.banned.insert(addr, expiry);
@@ -2332,6 +2373,34 @@ mod tests {
              re-opens the F11 CPU-burn vector.",
             score.reputation,
         );
+    }
+
+    #[test]
+    fn exempt_shared_transport_addr_is_never_banned() {
+        let mut s = PeerScorer::new();
+        let proxy: SocketAddr = "127.0.0.1:9050".parse().unwrap();
+        s.exempt_addr(proxy);
+
+        // An explicit ban of the shared transport addr is a no-op.
+        s.ban(proxy);
+        assert!(!s.is_banned(&proxy), "exempt addr cannot be banned");
+
+        // Misbehavior recorded against it (e.g. from a bad onion peer, or a
+        // tunnel-rotation timeout) goes to a scratch score and never persists,
+        // so it can never accumulate toward banning the shared addr.
+        for _ in 0..50 {
+            s.get_or_create(proxy)
+                .record_misbehavior(MisbehaviorType::InvalidBlockPoW);
+        }
+        assert!(
+            !s.is_banned(&proxy),
+            "misbehavior on an exempt addr must never ban it"
+        );
+
+        // A normal (clearnet) peer addr still bans exactly as before.
+        let evil: SocketAddr = "203.0.113.5:28080".parse().unwrap();
+        s.ban(evil);
+        assert!(s.is_banned(&evil), "a normal addr still bans");
     }
 
     #[test]

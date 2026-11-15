@@ -933,6 +933,24 @@ impl P2PNode {
                 Ok(_) => {}
                 Err(e) => warn!("Failed to load ban list: {}", e),
             }
+            // Exempt the shared anonymity-network transports from scoring/banning:
+            // every onion peer shares the proxy's SocketAddr and every I2P peer
+            // the SAM bridge's, so one bad peer or a routine tunnel-rotation
+            // timeout must not ban the shared addr and cut off ALL of them.
+            if let Some(proxy) = self.config.proxy.as_ref() {
+                if let Ok(a) =
+                    format!("{}:{}", proxy.address, proxy.port).parse::<std::net::SocketAddr>()
+                {
+                    scorer.exempt_addr(a);
+                    info!("scorer: exempting Tor proxy {a} from peer scoring (shared onion transport)");
+                }
+            }
+            if let Some(sam) = self.config.i2p_sam.as_ref() {
+                if let Ok(a) = sam.parse::<std::net::SocketAddr>() {
+                    scorer.exempt_addr(a);
+                    info!("scorer: exempting I2P SAM bridge {a} from peer scoring (shared I2P transport)");
+                }
+            }
         }
 
         let onion_only = self
