@@ -285,6 +285,25 @@ pub(super) async fn handle_flare(
                     &peer_id[..4],
                     flare.capabilities
                 );
+                // addrv2: the Flare is our signal that this peer speaks addrv2,
+                // so pull its typed (onion/I2P) addresses NOW. This fires whether
+                // the Flare arrived before or after Verack, so a fresh peer's
+                // onions are learned in seconds instead of waiting up to the 90s
+                // periodic gossip tick. The handshake no longer pulls v2 — this
+                // is the single, reliable trigger.
+                if crate::network::firework::has_cap(
+                    flare.capabilities,
+                    crate::network::firework::CAP_ADDRV2,
+                ) {
+                    let sender = senders.get(&peer_id).map(|s| s.value().clone());
+                    if let Some(sender) = sender {
+                        if let Ok(bytes) =
+                            Message::new(magic, MessageType::GetAddrV2, Vec::new()).to_bytes()
+                        {
+                            let _ = sender.send(bytes).await;
+                        }
+                    }
+                }
                 // Firework Phase 2: if the peer supports CAP_CHAINWORK,
                 // send our current cumulative work immediately so it
                 // can evaluate our chain during handshake, not only on
@@ -528,31 +547,12 @@ pub(super) async fn handle_verack(
         );
     }
 
-    // Send GetAddr to discover more peers after handshake
+    // Send GetAddr to discover more peers after handshake. (Typed addrv2 peers
+    // are pulled via GetAddrV2 when their Flare arrives — see handle_flare — so
+    // the pull fires reliably whether the Flare lands before or after Verack.)
     let getaddr = Message::new(magic, MessageType::GetAddr, vec![]);
     if let Ok(data) = getaddr.to_bytes() {
         let _ = send_to_peer(senders, &peer_id, data).await;
-    }
-
-    // addrv2: if the peer already advertised CAP_ADDRV2 (via its Flare), pull its
-    // typed (onion-v3 / I2P) addresses too — the one-shot handshake pull. If the
-    // Flare hasn't arrived yet, the peer isn't skipped forever: the periodic
-    // addrv2 gossip tick (maintenance) re-requests once the cap is known. Pre-
-    // addrv2 peers never set the cap and are never sent the unknown message type.
-    let speaks_addrv2 = peers
-        .get(&peer_id)
-        .map(|p| {
-            crate::network::firework::has_cap(
-                p.capabilities,
-                crate::network::firework::CAP_ADDRV2,
-            )
-        })
-        .unwrap_or(false);
-    if speaks_addrv2 {
-        let getaddrv2 = Message::new(magic, MessageType::GetAddrV2, vec![]);
-        if let Ok(data) = getaddrv2.to_bytes() {
-            let _ = send_to_peer(senders, &peer_id, data).await;
-        }
     }
 
     // Handshake complete — if this peer is ahead, send GetHeaders with nonce.
@@ -1162,14 +1162,16 @@ mod handler_tests {
     }
 
     #[tokio::test]
-    async fn handle_verack_from_addrv2_peer_also_sends_getaddrv2() {
+    async fn handle_verack_sends_only_getaddr_not_getaddrv2() {
         let peer_id = [17u8; 32];
         let addr = addr_for(30017);
         let peers = DashMap::new();
         let mut info = PeerInfo::new(peer_id, addr, false);
         info.state = PeerState::VersionReceived;
         info.height = 0;
-        // The peer advertised addrv2 in its Flare before verack.
+        // Even for a peer already known to speak addrv2, Verack sends only
+        // GetAddr — the GetAddrV2 pull is triggered by the Flare (handle_flare),
+        // so it fires reliably whether the Flare lands before or after Verack.
         info.capabilities = crate::network::firework::CAP_ADDRV2;
         peers.insert(peer_id, info);
         let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
@@ -1183,16 +1185,47 @@ mod handler_tests {
             .await
             .unwrap();
 
-        // Not behind => no GetHeaders. We expect GetAddr then GetAddrV2, in order
-        // (type byte sits at offset 4, after the 4-byte magic).
         let first = srx.try_recv().expect("GetAddr sent");
         assert_eq!(first[4], crate::network::protocol::MessageType::GetAddr as u8);
-        let second = srx.try_recv().expect("GetAddrV2 sent to an addrv2 peer");
+        assert!(
+            srx.try_recv().is_err(),
+            "no GetAddrV2 at Verack — that is the Flare's job"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_flare_with_addrv2_cap_pulls_getaddrv2() {
+        let peer_id = [19u8; 32];
+        let addr = addr_for(30019);
+        let peers = DashMap::new();
+        let mut info = PeerInfo::new(peer_id, addr, false);
+        info.state = PeerState::Connected;
+        peers.insert(peer_id, info);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(peer_id, stx);
+        let chain = genesis_chain();
+
+        let payload = borsh::to_vec(&FlareMessage {
+            capabilities: crate::network::firework::CAP_ADDRV2,
+        })
+        .unwrap();
+        handle_flare(peer_id, &payload, MAGIC, &peers, &senders, &chain)
+            .await
+            .unwrap();
+
+        // Caps stored, and a GetAddrV2 pulled immediately (CAP_ADDRV2 alone, so
+        // no ChainWork/Fingerprint response — GetAddrV2 is the only message).
+        assert!(crate::network::firework::has_cap(
+            peers.get(&peer_id).unwrap().capabilities,
+            crate::network::firework::CAP_ADDRV2
+        ));
+        let msg = srx.try_recv().expect("GetAddrV2 pulled on Flare");
         assert_eq!(
-            second[4],
+            msg[4],
             crate::network::protocol::MessageType::GetAddrV2 as u8
         );
-        assert!(srx.try_recv().is_err(), "nothing else is sent");
+        assert!(srx.try_recv().is_err(), "only GetAddrV2 for a CAP_ADDRV2 Flare");
     }
 
     #[tokio::test]
