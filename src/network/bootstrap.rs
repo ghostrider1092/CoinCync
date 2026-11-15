@@ -458,6 +458,9 @@ pub struct AddressManager {
     addrs_v2: Vec<crate::network::protocol::NetAddrV2>,
     /// Dedup set for `addrs_v2`, keyed `(net_id, addr bytes)`.
     v2_seen: HashSet<(u8, Vec<u8>)>,
+    /// Our OWN advertisable onion/I2P addresses (operator-configured). Injected
+    /// into `GetAddrV2` / `AddrV2` responses so peers can reach us over Tor/I2P.
+    self_v2: Vec<crate::network::protocol::NetAddrV2>,
 }
 
 impl AddressManager {
@@ -478,6 +481,7 @@ impl AddressManager {
             max_per_group: (max_addresses / 8).max(8),
             addrs_v2: Vec::new(),
             v2_seen: HashSet::new(),
+            self_v2: Vec::new(),
         }
     }
 
@@ -511,6 +515,18 @@ impl AddressManager {
     /// True if a specific onion/I2P address is in the store.
     pub fn contains_v2(&self, net_id: u8, addr: &[u8]) -> bool {
         self.v2_seen.contains(&(net_id, addr.to_vec()))
+    }
+
+    /// Register one of our OWN onion/I2P addresses to advertise to peers.
+    pub fn add_self_v2(&mut self, a: crate::network::protocol::NetAddrV2) {
+        if a.is_routable() {
+            self.self_v2.push(a);
+        }
+    }
+
+    /// Our own advertisable onion/I2P addresses.
+    pub fn self_v2(&self) -> Vec<crate::network::protocol::NetAddrV2> {
+        self.self_v2.clone()
     }
 
     /// Netgroup key for anti-eclipse book diversity: /16 for IPv4, /32 for

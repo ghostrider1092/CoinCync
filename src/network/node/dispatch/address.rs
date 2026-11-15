@@ -341,23 +341,30 @@ pub(super) async fn handle_get_addr_v2(
         return Ok(());
     }
 
+    let now = super::unix_now();
     let addrs = addresses.read().await;
+    // Our OWN advertised onion/i2p addresses first (timestamp refreshed to now).
     let mut out: Vec<NetAddrV2> = addrs
-        .get_for_gossip(100)
-        .iter()
-        .map(|pa| {
-            let na = NetAddr {
-                services: pa.services,
-                ip: match pa.addr.ip() {
-                    std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
-                    std::net::IpAddr::V6(v6) => v6.octets(),
-                },
-                port: pa.addr.port(),
-                timestamp: pa.last_seen,
-            };
-            NetAddrV2::from(&na)
+        .self_v2()
+        .into_iter()
+        .map(|mut a| {
+            a.timestamp = now;
+            a
         })
         .collect();
+    // Then the verified IP book (mapped to addrv2) and learned onion/i2p peers.
+    out.extend(addrs.get_for_gossip(100).iter().map(|pa| {
+        let na = NetAddr {
+            services: pa.services,
+            ip: match pa.addr.ip() {
+                std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+                std::net::IpAddr::V6(v6) => v6.octets(),
+            },
+            port: pa.addr.port(),
+            timestamp: pa.last_seen,
+        };
+        NetAddrV2::from(&na)
+    }));
     out.extend(addrs.get_v2(100));
     drop(addrs);
 
@@ -591,5 +598,106 @@ mod handler_tests {
         );
         // The routable IPv4 went to the IP book; loopback was rejected.
         assert_eq!(book.len(), 1, "routable IPv4 accepted, loopback rejected");
+    }
+
+    /// Self-advertising: a node with its own configured `.onion` injects it into
+    /// its `GetAddrV2` response, so peers can reach it over Tor.
+    #[tokio::test]
+    async fn get_addr_v2_advertises_our_own_configured_onion() {
+        use crate::network::protocol::{net_id, AddrV2Message, NetAddrV2};
+
+        let peer_id = [5u8; 32];
+        let peers = DashMap::new();
+        // Veil only shares with an authenticated (Noise-encrypted) peer.
+        // NB: PeerInfo::new's 3rd arg is `outbound`, not `encrypted` — set it directly.
+        let mut pi = PeerInfo::new(peer_id, addr_for(33055), false);
+        pi.encrypted = true;
+        peers.insert(peer_id, pi);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(4);
+        senders.insert(peer_id, stx);
+        let addresses = RwLock::new(AddressManager::new(1000));
+
+        // Configure our own onion self-address and register it.
+        let onion_host = "a".repeat(56); // decodes to a zero key (fine for a test)
+        let self_na = NetAddrV2::onion_v3_self(&onion_host, 28080, 0).unwrap();
+        let onion_key = self_na.addr.clone();
+        addresses.write().await.add_self_v2(self_na);
+
+        handle_get_addr_v2(peer_id, MAGIC, &peers, &senders, &addresses)
+            .await
+            .unwrap();
+
+        // We sent an AddrV2 frame; strip the 13-byte header and decode the payload.
+        let frame = srx.try_recv().expect("an AddrV2 response was sent");
+        let payload = &frame[crate::network::framing::HEADER_SIZE..];
+        let msg: AddrV2Message = borsh::from_slice(payload).unwrap();
+        assert!(
+            msg.addresses
+                .iter()
+                .any(|a| a.net_id == net_id::ONION_V3 && a.addr == onion_key),
+            "our own onion address is advertised in the GetAddrV2 response"
+        );
+    }
+
+    /// FULL REAL two-node result: node A sends an `AddrV2` carrying its `.onion`
+    /// over a REAL OS `TcpStream`; node B reads it off the socket through the real
+    /// framing and its real `handle_addr_v2` stores A's onion in B's address book.
+    #[tokio::test]
+    async fn two_sockets_exchange_addrv2_and_receiver_stores_onion() {
+        use crate::network::framing::MessageFramer;
+        use crate::network::protocol::{net_id, AddrV2Message, NetAddrV2};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let magic = MAGIC;
+        let onion_key = [0x77u8; 32];
+
+        // A real OS socket pair.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (a_stream, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let a_stream = a_stream.unwrap();
+        let (b_stream, _) = accepted.unwrap();
+
+        // Node A writes an AddrV2 frame carrying its .onion over the real socket.
+        let (ar, aw) = tokio::io::split(a_stream);
+        let mut a_framer = MessageFramer::new(ar, aw, magic);
+        let now = now_secs();
+        let msg = AddrV2Message {
+            addresses: vec![NetAddrV2 {
+                services: 1,
+                timestamp: now,
+                net_id: net_id::ONION_V3,
+                addr: onion_key.to_vec(),
+                port: 28080,
+            }],
+        };
+        let payload = borsh::to_vec(&msg).unwrap();
+        a_framer
+            .write_message(MessageType::AddrV2 as u8, &payload)
+            .await
+            .unwrap();
+
+        // Node B reads the frame off the real socket via the real framing.
+        let (br, bw) = tokio::io::split(b_stream);
+        let mut b_framer = MessageFramer::new(br, bw, magic);
+        let (ty, got) = b_framer.read_message_timeout().await.unwrap();
+        assert_eq!(MessageType::try_from(ty).unwrap(), MessageType::AddrV2);
+
+        // B routes it through the REAL receive handler into its REAL address book.
+        let peer_id = [1u8; 32];
+        let peers = DashMap::new();
+        peers.insert(peer_id, PeerInfo::new(peer_id, addr, false));
+        let addresses = RwLock::new(AddressManager::new(1000));
+        let scorer = RwLock::new(PeerScorer::new());
+        handle_addr_v2(peer_id, &got, &peers, &addresses, &scorer)
+            .await
+            .unwrap();
+
+        // Real two-node result: B now holds A's onion after a real socket exchange.
+        assert!(
+            addresses.read().await.contains_v2(net_id::ONION_V3, &onion_key),
+            "B stored A's .onion after receiving it over a real TCP socket"
+        );
     }
 }

@@ -824,6 +824,52 @@ impl AddrV2Message {
     }
 }
 
+/// Decode a Tor v3 `.onion` host to its 32-byte ed25519 public key.
+/// Onion v3 = base32(pubkey[32] ‖ checksum[2] ‖ version[1]) = 56 chars. The
+/// embedded checksum is not verified here (an operator advertising their own
+/// address); a malformed string simply fails to parse.
+pub fn parse_onion_v3_pubkey(host: &str) -> Option<[u8; 32]> {
+    let h = host.strip_suffix(".onion").unwrap_or(host);
+    if h.len() != 56 || !h.is_ascii() {
+        return None;
+    }
+    // RFC4648 base32 alphabet, lowercase (as Tor emits).
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut acc: u64 = 0;
+    let mut nbits: u32 = 0;
+    let mut out: Vec<u8> = Vec::with_capacity(35);
+    for c in h.bytes() {
+        let v = ALPHABET.iter().position(|&a| a == c.to_ascii_lowercase())? as u64;
+        acc = (acc << 5) | v;
+        nbits += 5;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((acc >> nbits) as u8);
+        }
+    }
+    if out.len() != 35 {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&out[..32]);
+    Some(key)
+}
+
+impl NetAddrV2 {
+    /// Build a self-advertisable onion-v3 addrv2 entry from a `.onion` host.
+    /// Returns `None` if the host is not a valid 56-char onion-v3 string.
+    pub fn onion_v3_self(onion_host: &str, port: u16, timestamp: u64) -> Option<NetAddrV2> {
+        let key = parse_onion_v3_pubkey(onion_host)?;
+        Some(NetAddrV2 {
+            services: 0,
+            timestamp,
+            net_id: net_id::ONION_V3,
+            addr: key.to_vec(),
+            port,
+        })
+    }
+}
+
 /// Reject message
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RejectMessage {
@@ -1532,6 +1578,27 @@ mod tests {
         assert_eq!(MessageType::GetAddrV2 as u8, 32);
         assert_eq!(MessageType::AddrV2 as u8, 33);
         assert!(MessageType::AddrV2.max_size() >= 256 * 1024);
+    }
+
+    #[test]
+    fn onion_v3_parse_round_trips_and_builds_self_addr() {
+        // 56 'a's = all-zero 5-bit groups → 35 zero bytes → key = [0u8; 32].
+        let host = "a".repeat(56);
+        assert_eq!(parse_onion_v3_pubkey(&host), Some([0u8; 32]));
+        // The ".onion" suffix is tolerated.
+        assert_eq!(
+            parse_onion_v3_pubkey(&format!("{host}.onion")),
+            Some([0u8; 32])
+        );
+        // Wrong length / out-of-alphabet chars → None.
+        assert_eq!(parse_onion_v3_pubkey("tooshort.onion"), None);
+        assert_eq!(parse_onion_v3_pubkey(&"1".repeat(56)), None); // '1' not in base32
+        // The self-address builder yields a valid onion-v3 NetAddrV2.
+        let sa = NetAddrV2::onion_v3_self(&format!("{host}.onion"), 28080, 123).unwrap();
+        assert_eq!(sa.net_id, net_id::ONION_V3);
+        assert_eq!(sa.addr, vec![0u8; 32]);
+        assert_eq!(sa.port, 28080);
+        assert!(sa.validate().is_ok());
     }
 
     /// DEMONSTRATION (run with `--nocapture`): an `AddrV2` message carrying a Tor
