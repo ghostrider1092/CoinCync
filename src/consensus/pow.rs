@@ -563,6 +563,24 @@ mod randomx_cache {
     /// callers near the boundary never spawn duplicate builders.
     static PREWARM_INFLIGHT: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 
+    /// A background huge-page "reclaim" rebuild is in flight (Linux miners only).
+    ///
+    /// At an epoch key-change the new dataset is built while the OLD epoch's
+    /// dataset is still held by every live mining thread's VM (dropped only on
+    /// each thread's next hash). On a 1x huge-page reservation two ~2 GB
+    /// datasets can't both sit on huge pages, so the new build's
+    /// `FLAG_LARGE_PAGES` alloc fails and it falls back to 4 KB — and nothing
+    /// retries, so the rig mines ~16% slow until a process restart (observed
+    /// live on both full-mem miners at the 2026-11-14 boundary). Once the old
+    /// epoch drains and its huge pages return to the pool, we rebuild the SAME
+    /// live seed on huge pages and hot-swap it in (same mechanism
+    /// `recheck_live_entry` uses: swap under the write lock + bump
+    /// `DATASET_GENERATION` so every thread rebuilds its VM). This flag keeps a
+    /// single reclaim running at a time.
+    #[cfg(target_os = "linux")]
+    static RECLAIM_INFLIGHT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
     /// #235 STOPGAP — background prewarm + boundary promotion are DISABLED.
     ///
     /// A full-mem dataset built on the background prewarm thread (while the
@@ -835,6 +853,10 @@ mod randomx_cache {
                                 "RandomX epoch dataset promoted from prewarm (no build stall), key={}...",
                                 hex::encode(&seed[..4])
                             );
+                            // A prewarmed dataset built while the old epoch held
+                            // the huge pages can only be a 4 KB build; reclaim
+                            // them once the old epoch drains.
+                            maybe_reclaim_hugepages(seed, triple.2);
                             return Ok(triple);
                         }
                         Err(e) => {
@@ -866,6 +888,11 @@ mod randomx_cache {
                 let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
                 *guard = Some(entry);
                 *RETRY_UNTIL.lock() = None; // #142: init succeeded — clear backoff
+                // A synchronous boundary build runs while the old epoch's
+                // dataset is still held by the live mining threads, so on a 1x
+                // huge-page reservation it can only land on 4 KB pages; reclaim
+                // them once the old epoch drains.
+                maybe_reclaim_hugepages(seed, triple.2);
                 Ok(triple)
             }
             Err(e) => {
@@ -944,6 +971,180 @@ mod randomx_cache {
             if *inflight == Some(seed) {
                 *inflight = None;
             }
+        });
+    }
+
+    /// Parse `HugePages_Free` and `HugePages_Total` (in 2 MB pages) out of
+    /// `/proc/meminfo` text. Pure (no IO) so it is unit-tested on every
+    /// platform; the Linux-only reader below feeds it the real file. Returns
+    /// `None` if either field is absent or unparseable.
+    #[allow(dead_code)] // used by hugepages_free_total (Linux) + tests
+    fn parse_hugepages_meminfo(meminfo: &str) -> Option<(u64, u64)> {
+        let mut free = None;
+        let mut total = None;
+        for line in meminfo.lines() {
+            if let Some(v) = line.strip_prefix("HugePages_Free:") {
+                free = v.split_whitespace().next().and_then(|n| n.parse::<u64>().ok());
+            } else if let Some(v) = line.strip_prefix("HugePages_Total:") {
+                total = v.split_whitespace().next().and_then(|n| n.parse::<u64>().ok());
+            }
+        }
+        Some((free?, total?))
+    }
+
+    /// `(HugePages_Free, HugePages_Total)` right now, or `None` when it can't be
+    /// determined (non-Linux, or /proc unreadable). Used only to gate a
+    /// huge-page dataset rebuild — never to decide a hash.
+    #[cfg(target_os = "linux")]
+    fn hugepages_free_total() -> Option<(u64, u64)> {
+        parse_hugepages_meminfo(&std::fs::read_to_string("/proc/meminfo").ok()?)
+    }
+
+    /// Whether a freshly-installed entry is in the degraded state a huge-page
+    /// reclaim targets: a full-mem dataset running on 4 KB pages. A light
+    /// (validating) entry or one already on huge pages is not — nothing to do.
+    fn reclaim_warranted(flags: RandomXFlag) -> bool {
+        flags.contains(RandomXFlag::FLAG_FULL_MEM)
+            && !flags.contains(RandomXFlag::FLAG_LARGE_PAGES)
+    }
+
+    /// After installing a live dataset entry, kick off a background huge-page
+    /// reclaim iff the entry is degraded (full-mem on 4 KB pages). ALLOC-ONLY,
+    /// consensus-neutral: the reclaim rebuilds the SAME seed and self-checks it
+    /// (`try_build_entry` → `self_check_entry`, the #235 guard) before swapping,
+    /// so the computed hash never changes — only which page size the dataset
+    /// sits on. No-op on non-Linux and on boxes without reserved huge pages.
+    fn maybe_reclaim_hugepages(seed: &[u8; 32], installed_flags: RandomXFlag) {
+        if reclaim_warranted(installed_flags) {
+            spawn_hugepage_reclaim(*seed);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn spawn_hugepage_reclaim(_seed: [u8; 32]) {
+        // Huge-page reservation + reporting are Linux-specific here
+        // (/proc/meminfo + vm.nr_hugepages). The fleet miners are Linux; on
+        // other platforms the 4 KB fallback simply stands.
+    }
+
+    /// The RandomX dataset needs ~1170 huge pages (2 GB / 2 MB). Require a bit
+    /// more than that free before rebuilding, so we only build once the previous
+    /// epoch's dataset has actually drained its pages back to the pool.
+    #[cfg(target_os = "linux")]
+    const RECLAIM_MIN_FREE_PAGES: u64 = 1200;
+    /// Poll interval while waiting for the old epoch to drain.
+    #[cfg(target_os = "linux")]
+    const RECLAIM_POLL: std::time::Duration = std::time::Duration::from_secs(3);
+    /// Give up after this many polls (~1 min) if the pages never free — e.g.
+    /// something else holds them, or the reservation is too small for the box's
+    /// workload. Bounded so a degraded box never spins forever.
+    #[cfg(target_os = "linux")]
+    const RECLAIM_MAX_ATTEMPTS: u32 = 20;
+
+    /// Background worker: wait for huge pages to free, then rebuild the live
+    /// dataset for `seed` on huge pages and hot-swap it in. See `RECLAIM_INFLIGHT`.
+    #[cfg(target_os = "linux")]
+    fn spawn_hugepage_reclaim(seed: [u8; 32]) {
+        // Only arm where huge pages are actually reserved; otherwise the 4 KB
+        // entry is the best this box can do and a reclaim would just spin.
+        match hugepages_free_total() {
+            Some((_, total)) if total > 0 => {}
+            _ => return,
+        }
+        // One reclaim at a time.
+        if RECLAIM_INFLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        std::thread::spawn(move || {
+            // Release the in-flight slot no matter how this thread exits.
+            struct ResetInflight;
+            impl Drop for ResetInflight {
+                fn drop(&mut self) {
+                    RECLAIM_INFLIGHT.store(false, std::sync::atomic::Ordering::Release);
+                }
+            }
+            let _reset = ResetInflight;
+
+            for _ in 0..RECLAIM_MAX_ATTEMPTS {
+                std::thread::sleep(RECLAIM_POLL);
+
+                // Abandon if the live dataset is no longer the degraded entry we
+                // set out to upgrade: the epoch rotated, the entry was dropped,
+                // or it is already on huge pages.
+                {
+                    let guard = DATASET_CACHE.read();
+                    match guard.as_ref() {
+                        Some(e) if e.key == seed => {
+                            if e.flags.contains(RandomXFlag::FLAG_LARGE_PAGES) {
+                                return;
+                            }
+                        }
+                        _ => return,
+                    }
+                }
+
+                // Wait until the previous epoch's dataset has drained and its
+                // huge pages are back in the pool.
+                match hugepages_free_total() {
+                    Some((free, _)) if free >= RECLAIM_MIN_FREE_PAGES => {}
+                    _ => continue,
+                }
+
+                // Rebuild THIS seed on huge pages. `try_build_entry` self-checks
+                // the result against an independent light build (#235 guard).
+                let large_flags = RandomXFlag::get_recommended_flags()
+                    | RandomXFlag::FLAG_FULL_MEM
+                    | secure_flag()
+                    | RandomXFlag::FLAG_LARGE_PAGES;
+                match try_build_entry(large_flags, &seed) {
+                    Ok(entry) => {
+                        // Install only if the live entry is STILL the same
+                        // degraded seed (guard against an epoch rotation that
+                        // raced our ~60 s build). Swapping a same-seed, self-
+                        // checked entry + bumping the generation is exactly what
+                        // `recheck_live_entry` does; every thread's next hash
+                        // rebuilds its VM onto the huge-page dataset.
+                        let mut guard = DATASET_CACHE.write();
+                        let still_degraded = guard.as_ref().is_some_and(|e| {
+                            e.key == seed && !e.flags.contains(RandomXFlag::FLAG_LARGE_PAGES)
+                        });
+                        if still_degraded {
+                            *guard = Some(entry);
+                            DATASET_GENERATION
+                                .fetch_add(1, std::sync::atomic::Ordering::Release);
+                            tracing::info!(
+                                "RandomX reclaimed huge pages for the live dataset key={}... \
+                                 (rebuilt on huge pages after an epoch-boundary 4 KB fallback)",
+                                hex::encode(&seed[..4])
+                            );
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        // `try_build_entry` conflates two failures in its Err:
+                        //   - a huge-page alloc failure ("cache init"/"dataset
+                        //     alloc") means the pages aren't actually free yet —
+                        //     retry a few more times.
+                        //   - a SELF-CHECK failure means this specific huge-page
+                        //     build hashes wrong (#235). NEVER swap it; keep the
+                        //     already-validated 4 KB entry live and stop.
+                        if e.contains("self-check") {
+                            tracing::error!(
+                                "RandomX huge-page reclaim rebuild FAILED its self-check for \
+                                 key={}...: {}. Keeping the validated 4 KB dataset; not swapping.",
+                                hex::encode(&seed[..4]),
+                                e
+                            );
+                            return;
+                        }
+                        // else: huge pages likely still draining — poll again.
+                    }
+                }
+            }
+            tracing::debug!(
+                "RandomX huge-page reclaim gave up for key={}... (pages never freed within the window)",
+                hex::encode(&seed[..4])
+            );
         });
     }
 
@@ -1382,6 +1583,60 @@ mod randomx_cache {
     #[allow(unsafe_code)]
     mod tests {
         use super::*;
+
+        /// `/proc/meminfo` huge-page parsing — the only new input the reclaim
+        /// path reads to decide whether a huge-page rebuild can succeed. Pure,
+        /// so it runs in the normal suite (no 2 GB dataset build).
+        #[test]
+        fn parse_hugepages_meminfo_reads_free_and_total() {
+            let sample = "\
+MemTotal:        7861520 kB
+HugePages_Total:    1280
+HugePages_Free:      110
+HugePages_Rsvd:        0
+Hugepagesize:       2048 kB
+";
+            // Steady state: the live dataset holds ~1170 of the 1280 reserved.
+            assert_eq!(parse_hugepages_meminfo(sample), Some((110, 1280)));
+        }
+
+        #[test]
+        fn parse_hugepages_meminfo_sees_drained_pool() {
+            // After the old epoch drains, Free climbs back toward Total — the
+            // signal the reclaim waits for before rebuilding on huge pages.
+            let sample = "HugePages_Total:    1280\nHugePages_Free:     1280\n";
+            assert_eq!(parse_hugepages_meminfo(sample), Some((1280, 1280)));
+        }
+
+        #[test]
+        fn parse_hugepages_meminfo_none_when_fields_missing() {
+            // No huge-page lines at all → can't decide → None (reclaim no-ops).
+            assert_eq!(parse_hugepages_meminfo("MemTotal: 123 kB\n"), None);
+            // Total present but Free absent → None.
+            assert_eq!(parse_hugepages_meminfo("HugePages_Total: 0\n"), None);
+            // Huge pages compiled in but none reserved → 0/0 (arm check rejects it).
+            assert_eq!(
+                parse_hugepages_meminfo("HugePages_Total: 0\nHugePages_Free: 0\n"),
+                Some((0, 0))
+            );
+        }
+
+        /// The reclaim arms ONLY for a degraded full-mem entry (4 KB pages);
+        /// never for a validating/light node or one already on huge pages.
+        #[test]
+        fn reclaim_warranted_only_for_degraded_full_mem() {
+            let recommended = RandomXFlag::get_recommended_flags();
+            let full = recommended | RandomXFlag::FLAG_FULL_MEM;
+            let full_large = full | RandomXFlag::FLAG_LARGE_PAGES;
+            let light = recommended & !RandomXFlag::FLAG_FULL_MEM;
+
+            // Degraded: full-mem miner that fell back to 4 KB pages.
+            assert!(reclaim_warranted(full));
+            // Already on huge pages: nothing to reclaim.
+            assert!(!reclaim_warranted(full_large));
+            // Validating / light node: never builds the 2 GB dataset.
+            assert!(!reclaim_warranted(light));
+        }
 
         /// Hot-swap plumbing: a background `prewarm_seed` must land its
         /// built dataset in PREWARM_CACHE, and the next `ensure_dataset` for
