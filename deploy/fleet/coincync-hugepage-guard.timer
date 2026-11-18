@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the CoinCync RandomX huge-page guard every 2 minutes
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=120
+AccuracySec=15s
+Unit=coincync-hugepage-guard.service
+
+[Install]
+WantedBy=timers.target

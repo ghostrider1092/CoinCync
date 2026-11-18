@@ -1,0 +1,13 @@
+[Unit]
+Description=CoinCync RandomX huge-page self-heal guard (one-shot, driven by the .timer)
+After=coincync-baseline-miner.service
+# Don't fight a deploy in progress.
+ConditionPathExists=!/run/coincync-deploy.lock
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/coincync-hugepage-guard.sh
+# Tunables (override with a drop-in if needed):
+Environment=DEGRADED_SECS=180
+Environment=MIN_RESTART_GAP=7200
+Nice=10

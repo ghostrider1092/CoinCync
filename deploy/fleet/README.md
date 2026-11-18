@@ -80,6 +80,39 @@ Then install the rig binary (built `--features testnet`, full-mem) and restart
 with a loud warning if none are reserved — it never hard-fails, just mines slower.
 Light-mode validating nodes don't build the dataset, so this is a miner-only step.
 
+### 4. `coincync-hugepage-guard` — keep the huge-page fallback from sitting silently
+
+Reserving huge pages (step 3) is not self-healing. At a RandomX epoch key-change
+the rig rebuilds the ~2 GB dataset while the previous epoch's dataset (and/or the
+background prewarm) still holds the reserved pages, so the new dataset's
+`FLAG_LARGE_PAGES` allocation can fail and the rig falls back to 4 KB — logging
+`Falling back to 4 KB pages` — and does **not** retry until a restart. Seen live
+2026-11-14 on both full-mem miners at the same epoch; one ran ~16% slow for ~3
+days before anyone noticed.
+
+A systemd timer on each miner box (every 2 min) detects the fallback — huge pages
+reserved but the pool sits ~unused (`HugePages_Free ≈ Total`) while the miner is
+active — and restarts the miner so it re-grabs them. It is heavily guarded against
+hot-looping: the fallback must persist past `DEGRADED_SECS` (default 180s, longer
+than one dataset rebuild), the pool must actually be free enough for a rebuild to
+re-grab it, restarts are rate-limited (`MIN_RESTART_GAP`, default 2h), and it
+no-ops when huge pages aren't reserved, large pages are already engaged, or the
+miner is down. It skips while a deploy lock is held.
+
+Install on the full-mem miner boxes only:
+
+```bash
+bash deploy/fleet/install-hugepage-guard.sh <miner-host> [miner-host...]
+```
+
+Check it: `systemctl list-timers coincync-hugepage-guard.timer` and
+`journalctl -t coincync-hugepage-guard`. The miner unit defaults to
+`coincync-baseline-miner` (override `COINCYNC_MINER_UNIT`).
+
+This is the safety net, not the cure — the root fix belongs in the rig's dataset
+builder (free the old epoch's huge pages before the new-epoch large-page
+allocation, so the steady-state dataset is always on huge pages).
+
 ## Still the operator's job
 
 - **One driver at a time.** The lock stops *accidental* concurrency; it is not a
