@@ -556,7 +556,9 @@ impl Mempool {
         if let Err(e) = self.preflight_check(&tx) {
             return Err(self.reject(tx_hash, e));
         }
-        // Already-in-mempool short-circuit lives inside preflight_check.
+        // Already-in-mempool short-circuit: a resident tx is idempotent, so return
+        // its hash. Runs AFTER preflight_check (which does only coinbase/structural/
+        // privacy checks) — NOT inside it.
         if self.transactions.contains_key(&tx_hash) {
             return Ok(tx_hash);
         }

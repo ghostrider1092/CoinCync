@@ -565,6 +565,17 @@ impl Blockchain {
                             .flatten()
                             .map(|s| s.last_checkpoint)
                             .unwrap_or(0);
+                        // KNOWN LIMITATION (CHPN2): total_supply / total_burned are
+                        // persisted here at their PRE-truncation (height N) values.
+                        // Unlike total_difficulty — which self-heals via
+                        // recompute_total_difficulty on the next load — supply/burned
+                        // have no recompute-on-load, so after a corruption-truncation
+                        // they stay inflated for the shorter chain (wrong telemetry,
+                        // and a wrong basis for the supply-commitment rule once it
+                        // leaves its gated-off state). A correct fix recomputes both
+                        // for good_height (Σ rewards/burns over 0..=good_height);
+                        // deferred because this branch is reachable only via on-disk
+                        // corruption and a naive recompute risks a worse supply error.
                         let state = crate::db::ChainStateData {
                             tip_hash: inner.stats.tip_hash,
                             height: good_height,
