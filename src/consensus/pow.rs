@@ -508,7 +508,48 @@ mod randomx_cache {
     #[allow(unsafe_code)]
     unsafe impl Sync for DatasetEntry {}
 
-    static DATASET_CACHE: RwLock<Option<DatasetEntry>> = RwLock::new(None);
+    /// Capacity of the dataset-entry LRU. A single slot forced a full ~1.6s
+    /// light-cache rebuild every time validation alternated between two in-play
+    /// epoch keys (measured ~142 rebuilds of 2 keys during IBD, ~78% of sync
+    /// time). Holding a few recent entries makes each key build once. Light
+    /// caches are ~256MB each (≤ CAP·256MB during light-mode validation); at
+    /// most ONE full-mem (~2GB) dataset is retained since a miner only ever
+    /// hashes the current epoch.
+    const DATASET_CACHE_CAPACITY: usize = 3;
+
+    /// Most-recently-used RandomX dataset entries, newest at the front, keyed by
+    /// epoch `key`. Replaces a single-slot `Option<DatasetEntry>` so alternating
+    /// keys are cache hits, not rebuilds. The RandomX cache is deterministic from
+    /// the key, so an entry evicted here and rebuilt later is byte-identical —
+    /// eviction is never a consensus change.
+    static DATASET_CACHE: RwLock<std::collections::VecDeque<DatasetEntry>> =
+        RwLock::new(std::collections::VecDeque::new());
+
+    /// Insert `entry` as most-recently-used: de-duplicate its key, keep at most
+    /// one full-mem (~2GB) entry, and bound the LRU to `DATASET_CACHE_CAPACITY`.
+    fn insert_dataset_entry(
+        dq: &mut std::collections::VecDeque<DatasetEntry>,
+        entry: DatasetEntry,
+    ) {
+        dq.retain(|e| e.key != entry.key);
+        if entry.flags.contains(RandomXFlag::FLAG_FULL_MEM) {
+            dq.retain(|e| !e.flags.contains(RandomXFlag::FLAG_FULL_MEM));
+        }
+        dq.push_front(entry);
+        while dq.len() > DATASET_CACHE_CAPACITY {
+            dq.pop_back();
+        }
+    }
+
+    /// Find a cached entry by key. MRU ordering is maintained on insert, which
+    /// is sufficient for this tiny LRU (no reorder-on-read, so reads stay on the
+    /// cheap read lock).
+    fn find_dataset_entry<'a>(
+        dq: &'a std::collections::VecDeque<DatasetEntry>,
+        seed: &[u8; 32],
+    ) -> Option<&'a DatasetEntry> {
+        dq.iter().find(|e| e.key == *seed)
+    }
 
     /// Bumped whenever a live entry is dropped by something other than a key
     /// rotation (`recheck_live_entry`, `clear_cache`). Thread-local VMs are
@@ -525,12 +566,7 @@ mod randomx_cache {
     /// full-mem entry is left untouched (nothing to fix).
     pub(super) fn drop_light_entry() {
         let mut guard = DATASET_CACHE.write();
-        if guard
-            .as_ref()
-            .is_some_and(|e| !e.flags.contains(RandomXFlag::FLAG_FULL_MEM))
-        {
-            *guard = None;
-        }
+        guard.retain(|e| e.flags.contains(RandomXFlag::FLAG_FULL_MEM));
     }
 
     /// RandomX (re)initialization backoff deadline, on a MONOTONIC clock.
@@ -817,20 +853,16 @@ mod randomx_cache {
         // Fast path: read-only check.
         {
             let guard = DATASET_CACHE.read();
-            if let Some(entry) = guard.as_ref() {
-                if entry.key == *seed {
-                    return Ok((entry.cache.clone(), entry.dataset.clone(), entry.flags));
-                }
+            if let Some(entry) = find_dataset_entry(&guard, seed) {
+                return Ok((entry.cache.clone(), entry.dataset.clone(), entry.flags));
             }
         }
 
         // Slow path: build a new entry. Take the write lock; another
         // thread may have raced ahead and built it first — re-check.
         let mut guard = DATASET_CACHE.write();
-        if let Some(entry) = guard.as_ref() {
-            if entry.key == *seed {
-                return Ok((entry.cache.clone(), entry.dataset.clone(), entry.flags));
-            }
+        if let Some(entry) = find_dataset_entry(&guard, seed) {
+            return Ok((entry.cache.clone(), entry.dataset.clone(), entry.flags));
         }
 
         // Was this seed prewarmed on a background thread before the epoch
@@ -847,7 +879,7 @@ mod randomx_cache {
                     match self_check_entry(&entry) {
                         Ok(()) => {
                             let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
-                            *guard = Some(entry);
+                            insert_dataset_entry(&mut guard, entry);
                             *RETRY_UNTIL.lock() = None; // #142: init succeeded — clear backoff
                             tracing::info!(
                                 "RandomX epoch dataset promoted from prewarm (no build stall), key={}...",
@@ -886,7 +918,7 @@ mod randomx_cache {
         match create_dataset_entry(seed) {
             Ok(entry) => {
                 let triple = (entry.cache.clone(), entry.dataset.clone(), entry.flags);
-                *guard = Some(entry);
+                insert_dataset_entry(&mut guard, entry);
                 *RETRY_UNTIL.lock() = None; // #142: init succeeded — clear backoff
                 // A synchronous boundary build runs while the old epoch's
                 // dataset is still held by the live mining threads, so on a 1x
@@ -921,12 +953,7 @@ mod randomx_cache {
             return;
         }
         // Already the live dataset? nothing to do.
-        if DATASET_CACHE
-            .read()
-            .as_ref()
-            .map(|e| e.key == seed)
-            .unwrap_or(false)
-        {
+        if DATASET_CACHE.read().iter().any(|e| e.key == seed) {
             return;
         }
         // Already prewarmed? nothing to do.
@@ -1073,13 +1100,13 @@ mod randomx_cache {
                 // or it is already on huge pages.
                 {
                     let guard = DATASET_CACHE.read();
-                    match guard.as_ref() {
-                        Some(e) if e.key == seed => {
-                            if e.flags.contains(RandomXFlag::FLAG_LARGE_PAGES) {
-                                return;
-                            }
-                        }
-                        _ => return,
+                    match find_dataset_entry(&guard, &seed) {
+                        // Already reclaimed onto huge pages — done.
+                        Some(e) if e.flags.contains(RandomXFlag::FLAG_LARGE_PAGES) => return,
+                        // Still the degraded entry we set out to upgrade — keep polling.
+                        Some(_) => {}
+                        // Epoch rotated or the entry was evicted — abandon.
+                        None => return,
                     }
                 }
 
@@ -1105,11 +1132,13 @@ mod randomx_cache {
                         // `recheck_live_entry` does; every thread's next hash
                         // rebuilds its VM onto the huge-page dataset.
                         let mut guard = DATASET_CACHE.write();
-                        let still_degraded = guard.as_ref().is_some_and(|e| {
-                            e.key == seed && !e.flags.contains(RandomXFlag::FLAG_LARGE_PAGES)
-                        });
+                        let still_degraded = find_dataset_entry(&guard, &seed)
+                            .is_some_and(|e| !e.flags.contains(RandomXFlag::FLAG_LARGE_PAGES));
                         if still_degraded {
-                            *guard = Some(entry);
+                            // insert_dataset_entry de-dupes this key and keeps a
+                            // single full-mem entry, so the degraded same-seed
+                            // dataset is dropped and replaced by the huge-page one.
+                            insert_dataset_entry(&mut guard, entry);
                             DATASET_GENERATION
                                 .fetch_add(1, std::sync::atomic::Ordering::Release);
                             tracing::info!(
@@ -1497,14 +1526,17 @@ mod randomx_cache {
     pub(super) fn recheck_live_entry() -> bool {
         let entry = {
             let guard = DATASET_CACHE.read();
-            match guard.as_ref() {
-                Some(e) if e.flags.contains(RandomXFlag::FLAG_FULL_MEM) => DatasetEntry {
+            match guard
+                .iter()
+                .find(|e| e.flags.contains(RandomXFlag::FLAG_FULL_MEM))
+            {
+                Some(e) => DatasetEntry {
                     key: e.key,
                     cache: e.cache.clone(),
                     dataset: e.dataset.clone(),
                     flags: e.flags,
                 },
-                _ => return false,
+                None => return false,
             }
         };
         match self_check_entry(&entry) {
@@ -1524,8 +1556,9 @@ mod randomx_cache {
                     e
                 );
                 let mut guard = DATASET_CACHE.write();
-                if guard.as_ref().is_some_and(|g| g.key == entry.key) {
-                    *guard = None;
+                let before = guard.len();
+                guard.retain(|g| g.key != entry.key);
+                if guard.len() != before {
                     DATASET_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
                 }
                 true
@@ -1558,7 +1591,7 @@ mod randomx_cache {
     #[allow(dead_code)]
     pub fn clear_cache() {
         let mut guard = DATASET_CACHE.write();
-        *guard = None;
+        guard.clear();
         DATASET_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
         THREAD_VM.with(|cell| {
             *cell.borrow_mut() = None;
@@ -1688,11 +1721,7 @@ Hugepagesize:       2048 kB
             ensure_dataset(&seed).expect("ensure_dataset should promote the prewarmed entry");
 
             assert!(
-                DATASET_CACHE
-                    .read()
-                    .as_ref()
-                    .map(|e| e.key == seed)
-                    .unwrap_or(false),
+                DATASET_CACHE.read().iter().any(|e| e.key == seed),
                 "promoted entry should now be the live dataset"
             );
             assert!(
@@ -1745,9 +1774,9 @@ Hugepagesize:       2048 kB
 
             // Bad live entry: dropped, generation bumped, nothing left to drop.
             let gen_before = DATASET_GENERATION.load(std::sync::atomic::Ordering::Acquire);
-            *DATASET_CACHE.write() = Some(wrong);
+            DATASET_CACHE.write().push_front(wrong);
             assert!(recheck_live_entry());
-            assert!(DATASET_CACHE.read().is_none());
+            assert!(DATASET_CACHE.read().is_empty());
             assert!(DATASET_GENERATION.load(std::sync::atomic::Ordering::Acquire) > gen_before);
             assert!(!recheck_live_entry());
         }
