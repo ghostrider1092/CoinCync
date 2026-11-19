@@ -57,6 +57,12 @@ use crate::error::{Error, Result};
 /// (`ShieldedStore` / `SparkStore` use 1000, covering testnet max_reorg_depth).
 const MAX_CHECKPOINTS: usize = 1000;
 
+// Phase-2 reorg-durability invariant (see the note in storage::shielded): the
+// checkpoint stack must be at least as deep as the deepest legal reorg, or a
+// legal-depth reorg after a restart could strand pool state (CYNC-STOR-001). The
+// test `checkpoint_stack_covers_max_reorg_depth` binds MAX_CHECKPOINTS to the
+// live `finality::max_reorg_depth_for`.
+
 /// Maximum coins in a single Spark cover-set group (= N, the libspark
 /// `get_coincync` Grootle capacity n^m = 8^3 = 512, CoinCync's RATIFIED
 /// production anon-set). libspark rejects a cover set larger than N on both
@@ -853,6 +859,32 @@ impl crate::storage::phase2::Phase2Store for SparkPoolStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase-2 reorg-durability invariant (CYNC-STOR-001): MAX_CHECKPOINTS must
+    /// cover the deepest legal reorg on ANY network, or a legal-depth reorg after
+    /// a restart-rebuild could strand pool state. Reads the live
+    /// `max_reorg_depth_for` without coupling into the consensus-locked
+    /// finality.rs.
+    #[test]
+    fn checkpoint_stack_covers_max_reorg_depth() {
+        use crate::config::NetworkType;
+        let deepest = [
+            NetworkType::Testnet,
+            NetworkType::Regtest,
+            NetworkType::Beta,
+            NetworkType::Mainnet,
+        ]
+        .into_iter()
+        .map(crate::consensus::finality::max_reorg_depth_for)
+        .max()
+        .unwrap();
+        assert!(
+            MAX_CHECKPOINTS as u64 >= deepest,
+            "spark_pool MAX_CHECKPOINTS={} < deepest max_reorg_depth={}",
+            MAX_CHECKPOINTS,
+            deepest,
+        );
+    }
 
     fn coin(tag: u8) -> CoinBytes {
         CoinBytes(vec![tag; 40])
