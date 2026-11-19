@@ -163,6 +163,32 @@ impl ShieldedNoteStore {
         false
     }
 
+    /// Inverse of [`mark_spent`](Self::mark_spent): restore a locally-spent note
+    /// to spendable. Returns true if a matching spent note was found.
+    ///
+    /// Reorg safety: the shielded `spent` flag is set LOCALLY the moment this
+    /// wallet builds a spend, before the spend confirms. If a reorg later drops
+    /// the block that carried the spend, that note is unspent on-chain again — so
+    /// the reorg-rewind path must call this (per rewound own-spend outpoint) to
+    /// avoid leaving the note stuck-spent and its value off the spendable balance.
+    /// This mirrors the transparent side's `Balance::unmark_spent_by_key_image`,
+    /// which the scanner's `rewind_to_height` already drives. (The note's value is
+    /// never lost — a fresh seed re-scan into a clean store would also recover it,
+    /// since on-chain the coin is unspent — but this keeps a live store correct
+    /// without a rebuild.)
+    ///
+    /// Idempotent: a no-op (returns false) if the note is already unspent or
+    /// untracked, so a reorg orchestrator may call it unconditionally.
+    pub fn unmark_spent(&mut self, outpoint: &[u8]) -> bool {
+        for n in self.notes.iter_mut() {
+            if n.outpoint == outpoint && n.spent {
+                n.spent = false;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Build a consensus-verifiable shielded spend from one owned note and mark
     /// that note spent.
     ///
@@ -290,6 +316,29 @@ mod tests {
         assert!(a.mark_spent(&op0));
         assert!(a.balance() < 6_000);
         assert!(!a.mark_spent(&op0), "already spent");
+    }
+
+    #[test]
+    fn unmark_spent_restores_note_after_reorg() {
+        let pool = SparkPoolStore::new();
+        let seed = b"reorg-wallet";
+        mint_to_pool(&pool, seed, &[1_000, 2_000, 3_000]);
+
+        let mut w = ShieldedNoteStore::new();
+        assert_eq!(w.scan(seed, &pool), 3);
+        let full = w.balance();
+        assert_eq!(full, 6_000);
+
+        // Spend a note (locally), then a reorg drops the spend: unmark restores it.
+        let op = w.select_for_spend(500).unwrap()[0].clone();
+        assert!(w.mark_spent(&op));
+        assert!(w.balance() < full, "spent note leaves the spendable balance");
+        assert!(w.unmark_spent(&op), "a tracked spent note is restored");
+        assert_eq!(w.balance(), full, "restored note returns to the spendable balance");
+
+        // Idempotent no-ops: already-unspent, and an untracked outpoint.
+        assert!(!w.unmark_spent(&op), "already unspent → no-op");
+        assert!(!w.unmark_spent(b"not-a-real-outpoint"), "untracked → no-op");
     }
 
     #[test]
