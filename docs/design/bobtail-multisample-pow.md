@@ -206,3 +206,36 @@ only trades timing variance for orphan/reorg risk. It is also a deep, high-cerem
 fork. **Recommendation:** treat Bobtail as a post-audit flagship consensus
 upgrade; the immediate next step is resolving §7 (reward split first) and writing
 the §4 items up as a full spec — no consensus code until Phase C/D.
+
+## 10. Phase C — early results (2026-11-20)
+
+Two of §7's gates are now settled by derivation + simulation
+(`scratchpad/bobtail_sim2.py`):
+
+**10.1 Difficulty-conversion constant (§7.4) — resolved.** To preserve the *same
+work per block* as today's single-hash target `T` (and therefore the same 51 %
+honest-majority bound), the k-mean acceptance threshold is
+
+```
+tau = T * (k + 1) / 2
+```
+
+The ASERT retarget keeps computing `T` exactly as it does now; only the
+acceptance rule changes — it compares the mean of the k lowest samples against
+`tau`. Simulation of the real k-lowest-mean stopping rule confirms the expected
+hashes per block is preserved to within noise at every k (ratio ~1.00× for
+k = 1…20), while the block-time CV falls from ~1.00 to ~0.26 at k = 20. So the
+fork smooths the variance **without** silently changing effective difficulty or
+weakening security — the property that makes it safe to activate.
+
+**10.2 Share-withholding (§7.2) — no proposer advantage.** The block proposer is
+whoever holds the single global-minimum sample, which is uniform over all
+hashers. An attacker that hoards its non-minimum low samples cannot change who
+holds that minimum, so its block-proposal rate equals its hashrate share and no
+more (simulated: share 0.10/0.30/0.45 → proposal rate 0.101/0.302/0.452).
+Hoarding only forfeits the attacker's own reward share. Full selfish-mining
+under low variance still needs modelling (rest of Phase C), but the withholding
+vector shows no first-order gain.
+
+**Remaining before a spec:** the reward-split decision (§4.5 — the economic +
+privacy choice, still the central open item) and the gossip-cost bound (§7.3).
