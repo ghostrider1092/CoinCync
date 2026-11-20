@@ -237,5 +237,45 @@ Hoarding only forfeits the attacker's own reward share. Full selfish-mining
 under low variance still needs modelling (rest of Phase C), but the withholding
 vector shows no first-order gain.
 
-**Remaining before a spec:** the reward-split decision (§4.5 — the economic +
-privacy choice, still the central open item) and the gossip-cost bound (§7.3).
+**Remaining before a spec:** the gossip-cost bound (§7.3) and the full
+selfish-mining-under-low-variance model (rest of Phase C).
+
+## 11. Reward split (§4.5) — resolved by simulation (2026-11-20)
+
+`scratchpad/reward_split_sim.py` (200k blocks, k=10, a realistically skewed
+miner set) measures each candidate on fairness, coinbase-output count, and
+payout variance:
+
+| split rule | fairness error | outputs/block | payout CV (40% / 2% miner) |
+|---|---|---|---|
+| **equal split** | 0.09 % | ~4.87 | **0.39 / 2.2** (lowest) |
+| proposer-weighted 60/40 | 0.05 % | ~4.87 | 0.75 / 4.3 |
+| single-output lottery | 0.18 % | **1.00** | 1.22 / 7.0 (highest) |
+
+**11.1 All candidates are fair and incentive-compatible** (reward share =
+hashrate share to ≤0.18 %; every shared sample pays > 0, so hoarding is never
+rational). Fairness therefore does not decide it.
+
+**11.2 Proposer-weighting is rejected.** An earlier hunch was that weighting the
+proposer would bound the output count. The simulation disproves it: it yields the
+*same* ~4.87 distinct outputs as equal split **and raises payout variance**
+(0.75 vs 0.39 for a large miner; 4.3 vs 2.2 for a small one). It costs variance
+and buys nothing.
+
+**11.3 The real axis is output-count vs payout-variance** — equal split ~5
+outputs at the lowest variance, lottery 1 output at the highest. For a *privacy*
+chain the output-count concern is linkability, which is better answered by
+*shielding* the payouts than by reducing them.
+
+**11.4 Recommendation: equal split across the k contributors, paid as SHIELDED
+coinbase outputs into the Spark pool.** Perfect fairness, lowest variance, ~5
+recipients/block; the payouts leak nothing (no miner linkability) *and grow the
+anonymity set*, so the extra-output "cost" becomes a privacy benefit — mining
+itself becomes private. Incentive-compatible (R/k > 0 per share). It builds on
+the already-live shielded mint; the cost is coinbase complexity and faster
+(shielded) chain growth. **Fallback if chain size is the binding constraint:** a
+single-output *grinding-resistant* lottery (winner = `H(sorted k samples) mod k`,
+so the proposer cannot pick itself), also shielded — 1 private output/block, fair
+in expectation, higher payout variance. A lighter interim is transparent outputs
+to one-time stealth addresses. This lives entirely in the gated acceptance/coinbase
+module (Observe→Enforce), never touching the RandomX core.
