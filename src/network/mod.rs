@@ -26,6 +26,7 @@ pub mod peer;
 /// Peer-set security detail (eclipse/isolation surface). Operational-only.
 pub mod peer_security;
 pub mod proxy;
+pub mod sam;
 pub mod relay_score;
 pub mod scoring;
 pub mod switchboard;

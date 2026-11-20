@@ -84,8 +84,16 @@ pub(crate) const NOISE_TAG_SIZE: usize = 16;
 pub(crate) const NOISE_LENGTH_PREFIX_SIZE: usize = 2;
 pub(crate) const MAX_NOISE_PAYLOAD: usize = u16::MAX as usize - NOISE_TAG_SIZE;
 
-/// Noise handshake timeout in seconds.
+/// Noise handshake timeout in seconds (clearnet TCP / Tor — milliseconds to a
+/// couple of seconds in practice).
 pub const NOISE_HANDSHAKE_TIMEOUT_SECS: u64 = 15;
+
+/// Noise handshake timeout for peers reached over an anonymity network
+/// (onion / I2P). STREAM CONNECT plus the Noise round-trips over 3-hop inbound
+/// + 3-hop outbound tunnels can take 5–25 s — longer when the remote's LeaseSet
+/// isn't cached yet — so a short clearnet timeout would drop valid anon peers
+/// mid-handshake and churn them in the addrv2 store.
+pub const NOISE_HANDSHAKE_TIMEOUT_ANON_SECS: u64 = 45;
 
 /// Maximum legal size of a single Noise XX handshake frame. The XX
 /// pattern produces three messages whose worst-case sizes are

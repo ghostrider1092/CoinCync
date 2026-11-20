@@ -92,6 +92,12 @@ struct Cli {
     #[arg(long = "onion-address", value_name = "ONION")]
     onion_address: Option<String>,
 
+    /// I2P SAM bridge address (e.g. `127.0.0.1:7656`). When set, the node opens
+    /// a SAM session at startup and dials `.b32.i2p` peers through it. A bridge
+    /// that isn't running disables I2P dialing (logged, not fatal).
+    #[arg(long = "i2p-sam", value_name = "HOST:PORT")]
+    i2p_sam: Option<String>,
+
     /// Disable all automatic peer discovery (for isolated tests).
     #[arg(long)]
     no_peers: bool,
@@ -750,6 +756,7 @@ async fn main() {
                 cli.addnode,
                 cli.external_ip,
                 cli.onion_address,
+                cli.i2p_sam,
                 cli.no_peers,
                 cli.explorer,
                 cli.proxy,
@@ -1345,6 +1352,20 @@ fn split_onion_addnode(raw: &str, default_port: u16) -> Option<(String, u16)> {
     None
 }
 
+/// Parse an I2P `--addnode` entry: `<host>.b32.i2p` or `<host>.b32.i2p:<port>`.
+/// The host is validated downstream by `sam::i2p_hash_from_b32`.
+fn split_i2p_addnode(raw: &str, default_port: u16) -> Option<(String, u16)> {
+    if let Some((host, port)) = raw.rsplit_once(':') {
+        if host.ends_with(".b32.i2p") {
+            return Some((host.to_string(), port.parse().ok()?));
+        }
+    }
+    if raw.ends_with(".b32.i2p") {
+        return Some((raw.to_string(), default_port));
+    }
+    None
+}
+
 async fn start_node(
     network: Network,
     data_dir: PathBuf,
@@ -1355,6 +1376,7 @@ async fn start_node(
     addnodes: Vec<String>,
     external_ip: Option<String>,
     onion_address: Option<String>,
+    i2p_sam: Option<String>,
     no_peers: bool,
     serve_explorer: bool,
     proxy_arg: Option<String>,
@@ -1407,8 +1429,26 @@ async fn start_node(
     // trust (snapshot::import refuses an unsigned/untrusted/wrong-fork
     // snapshot). Runs on a blocking thread — blocking HTTP + RocksDB I/O must
     // not run on a tokio worker.
-    if fast_sync {
+    if fast_sync && onion_only {
+        // Leak guard: the snapshot download is clearnet HTTPS and cannot be
+        // served anonymously from a clearnet URL, so refuse it in onion-only
+        // mode rather than expose the operator's IP. Sync via IBD over Tor, or
+        // import a snapshot fetched out-of-band with `snapshot-import`.
+        warn!("--fast-sync disabled in onion-only mode (its snapshot download is clearnet HTTPS and would leak your IP); use IBD over Tor or `snapshot-import` instead");
+    } else if fast_sync {
         if coincync::network::snapshot_fetch::is_fresh_datadir(&data_dir, network) {
+            // Route the download through the SOCKS proxy when one is configured
+            // (--tor/--proxy), so even dual-stack hides the operator IP from the
+            // snapshot server; socks5h resolves the host at the proxy (no DNS
+            // leak). None = direct (no proxy configured).
+            let fetch_proxy = if let Some(ref p) = proxy_arg {
+                Some(format!("socks5h://{p}"))
+            } else if tor_shortcut {
+                Some("socks5h://127.0.0.1:9050".to_string())
+            } else {
+                None
+            };
+            coincync::network::snapshot_fetch::set_fetch_proxy(fetch_proxy);
             let dd = data_dir.clone();
             match tokio::task::spawn_blocking(move || fast_sync_bootstrap(network, &dd)).await {
                 Ok(Some(h)) => {
@@ -1502,6 +1542,26 @@ async fn start_node(
             }
             continue;
         }
+        // I2P addnode: "<host>.b32.i2p[:port]" -> an I2P addrv2 seed.
+        if let Some((host, port)) = split_i2p_addnode(raw, default_p2p_port) {
+            match coincync::network::sam::i2p_hash_from_b32(&host) {
+                Some(hash) => {
+                    info!("--addnode {:?}: I2P peer seeded into the addrv2 store", raw);
+                    onion_seeds.push(coincync::network::protocol::NetAddrV2 {
+                        services: 0,
+                        timestamp: seed_ts,
+                        net_id: coincync::network::protocol::net_id::I2P,
+                        addr: hash.to_vec(),
+                        port,
+                    });
+                }
+                None => warn!(
+                    "Ignoring --addnode {:?}: not a valid I2P host (52 base32 chars + .b32.i2p)",
+                    raw
+                ),
+            }
+            continue;
+        }
         // Fast path: already a numeric socket address.
         if let Ok(addr) = raw.parse::<std::net::SocketAddr>() {
             extra_peers.push(addr);
@@ -1573,6 +1633,12 @@ async fn start_node(
                 raw
             );
         }
+    }
+
+    // --i2p-sam: open a SAM session at startup to dial .b32.i2p peers.
+    if let Some(sam) = &i2p_sam {
+        info!("--i2p-sam: I2P dialing enabled via SAM bridge {}", sam);
+        p2p_config.i2p_sam = Some(sam.clone());
     }
 
     if no_peers {
@@ -1674,6 +1740,24 @@ async fn start_node(
             },
         );
         p2p_config.proxy = Some(cfg);
+    }
+
+    // ── Onion-only leak guards (threat: clearnet IP leaks) ──────────────────
+    // When the operator demands Tor-only, make sure NOTHING can expose their
+    // clearnet IP: UPnP (punches a router port + announces presence) is forced
+    // off, and any --external-ip (a clearnet address) is dropped. Clearnet dials
+    // are already refused by the connector and DNS already routes over SOCKS.
+    if onion_only {
+        if p2p_config.upnp {
+            warn!("onion-only: disabling UPnP — it would open a clearnet router port and announce this node");
+            p2p_config.upnp = false;
+        }
+        if p2p_config.external_addr.take().is_some() {
+            warn!("onion-only: ignoring --external-ip — advertising a clearnet address would de-anonymize this node");
+        }
+        info!(
+            "onion-only leak guards active: clearnet dials refused, DNS via SOCKS, UPnP off, no external-ip — only .onion peers"
+        );
     }
 
     // Open database
@@ -1844,9 +1928,15 @@ async fn start_node(
     // Onion --addnode peers go into the addrv2 store; the connector dials them
     // through the SOCKS proxy. Without a proxy they sit unused (can't be dialed
     // on clearnet) — warn once so the operator isn't surprised.
-    if !onion_seeds.is_empty() && proxy_arg.is_none() && !tor_shortcut && !onion_only {
+    if !onion_seeds.is_empty()
+        && proxy_arg.is_none()
+        && !tor_shortcut
+        && !onion_only
+        && i2p_sam.is_none()
+    {
         warn!(
-            "{} onion --addnode peer(s) seeded but no proxy configured — they cannot be dialed; add --tor or --proxy",
+            "{} onion/I2P --addnode peer(s) seeded but no proxy or SAM bridge configured — \
+             they cannot be dialed; add --tor/--proxy or --i2p-sam",
             onion_seeds.len()
         );
     }

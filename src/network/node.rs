@@ -162,7 +162,9 @@ pub use constants::{
     TIP_REBROADCAST_INTERVAL_SECS,
 };
 pub use tx_absence::TxAbsenceCache;
-pub use types::{ChainUpdateToken, ConnectionStats, NetworkStats, NodeConfig, NodeEvent};
+pub use types::{
+    ChainUpdateToken, ConnectionStats, I2pTransportStatus, NetworkStats, NodeConfig, NodeEvent,
+};
 
 /// Message from peer connection
 struct PeerMessage {
@@ -188,6 +190,46 @@ enum ConnectionCommand {
 
 const START_ONE_SHOT_ERROR: &str =
     "P2PNode is one-shot: start cannot be called again after a successful start";
+
+/// Soft open-file limit below which we warn. Each peer costs a file descriptor,
+/// and anonymity transports add one more per peer (the SAM/Tor stream) plus
+/// tunnel buffers, so a tight `ulimit -n` risks "too many open files" under
+/// heavy gossip. Combined with the stream caps (`MAX_I2P_INBOUND` inbound +
+/// `ONION_OUTBOUND_BUDGET` outbound onion/I2P) a busy node wants thousands.
+const FD_LIMIT_WARN: u64 = 4096;
+
+/// Parse the soft open-file limit from `/proc/self/limits` text. The relevant
+/// line is `Max open files   <soft>   <hard>   files`; the first token after the
+/// field name is the soft limit. Pure, so it is unit-tested without `/proc`.
+fn parse_fd_soft_limit(limits_text: &str) -> Option<u64> {
+    limits_text
+        .lines()
+        .find_map(|l| l.strip_prefix("Max open files"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// Linux-only startup diagnostic: warn if the soft open-file limit is low.
+/// Reads `/proc/self/limits` (no extra dependency); no-op off Linux.
+#[cfg(target_os = "linux")]
+fn check_fd_limit() {
+    let Ok(limits) = std::fs::read_to_string("/proc/self/limits") else {
+        return;
+    };
+    match parse_fd_soft_limit(&limits) {
+        Some(soft) if soft < FD_LIMIT_WARN => warn!(
+            "open-file limit (ulimit -n) is {soft} — low. Each Tor/I2P peer uses a file \
+             descriptor (SAM/Tor stream + tunnel buffers); under heavy gossip this risks \
+             'too many open files'. Raise it (e.g. `ulimit -n 65535`, or LimitNOFILE=65535 \
+             in the systemd unit)."
+        ),
+        Some(soft) => tracing::debug!("open-file limit (ulimit -n): {soft}"),
+        None => {}
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_fd_limit() {}
 
 // ConnectionTracker lives in `super::connection_tracker` — extracted
 // out of this monolithic file as the first step of splitting node.rs
@@ -268,6 +310,13 @@ pub struct P2PNode {
     /// `MESH_FLOOR_SUSTAIN_TICKS` consecutive heartbeats. Observational by
     /// default. See docs/design/runtime-mesh-floor.md.
     mesh_degraded: Arc<std::sync::atomic::AtomicBool>,
+    /// Retained handle to the I2P SAM transport, present only when the operator
+    /// configured `--i2p-sam`. Backs the read-only transport-health gauge in
+    /// `get_info` (alive / rebuild count); `None` when I2P is off, set by
+    /// `start()` once the session is established. Observability only — reading it
+    /// never changes node behavior, and when I2P is off the gauge is simply
+    /// absent, so an operator uses it or not.
+    i2p_transport: parking_lot::Mutex<Option<Arc<super::sam::SamSession>>>,
 }
 
 impl P2PNode {
@@ -416,6 +465,7 @@ impl P2PNode {
             dht: None,
             traffic_shaper: Arc::new(TrafficShaper::default_enabled()),
             mesh_degraded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            i2p_transport: parking_lot::Mutex::new(None),
         }
     }
 
@@ -544,7 +594,11 @@ impl P2PNode {
     /// first hidden-service peer: the outbound connector dials it through the
     /// configured SOCKS proxy on the next tick.
     pub async fn add_onion_seed(&self, v2: crate::network::protocol::NetAddrV2) {
-        self.addresses.write().await.add_v2(v2);
+        // Operator-configured seeds are trusted-local — exempt from the per-source cap.
+        self.addresses
+            .write()
+            .await
+            .add_v2(v2, crate::network::bootstrap::V2_SOURCE_LOCAL);
     }
 
     /// Get connection tracker statistics
@@ -889,6 +943,7 @@ impl P2PNode {
         }
 
         info!("Starting P2P node on {}", self.config.listen_addr);
+        check_fd_limit();
 
         let addr_book_path = self.config.data_dir.join("address_book.json");
         let ban_list_path = self.config.data_dir.join("ban_list.json");
@@ -911,12 +966,41 @@ impl P2PNode {
             self.addresses.write().await.set_anchors(anchors);
         }
 
+        // Restore learned onion/I2P peers so a restart keeps its hidden-service
+        // book instead of relearning from scratch.
+        let restored_v2 = self
+            .addresses
+            .write()
+            .await
+            .load_v2_from_disk(&self.config.data_dir);
+        if restored_v2 > 0 {
+            info!("Restored {restored_v2} onion/I2P peer(s) from disk");
+        }
+
         {
             let mut scorer = self.peer_scorer.write().await;
             match scorer.load_bans_from_file(&ban_list_path) {
                 Ok(n) if n > 0 => info!("Loaded {} bans from disk", n),
                 Ok(_) => {}
                 Err(e) => warn!("Failed to load ban list: {}", e),
+            }
+            // Exempt the shared anonymity-network transports from scoring/banning:
+            // every onion peer shares the proxy's SocketAddr and every I2P peer
+            // the SAM bridge's, so one bad peer or a routine tunnel-rotation
+            // timeout must not ban the shared addr and cut off ALL of them.
+            if let Some(proxy) = self.config.proxy.as_ref() {
+                if let Ok(a) =
+                    format!("{}:{}", proxy.address, proxy.port).parse::<std::net::SocketAddr>()
+                {
+                    scorer.exempt_addr(a);
+                    info!("scorer: exempting Tor proxy {a} from peer scoring (shared onion transport)");
+                }
+            }
+            if let Some(sam) = self.config.i2p_sam.as_ref() {
+                if let Ok(a) = sam.parse::<std::net::SocketAddr>() {
+                    scorer.exempt_addr(a);
+                    info!("scorer: exempting I2P SAM bridge {a} from peer scoring (shared I2P transport)");
+                }
             }
         }
 
@@ -926,6 +1010,9 @@ impl P2PNode {
             .as_ref()
             .map(|proxy| proxy.onion_only)
             .unwrap_or(false);
+        // Publish the anonymity mode process-wide so the addrv2 gossip path can
+        // refuse to advertise our clearnet peer book over an onion/I2P link.
+        crate::network::proxy::set_onion_only(onion_only);
         let proxy_active = self.config.proxy.is_some();
 
         if self.addresses.read().await.is_empty() {
@@ -1034,6 +1121,62 @@ impl P2PNode {
                 node_runtime.shutdown_receiver(),
             ),
         );
+        // I2P SAM: if configured, open ONE shared session (its control socket is
+        // held for the node's lifetime) for the connector to dial `.b32.i2p`
+        // peers through. A bridge that isn't running is non-fatal — I2P dialing
+        // is simply disabled, never a hard stop (optional transport).
+        let i2p_sam = match &self.config.i2p_sam {
+            Some(addr) => {
+                match crate::network::sam::SamSession::connect(
+                    addr,
+                    &self.config.data_dir,
+                    std::time::Duration::from_secs(30), // control-socket connect
+                    std::time::Duration::from_secs(180), // SESSION CREATE (tunnel build) is slow
+                )
+                .await
+                {
+                    Ok(session) => {
+                        info!("I2P SAM session established via {addr} — can dial .b32.i2p peers");
+                        Some(Arc::new(session))
+                    }
+                    Err(e) => {
+                        warn!("I2P SAM bridge at {addr} unreachable ({e}); I2P dialing disabled");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        // I2P inbound: if the SAM session is up, run the STREAM ACCEPT pool so
+        // the node is DIALABLE over I2P, not just dialing out. (`ref` borrows;
+        // the session Arc is still moved into the connector context below.)
+        if let Some(ref session) = i2p_sam {
+            // Retain a handle for the read-only transport-health gauge (get_info)
+            // before the Arc is moved into the outbound connector below.
+            *self.i2p_transport.lock() = Some(session.clone());
+            node_runtime.track(
+                "i2p-accept-pool",
+                peer_manager::spawn_i2p_accept_pool(
+                    peer_manager::I2pAcceptContext {
+                        session: session.clone(),
+                        peers: self.peers.clone(),
+                        senders: self.peer_senders.clone(),
+                        event_tx: self.event_tx.clone(),
+                        msg_tx: msg_tx.clone(),
+                        handshake_tx: handshake_tx.clone(),
+                        chain_state: self.chain_state.reader(),
+                        identity: self.identity.clone(),
+                        encryption: self.config.encryption.clone(),
+                        tracker: self.conn_tracker.clone(),
+                        traffic_shaper: self.traffic_shaper.clone(),
+                        magic: self.config.magic,
+                        our_nonce: self.version_nonce,
+                    },
+                    node_runtime.shutdown_receiver(),
+                ),
+            );
+            info!("I2P inbound STREAM ACCEPT pool started — node is dialable over I2P");
+        }
         node_runtime.track(
             "outbound-connector",
             peer_manager::spawn_outbound_connector(
@@ -1063,10 +1206,52 @@ impl P2PNode {
                     magic: self.config.magic,
                     our_nonce: self.version_nonce,
                     bootstrap: self.config.bootstrap.clone(),
+                    i2p_sam,
                 },
                 node_runtime.shutdown_receiver(),
             ),
         );
+
+        // Reachability self-check: if we advertise an onion and have a proxy,
+        // confirm (best-effort, after a delay so the Tor hidden-service
+        // descriptor has had time to publish) that our own service is actually
+        // reachable, and WARN if not — so an operator never silently advertises
+        // a dead service. Advisory only: it dials and drops, never handshakes.
+        if let (Some(host), Some(proxy)) =
+            (self.config.onion_address.clone(), self.config.proxy.clone())
+        {
+            if proxy.is_active() {
+                let port = self.config.listen_addr.port();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let Some(self_v2) =
+                        crate::network::protocol::NetAddrV2::onion_v3_self(&host, port, now)
+                    else {
+                        return;
+                    };
+                    match crate::network::proxy::dial_v2(
+                        &self_v2,
+                        &proxy,
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+                    {
+                        Ok(_stream) => info!(
+                            "Reachability: our hidden service {host} is reachable over Tor"
+                        ),
+                        Err(e) => warn!(
+                            "Reachability: our hidden service {host} is NOT reachable over Tor \
+                             ({e}) — peers cannot dial us back. Check that your torrc \
+                             HiddenServicePort maps to our P2P port {port}."
+                        ),
+                    }
+                });
+            }
+        }
         node_runtime.track(
             "message-processor",
             runtime::spawn_message_processor(
@@ -1187,6 +1372,11 @@ impl P2PNode {
 
         // ANCHORS: persist known-good outbound peers for fast reconnect next start.
         peer_manager::save_anchors_to_disk(&self.peers, &self.config.data_dir);
+        // Persist the learned onion/I2P book too, so a restart keeps it.
+        self.addresses
+            .read()
+            .await
+            .save_v2_to_disk(&self.config.data_dir);
         peer_manager::disconnect_all(&self.peers, &self.peer_senders, &self.event_tx);
 
         info!("P2P node stopped");
@@ -1319,6 +1509,23 @@ impl P2PNode {
         }
     }
 
+    /// Read-only health of the I2P SAM transport, or `None` when the operator
+    /// did not configure `--i2p-sam` (I2P off → the gauge is simply absent, an
+    /// operator consults it or not). Observational: reading it never changes node
+    /// behavior. `alive` is false only during the brief window while the session
+    /// supervisor rebuilds a dropped control socket; `rebuilds` counts how many
+    /// times it has had to (0 = never dropped since start).
+    pub fn i2p_transport_status(&self) -> Option<I2pTransportStatus> {
+        self.i2p_transport.lock().as_ref().map(|s| {
+            let generation = s.generation();
+            I2pTransportStatus {
+                alive: s.is_alive(),
+                // generation is 1 after the first connect, +1 per rebuild.
+                rebuilds: generation.saturating_sub(1),
+            }
+        })
+    }
+
     /// Sustained mesh-floor state: true when connected peers have been below
     /// `MESH_FLOOR_PEERS` for `MESH_FLOOR_SUSTAIN_TICKS` consecutive heartbeats.
     /// Observational (does not itself change mining/peering); a monitor or an
@@ -1361,6 +1568,17 @@ impl P2PNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_the_soft_open_file_limit() {
+        let sample = "Limit                     Soft Limit           Hard Limit           Units\n\
+             Max cpu time              unlimited            unlimited            seconds\n\
+             Max open files            1024                 1048576              files\n\
+             Max locked memory         65536                65536                bytes\n";
+        assert_eq!(parse_fd_soft_limit(sample), Some(1024));
+        assert_eq!(parse_fd_soft_limit("no such line here"), None);
+        assert!(FD_LIMIT_WARN >= 4096, "fd-limit warn floor is at least 4096");
+    }
 
     #[test]
     fn test_node_config_default() {

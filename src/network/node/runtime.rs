@@ -165,6 +165,10 @@ pub(super) fn spawn_padding_broadcast(
     tokio::spawn(async move {
         let padding_loop = shaper.run_padding_loop_broadcast(
             magic,
+            // Cover traffic goes to EVERY peer in the senders map — clearnet,
+            // onion and I2P alike (the map is keyed by PeerId, not transport).
+            // Do NOT filter by transport: timing cover for anon peers is what
+            // stops an ISP correlating a block-find broadcast burst to a router.
             move || {
                 senders
                     .iter()

@@ -357,6 +357,7 @@ pub(super) fn spawn_maintenance(
                     heartbeat_ticks = heartbeat_ticks.saturating_add(1);
                     emit_heartbeat(&maint_peers, heartbeat_ticks);
                     update_mesh_floor(&maint_peers, &maint_mesh_degraded, &mut mesh_below_streak);
+                    check_clock_skew();
                 }
                 _ = self_heal_interval.tick() => {
                     run_self_heal_tick(
@@ -678,6 +679,20 @@ async fn run_addrv2_gossip_tick(
         );
     }
 
+    // Promote CONNECTED onion/I2P peers into the "tried" bucket: a peer we have
+    // completed a handshake with is verified and must never be evicted by
+    // unverified Sybil gossip. Also refreshes its timestamp so it is not aged.
+    {
+        let mut book = addresses.write().await;
+        for peer in peers.iter() {
+            if peer.state == PeerState::Connected {
+                if let Some(host) = peer.onion_host.as_deref() {
+                    book.mark_v2_tried(host, now);
+                }
+            }
+        }
+    }
+
     // Build both frames once. GetAddrV2 pulls; AddrV2 relays a bounded sample.
     let Ok(get_frame) = Message::new(magic, MessageType::GetAddrV2, Vec::new()).to_bytes() else {
         return;
@@ -764,6 +779,31 @@ fn update_mesh_floor(
                 "mesh-floor: connected peers={} at/above floor={} — clearing mesh_degraded",
                 connected, MESH_FLOOR_PEERS,
             );
+        }
+    }
+}
+
+/// One-shot operator warning when the system clock is skewed enough to break
+/// I2P tunnel building (NTCP2/SSU2 reject > ~60 s drift, so the external SAM
+/// bridge silently fails to build tunnels) and to risk consensus block-timestamp
+/// rejection. Edge-triggered: warns once on entering skew, re-arms once the
+/// clock comes back into range. Uses the peer-sampled network median (net_time).
+fn check_clock_skew() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    match crate::net_time::clock_skew_secs() {
+        Some(skew) => {
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "System clock appears ~{skew}s off network time (peer median). \
+                     I2P NTCP2/SSU2 reject handshakes past ~60s skew — a SAM bridge \
+                     may silently fail to build tunnels — and block timestamps risk \
+                     rejection. Sync your clock (NTP / chrony)."
+                );
+            }
+        }
+        None => {
+            WARNED.store(false, Ordering::Relaxed);
         }
     }
 }
@@ -1092,8 +1132,9 @@ mod addrv2_gossip_tests {
             addr: vec![byte; 32],
             port: 28080,
         };
-        book.add_v2(onion(0x11, now)); // fresh — kept
-        book.add_v2(onion(0x22, now - ADDRV2_MAX_AGE_SECS - 10)); // stale — pruned
+        use crate::network::bootstrap::V2_SOURCE_LOCAL;
+        book.add_v2(onion(0x11, now), V2_SOURCE_LOCAL); // fresh — kept
+        book.add_v2(onion(0x22, now - ADDRV2_MAX_AGE_SECS - 10), V2_SOURCE_LOCAL); // stale
         assert_eq!(book.v2_len(), 2);
 
         let addresses = RwLock::new(book);
@@ -1117,13 +1158,16 @@ mod addrv2_gossip_tests {
             .unwrap()
             .as_secs();
         let mut book = AddressManager::new(1000);
-        book.add_v2(NetAddrV2 {
-            services: 0,
-            timestamp: now,
-            net_id: net_id::ONION_V3,
-            addr: vec![0x33; 32],
-            port: 28080,
-        });
+        book.add_v2(
+            NetAddrV2 {
+                services: 0,
+                timestamp: now,
+                net_id: net_id::ONION_V3,
+                addr: vec![0x33; 32],
+                port: 28080,
+            },
+            crate::network::bootstrap::V2_SOURCE_LOCAL,
+        );
         let addresses = RwLock::new(book);
 
         let peers = DashMap::new();

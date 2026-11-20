@@ -83,6 +83,24 @@
 
 use crate::config::ProxyConfig;
 use crate::error::{Error, Result};
+
+/// Process-global onion-only / anonymity-only mode, set once at node startup
+/// from `--onion-only`. When true the node must never touch clearnet: in
+/// particular it must not ADVERTISE its clearnet peer book over addrv2 (that
+/// would hand an onion/I2P peer our clearnet contacts). Static because the mode
+/// is fixed for the process lifetime and read on a hot gossip path without
+/// threading a flag through every handler.
+static ONION_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set the process-global onion-only mode (call once at startup).
+pub fn set_onion_only(on: bool) {
+    ONION_ONLY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the node is in onion-only / anonymity-only mode.
+pub fn is_onion_only() -> bool {
+    ONION_ONLY.load(std::sync::atomic::Ordering::Relaxed)
+}
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio_socks::tcp::Socks5Stream;

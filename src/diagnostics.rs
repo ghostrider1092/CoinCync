@@ -243,6 +243,8 @@ pub const CYNC_POW_001: &str = "CYNC-POW-001";
 pub const CYNC_STOR_001: &str = "CYNC-STOR-001";
 /// Node is isolated (0 outbound) with an exhausted address book.
 pub const CYNC_NET_001: &str = "CYNC-NET-001";
+/// Optional I2P SAM transport session dropped; supervisor is rebuilding it.
+pub const CYNC_NET_002: &str = "CYNC-NET-002";
 /// Shielded pool value went negative (value created across the veil).
 pub const CYNC_SHLD_001: &str = "CYNC-SHLD-001";
 /// Unsupported transaction version.
@@ -424,6 +426,20 @@ pub const CATALOG: &[Diagnostic] = &[
         spec: "docs/design/runtime-mesh-floor.md (re-bootstrap on isolation)",
         help: "0 outbound peers and no dialable addresses; the connector re-resolves \
                the DNS seeds (rate-limited). Persistent firing means the seeds are down.",
+    },
+    Diagnostic {
+        code: CYNC_NET_002,
+        domain: Domain::Network,
+        severity: Severity::Warning,
+        title: "I2P SAM transport session dropped (auto-reconnecting)",
+        invariant: "a configured I2P SAM session holds a live control socket or is being rebuilt",
+        location: "src/network/sam.rs::supervise",
+        spec: "docs/design/i2p-sam-trust-boundary.md (external SAM bridge)",
+        help: "the SAM bridge's control socket closed (bridge restart / tunnel loss); \
+               the supervisor rebuilds the session in place with capped backoff, so \
+               .b32.i2p dialing fails fast until it is back. Non-fatal and optional \
+               (clearnet/Tor are unaffected). Persistent firing means the i2pd / \
+               Java-I2P bridge is down — check it. Live state: get_info.i2p_transport.",
     },
     Diagnostic {
         code: CYNC_SHLD_001,

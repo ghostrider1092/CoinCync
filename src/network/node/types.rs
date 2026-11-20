@@ -110,6 +110,10 @@ pub struct NodeConfig {
     /// CAP_ADDRV2 peers so they can dial us back over Tor. A malformed value is
     /// logged and ignored — never fatal.
     pub onion_address: Option<String>,
+    /// I2P SAM bridge address (e.g. `127.0.0.1:7656`). When set, the node opens a
+    /// SAM session at startup and dials `.b32.i2p` peers through it. A bridge
+    /// that isn't running disables I2P dialing — never fatal.
+    pub i2p_sam: Option<String>,
     /// Per-IP inbound connection cap (#193). Defaults to
     /// [`crate::network::connection_tracker::MAX_CONNECTIONS_PER_IP`] (2);
     /// raise it on a seed when several legitimate nodes share one public IP
@@ -133,6 +137,7 @@ impl Default for NodeConfig {
             encryption: crate::config::P2PEncryptionConfig::default(),
             external_addr: None,
             onion_address: None,
+            i2p_sam: None,
             max_connections_per_ip: crate::network::connection_tracker::MAX_CONNECTIONS_PER_IP,
         }
     }
@@ -152,9 +157,52 @@ pub struct NetworkStats {
     pub mesh_degraded: bool,
 }
 
+/// Read-only health of the optional I2P SAM transport, surfaced in `get_info`
+/// only when the operator configured `--i2p-sam`. Observability only — nothing
+/// here feeds peer scoring or the fuse box (an I2P bridge hiccup must not trip
+/// the P2p breaker on a node that is healthy over clearnet/Tor); it is a gauge
+/// an operator consults or ignores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct I2pTransportStatus {
+    /// Session usable right now (control socket open). False only during the
+    /// brief window while the supervisor rebuilds a dropped session.
+    pub alive: bool,
+    /// How many times the supervisor has had to rebuild the session since start
+    /// (0 = never dropped).
+    pub rebuilds: u64,
+}
+
+impl I2pTransportStatus {
+    /// Operator-facing one-word state: `"up"` while alive, `"rebuilding"` while
+    /// the supervisor is reconnecting a dropped session.
+    pub fn state_str(&self) -> &'static str {
+        if self.alive {
+            "up"
+        } else {
+            "rebuilding"
+        }
+    }
+}
+
 /// Connection memory accounting exposed by the facade.
 #[derive(Clone, Debug)]
 pub struct ConnectionStats {
     pub memory_used: usize,
     pub memory_budget: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn i2p_transport_status_state_str_tracks_liveness() {
+        let up = I2pTransportStatus { alive: true, rebuilds: 0 };
+        assert_eq!(up.state_str(), "up");
+        // Still "up" after rebuilds, as long as the current session is live.
+        let recovered = I2pTransportStatus { alive: true, rebuilds: 3 };
+        assert_eq!(recovered.state_str(), "up");
+        let down = I2pTransportStatus { alive: false, rebuilds: 1 };
+        assert_eq!(down.state_str(), "rebuilding");
+    }
 }

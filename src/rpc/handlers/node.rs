@@ -121,6 +121,22 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             let status = health.as_str();
             let health_score = health.score();
 
+            // I2P transport gauge — present only when the operator enabled
+            // `--i2p-sam`. Read-only: it reflects the SAM session's liveness and
+            // how many times its supervisor has rebuilt a dropped session, and it
+            // feeds nothing (not peer scoring, not the fuse box). When I2P is off
+            // the block is null + `i2p_enabled=false`, so an operator uses it or
+            // not.
+            let i2p = state.p2p.as_ref().and_then(|p| p.i2p_transport_status());
+            let i2p_block: Value = match i2p {
+                Some(s) => json!({
+                    "state":    s.state_str(), // "up" | "rebuilding"
+                    "alive":    s.alive,
+                    "rebuilds": s.rebuilds,
+                }),
+                None => Value::Null,
+            };
+
             Ok::<_, ErrorObjectOwned>(json!({
                 // Identity
                 "version":                 env!("CARGO_PKG_VERSION"),
@@ -191,6 +207,9 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 "stratum_native_tls_enabled": state.stratum_native_tls_enabled,
                 "stratum_tls_proxy_ack": state.stratum_tls_proxy_ack,
                 "stratum_transport_hardened": state.stratum_transport_hardened,
+                // Optional I2P transport health (null unless --i2p-sam is set).
+                "i2p_enabled":             i2p.is_some(),
+                "i2p_transport":           i2p_block,
             }))
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;

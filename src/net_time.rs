@@ -129,6 +129,28 @@ pub fn offset_secs() -> i64 {
     }
 }
 
+/// Threshold (seconds) past which the local clock is likely to break I2P
+/// NTCP2/SSU2 tunnel building (they reject handshakes beyond ~60–90 s skew) and
+/// to risk consensus block-timestamp rejection. The operator is warned here.
+pub const CLOCK_SKEW_WARN_SECS: i64 = 60;
+
+/// The raw median peer clock offset (seconds) when it exceeds
+/// ±[`CLOCK_SKEW_WARN_SECS`] and at least [`MIN_TIME_PEERS`] netgroups have been
+/// sampled, else `None`. Unlike [`offset_secs`], a gross median is NOT discarded
+/// — a large skew is exactly the condition this diagnoses for the operator.
+pub fn clock_skew_secs() -> Option<i64> {
+    let now = now_unix();
+    let mut st = state().lock().unwrap_or_else(|e| e.into_inner());
+    prune_stale(&mut st, now);
+    if st.samples.len() < MIN_TIME_PEERS {
+        return None;
+    }
+    let mut v: Vec<i64> = st.samples.values().map(|(off, _)| *off).collect();
+    v.sort_unstable();
+    let median = v[v.len() / 2];
+    (median.abs() >= CLOCK_SKEW_WARN_SECS).then_some(median)
+}
+
 /// Drop samples older than `SAMPLE_TTL_SECS` so the median reflects the current
 /// peer set and a stale offset can't survive a local clock correction.
 fn prune_stale(st: &mut State, now: u64) {
@@ -176,6 +198,39 @@ mod tests {
         // The 5th distinct netgroup crosses the floor.
         record_offset(&addr(10, 99), 3600);
         assert_eq!(offset_secs(), 3600);
+    }
+
+    #[test]
+    fn clock_skew_warns_above_threshold_and_not_below() {
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        // Below warmup: no verdict even with a large offset.
+        for i in 0..(MIN_TIME_PEERS as u8 - 1) {
+            record_offset(&addr(20, i), 300);
+        }
+        assert_eq!(clock_skew_secs(), None, "below warmup → no verdict");
+        record_offset(&addr(20, 99), 300);
+        assert_eq!(clock_skew_secs(), Some(300), "large sustained skew warns");
+
+        // A GROSS skew (beyond the offset_secs discard bound) still warns here —
+        // the diagnostic must not hide the worst case.
+        reset_for_test();
+        for i in 0..MIN_TIME_PEERS as u8 {
+            record_offset(&addr(30, i), 100_000);
+        }
+        assert_eq!(offset_secs(), 0, "offset_secs discards a gross median");
+        assert_eq!(
+            clock_skew_secs(),
+            Some(100_000),
+            "the skew warning does NOT discard a gross median"
+        );
+
+        // A small offset never warns.
+        reset_for_test();
+        for i in 0..MIN_TIME_PEERS as u8 {
+            record_offset(&addr(40, i), 5);
+        }
+        assert_eq!(clock_skew_secs(), None, "a small offset does not warn");
     }
 
     #[test]
