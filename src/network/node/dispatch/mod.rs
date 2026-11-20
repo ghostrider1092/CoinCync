@@ -237,6 +237,14 @@ pub(super) async fn process_message(
             relay::handle_not_found(peer_id, payload, peers, scorer, tx_absence_cache).await?;
         }
 
+        MessageType::GetAddrV2 => {
+            address::handle_get_addr_v2(peer_id, magic, peers, senders, addresses).await?;
+        }
+
+        MessageType::AddrV2 => {
+            address::handle_addr_v2(peer_id, payload, peers, addresses, scorer).await?;
+        }
+
         MessageType::InvBlock => {
             chain::handle_inv_block(peer_id, payload, magic, peers, senders, sync, chain, scorer)
                 .await?;

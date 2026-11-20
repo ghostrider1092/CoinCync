@@ -105,6 +105,11 @@ pub struct NodeConfig {
     /// Externally reachable address registered as self to prevent gossip-driven
     /// self-dials when nonce detection is unavailable across restarts.
     pub external_addr: Option<SocketAddr>,
+    /// Our own hidden-service host (`<56-char>.onion`, onion-v3) if we run one.
+    /// When set, it is parsed to a self addrv2 at startup and advertised to
+    /// CAP_ADDRV2 peers so they can dial us back over Tor. A malformed value is
+    /// logged and ignored — never fatal.
+    pub onion_address: Option<String>,
     /// Per-IP inbound connection cap (#193). Defaults to
     /// [`crate::network::connection_tracker::MAX_CONNECTIONS_PER_IP`] (2);
     /// raise it on a seed when several legitimate nodes share one public IP
@@ -127,6 +132,7 @@ impl Default for NodeConfig {
             data_dir: std::path::PathBuf::from("."),
             encryption: crate::config::P2PEncryptionConfig::default(),
             external_addr: None,
+            onion_address: None,
             max_connections_per_ip: crate::network::connection_tracker::MAX_CONNECTIONS_PER_IP,
         }
     }

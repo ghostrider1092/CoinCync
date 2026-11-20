@@ -84,6 +84,14 @@ struct Cli {
     #[arg(long = "external-ip", value_name = "IP[:PORT]")]
     external_ip: Option<String>,
 
+    /// Our own hidden-service address (`<56-char>.onion`, onion-v3) if we run
+    /// one. Provision the service in torrc (`HiddenServicePort <p2p-port>
+    /// 127.0.0.1:<listen>`), then pass the host here. CoinCync advertises it
+    /// over addrv2 so Tor-capable peers can dial us back. The listen port is
+    /// attached automatically; a malformed value is ignored with a warning.
+    #[arg(long = "onion-address", value_name = "ONION")]
+    onion_address: Option<String>,
+
     /// Disable all automatic peer discovery (for isolated tests).
     #[arg(long)]
     no_peers: bool,
@@ -741,6 +749,7 @@ async fn main() {
                 cli.rest_disable,
                 cli.addnode,
                 cli.external_ip,
+                cli.onion_address,
                 cli.no_peers,
                 cli.explorer,
                 cli.proxy,
@@ -1320,6 +1329,22 @@ fn fast_sync_bootstrap(network: Network, data_dir: &std::path::Path) -> Option<u
     result
 }
 
+/// Parse an onion `--addnode` entry: `<host>.onion` or `<host>.onion:<port>`.
+/// Returns the host (with `.onion`) and port (default when omitted), or `None`
+/// when the entry is not a `.onion` address. The host is validated downstream by
+/// `parse_onion_v3_pubkey` (version + checksum).
+fn split_onion_addnode(raw: &str, default_port: u16) -> Option<(String, u16)> {
+    if let Some((host, port)) = raw.rsplit_once(':') {
+        if host.ends_with(".onion") {
+            return Some((host.to_string(), port.parse().ok()?));
+        }
+    }
+    if raw.ends_with(".onion") {
+        return Some((raw.to_string(), default_port));
+    }
+    None
+}
+
 async fn start_node(
     network: Network,
     data_dir: PathBuf,
@@ -1329,6 +1354,7 @@ async fn start_node(
     rest_disable: bool,
     addnodes: Vec<String>,
     external_ip: Option<String>,
+    onion_address: Option<String>,
     no_peers: bool,
     serve_explorer: bool,
     proxy_arg: Option<String>,
@@ -1445,11 +1471,37 @@ async fn start_node(
     // resolve via DNS — so operators can pass a stable DDNS seed name
     // (e.g. seed1.coincync.network:28080) instead of an IP that rotates.
     let mut extra_peers: Vec<std::net::SocketAddr> = Vec::new();
+    // Onion/I2P --addnode entries seed the addrv2 store directly (they aren't
+    // SocketAddrs). A Tor-only node bootstraps its first hidden-service peer
+    // this way: the outbound connector dials them through the SOCKS proxy.
+    let mut onion_seeds: Vec<coincync::network::protocol::NetAddrV2> = Vec::new();
+    let default_p2p_port = p2p_config.listen_addr.port();
+    // Seed onions with the current time so the addrv2 aging tick (prune_v2) does
+    // not immediately treat a freshly-configured seed as stale and drop it.
+    let seed_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     // A clearnet DNS lookup here would leak the hostname under --proxy/--tor
     // (the very leak DNS-seed resolution routes through SOCKS5 to avoid), so
     // in proxied mode we require a numeric IP:port instead of resolving.
     let addnode_proxied = proxy_arg.is_some() || tor_shortcut || onion_only;
     for raw in &addnodes {
+        // Onion addnode: parse "<host>.onion[:port]" into an addrv2 seed. Needs a
+        // proxy to actually dial, but seeding is harmless either way.
+        if let Some((host, port)) = split_onion_addnode(raw, default_p2p_port) {
+            match coincync::network::protocol::NetAddrV2::onion_v3_self(&host, port, seed_ts) {
+                Some(v2) => {
+                    info!("--addnode {:?}: onion peer seeded into the addrv2 store", raw);
+                    onion_seeds.push(v2);
+                }
+                None => warn!(
+                    "Ignoring --addnode {:?}: not a valid onion-v3 host (56 base32 chars + .onion)",
+                    raw
+                ),
+            }
+            continue;
+        }
         // Fast path: already a numeric socket address.
         if let Ok(addr) = raw.parse::<std::net::SocketAddr>() {
             extra_peers.push(addr);
@@ -1504,6 +1556,22 @@ async fn start_node(
                 p2p_config.external_addr = Some(addr);
             }
             None => warn!("Ignoring bad --external-ip {:?}", raw),
+        }
+    }
+
+    // --onion-address: our own hidden service, advertised over addrv2 so
+    // Tor-capable peers can dial us back. Validate the host here for early
+    // operator feedback; the self addrv2 entry is built at node startup
+    // (P2PNode::new) and paired with our listen port.
+    if let Some(raw) = &onion_address {
+        if coincync::network::protocol::parse_onion_v3_pubkey(raw).is_some() {
+            info!("--onion-address: advertising hidden service {} over addrv2", raw);
+            p2p_config.onion_address = Some(raw.clone());
+        } else {
+            warn!(
+                "Ignoring bad --onion-address {:?}: expected a 56-char onion-v3 host ending in .onion",
+                raw
+            );
         }
     }
 
@@ -1772,6 +1840,21 @@ async fn start_node(
     for addr in &extra_peers {
         info!("--addnode: adding manual peer {}", addr);
         p2p.add_seed_address(*addr).await;
+    }
+    // Onion --addnode peers go into the addrv2 store; the connector dials them
+    // through the SOCKS proxy. Without a proxy they sit unused (can't be dialed
+    // on clearnet) — warn once so the operator isn't surprised.
+    if !onion_seeds.is_empty() && proxy_arg.is_none() && !tor_shortcut && !onion_only {
+        warn!(
+            "{} onion --addnode peer(s) seeded but no proxy configured — they cannot be dialed; add --tor or --proxy",
+            onion_seeds.len()
+        );
+    }
+    for v2 in onion_seeds {
+        if let Some(host) = v2.onion_host() {
+            info!("--addnode: seeding onion peer {} into addrv2 store", host);
+        }
+        p2p.add_onion_seed(v2).await;
     }
 
     // Consume P2P NodeEvents and feed BlockReceived into the chain.

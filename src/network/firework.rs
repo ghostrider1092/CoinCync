@@ -64,12 +64,19 @@ pub const CAP_CHAINWORK: u64 = 1 << 0;
 /// recorded, never an auto-disconnect. See `crate::consensus::fingerprint`.
 pub const CAP_CONSENSUS_FINGERPRINT: u64 = 1 << 1;
 
+/// Peer understands the addrv2-style typed address messages (`GetAddrV2` /
+/// `AddrV2`) that carry onion-v3 and I2P addresses in addition to IPv4/IPv6.
+/// Gated so nodes predating these messages never receive them (they would
+/// reject the unknown message type). See `crate::network::protocol::NetAddrV2`.
+/// Advertised now that the GetAddrV2/AddrV2 handlers are wired.
+pub const CAP_ADDRV2: u64 = 1 << 2;
+
 /// The capability set THIS node supports and advertises in its Flare.
 ///
 /// `const` so it is a single source of truth; extend the OR-set as new
 /// capability bits are added.
 pub const fn local_capabilities() -> u64 {
-    CAP_CHAINWORK | CAP_CONSENSUS_FINGERPRINT
+    CAP_CHAINWORK | CAP_CONSENSUS_FINGERPRINT | CAP_ADDRV2
 }
 
 /// True if `caps` advertises every bit set in `cap`.
@@ -95,6 +102,20 @@ mod tests {
         assert!(has_cap(local_capabilities(), CAP_CONSENSUS_FINGERPRINT));
         // The two capabilities are distinct bits.
         assert_ne!(CAP_CHAINWORK, CAP_CONSENSUS_FINGERPRINT);
+    }
+
+    #[test]
+    fn local_node_advertises_addrv2() {
+        // The addrv2 handlers are wired, so we advertise the capability.
+        assert!(has_cap(local_capabilities(), CAP_ADDRV2));
+        assert_eq!(CAP_ADDRV2, 1 << 2);
+        assert_ne!(CAP_ADDRV2, CAP_CHAINWORK);
+        assert_ne!(CAP_ADDRV2, CAP_CONSENSUS_FINGERPRINT);
+        // A peer predating addrv2 (only older bits) is not seen as addrv2-capable.
+        assert!(!has_cap(
+            CAP_CHAINWORK | CAP_CONSENSUS_FINGERPRINT,
+            CAP_ADDRV2
+        ));
     }
 
     #[test]

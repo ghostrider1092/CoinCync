@@ -121,6 +121,24 @@ use super::runtime::wait_for_shutdown;
 use super::types::NodeEvent;
 use super::TxAbsenceCache;
 
+/// How often to re-request typed (onion/I2P) addresses from CAP_ADDRV2 peers.
+/// The handshake does a one-shot pull (control::handle_verack); this periodic
+/// re-request is what keeps a long-lived node learning hidden-service peers that
+/// joined after it did. 90 s is below PEER_TIMEOUT and well under the churn
+/// cadence, so the book stays fresh without adding meaningful traffic.
+const ADDRV2_GOSSIP_INTERVAL_SECS: u64 = 90;
+
+/// Age horizon for learned onion/I2P addresses. A peer re-advertises on our
+/// GetAddrV2 requests and its own gossip (refreshing the stored timestamp), so
+/// an address older than this has not been seen in many gossip rounds and is
+/// pruned. 3 h tolerates normal churn while bounding how long a dead onion
+/// lingers in the dial set.
+const ADDRV2_MAX_AGE_SECS: u64 = 3 * 60 * 60;
+
+/// Max onion/I2P addresses to push in one unsolicited relay (AddrV2). Bounded,
+/// Bitcoin-style, so periodic relay stays cheap and can't be used to amplify.
+const ADDRV2_RELAY_MAX: usize = 10;
+
 pub(super) struct MaintenanceContext {
     pub peers: Arc<DashMap<PeerId, PeerInfo>>,
     pub dandelion: Arc<RwLock<DandelionRouter>>,
@@ -260,6 +278,10 @@ pub(super) fn spawn_maintenance(
         // #284 inbound-peer discovery: periodically seed the address book with
         // connected inbound peers (assumed to listen on the network default port).
         let mut discovery_interval = interval(Duration::from_secs(60));
+        // addrv2 gossip: periodically pull onion/I2P addresses from peers that
+        // advertise CAP_ADDRV2 (the handshake only pulls once, at verack).
+        let mut addrv2_gossip_interval =
+            interval(Duration::from_secs(ADDRV2_GOSSIP_INTERVAL_SECS));
 
         loop {
             tokio::select! {
@@ -324,6 +346,9 @@ pub(super) fn spawn_maintenance(
                 }
                 _ = discovery_interval.tick() => {
                     discover_inbound_peers(&maint_peers, &maint_addresses, discovery_port).await;
+                }
+                _ = addrv2_gossip_interval.tick() => {
+                    run_addrv2_gossip_tick(&maint_senders, &maint_peers, &maint_addresses, magic).await;
                 }
                 _ = outbound_rotate_interval.tick() => {
                     rotate_outbound_peer(&maint_peers, &maint_senders);
@@ -620,6 +645,87 @@ async fn discover_inbound_peers(
     }
 }
 
+/// addrv2 gossip tick — to every Connected `CAP_ADDRV2` peer, send BOTH a
+/// `GetAddrV2` (pull their onion/I2P addresses) and an unsolicited `AddrV2`
+/// relay carrying a bounded sample of the addresses WE know (our own first,
+/// then a sample of learned peers). The pull gathers; the relay forwards, so a
+/// learned onion propagates past our immediate neighbours instead of dying one
+/// hop out — the receiver's `handle_addr_v2` dedups, so re-receipt is cheap and
+/// there is no amplification. Peers that predate addrv2 never set the cap and
+/// are skipped (they would reject the unknown message types). Best-effort
+/// `try_send` — a full or closed channel is dropped, never blocks the loop.
+async fn run_addrv2_gossip_tick(
+    senders: &DashMap<PeerId, mpsc::Sender<Vec<u8>>>,
+    peers: &DashMap<PeerId, PeerInfo>,
+    addresses: &RwLock<AddressManager>,
+    magic: [u8; 4],
+) {
+    use super::super::protocol::MessageType;
+
+    // Age out onion/I2P addresses that stopped being gossiped, bounding the
+    // staleness of the dial set before we re-request / relay below.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cutoff = now.saturating_sub(ADDRV2_MAX_AGE_SECS);
+    let pruned = addresses.write().await.prune_v2(cutoff);
+    if pruned > 0 {
+        tracing::debug!(
+            target: "node::addrv2",
+            "addrv2 gossip: pruned {} stale onion/I2P address(es) older than {}s",
+            pruned, ADDRV2_MAX_AGE_SECS,
+        );
+    }
+
+    // Build both frames once. GetAddrV2 pulls; AddrV2 relays a bounded sample.
+    let Ok(get_frame) = Message::new(magic, MessageType::GetAddrV2, Vec::new()).to_bytes() else {
+        return;
+    };
+    let relay_frame = {
+        let sample = addresses.read().await.relay_sample_v2(ADDRV2_RELAY_MAX, now);
+        if sample.is_empty() {
+            None
+        } else {
+            let msg = crate::network::protocol::AddrV2Message { addresses: sample };
+            borsh::to_vec(&msg)
+                .ok()
+                .and_then(|p| Message::new(magic, MessageType::AddrV2, p).to_bytes().ok())
+        }
+    };
+
+    let mut pulled = 0usize;
+    let mut relayed = 0usize;
+    for peer in peers.iter() {
+        if peer.state != PeerState::Connected
+            || !crate::network::firework::has_cap(
+                peer.capabilities,
+                crate::network::firework::CAP_ADDRV2,
+            )
+        {
+            continue;
+        }
+        let Some(sender) = senders.get(peer.key()) else {
+            continue;
+        };
+        if sender.try_send(get_frame.clone()).is_ok() {
+            pulled += 1;
+        }
+        if let Some(ref relay) = relay_frame {
+            if sender.try_send(relay.clone()).is_ok() {
+                relayed += 1;
+            }
+        }
+    }
+    if pulled > 0 || relayed > 0 {
+        tracing::trace!(
+            target: "node::addrv2",
+            "addrv2 gossip: sent GetAddrV2 to {} peer(s), relayed AddrV2 to {} peer(s)",
+            pulled, relayed,
+        );
+    }
+}
+
 /// Track the sustained mesh-floor state with hysteresis. Increments a
 /// below-floor streak each heartbeat that connected peers are under
 /// `MESH_FLOOR_PEERS`; once the streak reaches `MESH_FLOOR_SUSTAIN_TICKS` the
@@ -905,6 +1011,152 @@ async fn run_self_heal_tick(
         // Reset the stall clock so the next recovery must re-accumulate a full
         // stall window (belt-and-braces alongside the MIN_GAP rate-limit).
         state.last_progress_at = now;
+    }
+}
+
+#[cfg(test)]
+mod addrv2_gossip_tests {
+    use super::*;
+    use crate::network::firework::CAP_ADDRV2;
+    use crate::network::protocol::MessageType;
+
+    const MAGIC: [u8; 4] = [0xCA, 0xFE, 0xBA, 0xBE];
+
+    fn peer(n: u8, connected: bool, caps: u64) -> (PeerId, PeerInfo) {
+        let id = [n; 32];
+        let addr = format!("127.0.0.1:{}", 30000 + n as u16).parse().unwrap();
+        let mut p = PeerInfo::new(id, addr, true);
+        if connected {
+            p.state = PeerState::Connected;
+        }
+        p.capabilities = caps;
+        (id, p)
+    }
+
+    /// The tick pulls typed addresses ONLY from peers that are both Connected and
+    /// advertise CAP_ADDRV2 — a no-cap peer (would reject the unknown type) and a
+    /// still-handshaking peer are both left alone.
+    #[tokio::test]
+    async fn gossip_tick_requests_only_from_connected_addrv2_peers() {
+        let peers = DashMap::new();
+        let senders = DashMap::new();
+        let mut rxs = std::collections::HashMap::new();
+
+        // 1: connected + CAP_ADDRV2 -> should receive GetAddrV2
+        // 2: connected, no cap      -> skipped
+        // 3: CAP_ADDRV2 but handshaking (not Connected) -> skipped
+        for (n, connected, caps) in [(1u8, true, CAP_ADDRV2), (2, true, 0), (3, false, CAP_ADDRV2)] {
+            let (id, p) = peer(n, connected, caps);
+            peers.insert(id, p);
+            let (tx, rx) = mpsc::channel::<Vec<u8>>(4);
+            senders.insert(id, tx);
+            rxs.insert(n, rx);
+        }
+
+        let addresses = RwLock::new(AddressManager::new(1000));
+        run_addrv2_gossip_tick(&senders, &peers, &addresses, MAGIC).await;
+
+        // Only peer 1 got a frame, and it is a GetAddrV2 (type byte at offset 4).
+        let frame = rxs
+            .get_mut(&1)
+            .unwrap()
+            .try_recv()
+            .expect("a capable connected peer is sent GetAddrV2");
+        assert_eq!(frame[4], MessageType::GetAddrV2 as u8);
+        assert!(
+            rxs.get_mut(&2).unwrap().try_recv().is_err(),
+            "a peer without CAP_ADDRV2 is skipped"
+        );
+        assert!(
+            rxs.get_mut(&3).unwrap().try_recv().is_err(),
+            "a not-yet-Connected peer is skipped"
+        );
+    }
+
+    /// The tick also ages out onion addresses older than ADDRV2_MAX_AGE_SECS,
+    /// while keeping fresh ones.
+    #[tokio::test]
+    async fn gossip_tick_prunes_stale_onion_addresses() {
+        use crate::network::protocol::{net_id, NetAddrV2};
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut book = AddressManager::new(1000);
+        let onion = |byte: u8, ts: u64| NetAddrV2 {
+            services: 0,
+            timestamp: ts,
+            net_id: net_id::ONION_V3,
+            addr: vec![byte; 32],
+            port: 28080,
+        };
+        book.add_v2(onion(0x11, now)); // fresh — kept
+        book.add_v2(onion(0x22, now - ADDRV2_MAX_AGE_SECS - 10)); // stale — pruned
+        assert_eq!(book.v2_len(), 2);
+
+        let addresses = RwLock::new(book);
+        let peers: DashMap<PeerId, PeerInfo> = DashMap::new();
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        run_addrv2_gossip_tick(&senders, &peers, &addresses, MAGIC).await;
+
+        let kept = addresses.read().await.get_v2(10);
+        assert_eq!(kept.len(), 1, "the stale onion was pruned");
+        assert_eq!(kept[0].addr, vec![0x11; 32], "the fresh onion survived");
+    }
+
+    /// The tick RELAYS our known onions: a capable peer receives an unsolicited
+    /// AddrV2 carrying an onion we learned, so it propagates past one hop.
+    #[tokio::test]
+    async fn gossip_tick_relays_known_onions_to_capable_peers() {
+        use crate::network::protocol::{net_id, AddrV2Message, NetAddrV2};
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut book = AddressManager::new(1000);
+        book.add_v2(NetAddrV2 {
+            services: 0,
+            timestamp: now,
+            net_id: net_id::ONION_V3,
+            addr: vec![0x33; 32],
+            port: 28080,
+        });
+        let addresses = RwLock::new(book);
+
+        let peers = DashMap::new();
+        let (id, p) = peer(1, true, CAP_ADDRV2);
+        peers.insert(id, p);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(id, tx);
+
+        run_addrv2_gossip_tick(&senders, &peers, &addresses, MAGIC).await;
+
+        // Peer gets a GetAddrV2 pull AND an AddrV2 relay that carries our onion.
+        let mut saw_get = false;
+        let mut saw_relayed_onion = false;
+        while let Ok(f) = rx.try_recv() {
+            match MessageType::try_from(f[4]).unwrap() {
+                MessageType::GetAddrV2 => saw_get = true,
+                MessageType::AddrV2 => {
+                    // Payload follows the 13-byte frame header.
+                    let msg: AddrV2Message = borsh::from_slice(&f[13..]).unwrap();
+                    if msg
+                        .addresses
+                        .iter()
+                        .any(|a| a.net_id == net_id::ONION_V3 && a.addr == vec![0x33; 32])
+                    {
+                        saw_relayed_onion = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_get, "GetAddrV2 pull was sent");
+        assert!(saw_relayed_onion, "AddrV2 relay carried our known onion");
     }
 }
 

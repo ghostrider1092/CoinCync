@@ -355,6 +355,32 @@ impl P2PNode {
             address_mgr.mark_self_address(ext);
             info!("Registered external address {ext} as self — peer gossip echoing our own IP will not cause self-dials");
         }
+        // If the operator configured our own hidden service, advertise it over
+        // addrv2 so CAP_ADDRV2 peers can dial us back through Tor. The onion host
+        // is paired with our P2P listen port. A malformed value is logged and
+        // skipped — never fatal. Read before `config` is moved below.
+        if let Some(host) = config.onion_address.as_deref() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            match crate::network::protocol::NetAddrV2::onion_v3_self(
+                host,
+                config.listen_addr.port(),
+                now,
+            ) {
+                Some(self_v2) => {
+                    address_mgr.add_self_v2(self_v2);
+                    info!(
+                        "Advertising hidden service {host}:{} over addrv2 — CAP_ADDRV2 peers can dial us via Tor",
+                        config.listen_addr.port()
+                    );
+                }
+                None => warn!(
+                    "Ignoring malformed onion_address {host:?}: not a valid onion-v3 host (expected 56 base32 chars + .onion)"
+                ),
+            }
+        }
         // Read before `config` is moved into the struct below (usize is Copy).
         let max_connections_per_ip = config.max_connections_per_ip;
 
@@ -511,6 +537,14 @@ impl P2PNode {
         // `add` left them at the mercy of the last_seen sort, where a stale
         // seed set could starve them out entirely.
         self.addresses.write().await.add_manual(addr);
+    }
+
+    /// Seed a learned onion/I2P peer directly into the addrv2 store (e.g. from
+    /// `--addnode <host>.onion:<port>`), so a Tor-only node can bootstrap its
+    /// first hidden-service peer: the outbound connector dials it through the
+    /// configured SOCKS proxy on the next tick.
+    pub async fn add_onion_seed(&self, v2: crate::network::protocol::NetAddrV2) {
+        self.addresses.write().await.add_v2(v2);
     }
 
     /// Get connection tracker statistics
@@ -1346,6 +1380,46 @@ mod tests {
 
         assert_eq!(node.peer_count(), 0);
         assert!(!node.our_id().iter().all(|&b| b == 0));
+    }
+
+    #[tokio::test]
+    async fn configured_onion_is_advertised_as_self_v2() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.data_dir = data_dir.path().to_path_buf();
+        config.listen_addr = "0.0.0.0:28080".parse().unwrap();
+        // A valid onion-v3 host derived from a known pubkey.
+        let key = [0x42u8; 32];
+        let host = crate::network::protocol::onion_v3_host_from_pubkey(&key);
+        config.onion_address = Some(host);
+
+        let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        let node = P2PNode::new(config, chain, crate::mempool::SharedMempool::new());
+
+        let selfs = node.addresses.read().await.self_v2();
+        assert_eq!(selfs.len(), 1, "the configured onion is advertised as self");
+        assert_eq!(
+            selfs[0].net_id,
+            crate::network::protocol::net_id::ONION_V3
+        );
+        assert_eq!(selfs[0].addr, key.to_vec(), "self addr carries our pubkey");
+        assert_eq!(selfs[0].port, 28080, "paired with our listen port");
+    }
+
+    #[tokio::test]
+    async fn malformed_onion_address_is_ignored_not_fatal() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        config.data_dir = data_dir.path().to_path_buf();
+        config.onion_address = Some("definitely-not-an-onion".to_string());
+
+        let chain = std::sync::Arc::new(crate::chain::Blockchain::new());
+        // Must not panic; the bad address is simply skipped.
+        let node = P2PNode::new(config, chain, crate::mempool::SharedMempool::new());
+        assert!(
+            node.addresses.read().await.self_v2().is_empty(),
+            "a malformed onion adds no self_v2 entry"
+        );
     }
 
     #[tokio::test]

@@ -144,6 +144,11 @@ pub enum MessageType {
     NotFound = 24,
     GetAddr = 30,
     Addr = 31,
+    /// addrv2 (BIP155-style) peer-address exchange — carries onion-v3 / I2P
+    /// addresses alongside IPv4/IPv6. Gated by `firework::CAP_ADDRV2`; nodes
+    /// predating it never receive these (they reject unknown message types).
+    GetAddrV2 = 32,
+    AddrV2 = 33,
     Reject = 40,
     Alert = 41,
     /// Firework: Flare capability-negotiation message.
@@ -234,6 +239,8 @@ impl TryFrom<u8> for MessageType {
             24 => Ok(MessageType::NotFound),
             30 => Ok(MessageType::GetAddr),
             31 => Ok(MessageType::Addr),
+            32 => Ok(MessageType::GetAddrV2),
+            33 => Ok(MessageType::AddrV2),
             40 => Ok(MessageType::Reject),
             41 => Ok(MessageType::Alert),
             50 => Ok(MessageType::Flare),
@@ -304,6 +311,8 @@ impl MessageType {
 
             // Peer addresses: moderate
             MessageType::Addr => 256 * 1024, // 256 KB
+            MessageType::GetAddrV2 => 256,   // 256 bytes (like GetAddr)
+            MessageType::AddrV2 => 256 * 1024, // 256 KB (like Addr; bounds borsh alloc)
 
             // Meta messages: small
             MessageType::Reject => 4 * 1024, // 4 KB
@@ -663,6 +672,280 @@ pub struct NetAddr {
     pub timestamp: u64,
 }
 
+/// BIP155-style network-address type IDs for [`NetAddrV2`].
+pub mod net_id {
+    /// IPv4 — 4-byte address.
+    pub const IPV4: u8 = 1;
+    /// IPv6 — 16-byte address.
+    pub const IPV6: u8 = 2;
+    /// Tor v3 — 32-byte ed25519 public key (the `.onion` host is derived from it).
+    pub const ONION_V3: u8 = 4;
+    /// I2P — 32-byte SHA-256 of the destination (`.b32.i2p`).
+    pub const I2P: u8 = 5;
+}
+
+/// Expected `addr` length for a known `net_id`, or `None` if unrecognized.
+fn net_id_addr_len(net_id: u8) -> Option<usize> {
+    match net_id {
+        net_id::IPV4 => Some(4),
+        net_id::IPV6 => Some(16),
+        net_id::ONION_V3 => Some(32),
+        net_id::I2P => Some(32),
+        _ => None,
+    }
+}
+
+/// A typed network address (BIP155 / addrv2 style). Unlike [`NetAddr`] — whose
+/// `ip` is a fixed `[u8; 16]` — this can carry onion-v3 and I2P addresses by
+/// tagging the bytes with a `net_id`. Exchanged via `GetAddrV2` / `AddrV2`,
+/// gated behind `firework::CAP_ADDRV2` so pre-addrv2 nodes never see it.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub struct NetAddrV2 {
+    pub services: u64,
+    pub timestamp: u64,
+    /// BIP155 network id (see [`net_id`]).
+    pub net_id: u8,
+    /// Raw address bytes; length is validated per `net_id`.
+    pub addr: Vec<u8>,
+    pub port: u16,
+}
+
+impl NetAddrV2 {
+    /// Hard cap on `addr` length for an UNKNOWN `net_id`, so a malicious peer
+    /// can't force a large allocation under an unrecognized tag. Known ids are
+    /// validated to their exact length by [`Self::validate`].
+    pub const MAX_ADDR_BYTES: usize = 64;
+
+    /// Validate the typed address: a known `net_id` must carry exactly its
+    /// expected length; an unknown `net_id` is tolerated (forward-compat — we
+    /// may relay what we don't yet understand) but capped at `MAX_ADDR_BYTES`.
+    pub fn validate(&self) -> Result<()> {
+        match net_id_addr_len(self.net_id) {
+            Some(expected) if self.addr.len() == expected => Ok(()),
+            Some(expected) => Err(Error::ProtocolError(format!(
+                "addrv2 net_id {} expects {} bytes, got {}",
+                self.net_id,
+                expected,
+                self.addr.len()
+            ))),
+            None if self.addr.len() <= Self::MAX_ADDR_BYTES => Ok(()),
+            None => Err(Error::ProtocolError(format!(
+                "addrv2 unknown net_id {} addr too long: {} > {}",
+                self.net_id,
+                self.addr.len(),
+                Self::MAX_ADDR_BYTES
+            ))),
+        }
+    }
+
+    /// True if this is an address we can actually route to (a known `net_id`).
+    pub fn is_routable(&self) -> bool {
+        net_id_addr_len(self.net_id).is_some()
+    }
+
+    /// Convert back to a legacy [`NetAddr`] when this is IPv4/IPv6, so addrv2
+    /// gossip can feed the existing IP-only address book. Returns `None` for
+    /// onion / i2p / unknown (they have no `[u8; 16]` representation).
+    pub fn to_net_addr(&self) -> Option<NetAddr> {
+        let ip = match self.net_id {
+            net_id::IPV4 if self.addr.len() == 4 => {
+                let mut ip = [0u8; 16];
+                ip[10] = 0xff;
+                ip[11] = 0xff;
+                ip[12..16].copy_from_slice(&self.addr);
+                ip
+            }
+            net_id::IPV6 if self.addr.len() == 16 => {
+                let mut ip = [0u8; 16];
+                ip.copy_from_slice(&self.addr);
+                ip
+            }
+            _ => return None,
+        };
+        Some(NetAddr {
+            services: self.services,
+            ip,
+            port: self.port,
+            timestamp: self.timestamp,
+        })
+    }
+}
+
+/// IPv4-mapped IPv6 prefix (`::ffff:a.b.c.d`).
+const V4_MAPPED_PREFIX: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff];
+
+impl From<&NetAddr> for NetAddrV2 {
+    /// Represent a legacy [`NetAddr`] as addrv2: its fixed `[u8; 16]` `ip` is an
+    /// IPv4-mapped address when it starts with the v4-mapped prefix, else native IPv6.
+    fn from(a: &NetAddr) -> Self {
+        if a.ip.starts_with(&V4_MAPPED_PREFIX) {
+            NetAddrV2 {
+                services: a.services,
+                timestamp: a.timestamp,
+                net_id: net_id::IPV4,
+                addr: a.ip[12..16].to_vec(),
+                port: a.port,
+            }
+        } else {
+            NetAddrV2 {
+                services: a.services,
+                timestamp: a.timestamp,
+                net_id: net_id::IPV6,
+                addr: a.ip.to_vec(),
+                port: a.port,
+            }
+        }
+    }
+}
+
+/// addrv2 address message (BIP155-style). Same count cap as [`AddrMessage`].
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct AddrV2Message {
+    pub addresses: Vec<NetAddrV2>,
+}
+
+impl AddrV2Message {
+    /// Validate: cap the address count (same as `AddrMessage`) and validate
+    /// every entry's typed length.
+    pub fn validate(&self) -> Result<()> {
+        if self.addresses.len() > MAX_ADDR_SIZE {
+            return Err(Error::ProtocolError(format!(
+                "too many addrv2 addresses: {} > {}",
+                self.addresses.len(),
+                MAX_ADDR_SIZE
+            )));
+        }
+        for a in &self.addresses {
+            a.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Onion-v3 protocol version byte (Tor rend-spec-v3).
+pub const ONION_V3_VERSION: u8 = 0x03;
+
+/// The 2-byte onion-v3 checksum: `SHA3-256(".onion checksum" ‖ pubkey ‖
+/// version)[..2]`. Shared by the parser (to verify) and the encoder (to emit),
+/// so the two can never disagree.
+fn onion_v3_checksum(pubkey: &[u8; 32], version: u8) -> [u8; 2] {
+    use sha3::{Digest, Sha3_256};
+    let mut h = Sha3_256::new();
+    h.update(b".onion checksum");
+    h.update(pubkey);
+    h.update([version]);
+    let digest = h.finalize();
+    [digest[0], digest[1]]
+}
+
+/// Decode a Tor v3 `.onion` host to its 32-byte ed25519 public key.
+/// Onion v3 = base32(pubkey[32] ‖ checksum[2] ‖ version[1]) = 56 chars.
+///
+/// The embedded version byte and 2-byte checksum are **verified**: the host
+/// must declare version 3 and carry the SHA3-256 checksum Tor computes over the
+/// pubkey. A host with a bad checksum (a typo, bit-rot, or a forged address)
+/// returns `None` rather than a garbage key, so we never advertise or dial a
+/// malformed onion.
+pub fn parse_onion_v3_pubkey(host: &str) -> Option<[u8; 32]> {
+    let h = host.strip_suffix(".onion").unwrap_or(host);
+    if h.len() != 56 || !h.is_ascii() {
+        return None;
+    }
+    // RFC4648 base32 alphabet, lowercase (as Tor emits).
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut acc: u64 = 0;
+    let mut nbits: u32 = 0;
+    let mut out: Vec<u8> = Vec::with_capacity(35);
+    for c in h.bytes() {
+        let v = ALPHABET.iter().position(|&a| a == c.to_ascii_lowercase())? as u64;
+        acc = (acc << 5) | v;
+        nbits += 5;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((acc >> nbits) as u8);
+        }
+    }
+    if out.len() != 35 {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&out[..32]);
+
+    // Verify version byte and checksum before trusting the key.
+    let version = out[34];
+    if version != ONION_V3_VERSION {
+        return None;
+    }
+    let expected = onion_v3_checksum(&key, version);
+    if out[32..34] != expected {
+        return None;
+    }
+    Some(key)
+}
+
+impl NetAddrV2 {
+    /// Build a self-advertisable onion-v3 addrv2 entry from a `.onion` host.
+    /// Returns `None` if the host is not a valid 56-char onion-v3 string.
+    pub fn onion_v3_self(onion_host: &str, port: u16, timestamp: u64) -> Option<NetAddrV2> {
+        let key = parse_onion_v3_pubkey(onion_host)?;
+        Some(NetAddrV2 {
+            services: 0,
+            timestamp,
+            net_id: net_id::ONION_V3,
+            addr: key.to_vec(),
+            port,
+        })
+    }
+
+    /// The `.onion` host for an onion-v3 address, or `None` if this isn't one.
+    /// Used to dial a learned onion peer through the Tor SOCKS proxy.
+    pub fn onion_host(&self) -> Option<String> {
+        if self.net_id == net_id::ONION_V3 && self.addr.len() == 32 {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&self.addr);
+            Some(onion_v3_host_from_pubkey(&key))
+        } else {
+            None
+        }
+    }
+}
+
+/// Base32 (RFC4648, lowercase, no padding) encode — the alphabet Tor uses for
+/// `.onion` hosts.
+fn base32_encode_lower(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut out = String::with_capacity(data.len() * 8 / 5 + 1);
+    let mut acc: u32 = 0;
+    let mut nbits: u32 = 0;
+    for &b in data {
+        acc = (acc << 8) | b as u32;
+        nbits += 8;
+        while nbits >= 5 {
+            nbits -= 5;
+            out.push(ALPHABET[((acc >> nbits) & 0x1f) as usize] as char);
+        }
+    }
+    if nbits > 0 {
+        out.push(ALPHABET[((acc << (5 - nbits)) & 0x1f) as usize] as char);
+    }
+    out
+}
+
+/// Encode a 32-byte onion-v3 pubkey to its `.onion` host, with the SHA3-256
+/// checksum + version byte Tor requires. Inverse of [`parse_onion_v3_pubkey`].
+pub fn onion_v3_host_from_pubkey(pubkey: &[u8; 32]) -> String {
+    let checksum = onion_v3_checksum(pubkey, ONION_V3_VERSION);
+    let mut data = Vec::with_capacity(35);
+    data.extend_from_slice(pubkey);
+    data.extend_from_slice(&checksum);
+    data.push(ONION_V3_VERSION);
+    let mut host = base32_encode_lower(&data);
+    host.push_str(".onion");
+    host
+}
+
 /// Reject message
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RejectMessage {
@@ -1016,8 +1299,8 @@ mod tests {
     /// authoritative list mirrored from the `TryFrom` impl; any drift between
     /// this and the impl is a wire-compatibility break the sweep tests catch.
     const VALID_DISCRIMINANTS: &[u8] = &[
-        0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 30, 31, 40, 41, 50, 51, 52, 60, 61,
-        62, 63, 64, 65, 70, 71, 80, 81, 99,
+        0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 30, 31, 32, 33, 40, 41, 50, 51, 52,
+        60, 61, 62, 63, 64, 65, 70, 71, 80, 81, 99,
     ];
 
     /// n distinct hashes (varying the first two bytes so counts up to ~65k
@@ -1107,13 +1390,13 @@ mod tests {
         }
         assert_eq!(
             VALID_DISCRIMINANTS.len(),
-            33,
-            "expected 33 defined message types"
+            35,
+            "expected 35 defined message types"
         );
     }
 
     /// Every byte NOT in the defined set is rejected — full 0..=255 sweep,
-    /// covering all gaps (4-9, 16-19, 25-29, 32-39, 42-49, 53-59, 66-69,
+    /// covering all gaps (4-9, 16-19, 25-29, 34-39, 42-49, 53-59, 66-69,
     /// 72-79, 82-98, 100-255).
     #[test]
     fn message_type_try_from_rejects_all_undefined_bytes() {
@@ -1235,6 +1518,289 @@ mod tests {
         );
         // Payload cap comfortably fits a 32-byte fingerprint + borsh framing.
         assert!(MessageType::ConsensusFingerprint.max_size() >= 32);
+    }
+
+    // ── addrv2 typed addresses (BIP155-style) ───────────────────────────
+
+    #[test]
+    fn addrv2_borsh_round_trips_all_net_ids() {
+        for (nid, len) in [
+            (net_id::IPV4, 4usize),
+            (net_id::IPV6, 16),
+            (net_id::ONION_V3, 32),
+            (net_id::I2P, 32),
+        ] {
+            let a = NetAddrV2 {
+                services: 1,
+                timestamp: 42,
+                net_id: nid,
+                addr: vec![0xab_u8; len],
+                port: 18080,
+            };
+            assert!(a.validate().is_ok(), "net_id {nid} should validate");
+            assert!(a.is_routable());
+            let bytes = borsh::to_vec(&a).unwrap();
+            let back: NetAddrV2 = borsh::from_slice(&bytes).unwrap();
+            assert_eq!(a, back);
+        }
+    }
+
+    #[test]
+    fn addrv2_validate_rejects_wrong_length_for_known_net_id() {
+        let bad = NetAddrV2 {
+            services: 0,
+            timestamp: 0,
+            net_id: net_id::ONION_V3,
+            addr: vec![0u8; 16], // onion-v3 must be exactly 32
+            port: 0,
+        };
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn addrv2_tolerates_unknown_net_id_within_cap_rejects_over() {
+        let ok = NetAddrV2 {
+            services: 0,
+            timestamp: 0,
+            net_id: 200, // unknown
+            addr: vec![0u8; NetAddrV2::MAX_ADDR_BYTES],
+            port: 0,
+        };
+        assert!(ok.validate().is_ok());
+        assert!(!ok.is_routable());
+
+        let too_big = NetAddrV2 {
+            services: 0,
+            timestamp: 0,
+            net_id: 200,
+            addr: vec![0u8; NetAddrV2::MAX_ADDR_BYTES + 1],
+            port: 0,
+        };
+        assert!(too_big.validate().is_err());
+    }
+
+    #[test]
+    fn netaddr_to_addrv2_and_back_round_trips_v4_and_v6() {
+        let mut ip4 = [0u8; 16];
+        ip4[10] = 0xff;
+        ip4[11] = 0xff;
+        ip4[12..16].copy_from_slice(&[203, 0, 113, 7]);
+        let v4 = NetAddr { services: 9, ip: ip4, port: 28080, timestamp: 100 };
+        let a4 = NetAddrV2::from(&v4);
+        assert_eq!(a4.net_id, net_id::IPV4);
+        assert_eq!(a4.addr, vec![203, 0, 113, 7]);
+        assert_eq!(a4.to_net_addr().unwrap().ip, v4.ip);
+
+        let mut ip6 = [0u8; 16];
+        ip6[0] = 0x20;
+        ip6[1] = 0x01;
+        ip6[15] = 0x01;
+        let v6 = NetAddr { services: 3, ip: ip6, port: 28080, timestamp: 200 };
+        let a6 = NetAddrV2::from(&v6);
+        assert_eq!(a6.net_id, net_id::IPV6);
+        assert_eq!(a6.to_net_addr().unwrap().ip, v6.ip);
+    }
+
+    #[test]
+    fn addrv2_onion_has_no_legacy_netaddr() {
+        let onion = NetAddrV2 {
+            services: 0,
+            timestamp: 0,
+            net_id: net_id::ONION_V3,
+            addr: vec![7u8; 32],
+            port: 18080,
+        };
+        assert!(onion.to_net_addr().is_none());
+    }
+
+    #[test]
+    fn addrv2_message_validate_caps_count_and_entries() {
+        let good = AddrV2Message {
+            addresses: vec![
+                NetAddrV2 {
+                    services: 0,
+                    timestamp: 0,
+                    net_id: net_id::ONION_V3,
+                    addr: vec![1u8; 32],
+                    port: 1,
+                },
+                NetAddrV2 {
+                    services: 0,
+                    timestamp: 0,
+                    net_id: net_id::IPV4,
+                    addr: vec![1, 2, 3, 4],
+                    port: 2,
+                },
+            ],
+        };
+        assert!(good.validate().is_ok());
+
+        let bad = AddrV2Message {
+            addresses: vec![NetAddrV2 {
+                services: 0,
+                timestamp: 0,
+                net_id: net_id::I2P,
+                addr: vec![0u8; 5], // i2p must be 32
+                port: 1,
+            }],
+        };
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn addrv2_message_types_round_trip() {
+        assert_eq!(MessageType::try_from(32u8).unwrap(), MessageType::GetAddrV2);
+        assert_eq!(MessageType::try_from(33u8).unwrap(), MessageType::AddrV2);
+        assert_eq!(MessageType::GetAddrV2 as u8, 32);
+        assert_eq!(MessageType::AddrV2 as u8, 33);
+        assert!(MessageType::AddrV2.max_size() >= 256 * 1024);
+    }
+
+    #[test]
+    fn onion_v3_parse_round_trips_and_builds_self_addr() {
+        // A genuinely valid onion-v3 host (correct version byte + checksum).
+        let key = [0x11u8; 32];
+        let host = onion_v3_host_from_pubkey(&key); // includes ".onion"
+        assert_eq!(parse_onion_v3_pubkey(&host), Some(key));
+        // The ".onion" suffix is optional.
+        let bare = host.strip_suffix(".onion").unwrap();
+        assert_eq!(parse_onion_v3_pubkey(bare), Some(key));
+        // Wrong length / out-of-alphabet chars → None.
+        assert_eq!(parse_onion_v3_pubkey("tooshort.onion"), None);
+        assert_eq!(parse_onion_v3_pubkey(&"1".repeat(56)), None); // '1' not in base32
+        // A well-formed base32 string with the WRONG version/checksum is
+        // rejected: 56 'a' decodes to version byte 0 and a zero checksum.
+        assert_eq!(parse_onion_v3_pubkey(&"a".repeat(56)), None);
+        // Corrupting a pubkey character breaks the embedded checksum → None.
+        let mut bytes: Vec<u8> = bare.bytes().collect();
+        bytes[0] = if bytes[0] == b'b' { b'c' } else { b'b' };
+        let corrupted = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            parse_onion_v3_pubkey(&corrupted),
+            None,
+            "a bad checksum is rejected"
+        );
+        // The self-address builder yields a valid onion-v3 NetAddrV2.
+        let sa = NetAddrV2::onion_v3_self(&host, 28080, 123).unwrap();
+        assert_eq!(sa.net_id, net_id::ONION_V3);
+        assert_eq!(sa.addr, key.to_vec());
+        assert_eq!(sa.port, 28080);
+        assert!(sa.validate().is_ok());
+    }
+
+    #[test]
+    fn onion_v3_encode_parse_round_trips() {
+        let key = [0x5a_u8; 32];
+        let host = onion_v3_host_from_pubkey(&key);
+        assert!(host.ends_with(".onion"));
+        assert_eq!(host.len(), 56 + ".onion".len());
+        // encode → parse recovers the key (the embedded checksum is valid base32).
+        assert_eq!(parse_onion_v3_pubkey(&host), Some(key));
+        // via the NetAddrV2 helper too.
+        let na = NetAddrV2 {
+            services: 0,
+            timestamp: 0,
+            net_id: net_id::ONION_V3,
+            addr: key.to_vec(),
+            port: 28080,
+        };
+        assert_eq!(na.onion_host(), Some(host));
+        // non-onion → no host.
+        let ip = NetAddrV2 {
+            services: 0,
+            timestamp: 0,
+            net_id: net_id::IPV4,
+            addr: vec![1, 2, 3, 4],
+            port: 1,
+        };
+        assert_eq!(ip.onion_host(), None);
+    }
+
+    /// DEMONSTRATION (run with `--nocapture`): an `AddrV2` message carrying a Tor
+    /// v3 onion key, an I2P destination, and an IPv4 address goes through the REAL
+    /// on-wire `Message` frame (header + payload) and is parsed back off the raw
+    /// bytes exactly as a receiving node would — proving addrv2 works on the wire,
+    /// not merely as an in-memory struct.
+    #[test]
+    fn addrv2_round_trips_through_the_real_message_frame() {
+        use borsh::BorshDeserialize;
+
+        let onion_key = [0x11u8; 32];
+        let i2p_dest = [0x22u8; 32];
+        let original = AddrV2Message {
+            addresses: vec![
+                NetAddrV2 {
+                    services: 1,
+                    timestamp: 1_000,
+                    net_id: net_id::IPV4,
+                    addr: vec![203, 0, 113, 9],
+                    port: 28080,
+                },
+                NetAddrV2 {
+                    services: 1,
+                    timestamp: 1_000,
+                    net_id: net_id::ONION_V3,
+                    addr: onion_key.to_vec(),
+                    port: 28080,
+                },
+                NetAddrV2 {
+                    services: 1,
+                    timestamp: 1_000,
+                    net_id: net_id::I2P,
+                    addr: i2p_dest.to_vec(),
+                    port: 28080,
+                },
+            ],
+        };
+        original.validate().expect("addrv2 message should be valid");
+
+        // 1. Encode as a real wire frame with the AddrV2 message type.
+        let payload = borsh::to_vec(&original).unwrap();
+        let frame = Message::new(MAINNET_MAGIC, MessageType::AddrV2, payload)
+            .to_bytes()
+            .unwrap();
+
+        // 2. Parse it back off the raw bytes like a receiver: decode the header
+        //    (advances the cursor), confirm the type, decode the payload.
+        let mut cursor: &[u8] = &frame;
+        let header = <MessageHeader as borsh::BorshDeserialize>::deserialize(&mut cursor).unwrap();
+        let ty = MessageType::try_from(header.msg_type).unwrap();
+        assert_eq!(ty, MessageType::AddrV2);
+        let decoded =
+            <AddrV2Message as borsh::BorshDeserialize>::deserialize(&mut cursor).unwrap();
+        decoded.validate().unwrap();
+
+        // 3. The onion and i2p addresses survived byte-for-byte.
+        assert_eq!(decoded.addresses, original.addresses);
+        assert_eq!(decoded.addresses[1].addr, onion_key.to_vec());
+        assert_eq!(decoded.addresses[2].addr, i2p_dest.to_vec());
+
+        // 4. Visible proof.
+        eprintln!("\n── addrv2 wire round-trip ──────────────────────────────");
+        eprintln!(
+            "  frame: {} bytes on the wire, msg_type = {:?} ({})",
+            frame.len(),
+            ty,
+            header.msg_type
+        );
+        for a in &decoded.addresses {
+            let kind = match a.net_id {
+                net_id::IPV4 => "ipv4",
+                net_id::IPV6 => "ipv6",
+                net_id::ONION_V3 => "onion-v3",
+                net_id::I2P => "i2p",
+                _ => "unknown",
+            };
+            eprintln!(
+                "  net_id={} ({:<8}) addr={} port={}",
+                a.net_id,
+                kind,
+                hex::encode(&a.addr),
+                a.port
+            );
+        }
+        eprintln!("  all {} addresses survived the wire \u{2713}", decoded.addresses.len());
+        eprintln!("────────────────────────────────────────────────────────\n");
     }
 
     // ── VersionMessage::validate ────────────────────────────────────────

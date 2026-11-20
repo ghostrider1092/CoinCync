@@ -285,6 +285,25 @@ pub(super) async fn handle_flare(
                     &peer_id[..4],
                     flare.capabilities
                 );
+                // addrv2: the Flare is our signal that this peer speaks addrv2,
+                // so pull its typed (onion/I2P) addresses NOW. This fires whether
+                // the Flare arrived before or after Verack, so a fresh peer's
+                // onions are learned in seconds instead of waiting up to the 90s
+                // periodic gossip tick. The handshake no longer pulls v2 — this
+                // is the single, reliable trigger.
+                if crate::network::firework::has_cap(
+                    flare.capabilities,
+                    crate::network::firework::CAP_ADDRV2,
+                ) {
+                    let sender = senders.get(&peer_id).map(|s| s.value().clone());
+                    if let Some(sender) = sender {
+                        if let Ok(bytes) =
+                            Message::new(magic, MessageType::GetAddrV2, Vec::new()).to_bytes()
+                        {
+                            let _ = sender.send(bytes).await;
+                        }
+                    }
+                }
                 // Firework Phase 2: if the peer supports CAP_CHAINWORK,
                 // send our current cumulative work immediately so it
                 // can evaluate our chain during handshake, not only on
@@ -528,7 +547,9 @@ pub(super) async fn handle_verack(
         );
     }
 
-    // Send GetAddr to discover more peers after handshake
+    // Send GetAddr to discover more peers after handshake. (Typed addrv2 peers
+    // are pulled via GetAddrV2 when their Flare arrives — see handle_flare — so
+    // the pull fires reliably whether the Flare lands before or after Verack.)
     let getaddr = Message::new(magic, MessageType::GetAddr, vec![]);
     if let Ok(data) = getaddr.to_bytes() {
         let _ = send_to_peer(senders, &peer_id, data).await;
@@ -1138,6 +1159,100 @@ mod handler_tests {
         assert!(!sync.read().await.headers_request_pending());
         assert!(srx.try_recv().is_ok(), "GetAddr sent");
         assert!(srx.try_recv().is_err(), "no GetHeaders when not behind");
+    }
+
+    #[tokio::test]
+    async fn handle_verack_sends_only_getaddr_not_getaddrv2() {
+        let peer_id = [17u8; 32];
+        let addr = addr_for(30017);
+        let peers = DashMap::new();
+        let mut info = PeerInfo::new(peer_id, addr, false);
+        info.state = PeerState::VersionReceived;
+        info.height = 0;
+        // Even for a peer already known to speak addrv2, Verack sends only
+        // GetAddr — the GetAddrV2 pull is triggered by the Flare (handle_flare),
+        // so it fires reliably whether the Flare lands before or after Verack.
+        info.capabilities = crate::network::firework::CAP_ADDRV2;
+        peers.insert(peer_id, info);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(peer_id, stx);
+        let dand = dandelion();
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let chain = genesis_chain();
+
+        handle_verack(peer_id, MAGIC, &peers, &senders, &dand, &sync, &chain)
+            .await
+            .unwrap();
+
+        let first = srx.try_recv().expect("GetAddr sent");
+        assert_eq!(first[4], crate::network::protocol::MessageType::GetAddr as u8);
+        assert!(
+            srx.try_recv().is_err(),
+            "no GetAddrV2 at Verack — that is the Flare's job"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_flare_with_addrv2_cap_pulls_getaddrv2() {
+        let peer_id = [19u8; 32];
+        let addr = addr_for(30019);
+        let peers = DashMap::new();
+        let mut info = PeerInfo::new(peer_id, addr, false);
+        info.state = PeerState::Connected;
+        peers.insert(peer_id, info);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(peer_id, stx);
+        let chain = genesis_chain();
+
+        let payload = borsh::to_vec(&FlareMessage {
+            capabilities: crate::network::firework::CAP_ADDRV2,
+        })
+        .unwrap();
+        handle_flare(peer_id, &payload, MAGIC, &peers, &senders, &chain)
+            .await
+            .unwrap();
+
+        // Caps stored, and a GetAddrV2 pulled immediately (CAP_ADDRV2 alone, so
+        // no ChainWork/Fingerprint response — GetAddrV2 is the only message).
+        assert!(crate::network::firework::has_cap(
+            peers.get(&peer_id).unwrap().capabilities,
+            crate::network::firework::CAP_ADDRV2
+        ));
+        let msg = srx.try_recv().expect("GetAddrV2 pulled on Flare");
+        assert_eq!(
+            msg[4],
+            crate::network::protocol::MessageType::GetAddrV2 as u8
+        );
+        assert!(srx.try_recv().is_err(), "only GetAddrV2 for a CAP_ADDRV2 Flare");
+    }
+
+    #[tokio::test]
+    async fn handle_verack_from_legacy_peer_sends_no_getaddrv2() {
+        let peer_id = [18u8; 32];
+        let addr = addr_for(30018);
+        let peers = DashMap::new();
+        let mut info = PeerInfo::new(peer_id, addr, false);
+        info.state = PeerState::VersionReceived;
+        info.height = 0;
+        info.capabilities = 0; // pre-addrv2 peer
+        peers.insert(peer_id, info);
+        let senders: DashMap<PeerId, mpsc::Sender<Vec<u8>>> = DashMap::new();
+        let (stx, mut srx) = mpsc::channel::<Vec<u8>>(8);
+        senders.insert(peer_id, stx);
+        let dand = dandelion();
+        let sync = RwLock::new(ChainSync::new(0, Hash::zero()));
+        let chain = genesis_chain();
+
+        handle_verack(peer_id, MAGIC, &peers, &senders, &dand, &sync, &chain)
+            .await
+            .unwrap();
+
+        // Only GetAddr — a legacy peer is never sent the unknown GetAddrV2 type.
+        let first = srx.try_recv().expect("GetAddr sent");
+        assert_eq!(first[4], crate::network::protocol::MessageType::GetAddr as u8);
+        assert!(srx.try_recv().is_err(), "no GetAddrV2 for a pre-addrv2 peer");
     }
 
     #[tokio::test]

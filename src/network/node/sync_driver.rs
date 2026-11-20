@@ -1591,6 +1591,7 @@ mod tests {
             connection_token: std::sync::Arc::new(()),
             eclipse_slot: None,
             consensus_fingerprint: None,
+            onion_host: None,
         }
     }
 
