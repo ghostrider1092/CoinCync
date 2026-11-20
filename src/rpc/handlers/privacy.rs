@@ -135,11 +135,30 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // Aggregate view of the Phase 2 privacy stores.
     module.register_method("get_privacy_stats", |_params, state, _ext| {
         let cut_through = state.chain.cut_through_stats();
+        // Report the Spark accumulator from the LIVE libspark pool
+        // (`spark_pool_store`) that shielded txs actually commit to — NOT the
+        // CIP-005 sketch `spark_store`, which the libspark mint/send/unshield
+        // path never writes. Reading the sketch store made get_privacy_stats
+        // (and the explorer's privacy-pools page) report spark_accumulator_size=0
+        // / an empty spark_root even while the real cover set held coins. The
+        // live pool is the same source get_shielded_cover_set and wallets use.
+        #[cfg(feature = "sketch-gk-proof")]
+        let (spark_root, spark_accumulator_size) = state
+            .chain
+            .spark_pool_store
+            .as_ref()
+            .map(|s| (s.current_root(), s.coin_count()))
+            .unwrap_or(([0u8; 32], 0));
+        #[cfg(not(feature = "sketch-gk-proof"))]
+        let (spark_root, spark_accumulator_size) = (
+            state.chain.spark_root(),
+            state.chain.spark_store.as_ref().map(|s| s.size()).unwrap_or(0),
+        );
         Ok::<_, ErrorObjectOwned>(json!({
             "shielded_root":      hex::encode(state.chain.shielded_root()),
             "shielded_tree_size": state.chain.shielded_store.as_ref().map(|s| s.tree_size()).unwrap_or(0),
-            "spark_root":         hex::encode(state.chain.spark_root()),
-            "spark_accumulator_size": state.chain.spark_store.as_ref().map(|s| s.size()).unwrap_or(0),
+            "spark_root":         hex::encode(spark_root),
+            "spark_accumulator_size": spark_accumulator_size,
             "mw_kernel_root":     hex::encode(state.chain.mw_kernel_root()),
             "mw_kernels_kept":    cut_through.kernels_kept,
             "mw_pending_candidates": cut_through.pending_candidates,
@@ -163,9 +182,22 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // ── get_spark_anchor ──────────────────────────────────────
     module
         .register_method("get_spark_anchor", |_params, state, _ext| {
+            // Anchor against the live libspark pool, same as get_privacy_stats.
+            #[cfg(feature = "sketch-gk-proof")]
+            let (root, size) = state
+                .chain
+                .spark_pool_store
+                .as_ref()
+                .map(|s| (s.current_root(), s.coin_count()))
+                .unwrap_or(([0u8; 32], 0));
+            #[cfg(not(feature = "sketch-gk-proof"))]
+            let (root, size) = (
+                state.chain.spark_root(),
+                state.chain.spark_store.as_ref().map(|s| s.size()).unwrap_or(0),
+            );
             Ok::<_, ErrorObjectOwned>(json!({
-                "root": hex::encode(state.chain.spark_root()),
-                "size": state.chain.spark_store.as_ref().map(|s| s.size()).unwrap_or(0),
+                "root": hex::encode(root),
+                "size": size,
             }))
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
