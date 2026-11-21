@@ -121,6 +121,15 @@ pub const TESTNET_GENESIS_HASH: [u8; 32] = [
 /// an alternative chain from genesis. Any chain that disagrees with a checkpoint
 /// at or below the checkpoint height is rejected immediately.
 pub const TESTNET_CHECKPOINT_LIST: &[(u64, &str)] = &[
+    // ── 2026-11-21 POST-h29000 SHIELDED-ACTIVATION FINALITY ANCHOR.
+    // Canonical block 30000 (hash == block 30001's prev_hash, read from the seed
+    // node's authenticated RPC and cross-checked). Pins finality just above the
+    // shielded activation (h29000) so a deep reorg cannot rewind the activation.
+    // This entry is hashed into consensus_fingerprint(Testnet): adding it is a
+    // deliberate, coordinated fingerprint-moving relaunch — the whole fleet
+    // (community too) must upgrade in lockstep. See
+    // docs + scripts/cut-finality-checkpoint.sh.
+    (30000, "760a7596f5985813e03ce251ac677f921bc0db2585863a62f84c0763400c44d7"),
     // ── 2026-10-06 CONSENSUS RELAUNCH: cleared.
     //
     // The prior anchor (h=10000, ac4e4914…) pinned the OLD testnet chain, which
@@ -424,15 +433,16 @@ mod tests {
     fn test_checkpoints_populated() {
         // Heights not in the list return None (no opinion).
         assert_eq!(verify_hardcoded_checkpoint(999_999, &Hash::zero()), None);
-        // The consensus checkpoint list is INTENTIONALLY EMPTY (cleared at the
-        // 2026-10-06 relaunch). The 2026-11-08 snapshot re-anchor (h=12000) is
-        // deliberately NOT here — it lives in TESTNET_SNAPSHOT_REANCHOR so it
-        // never moves the consensus fingerprint. So the highest consensus
-        // checkpoint stays 0 (genesis).
+        // The consensus checkpoint list holds the post-h29000 shielded-activation
+        // finality anchor at h=30000 (pinned 2026-11-21). The 2026-11-08 snapshot
+        // re-anchor (h=12000) is deliberately NOT here — it lives in
+        // TESTNET_SNAPSHOT_REANCHOR so it never moves the consensus fingerprint.
+        // So the highest consensus checkpoint is the finality anchor at 30000.
         let h = highest_checkpoint_height();
-        assert_eq!(h, 0,
-            "consensus checkpoint list must stay empty for fingerprint stability; \
-             snapshot anchors belong in TESTNET_SNAPSHOT_REANCHOR, not here (got {h})");
+        assert_eq!(h, 30_000,
+            "finality anchor must stay pinned at h=30000 (post-h29000 shielded \
+             activation); snapshot anchors belong in TESTNET_SNAPSHOT_REANCHOR, \
+             not here (got {h})");
         // List must be strictly monotonic in height — accidental duplicates
         // or out-of-order entries break the long-range-attack defence.
         let heights: Vec<u64> = TESTNET_CHECKPOINT_LIST.iter().map(|(h, _)| *h).collect();

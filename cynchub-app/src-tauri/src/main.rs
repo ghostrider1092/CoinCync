@@ -215,7 +215,7 @@ fn totp_disable() -> Result<(), String> {
 // tampered binary that could feed the wallet a forked view of the chain. We warn
 // loudly rather than trust its balances. Expected = the live testnet value.
 const EXPECTED_TESTNET_FINGERPRINT: &str =
-    "fc428e8673379f07cc213b9a7aceb4c05d5433387113a02b818ba3e0ab3664ca";
+    "3d3b4c338aeb7c07c2a5a30ec6878010d10dfc8ab16a183f373b837a64158c26";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
