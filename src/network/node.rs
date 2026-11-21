@@ -1197,6 +1197,15 @@ impl P2PNode {
         broadcast::broadcast_block(self.config.magic, block, &self.broadcast_context()).await
     }
 
+    /// Broadcast locally-found Bobtail proof-shares (Observe-phase send-side).
+    #[cfg(feature = "bobtail")]
+    pub async fn broadcast_proof_shares(
+        &self,
+        batch: &crate::consensus::bobtail::ProofShareBatch,
+    ) -> Result<()> {
+        broadcast::broadcast_proof_shares(self.config.magic, batch, &self.broadcast_context()).await
+    }
+
     /// Send message to specific peer
     pub async fn send_to(&self, peer_id: &PeerId, data: Vec<u8>) -> Result<()> {
         broadcast::send_to(&self.peer_senders, peer_id, data).await

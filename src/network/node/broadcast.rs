@@ -160,6 +160,18 @@ async fn broadcast_inv_block(
     broadcast_raw(data, context).await
 }
 
+/// Flood locally-found Bobtail proof-shares to peers (Observe-phase send-side).
+/// Gated; peers without `CAP_BOBTAIL_SHARES` reject the unknown type harmlessly.
+#[cfg(feature = "bobtail")]
+pub(super) async fn broadcast_proof_shares(
+    magic: [u8; 4],
+    batch: &crate::consensus::bobtail::ProofShareBatch,
+    context: &BroadcastContext<'_>,
+) -> Result<()> {
+    let data = Message::proof_shares(magic, batch)?.to_bytes()?;
+    broadcast_raw(data, context).await
+}
+
 /// Advertise the current cumulative chain work to CAP_CHAINWORK peers.
 pub(super) fn announce_chain_work(
     chain: &SharedBlockchain,

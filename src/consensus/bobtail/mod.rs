@@ -36,9 +36,11 @@ pub mod biguint;
 pub mod gossip;
 pub mod health;
 pub mod kmean;
+pub mod mining;
 pub mod shares;
 
 pub use gossip::{Admit, ProofShareBatch, SharePool, CAP_BOBTAIL_SHARES, PROOF_SHARES_MSG_TYPE};
+pub use mining::collect_shares;
 pub use health::{BobtailHealth, ViewDivergence};
 pub use kmean::{bar_fill_bps, k_mean_meets_target, tau_share_target};
 pub use shares::{

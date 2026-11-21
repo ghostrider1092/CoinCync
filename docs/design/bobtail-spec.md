@@ -300,8 +300,13 @@ machinery beyond the (improved, §12.2) time-to-finality distribution.
    that decodes a batch, admits it into a process-local tip-bound `SharePool`
    (fail-closed until `BOBTAIL_OBSERVE_HEIGHT`), and floods the admitted shares to
    the other peers. The share hash uses the existing public `compute_pow_hash`
-   (interim §2 definition; touches no hash-locked file). *Remaining:* the miner
-   send-side (broadcast a node's own low samples), the domain-separated share
-   preimage (replaces the interim hash at the Enforce fork), the `CYNC-POW`
-   diagnostics-bus hookup for `observe()` / `view_divergence`, then the adversarial
-   testnet soak, before any Enforce height is chosen.
+   (interim §2 definition; touches no hash-locked file). The **miner send-side is
+   wired** too (gated): `bobtail::collect_shares` grinds a bounded nonce budget for
+   the node's pubkey against the tip and returns the samples below `tau_share`;
+   the node mining task (`src/bin/node.rs`) runs this each round when Observe is
+   active and gossips them via a new `broadcast_proof_shares` on the p2p handle.
+   A share is its own grind (`RandomX(prev‖pubkey‖nonce)`), not a block-PoW
+   byproduct, since the share hash is `tx_root`-independent. *Remaining:* the
+   domain-separated share preimage (replaces the interim hash at the Enforce fork),
+   the `CYNC-POW` diagnostics-bus hookup for `observe()` / `view_divergence`, then
+   the adversarial testnet soak, before any Enforce height is chosen.
