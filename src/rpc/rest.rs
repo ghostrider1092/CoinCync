@@ -125,6 +125,16 @@ static EMISSION_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 static RECENT_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, (u64, u32)>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+// M2 (#444): /api/v1/search fans out up to 3 backend calls per request
+// (height -> get_block -> get_transaction -> get_asset_info) but was the only
+// such multi-call endpoint with no self-rate-limit. Give it the same global +
+// per-IP fixed-window limiter as the sibling recent/stats/emission endpoints.
+const SEARCH_MAX_REQ_PER_SEC: u32 = 10;
+const SEARCH_GLOBAL_MAX_REQ_PER_SEC: u32 = 10 * SEARCH_MAX_REQ_PER_SEC;
+static SEARCH_WINDOW_SEC: AtomicU64 = AtomicU64::new(0);
+static SEARCH_WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
+static SEARCH_IP_WINDOW: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, (u64, u32)>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 // SEC (2026-09-07): transaction submit drives full CLSAG + Bulletproofs+
 // verification in the backend, but was the only expensive REST endpoint with
 // NO self-rate-limit. Give it the same global + per-IP fixed-window limiter,
@@ -1015,6 +1025,8 @@ async fn submit_transaction(
 /// Returns the type and data of the first match found.
 async fn search(
     State(st): State<RestState>,
+    headers: HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let q = query.q.trim();
@@ -1033,6 +1045,16 @@ async fn search(
             Json(serde_json::json!({"error": "Search query is empty"})),
         ));
     }
+
+    // M2 (#444): rate-limit before the fan-out (up to 3 backend calls/request),
+    // matching the sibling multi-call endpoints (recent/stats/emission).
+    let client_ip = client_ip(&headers, peer);
+    enforce_fixed_window_limit(
+        &SEARCH_WINDOW_SEC,
+        &SEARCH_WINDOW_COUNT,
+        SEARCH_GLOBAL_MAX_REQ_PER_SEC,
+    )?;
+    enforce_ip_fixed_window_limit(&SEARCH_IP_WINDOW, &client_ip, SEARCH_MAX_REQ_PER_SEC)?;
 
     // 1) Try as block height (pure numeric)
     if let Ok(height) = q.parse::<u64>() {
