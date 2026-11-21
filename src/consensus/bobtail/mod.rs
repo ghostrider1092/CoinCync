@@ -80,6 +80,13 @@ pub const BOBTAIL_OBSERVE_HEIGHT: u64 = u64::MAX;
 /// regtest-activation safety model (`SHIELDED_REGTEST_ACTIVATION_HEIGHT`).
 pub const BOBTAIL_REGTEST_OBSERVE_HEIGHT: u64 = 2;
 
+/// **Testnet Observe flag-day** — a bobtail build only. Past this height, testnet
+/// nodes gossip proof-shares and compute the Observe telemetry (read-only; block
+/// validity is UNCHANGED — the consensus fingerprint does not change, no fork).
+/// Chosen ~2.7 days above tip 33,050 so the fleet is deployed with the
+/// `testnet,bobtail` binary before activation. Mainnet stays `u64::MAX`.
+pub const BOBTAIL_TESTNET_OBSERVE_HEIGHT: u64 = 35_000;
+
 /// Height at which the k-mean + canonical-set rule becomes **consensus**
 /// (Enforce). `u64::MAX` = not armed. Flipping this is a coordinated post-audit
 /// hard fork and changes the fingerprint (intended); see `bobtail-spec.md` §10.
@@ -92,7 +99,8 @@ pub const BOBTAIL_ACTIVATION_HEIGHT: u64 = u64::MAX;
 pub const fn bobtail_observe_height(network: crate::config::NetworkType) -> u64 {
     match network {
         crate::config::NetworkType::Regtest => BOBTAIL_REGTEST_OBSERVE_HEIGHT,
-        _ => BOBTAIL_OBSERVE_HEIGHT,
+        crate::config::NetworkType::Testnet => BOBTAIL_TESTNET_OBSERVE_HEIGHT,
+        _ => BOBTAIL_OBSERVE_HEIGHT, // mainnet stays u64::MAX (off)
     }
 }
 
@@ -238,9 +246,17 @@ mod tests {
         use crate::config::NetworkType;
         assert_eq!(BOBTAIL_OBSERVE_HEIGHT, u64::MAX);
         assert_eq!(BOBTAIL_ACTIVATION_HEIGHT, u64::MAX);
-        // testnet/mainnet: Observe off even at huge heights.
-        assert!(!bobtail_observe_active_at(NetworkType::Testnet, 1_000_000));
+        // mainnet: Observe off even at huge heights (fail-closed).
         assert!(!bobtail_observe_active_at(NetworkType::Mainnet, u64::MAX - 1));
+        // testnet: armed at the flag-day Observe height; off below it.
+        assert!(bobtail_observe_active_at(
+            NetworkType::Testnet,
+            BOBTAIL_TESTNET_OBSERVE_HEIGHT
+        ));
+        assert!(!bobtail_observe_active_at(
+            NetworkType::Testnet,
+            BOBTAIL_TESTNET_OBSERVE_HEIGHT - 1
+        ));
         // regtest (a bobtail build): activates at the low regtest height.
         assert!(bobtail_observe_active_at(
             NetworkType::Regtest,
