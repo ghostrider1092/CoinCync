@@ -69,7 +69,18 @@ pub const CAP_CONSENSUS_FINGERPRINT: u64 = 1 << 1;
 /// `const` so it is a single source of truth; extend the OR-set as new
 /// capability bits are added.
 pub const fn local_capabilities() -> u64 {
-    CAP_CHAINWORK | CAP_CONSENSUS_FINGERPRINT
+    let base = CAP_CHAINWORK | CAP_CONSENSUS_FINGERPRINT;
+    // Advertise Bobtail proof-share gossip only in a `bobtail`-feature build, so
+    // a default/production node never signals it and peers never send it the
+    // message. (Activation is further gated by BOBTAIL_OBSERVE_HEIGHT.)
+    #[cfg(feature = "bobtail")]
+    {
+        base | crate::consensus::bobtail::CAP_BOBTAIL_SHARES
+    }
+    #[cfg(not(feature = "bobtail"))]
+    {
+        base
+    }
 }
 
 /// True if `caps` advertises every bit set in `cap`.

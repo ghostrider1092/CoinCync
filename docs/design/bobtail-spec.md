@@ -291,9 +291,17 @@ machinery beyond the (improved, §12.2) time-to-finality distribution.
    gossip pool is built too (`gossip::SharePool`): parent-bound, with admission
    control (verify PoW `< tau_share` — `kmean::tau_share_target` — before relay),
    dedup, wrong-parent drop, flood cap, and tip-change clearing, plus the
-   `ProofShareBatch` wire type and the `CAP_BOBTAIL_SHARES` Flare bit. *Remaining:*
-   the live P2P dispatch patch (register the `MessageType` variant + `TryFrom` arm
-   in `network/protocol.rs`, OR the CAP bit into `firework::local_capabilities`,
-   and route inbound frames to `SharePool::admit_batch` + relay), the `CYNC-POW`
-   diagnostic that renders `observe()` / `view_divergence` onto the diagnostics
-   bus, then the adversarial testnet soak, before any Enforce height is chosen.
+   `ProofShareBatch` wire type and the `CAP_BOBTAIL_SHARES` Flare bit. The
+   **inbound dispatch is wired** too (all gated, Observe-only, no hash-locked file
+   touched): a `cfg`-gated `MessageType::ProofShares = 53` (+ `TryFrom` / `max_size`
+   arms — a non-`bobtail` build rejects discriminant 53 as unknown), the
+   `CAP_BOBTAIL_SHARES` bit OR'd into `firework::local_capabilities`, a
+   `Message::proof_shares` constructor, and a `dispatch::bobtail_shares` handler
+   that decodes a batch, admits it into a process-local tip-bound `SharePool`
+   (fail-closed until `BOBTAIL_OBSERVE_HEIGHT`), and floods the admitted shares to
+   the other peers. The share hash uses the existing public `compute_pow_hash`
+   (interim §2 definition; touches no hash-locked file). *Remaining:* the miner
+   send-side (broadcast a node's own low samples), the domain-separated share
+   preimage (replaces the interim hash at the Enforce fork), the `CYNC-POW`
+   diagnostics-bus hookup for `observe()` / `view_divergence`, then the adversarial
+   testnet soak, before any Enforce height is chosen.
