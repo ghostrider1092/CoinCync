@@ -312,4 +312,28 @@ Under multi-sample that tail vanishes (never below 4), so a time-based acceptanc
 rule becomes a reliable guarantee and the exploitable slow-gap window collapses.
 
 **Net:** security-neutral on the hard thresholds (not weakened), strictly better
-on time-based finality. Remaining Phase-C item: the gossip-cost bound (§7.3).
+on time-based finality.
+
+## 13. Gossip-cost bound (§7.3) — Phase C complete (2026-11-20)
+
+`scratchpad/gossip_sim.py`. Miners broadcast every hash below a share threshold
+`tau_share`, set so the expected shares per block is a safety multiple of k.
+Because `tau_share` scales with the block target, shares/block is constant in k
+and **independent of hashrate** (more hashrate → higher difficulty → same count).
+
+| k | safety c | E[shares]/block | P(≥k shares) | P(captures true k-lowest) | KB/block |
+|---|---------|-----------------|--------------|---------------------------|----------|
+| 10 | 2 | 20 | 0.995 | 0.995 | 1.6 |
+| 10 | **3** | 30 | **1.000** | **1.000** | 2.3 |
+| 20 | 3 | 60 | 1.000 | 1.000 | 4.7 |
+
+With **c = 3** the k-lowest are present and captured with probability 1.000. The
+traffic is ~3k shares/block (~2–5 KB per 120 s block, ~20–40 B/s per node,
+flood-deduped) — negligible against block propagation (KB–MB). Spam is
+self-limiting: every share is real work (`hash < tau_share`), so an attacker's
+share rate is bounded by its hashrate, and the mesh's existing per-peer rate cap
+backstops it. No amplification.
+
+**Phase C is complete.** All gates pass: conversion constant (§10.1),
+share-withholding (§10.2), reward split (§11), security/finality (§12), gossip
+cost (§13). The design is ready to spec — see `bobtail-spec.md`.
