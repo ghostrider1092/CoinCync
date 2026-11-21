@@ -243,7 +243,11 @@ const RPC_ALLOWED_METHODS: &[&str] = &[
     "get_block_by_height",
     "get_block", // by hash hex (embedded explorer search bar)
     "get_block_range",
-    // Peer table for the explorer "Peers" tab.
+    // Peer table for the explorer "Peers" tab. H3 (#442): the get_peers handler
+    // now force-minimizes addr + peer-id regardless of the node's
+    // minimize_metadata setting, so the public /rpc proxy no longer leaks peer
+    // IPs / id prefixes (serialize_peer_info redacts both under minimization).
+    // See handlers/node.rs get_peers.
     "get_peers",
     // Mempool
     "get_mempool_info",
