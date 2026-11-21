@@ -156,14 +156,16 @@ it bounds the extra coinbase outputs while preserving the incentive.
 
 Bobtail's headline result is that it **preserves the Nakamoto honest-majority
 bound**: an adversary still needs > 50% of hashrate to control the chain, the
-same as single-sample PoW. Moreover, because low-variance mining removes the
-"lucky streak" that selfish mining and short-range double-spends rely on, Bobtail
-**slightly improves** resistance to those attacks at a given honest-majority
-margin. The adversarial surface specific to the new mechanism — **share
-withholding** (a miner hoards low samples to bias block assembly) and
-**share spam** — must be modelled explicitly before any fork (see §7), but the
-base security bound is not weakened. This is a published, reviewed result; we are
-validating and adapting it, not asserting new cryptography.
+same as single-sample PoW. Its effect on **depth-based** attacks (selfish mining,
+d-confirmation double-spend) is **neutral, not an improvement** — those depend on
+the block-*finder* sequence (Bernoulli in hashrate share), which block-time
+variance does not touch, so the thresholds are unchanged (confirmed in §12.1; an
+earlier draft of this note said "slightly improves" — that was wrong). Where
+multi-sample genuinely helps is **time-based finality** (§12.2). The adversarial
+surface specific to the new mechanism — **share withholding** (no proposer
+advantage, §10.2) and **share spam** — is bounded; the base security bound is not
+weakened. This is a published, reviewed result; we are validating and adapting it,
+not asserting new cryptography.
 
 ## 7. Open questions / risks (settle before a spec)
 
@@ -279,3 +281,35 @@ so the proposer cannot pick itself), also shielded — 1 private output/block, f
 in expectation, higher payout variance. A lighter interim is transparent outputs
 to one-time stealth addresses. This lives entirely in the gated acceptance/coinbase
 module (Observe→Enforce), never touching the RandomX core.
+
+## 12. Security under multi-sample — modelled (2026-11-20)
+
+`scratchpad/selfish_mining_sim.py`.
+
+**12.1 Depth-based attacks: unchanged (not weakened, not improved).** Selfish
+mining and the d-confirmation double-spend depend only on *who finds each block*
+— Bernoulli in hashrate share — so block-time variance cannot change them. The
+double-spend catch-up simulation matches the Nakamoto gambler's-ruin
+`P = (α/(1-α))^z` exactly (α=0.10/0.30/0.45, z=6 → 0.0000/0.0062/0.2992 vs
+formula 0.0000/0.0062/0.3000). These thresholds are **identical at every k**, so
+multi-sample does not weaken the hard security bound — the non-negotiable for a
+consensus change. (It also does *not* improve them; §6's earlier "slightly
+improves" was wrong and is corrected.)
+
+**12.2 Time-based finality: genuinely improved.** The benefit is in the *time*
+domain. A merchant waiting a fixed 12 minutes receives a random number of
+confirmations; low variance makes that count reliable:
+
+| k | mean confs | p1 | p99 | P(< 3 confirmations) |
+|---|-----------|----|-----|----------------------|
+| **1 (today)** | 6.0 | 1 | 12 | **6.3 %** |
+| 10 | 5.6 | 4 | 8 | **0 %** |
+| 20 | 5.5 | 4 | 7 | **0 %** |
+
+Today ~6 % of 12-minute waits silently yield fewer than 3 confirmations — unsafe
+for time-based acceptance, and the slow-gap window a time-based attacker exploits.
+Under multi-sample that tail vanishes (never below 4), so a time-based acceptance
+rule becomes a reliable guarantee and the exploitable slow-gap window collapses.
+
+**Net:** security-neutral on the hard thresholds (not weakened), strictly better
+on time-based finality. Remaining Phase-C item: the gossip-cost bound (§7.3).
