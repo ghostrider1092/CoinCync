@@ -344,22 +344,39 @@ async fn rest_transaction_invalid_400_and_missing_404() {
 async fn rest_submit_transaction_rejects_non_hex_and_oversize_400() {
     let (_rpc, rest) = start_rpc_and_rest(19744, 19746).await;
     let c = client();
-    // Non-hex.
-    let non_hex = c
-        .post("http://127.0.0.1:19746/api/v1/transaction/submit")
-        .json(&serde_json::json!({ "tx_hex": "nothex!!" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(non_hex.status(), reqwest::StatusCode::BAD_REQUEST);
-    // Over the 1 MiB cap (still valid hex chars).
-    let oversize = c
-        .post("http://127.0.0.1:19746/api/v1/transaction/submit")
-        .json(&serde_json::json!({ "tx_hex": "a".repeat(1024 * 1024 + 2) }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(oversize.status(), reqwest::StatusCode::BAD_REQUEST);
+    // The submit endpoint rate-limits per-IP (SUBMIT_MAX_REQ_PER_SEC) BEFORE it
+    // validates tx_hex (rest.rs: enforce_ip_fixed_window_limit precedes the
+    // hex/size check). That per-IP window is a process-global static, and the
+    // in-process test REST servers all share it keyed on 127.0.0.1 — so a
+    // concurrent sibling (`rest_submit_transaction_rate_limits_at_5_per_sec`
+    // bursts 40 requests) can transiently push this request to 429 before it
+    // ever reaches validation, flaking the assert. Wait out the <=1s window and
+    // retry until we observe the real validation status.
+    async fn submit_status(c: &reqwest::Client, body: serde_json::Value) -> reqwest::StatusCode {
+        for _ in 0..40 {
+            let resp = c
+                .post("http://127.0.0.1:19746/api/v1/transaction/submit")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return resp.status();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("submit stayed rate-limited (429) across retries — window never cleared");
+    }
+    // Non-hex → 400.
+    assert_eq!(
+        submit_status(&c, serde_json::json!({ "tx_hex": "nothex!!" })).await,
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    // Over the 1 MiB cap (still valid hex chars) → 400.
+    assert_eq!(
+        submit_status(&c, serde_json::json!({ "tx_hex": "a".repeat(1024 * 1024 + 2) })).await,
+        reqwest::StatusCode::BAD_REQUEST
+    );
     rest.abort();
 }
 
