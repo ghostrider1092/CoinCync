@@ -287,7 +287,13 @@ machinery beyond the (improved, §12.2) time-to-finality distribution.
    bar-fill margin — plus `view_divergence`, the partial-view split early-warning
    that counts a block's canonically-lower omitted shares and its shares unseen
    locally) — all unit-tested. The omission check compares over the full canonical
-   total order (hash, pubkey, nonce), closing the equal-hash swap. *Remaining:*
-   proof-share gossip + relay (§3), the `CYNC-POW-00x` diagnostic that renders
-   `observe()` / `view_divergence` onto the diagnostics bus, then the adversarial
-   testnet soak, before any Enforce height is chosen.
+   total order (hash, pubkey, nonce), closing the equal-hash swap. The proof-share
+   gossip pool is built too (`gossip::SharePool`): parent-bound, with admission
+   control (verify PoW `< tau_share` — `kmean::tau_share_target` — before relay),
+   dedup, wrong-parent drop, flood cap, and tip-change clearing, plus the
+   `ProofShareBatch` wire type and the `CAP_BOBTAIL_SHARES` Flare bit. *Remaining:*
+   the live P2P dispatch patch (register the `MessageType` variant + `TryFrom` arm
+   in `network/protocol.rs`, OR the CAP bit into `firework::local_capabilities`,
+   and route inbound frames to `SharePool::admit_batch` + relay), the `CYNC-POW`
+   diagnostic that renders `observe()` / `view_divergence` onto the diagnostics
+   bus, then the adversarial testnet soak, before any Enforce height is chosen.

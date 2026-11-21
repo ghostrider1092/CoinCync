@@ -33,12 +33,14 @@
 //! coordinated post-audit hard fork; see `bobtail-spec.md` §10.
 
 pub mod biguint;
+pub mod gossip;
 pub mod health;
 pub mod kmean;
 pub mod shares;
 
-pub use kmean::{bar_fill_bps, k_mean_meets_target};
+pub use gossip::{Admit, ProofShareBatch, SharePool, CAP_BOBTAIL_SHARES, PROOF_SHARES_MSG_TYPE};
 pub use health::{BobtailHealth, ViewDivergence};
+pub use kmean::{bar_fill_bps, k_mean_meets_target, tau_share_target};
 pub use shares::{
     block_shares_valid, canonical_k_lowest, count_omitted_lower, equal_split, lottery_index,
     max_pool_size, omits_lower_share, retain_lowest, ResolvedShare, ShareProof,

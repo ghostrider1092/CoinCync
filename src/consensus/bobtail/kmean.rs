@@ -95,6 +95,24 @@ pub fn bar_fill_bps(samples: &[Hash], target: &Hash) -> u64 {
     }
 }
 
+/// The gossip threshold `tau_share = C_SHARE·K·T` (`bobtail-spec.md` §1) as a
+/// 256-bit target: a sample is worth gossiping iff `h ≤ tau_share` (i.e.
+/// `h.meets_difficulty(tau_share_target)`). `tau_share` is ≈ `2·C_SHARE/(K+1)`
+/// times the block bar `τ`, so the pool holds `E[shares] = C_SHARE·K` per block.
+/// Clamped to the maximum target when `C_SHARE·K·T` would overflow 256 bits (an
+/// easy `T`), so it never wraps.
+pub fn tau_share_target(target: &Hash, k: usize, c_share: u64) -> Hash {
+    let t = U512::from_big_endian(target.as_bytes());
+    let prod = t * U512::from(c_share) * U512::from(k as u64);
+    let max256 = (U512::one() << 256usize) - U512::one();
+    let v = if prod > max256 { max256 } else { prod };
+    let mut be = [0u8; 64];
+    v.to_big_endian(&mut be);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&be[32..64]); // low 256 bits (big-endian)
+    Hash::from_bytes(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +213,17 @@ mod tests {
         let at = vec![h(0x20); 3];
         assert_eq!(bar_fill_bps(&at, &h(0x10)), 10_000);
         assert!(k_mean_meets_target(&at, &h(0x10)));
+    }
+
+    /// `tau_share = C_SHARE·K·T`, clamped to max. K=20, C_SHARE=3 → 60·T.
+    #[test]
+    fn tau_share_is_c_k_times_target_clamped() {
+        // T first byte 0x01 → 60·T has first byte 0x3C (= 60).
+        let ts = tau_share_target(&h(0x01), 20, 3);
+        assert_eq!(ts.as_bytes()[0], 0x3C, "60·T");
+        // Overflow clamps to the maximum target (never wraps).
+        let maxed = tau_share_target(&Hash::from_bytes([0xFF; 32]), 20, 3);
+        assert_eq!(maxed, Hash::from_bytes([0xFF; 32]), "clamped, not wrapped");
     }
 
     /// No overflow / panic at the extreme: K large, all samples max, max target.
