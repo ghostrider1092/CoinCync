@@ -15,10 +15,17 @@ Prereqs settled in the analysis: conversion constant (§10.1), reward split
 
 | name | value | notes |
 |------|-------|-------|
-| `K` | **16** (knee of 10–20) | samples per block; block-time CV ≈ 0.28 |
-| `C_SHARE` | 3 | share safety factor → E[shares]/block ≈ 48 |
+| `K` | **20** (95%-in-band knee) | samples/block; block-time CV ≈ 0.26, ~95% of blocks in 60–180 s |
+| `C_SHARE` | 3 | share safety factor → E[shares]/block = 3K = 60 |
 | `tau = T·(K+1)/2` | derived | k-mean block threshold from the ASERT target `T` |
-| `tau_share` | tracks `T` | gossip threshold; set so E[shares]=`C_SHARE`·K |
+| `tau_share = 3·K·T` | derived (≈5.7× `tau`) | gossip threshold; couples to the retarget, no separate knob |
+
+`K` was finalized by full cost accounting (`scratchpad/finalize_k.py`): smoothness
+vs gossip, shielded-coinbase chain growth, and proving. The shielded-coinbase
+output count *saturates* (~6–7/block even at k=32, since one large miner holds
+several of the K slots), so chain growth is sublinear in K and modest (~1.4 GB/yr
+at K=20; ~4.7 KB gossip/block; ~39 ms proving). Gains flatten past K=20, so 20 is
+the knee. K=16 (CV 0.28, ~90% in-band) is a lighter power-of-two alternative.
 | `BOBTAIL_ACTIVATION_HEIGHT` | TBD | flag-day; `u64::MAX` until scheduled |
 | `BOBTAIL_OBSERVE_HEIGHT` | TBD < activation | start computing (not enforcing) |
 
@@ -152,12 +159,16 @@ machinery beyond the (improved, §12.2) time-to-finality distribution.
 
 ## 13. Open before implementation
 
-1. Exact `tau_share` calibration constant and its retarget coupling.
-2. Shielded-coinbase mechanics: K small shielded mints per block on the existing
-   Spark path; measure chain-growth and proving cost; confirm the split is
-   verifiable without revealing amounts.
+1. ~~`tau_share` calibration~~ — **done**: `tau_share = 3·K·T` (≈5.7× `tau`),
+   couples to the retarget; derived in §1.
+2. Shielded-coinbase mechanics: ~6–7 small shielded mints per block on the Spark
+   path (count saturates sublinearly in K). Chain growth ~1.4 GB/yr, proving
+   ~39 ms/block with the batched GK prover (first-order estimates from
+   `finalize_k.py`) — still to confirm the split is verifiable without revealing
+   amounts, and to measure real proving on the Spark FFI.
 3. Grinding-resistance proof for the lottery fallback’s `H(shares) mod K`.
-4. `K` final value (16 recommended; re-confirm against gossip + proving budget).
+4. ~~`K` final value~~ — **done**: K=20 (the 95%-in-band knee), by full cost
+   accounting; K=16 is the lighter power-of-two alternative.
 5. Full Phase-C selfish-mining write-up beyond the depth/finality split (done)
    — model any mempool-level share games.
 6. Reference implementation in the Observe module, then the adversarial testnet
