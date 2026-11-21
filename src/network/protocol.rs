@@ -1042,8 +1042,11 @@ mod tests {
     /// authoritative list mirrored from the `TryFrom` impl; any drift between
     /// this and the impl is a wire-compatibility break the sweep tests catch.
     const VALID_DISCRIMINANTS: &[u8] = &[
-        0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 30, 31, 40, 41, 50, 51, 52, 60, 61,
-        62, 63, 64, 65, 70, 71, 80, 81, 99,
+        0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 30, 31, 40, 41, 50, 51, 52,
+        // Bobtail proof-share message (gated); only defined in a `bobtail` build.
+        #[cfg(feature = "bobtail")]
+        53,
+        60, 61, 62, 63, 64, 65, 70, 71, 80, 81, 99,
     ];
 
     /// n distinct hashes (varying the first two bytes so counts up to ~65k
@@ -1131,10 +1134,11 @@ mod tests {
                 .unwrap_or_else(|_| panic!("discriminant {} must be accepted", b));
             assert_eq!(variant as u8, b, "discriminant {} must round-trip", b);
         }
+        let expected = if cfg!(feature = "bobtail") { 34 } else { 33 };
         assert_eq!(
             VALID_DISCRIMINANTS.len(),
-            33,
-            "expected 33 defined message types"
+            expected,
+            "expected {expected} defined message types"
         );
     }
 
