@@ -4018,6 +4018,27 @@ impl Blockchain {
                                 // reorg -> mempool/consensus partition. Restore the disk
                                 // rows so the rollback is symmetric on disk as well.
                                 self.persist_output_index(&txs, *h);
+                                // H1 (#440): re-feed the Phase-2 shielded stores, matching
+                                // every other apply site (clean-extend :2793/2809, reorg-
+                                // success tip :4223/4225). The disconnect above rewound
+                                // these stores; without re-applying here the in-memory
+                                // shielded tree / spark accumulator / kernels stay short of
+                                // the restored tip and silently diverge from consensus (the
+                                // O(1) lock-step guard can't catch it — the checkpoints WERE
+                                // pushed). begin_staging buffers the persistence writes; a
+                                // failed reorg never drains/commits, so the staged buffer is
+                                // discarded (reset by the next block's begin_staging) and the
+                                // on-disk store — untouched by this in-memory rollback — is
+                                // not double-written. Only the in-memory accumulators are
+                                // restored, which is exactly the gap. Inert while stores None.
+                                if let Some(s) = &self.shielded_store { s.begin_staging(); }
+                                if let Some(s) = &self.spark_store { s.begin_staging(); }
+                                if let Some(s) = &self.kernel_store { s.begin_staging(); }
+                                self.apply_shielded_txs(&txs, *h);
+                                #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                                if let Some(s) = &self.spark_pool_store { s.begin_staging(); }
+                                #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                                self.apply_spark_v2_txs(&txs, *h);
                             }
                         }
 
@@ -4190,6 +4211,21 @@ impl Blockchain {
                                 // disconnect removed (R-68), so a failed reorg is
                                 // symmetric on disk — see the path-A note above.
                                 self.persist_output_index(&txs, *h);
+                                // H1 (#440): re-feed the Phase-2 shielded stores (same as
+                                // site 6a and every other apply site). Without this the
+                                // in-memory shielded accumulators stay short of the restored
+                                // tip after a failed reorg over shielded-bearing blocks,
+                                // silently diverging from consensus. The staged persistence
+                                // writes are discarded on the non-committing rollback, so the
+                                // on-disk store is not double-written. Inert while stores None.
+                                if let Some(s) = &self.shielded_store { s.begin_staging(); }
+                                if let Some(s) = &self.spark_store { s.begin_staging(); }
+                                if let Some(s) = &self.kernel_store { s.begin_staging(); }
+                                self.apply_shielded_txs(&txs, *h);
+                                #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                                if let Some(s) = &self.spark_pool_store { s.begin_staging(); }
+                                #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
+                                self.apply_spark_v2_txs(&txs, *h);
                             }
                         }
 
