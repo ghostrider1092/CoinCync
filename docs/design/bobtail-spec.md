@@ -306,7 +306,12 @@ machinery beyond the (improved, §12.2) time-to-finality distribution.
    the node mining task (`src/bin/node.rs`) runs this each round when Observe is
    active and gossips them via a new `broadcast_proof_shares` on the p2p handle.
    A share is its own grind (`RandomX(prev‖pubkey‖nonce)`), not a block-PoW
-   byproduct, since the share hash is `tx_root`-independent. *Remaining:* the
-   domain-separated share preimage (replaces the interim hash at the Enforce fork),
-   the `CYNC-POW` diagnostics-bus hookup for `observe()` / `view_divergence`, then
-   the adversarial testnet soak, before any Enforce height is chosen.
+   byproduct, since the share hash is `tx_root`-independent. The **`CYNC-POW` diagnostics bus
+   is wired** too: catalog entries `CYNC-POW-004` (slot concentration) and
+   `CYNC-POW-005` (partial-view divergence), a `bobtail::diagnostics` module that
+   turns `observe()` / `view_divergence` into catalog-backed `Report`s on
+   threshold crossings, and a throttled (once/min) concentration emission from the
+   Observe share handler. *Remaining:* the domain-separated share preimage
+   (replaces the interim hash at the Enforce fork) and the `view_divergence`
+   emission at Enforce (needs a block carrying a share set), then the adversarial
+   testnet soak, before any Enforce height is chosen.

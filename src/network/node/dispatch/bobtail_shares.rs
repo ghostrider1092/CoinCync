@@ -66,20 +66,33 @@ pub(super) async fn handle_proof_shares(
 
     // Admit under the lock, collecting the shares to relay. The guard is dropped
     // before any `.await` so no lock is held across the network send.
-    let to_relay: Vec<ShareProof> = {
+    let (to_relay, diag): (Vec<ShareProof>, Option<String>) = {
         let mut guard = POOL.lock().unwrap_or_else(|e| e.into_inner());
         let pool = guard.get_or_insert_with(|| {
             SharePool::new(tip, bobtail::BOBTAIL_K, bobtail::BOBTAIL_C_SHARE)
         });
         pool.on_tip_change(tip); // shares are parent-bound; reset if the tip moved
         let verdicts = pool.admit_batch(&batch, &tau, hasher);
-        batch
+        let to_relay = batch
             .shares
             .iter()
             .zip(verdicts)
             .filter_map(|(s, v)| matches!(v, Admit::Accepted { relay: true }).then(|| s.clone()))
-            .collect()
+            .collect();
+        // CYNC-POW Observe diagnostic (throttled to once/min): surface
+        // slot-concentration onto the diagnostics bus.
+        let diag = if bobtail::diagnostics::observe_due() {
+            bobtail::diagnostics::concentration_report(&pool.observe(&target))
+                .map(|r| r.to_string())
+        } else {
+            None
+        };
+        (to_relay, diag)
     };
+
+    if let Some(d) = diag {
+        tracing::warn!(target: "bobtail", "{d}");
+    }
 
     if to_relay.is_empty() {
         return;

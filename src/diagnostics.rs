@@ -319,6 +319,13 @@ pub const CYNC_CONS_040: &str = "CYNC-CONS-040";
 pub const CYNC_POW_002: &str = "CYNC-POW-002";
 /// PoW algorithm mismatch.
 pub const CYNC_POW_003: &str = "CYNC-POW-003";
+/// Bobtail (Observe): one miner holds a majority of the K slots (centralization).
+#[cfg(feature = "bobtail")]
+pub const CYNC_POW_004: &str = "CYNC-POW-004";
+/// Bobtail (Observe): this node's canonical K-lowest diverges from a block's
+/// claimed share set (partial-view split risk).
+#[cfg(feature = "bobtail")]
+pub const CYNC_POW_005: &str = "CYNC-POW-005";
 
 /// The canonical diagnostic catalog — the single source of truth for runtime
 /// messages, `explain`, and the generated `DIAGNOSTICS.md`.
@@ -805,6 +812,32 @@ pub const CATALOG: &[Diagnostic] = &[
         location: "src/consensus/pow_cache.rs::pow_hash_cached",
         spec: "docs/design (PoW algorithm)",
         help: "the block's claimed PoW algorithm did not match the computed one.",
+    },
+    #[cfg(feature = "bobtail")]
+    Diagnostic {
+        code: CYNC_POW_004,
+        domain: Domain::Pow,
+        severity: Severity::Warning,
+        title: "bobtail: a single miner holds a majority of the K slots",
+        invariant: "the canonical K-lowest set should draw from many miners",
+        location: "src/consensus/bobtail/diagnostics.rs::concentration_report",
+        spec: "docs/design/bobtail-spec.md (Observe telemetry)",
+        help: "Observe-only, detection: one miner owning most slots erodes the \
+               multi-sample decentralization benefit. Measure across the fleet \
+               before arming Enforce; not a consensus fault.",
+    },
+    #[cfg(feature = "bobtail")]
+    Diagnostic {
+        code: CYNC_POW_005,
+        domain: Domain::Pow,
+        severity: Severity::Warning,
+        title: "bobtail: local canonical set diverges from a block's share set",
+        invariant: "nodes agree on the globally K-lowest shares (no partial-view split)",
+        location: "src/consensus/bobtail/diagnostics.rs::divergence_report",
+        spec: "docs/design/bobtail-spec.md (partial-view, §6.3.3)",
+        help: "Observe-only, detection: the block omitted a share this node ranks \
+               lower, or used shares this node never saw. Size the gossip-inclusion \
+               grace from this before arming Enforce; not a consensus fault yet.",
     },
 ];
 

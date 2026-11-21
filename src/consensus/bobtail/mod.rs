@@ -33,6 +33,7 @@
 //! coordinated post-audit hard fork; see `bobtail-spec.md` §10.
 
 pub mod biguint;
+pub mod diagnostics;
 pub mod gossip;
 pub mod health;
 pub mod kmean;
