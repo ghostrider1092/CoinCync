@@ -111,13 +111,33 @@ k-mean. This preserves expected hashes/block (hence difficulty and the 51 % boun
 ## 8. Reward / coinbase rule
 
 Per §11: the block reward (unchanged emission total) is split **equally across
-the K share owners**, paid as **shielded coinbase outputs into the Spark pool**
-(one per owner, deduplicated so an owner holding several of the K gets one output
-for the sum). Shielded payouts leak no miner linkage and grow the anonymity set.
-The coinbase must mint exactly `reward/K · (count_i)` to each distinct owner;
-validators check the split against the K shares. **Fallback** (if chain size
-binds): a single shielded output to the grinding-resistant lottery winner
-`idx = H(shares) mod K`. Both live in this module; emission policy is untouched.
+the K share owners**, paid as **shielded coinbase outputs into the Spark pool**.
+
+**Amounts are PUBLIC, not hidden** (corrects §13.2's earlier framing). Hiding
+coinbase amounts would make total issuance unauditable and break the "no hidden
+inflation" guarantee (`chain supply`/`chain emission`). So each output commits to
+the *rule-determined* amount `reward/K · count_i`, which anyone can compute. The
+privacy is elsewhere: each output goes to a one-time **stealth address**
+(unlinkable to the miner) and joins the **Spark pool**, so *who* was paid is
+hidden and the *later spend* is pool-private. Who/when private; how-much public —
+which is the correct posture for coinbase.
+
+**Verification** (cheap; uses the Pedersen commitments Spark already has, which
+are additively homomorphic):
+1. the coinbase has the right output count, each to a declared stealth key;
+2. each output's commitment `C_i` opens to the public amount `reward/K · count_i`;
+3. `Σ C_i = reward·G + R·H` — sums to exactly the block reward, emission-neutral,
+   checkable homomorphically (no inflation);
+4. each output is a well-formed Spark coin.
+
+**Output grouping** — a sub-choice: **dedup** (one output per distinct owner,
+`reward/K · count_i`; ~6–7 outputs, ~1.4 GB/yr, but an output's amount leaks that
+owner's slot-count as *unlinkable* metadata) vs **uniform** (K separate `reward/K`
+outputs, all identical, zero metadata, ~4 GB/yr). Recommend **dedup** (the
+metadata is tiny and tied to an unlinkable stealth key); uniform is the
+maximal-privacy option. **Fallback** (if chain size binds): a single shielded
+output to the grinding-resistant lottery winner `idx = H(shares) mod K`. All in
+this module; emission policy untouched.
 
 ## 9. Fork choice
 
@@ -161,11 +181,12 @@ machinery beyond the (improved, §12.2) time-to-finality distribution.
 
 1. ~~`tau_share` calibration~~ — **done**: `tau_share = 3·K·T` (≈5.7× `tau`),
    couples to the retarget; derived in §1.
-2. Shielded-coinbase mechanics: ~6–7 small shielded mints per block on the Spark
-   path (count saturates sublinearly in K). Chain growth ~1.4 GB/yr, proving
-   ~39 ms/block with the batched GK prover (first-order estimates from
-   `finalize_k.py`) — still to confirm the split is verifiable without revealing
-   amounts, and to measure real proving on the Spark FFI.
+2. Shielded-coinbase mechanics — **design settled (§8)**: amounts PUBLIC
+   (emission-auditable), recipients shielded stealth into the Spark pool,
+   split verified by the homomorphic commitment sum = reward; dedup grouping
+   (~6–7 outputs, ~1.4 GB/yr). *Remaining:* measure real proving cost on the
+   Spark FFI (needs a build) and confirm the commitment-sum check against the
+   live `sketch-gk-proof + libspark-ffi` path.
 3. Grinding-resistance proof for the lottery fallback’s `H(shares) mod K`.
 4. ~~`K` final value~~ — **done**: K=20 (the 95%-in-band knee), by full cost
    accounting; K=16 is the lighter power-of-two alternative.
