@@ -39,6 +39,8 @@ pub mod hashrate;
 pub mod health;
 pub mod kmean;
 pub mod mining;
+pub mod retarget;
+pub mod shadow;
 pub mod shares;
 
 pub use hashrate::ShareHashrate;

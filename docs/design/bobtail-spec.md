@@ -263,7 +263,25 @@ block-interval estimate. The Observe share handler records each admitted batch
 into a sliding window (`ShareHashrate`) and logs the estimate. This **measures**
 the signal with real data now; feeding it into the ASERT retarget for a smoother,
 lower-lag difficulty is a gated, post-audit step (it would touch `difficulty.rs`,
-so it stays a connector/measurement until then). Pure + unit-tested.
+so it stays a connector/measurement until then). `consensus::bobtail::shadow`
+turns the estimate into a **shadow difficulty** (`hashrate · TARGET_BLOCK_TIME`)
+and compares it side by side with the live ASERT difficulty (`DifficultyShadow`:
+ratio + the `√N` noise advantage); the Observe handler logs the comparison each
+tick. A Monte-Carlo demo (`tests/bobtail_observe_e2e.rs`) confirms the share-based
+estimate's CV is ~√60 ≈ 7.7× tighter than a block-interval one. Pure + unit-tested.
+
+The retarget **rule** is also fully built, as a connector + gated policy-slot
+(`consensus::bobtail::retarget`): `retarget_blend` weighted-averages the ASERT
+target with the share-informed shadow target in the 256-bit domain, and
+`effective_next_target(height, asert, hashrate)` is the slot the validator would
+consult — returning the ASERT target **unchanged** until `bobtail_enforce_active_at`
+(blend held at `0/4` while gated), so wiring it into a call site is byte-identical.
+This keeps the hash-locked `difficulty.rs` / `validation.rs` untouched. The **one
+remaining change** to make the retarget live is the locked-core call site adopting
+this slot — a single coordinated post-audit fork edit (review + lock regen +
+fingerprint change), exactly like the Enforce height (§10). It is deliberately a
+gate, not a loose end: everything up to it (the rule, the shadow comparison, the
+telemetry) is wired and tested; only the locked validator's adoption is deferred.
 
 ## 13. Open before implementation
 

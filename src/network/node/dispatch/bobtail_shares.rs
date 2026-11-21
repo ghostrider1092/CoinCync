@@ -121,11 +121,16 @@ pub(super) async fn handle_proof_shares(
         tracing::warn!(target: "bobtail", "{c}");
     }
     if let Some((rate, n)) = hr_sample {
+        // Shadow difficulty from the share-hashrate, side by side with the live
+        // ASERT difficulty (Observe comparison — no difficulty.rs change).
+        let s = bobtail::shadow::DifficultyShadow::new(&target, rate, n);
         tracing::info!(
             target: "bobtail",
-            "observe: share-hashrate ≈ {rate:.3e} H/s from {n} shares in {}s (dense signal — ~{}× more samples than block-interval)",
-            bobtail::hashrate::DEFAULT_WINDOW_SECS,
-            bobtail::BOBTAIL_C_SHARE as usize * bobtail::BOBTAIL_K
+            "observe: share-hashrate ≈ {rate:.3e} H/s ({n} shares) | shadow-diff {:.3e} vs block-diff {} (ratio {:.2}, ~{:.1}× lower noise)",
+            s.share_difficulty,
+            s.block_difficulty,
+            s.ratio(),
+            1.0 / s.noise_fraction(1)
         );
     }
     tracing::debug!(

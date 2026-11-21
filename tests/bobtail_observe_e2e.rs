@@ -122,3 +122,61 @@ fn bobtail_observe_end_to_end_with_real_randomx() {
 
     println!("\n=== Observe path verified end-to-end with real RandomX ===\n");
 }
+
+// --- Inlined RNG so this demo needs no extra dep ---
+fn xorshift01(s: &mut u64) -> f64 {
+    *s ^= *s << 13;
+    *s ^= *s >> 7;
+    *s ^= *s << 17;
+    (*s >> 11) as f64 / (1u64 << 53) as f64
+}
+fn normal(s: &mut u64, mean: f64, std: f64) -> f64 {
+    let u1 = xorshift01(s).max(1e-12);
+    let u2 = xorshift01(s);
+    let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+    mean + std * z
+}
+
+/// Monte-Carlo demonstration that the share-informed hashrate estimate is far
+/// smoother than a block-interval one: shares arrive ~C_SHARE*K× more often, so
+/// the estimate's spread (CV ∝ 1/√N) is ~√(C_SHARE*K) tighter. This is the
+/// evidence a share-informed difficulty retarget would be smoother + lower-lag.
+#[test]
+fn share_vs_block_difficulty_is_smoother() {
+    let k = bobtail::BOBTAIL_K as f64;
+    let c = bobtail::BOBTAIL_C_SHARE as f64;
+    let window = 1200.0; // 10 block intervals
+    let lambda_block = window / 120.0; // ~10 blocks/window
+    let lambda_share = lambda_block * c * k; // ~600 shares/window
+
+    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+    let trials = 4000;
+    let (mut blk, mut shr) = (Vec::with_capacity(trials), Vec::with_capacity(trials));
+    for _ in 0..trials {
+        // count ~ Normal(λ, √λ) (Poisson for large λ), floored at 0.
+        blk.push(normal(&mut rng, lambda_block, lambda_block.sqrt()).max(0.0));
+        shr.push(normal(&mut rng, lambda_share, lambda_share.sqrt()).max(0.0));
+    }
+    let cv = |v: &[f64]| {
+        let m = v.iter().sum::<f64>() / v.len() as f64;
+        let var = v.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / v.len() as f64;
+        var.sqrt() / m
+    };
+    let (cvb, cvs) = (cv(&blk), cv(&shr));
+
+    println!("\n=== Share- vs block-based hashrate estimate (smoothness) ===");
+    println!(
+        "window {window:.0}s: ~{lambda_block:.0} blocks  vs  ~{lambda_share:.0} shares per window"
+    );
+    println!("  block-based estimate CV : {:.1}%", cvb * 100.0);
+    println!("  share-based estimate CV : {:.1}%", cvs * 100.0);
+    println!(
+        "  measured smoothness gain: {:.1}× tighter  (predicted √{:.0} = {:.1}×)",
+        cvb / cvs,
+        c * k,
+        (c * k).sqrt()
+    );
+    println!("  => a share-informed retarget tracks hashrate with ~that much less noise/lag\n");
+
+    assert!(cvs < cvb * 0.3, "share-based estimate must be much tighter (got {cvs} vs {cvb})");
+}
