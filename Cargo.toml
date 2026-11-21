@@ -92,6 +92,13 @@ state-accumulator = []
 # fail-closed, nothing wired. Lets the interfaces be reviewed ahead of the
 # post-audit implementation without touching production builds.
 crosschain-onramp = []
+# CIP-Bobtail: multi-sample PoW reference module (Phase D, Observe-only). Off by
+# default — compiles src/consensus/bobtail/ (the pure k-mean acceptance bar,
+# canonical K-lowest set + anti-grinding predicate, and the reward split /
+# lottery). NOT wired into the header, block validation, apply, or reorg (that is
+# the coordinated post-audit fork). Gated so production builds are byte-identical
+# and no hash-locked consensus file changes. See docs/design/bobtail-spec.md.
+bobtail = []
 # Rolling soft-finality (CIP-009.D) consensus-layer adapter. Off by
 # default: compiles in `src/consensus/rolling_finality.rs` and pulls
 # the `coincync-rolling-finality` crate only when explicitly enabled.

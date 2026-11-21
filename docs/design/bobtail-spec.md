@@ -135,8 +135,13 @@ reward rule that reads the chosen set is grindable by set selection.
 
 The cure removes the freedom at its root: a block's `K` shares **must be the
 globally `K`-lowest** in the gossiped share pool, not merely *some* `K` with
-`mean ≤ tau`. A validator rejects a block that omits a share it holds with
-`h < h_{K-1}` (§5.5). With the set forced:
+`mean ≤ tau`. A validator rejects a block that omits a share it holds which is
+**canonically lower** than the block's greatest included share (§5.5). "Lower"
+is the full canonical total order — hash, then owner pubkey, then nonce — *not*
+hash alone: two shares that tie on hash still have a strict deterministic order,
+so a proposer cannot swap between equal-hash shares to steer the proposer slot or
+lottery winner. (A hash-only `h < h_{K-1}` check would leave exactly that gap.)
+With the set forced:
 
 - **equal split:** the proposer cannot swap in extra own-shares — the set is not
   its to choose — so its slot count is exactly what it legitimately mined. Fair.
@@ -268,5 +273,17 @@ machinery beyond the (improved, §12.2) time-to-finality distribution.
    accounting; K=16 is the lighter power-of-two alternative.
 5. Full Phase-C selfish-mining write-up beyond the depth/finality split (done)
    — model any mempool-level share games.
-6. Reference implementation in the Observe module, then the adversarial testnet
-   soak, before any Enforce height is chosen.
+6. Reference implementation — **in progress** (`src/consensus/bobtail/`, Cargo
+   feature `bobtail`, off by default; production builds byte-identical with it
+   off, no hash-locked file touched). *Slice 1 (done):* the pure consensus math —
+   the work-preserving k-mean bar (`kmean::k_mean_meets_target`, exact 512-bit
+   integer form `2·Σh ≤ T·K·(K+1)`), the canonical K-lowest set + the §5.5/§6
+   anti-grinding predicate (`shares::canonical_k_lowest` / `omits_lower_share`),
+   the emission-exact equal split and the set-bound lottery (`shares::equal_split`
+   / `lottery_index`), a composite validity predicate (`block_shares_valid`), the
+   pool-flood bound (`retain_lowest` / `max_pool_size`, keep only the lowest
+   `4·C_SHARE·K`), and the read-only `observe()` gauge — all unit-tested. The
+   omission check compares over the full canonical total order (hash, pubkey,
+   nonce), closing the equal-hash swap. *Remaining:* proof-share gossip + relay
+   (§3), the `CYNC-POW-00x` diagnostic hookup that renders `observe()`, then the
+   adversarial testnet soak, before any Enforce height is chosen.
