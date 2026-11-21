@@ -5725,6 +5725,46 @@ mod tests {
         );
     }
 
+    /// Regression: the accumulator size reported by `get_privacy_stats` /
+    /// `get_spark_anchor` must come from the LIVE libspark pool
+    /// (`spark_pool_store`), not the CIP-005 sketch `spark_store`. The libspark
+    /// mint/send/unshield path only writes the former, so reading the latter
+    /// reported `spark_accumulator_size = 0` while the real cover set held
+    /// coins (observed on live testnet 2026-11-20). This test mirrors the
+    /// handler's source expression and pins both stores' divergence.
+    #[cfg(feature = "sketch-gk-proof")]
+    #[test]
+    fn privacy_stats_count_reads_live_spark_pool_not_sketch_store() {
+        use crate::db::Database;
+        use spark_connector::CoinBytes;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        let mut chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Regtest);
+        // Mirror node.rs: the (empty) sketch observability store is also wired.
+        chain.spark_store = Some(Arc::new(crate::storage::SparkStore::new()));
+
+        // A libspark mint commits to the LIVE pool.
+        chain
+            .spark_pool_store
+            .as_ref()
+            .unwrap()
+            .add_coin(b"outpoint-stats".to_vec(), CoinBytes(vec![9u8; 40]), b"ctx".to_vec(), 1)
+            .expect("coin added to live pool");
+
+        // The sketch store the OLD stats read stays empty…
+        let sketch_size = chain.spark_store.as_ref().map(|s| s.size()).unwrap_or(0);
+        assert_eq!(sketch_size, 0, "sketch spark_store is not fed by the libspark pool");
+
+        // …while the live pool the FIXED stats read reflects the real coin set.
+        let live_size = chain
+            .spark_pool_store
+            .as_ref()
+            .map(|s| s.coin_count())
+            .unwrap_or(0);
+        assert_eq!(live_size, 1, "get_privacy_stats must report the live spark_pool coin_count");
+    }
+
     /// Integration of the COMPLETE shielded spend path through the chain's
     /// store-aware verifier (`verify_block_shielded_spends` → `verify_shielded_payload`):
     /// a full payload (bound spend + range + mint-binding + balance) over a minted
