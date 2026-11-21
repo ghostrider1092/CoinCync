@@ -35,10 +35,13 @@
 pub mod biguint;
 pub mod diagnostics;
 pub mod gossip;
+pub mod hashrate;
 pub mod health;
 pub mod kmean;
 pub mod mining;
 pub mod shares;
+
+pub use hashrate::ShareHashrate;
 
 pub use gossip::{Admit, ProofShareBatch, SharePool, CAP_BOBTAIL_SHARES, PROOF_SHARES_MSG_TYPE};
 pub use mining::collect_shares;
@@ -69,15 +72,32 @@ pub const BOBTAIL_C_SHARE: u64 = 3;
 /// mirroring [`crate::constants::shielded_activation_height`]'s posture.
 pub const BOBTAIL_OBSERVE_HEIGHT: u64 = u64::MAX;
 
+/// Regtest Observe-activation height (a `bobtail` build only). Low so a local
+/// regtest run exercises the Observe path within a few blocks. NEVER affects
+/// testnet/mainnet (see [`bobtail_observe_height`]), mirroring the shielded
+/// regtest-activation safety model (`SHIELDED_REGTEST_ACTIVATION_HEIGHT`).
+pub const BOBTAIL_REGTEST_OBSERVE_HEIGHT: u64 = 2;
+
 /// Height at which the k-mean + canonical-set rule becomes **consensus**
 /// (Enforce). `u64::MAX` = not armed. Flipping this is a coordinated post-audit
 /// hard fork and changes the fingerprint (intended); see `bobtail-spec.md` §10.
 pub const BOBTAIL_ACTIVATION_HEIGHT: u64 = u64::MAX;
 
-/// Whether the shadow Observe computation runs at `height` (fail-closed: off
-/// until a finite [`BOBTAIL_OBSERVE_HEIGHT`] is set and reached).
-pub const fn bobtail_observe_active_at(height: u64) -> bool {
-    height >= BOBTAIL_OBSERVE_HEIGHT
+/// Network-scoped Observe height: **regtest** activates at
+/// [`BOBTAIL_REGTEST_OBSERVE_HEIGHT`]; **testnet/mainnet stay `u64::MAX`** (off)
+/// until a governance-set rollout height. Only reachable in a `bobtail` build
+/// (the whole module is feature-gated).
+pub const fn bobtail_observe_height(network: crate::config::NetworkType) -> u64 {
+    match network {
+        crate::config::NetworkType::Regtest => BOBTAIL_REGTEST_OBSERVE_HEIGHT,
+        _ => BOBTAIL_OBSERVE_HEIGHT,
+    }
+}
+
+/// Whether the shadow Observe computation runs for `network` at `height`
+/// (fail-closed: off until the network's Observe height is set and reached).
+pub const fn bobtail_observe_active_at(network: crate::config::NetworkType, height: u64) -> bool {
+    height >= bobtail_observe_height(network)
 }
 
 /// Whether the Bobtail validity rule is ENFORCED at `height` (fail-closed: off
@@ -213,9 +233,21 @@ mod tests {
     /// The gate is fail-closed: with the placeholder heights, nothing is armed.
     #[test]
     fn gates_fail_closed_by_default() {
+        use crate::config::NetworkType;
         assert_eq!(BOBTAIL_OBSERVE_HEIGHT, u64::MAX);
         assert_eq!(BOBTAIL_ACTIVATION_HEIGHT, u64::MAX);
-        assert!(!bobtail_observe_active_at(1_000_000));
+        // testnet/mainnet: Observe off even at huge heights.
+        assert!(!bobtail_observe_active_at(NetworkType::Testnet, 1_000_000));
+        assert!(!bobtail_observe_active_at(NetworkType::Mainnet, u64::MAX - 1));
+        // regtest (a bobtail build): activates at the low regtest height.
+        assert!(bobtail_observe_active_at(
+            NetworkType::Regtest,
+            BOBTAIL_REGTEST_OBSERVE_HEIGHT
+        ));
+        assert!(!bobtail_observe_active_at(
+            NetworkType::Regtest,
+            BOBTAIL_REGTEST_OBSERVE_HEIGHT - 1
+        ));
         assert!(!bobtail_enforce_active_at(u64::MAX - 1));
     }
 }

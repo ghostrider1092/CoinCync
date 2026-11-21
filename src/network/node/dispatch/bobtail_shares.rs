@@ -29,6 +29,11 @@ use tokio::sync::mpsc;
 /// first admitted batch, then bound to the current tip.
 static POOL: std::sync::Mutex<Option<SharePool>> = std::sync::Mutex::new(None);
 
+/// Process-local share-informed hashrate estimator (Observe telemetry). Shares
+/// are a ~C_SHARE*K denser hashrate signal than block intervals.
+static HASHRATE: std::sync::Mutex<Option<bobtail::ShareHashrate>> =
+    std::sync::Mutex::new(None);
+
 /// Handle an inbound `ProofShares` message: admit + relay. Best-effort and
 /// side-effect-only (never fails the dispatch loop); malformed input is dropped.
 pub(super) async fn handle_proof_shares(
@@ -40,7 +45,7 @@ pub(super) async fn handle_proof_shares(
 ) {
     let height = chain.height();
     // Fail-closed: inert until the Observe height is reached.
-    if !bobtail::bobtail_observe_active_at(height) {
+    if !bobtail::bobtail_observe_active_at(chain.network(), height) {
         return;
     }
 
@@ -66,33 +71,70 @@ pub(super) async fn handle_proof_shares(
 
     // Admit under the lock, collecting the shares to relay. The guard is dropped
     // before any `.await` so no lock is held across the network send.
-    let (to_relay, diag): (Vec<ShareProof>, Option<String>) = {
+    let now = crate::clock::unix_now();
+    // Throttle telemetry (concentration + hashrate) to at most once per minute.
+    let emit = bobtail::diagnostics::observe_due();
+
+    let (to_relay, accepted, conc): (Vec<ShareProof>, usize, Option<String>) = {
         let mut guard = POOL.lock().unwrap_or_else(|e| e.into_inner());
         let pool = guard.get_or_insert_with(|| {
             SharePool::new(tip, bobtail::BOBTAIL_K, bobtail::BOBTAIL_C_SHARE)
         });
         pool.on_tip_change(tip); // shares are parent-bound; reset if the tip moved
         let verdicts = pool.admit_batch(&batch, &tau, hasher);
+        let accepted = verdicts
+            .iter()
+            .filter(|v| matches!(v, Admit::Accepted { .. }))
+            .count();
         let to_relay = batch
             .shares
             .iter()
-            .zip(verdicts)
+            .zip(&verdicts)
             .filter_map(|(s, v)| matches!(v, Admit::Accepted { relay: true }).then(|| s.clone()))
             .collect();
-        // CYNC-POW Observe diagnostic (throttled to once/min): surface
-        // slot-concentration onto the diagnostics bus.
-        let diag = if bobtail::diagnostics::observe_due() {
+        // CYNC-POW Observe diagnostic (throttled): slot-concentration.
+        let conc = if emit {
             bobtail::diagnostics::concentration_report(&pool.observe(&target))
                 .map(|r| r.to_string())
         } else {
             None
         };
-        (to_relay, diag)
+        (to_relay, accepted, conc)
     };
 
-    if let Some(d) = diag {
-        tracing::warn!(target: "bobtail", "{d}");
+    // Share-informed hashrate telemetry: record this batch's accepted shares;
+    // on the throttle tick, log the share-based hashrate estimate. Shares are a
+    // ~C_SHARE*K denser hashrate signal than block intervals.
+    let hr_sample = {
+        let mut guard = HASHRATE.lock().unwrap_or_else(|e| e.into_inner());
+        let hr = guard
+            .get_or_insert_with(|| bobtail::ShareHashrate::new(bobtail::hashrate::DEFAULT_WINDOW_SECS));
+        hr.record_batch(now, accepted as u64, &tau);
+        if emit {
+            Some((hr.estimate(now), hr.sample_count()))
+        } else {
+            None
+        }
+    };
+
+    if let Some(c) = conc {
+        tracing::warn!(target: "bobtail", "{c}");
     }
+    if let Some((rate, n)) = hr_sample {
+        tracing::info!(
+            target: "bobtail",
+            "observe: share-hashrate ≈ {rate:.3e} H/s from {n} shares in {}s (dense signal — ~{}× more samples than block-interval)",
+            bobtail::hashrate::DEFAULT_WINDOW_SECS,
+            bobtail::BOBTAIL_C_SHARE as usize * bobtail::BOBTAIL_K
+        );
+    }
+    tracing::debug!(
+        target: "bobtail",
+        "observe: inbound batch of {} share(s) -> {} relayed (tip 0x{})",
+        batch.shares.len(),
+        to_relay.len(),
+        &tip.to_hex()[..8]
+    );
 
     if to_relay.is_empty() {
         return;

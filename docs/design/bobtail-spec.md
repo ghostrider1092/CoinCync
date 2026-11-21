@@ -252,6 +252,19 @@ machinery beyond the (improved, §12.2) time-to-finality distribution.
 - Time-based finality: improved; `P(<3 confs in 12 min)` 6.3 % → 0 % (§12.2).
 - Share withholding: no proposer advantage (§10.2). Share spam: work-bounded (§13).
 
+## 12a. Share-informed hashrate (smoothness prototype)
+
+Shares arrive ~`C_SHARE·K` (≈60×) more often than blocks, so the share stream is a
+~60× denser hashrate signal. `consensus::bobtail::hashrate` (Observe-only, gated)
+estimates hashrate from shares — `Σ work(tau_share) / elapsed`, the standard
+"shares × share-difficulty / time" estimator — with ~60× more samples, so its
+noise (std ∝ 1/√N) is ~√60 ≈ 7.7× lower and it reacts ~60× faster than a
+block-interval estimate. The Observe share handler records each admitted batch
+into a sliding window (`ShareHashrate`) and logs the estimate. This **measures**
+the signal with real data now; feeding it into the ASERT retarget for a smoother,
+lower-lag difficulty is a gated, post-audit step (it would touch `difficulty.rs`,
+so it stays a connector/measurement until then). Pure + unit-tested.
+
 ## 13. Open before implementation
 
 1. ~~`tau_share` calibration~~ — **done**: `tau_share = 3·K·T` (≈5.7× `tau`),

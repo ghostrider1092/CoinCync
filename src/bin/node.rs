@@ -2444,7 +2444,7 @@ async fn start_node(
                         #[cfg(feature = "bobtail")]
                         {
                             use coincync::consensus::bobtail;
-                            if bobtail::bobtail_observe_active_at(height) {
+                            if bobtail::bobtail_observe_active_at(chain_m.network(), height) {
                                 let prev = start_tip;
                                 let pk = candidate.header.miner_pubkey;
                                 let tau = bobtail::tau_share_target(
@@ -2480,11 +2480,17 @@ async fn start_node(
                                 .await
                                 .unwrap_or_default();
                                 if !shares.is_empty() {
+                                    let n = shares.len();
                                     let batch = bobtail::ProofShareBatch {
                                         prev_hash: prev,
                                         shares,
                                     };
                                     let _ = p2p_m.broadcast_proof_shares(&batch).await;
+                                    tracing::debug!(
+                                        target: "bobtail",
+                                        "observe: mined + gossiped {n} proof-share(s) for tip 0x{}",
+                                        &prev.to_hex()[..8]
+                                    );
                                 }
                             }
                         }
