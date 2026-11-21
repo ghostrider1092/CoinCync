@@ -84,12 +84,18 @@ A block is valid iff all hold:
 3. `shares` are sorted ascending by `h_i`;
 4. **`mean(h_0 … h_{K-1}) ≤ tau`**, where `tau = T·(K+1)/2` and `T` is the ASERT
    target for this height (§7);
-5. the body (`tx_root` and its transactions) is valid under all existing rules,
-   and the coinbase obeys §8;
-6. `timestamp` obeys the existing strictly-increasing / median-time rules.
+5. **canonical set (anti-grinding):** the `K` shares are the `K` *lowest* in the
+   validator's gossiped share pool for this parent — a block is rejected if the
+   validator holds a gossiped share with `h < h_{K-1}` that was not included.
+   Partial-view tolerance: a share counts against this rule only if it was
+   gossiped before the block's `timestamp` minus a small grace (impl item §13.3);
+6. the body (`tx_root`) is valid under all existing rules, coinbase obeys §8;
+7. `timestamp` obeys the existing strictly-increasing / median-time rules.
 
-Rule 4 is the *only* new PoW condition. Rules 1–3 bind the samples; 5–6 are
-unchanged. No node may accept a block failing rule 4 at or after activation.
+Rules 4 **and 5** are the new conditions, and rule 5 is **load-bearing** (§6):
+without it the proposer's freedom to pick *which* `K` shares to include lets a
+10 %-hashrate proposer steer the single-output lottery to itself ~83 % of the time
+*and* pad its own slots under the equal split. Rule 5 forces the set, nulling both.
 
 ## 6. Proposer selection & grinding resistance
 
@@ -99,6 +105,70 @@ is uniform over hashers (so proposal rate = hashrate share; §10.2). Because
 re-grind to replace it. The tx-set binding (`tx_root`) is chosen by the proposer
 only; other share owners contribute PoW tickets over `prev_hash` and need never
 see the tx set, so shares found before the body existed still bind correctly.
+
+### 6.1 The grinding vector: set selection
+
+The attack is **not** on the proposer slot (that is one global minimum — re-mining
+it costs a full block). It is on **which `K` shares fill the block**. The k-mean
+bar `mean ≤ tau` does *not* pin a unique set: because the mean divides by `K`,
+swapping the largest included share for a slightly higher collected one barely
+moves the mean, so many valid sets coexist. `scratchpad/grinding_sim.py` measures
+this directly (K=20, `E[shares]=3K`, normalized `tau_share=1`):
+
+- the `K`-lowest mean sits ≈ at `tau` (the bar is tight), **yet** multiple valid
+  sets are reachable by single swaps in ~52 % of blocks — the freedom is real,
+  not marginal;
+- a proposer can pick the set, and *each distinct set is a distinct outcome* for
+  any set-dependent reward rule. Modelled against the fallback lottery
+  `idx = H(shares) mod K`, a proposer with **10 %** of hashrate steers the winner
+  to one of its own slots **~83 %** of the time (vs its fair 10 %); at 30 % it is
+  near-certain. (The sim's own closing comment — "almost no slack to grind" — is
+  **wrong**; the measured freedom disproves it. Recorded here so the error is not
+  silently inherited.)
+
+Crucially this is **not** lottery-specific. The same set freedom breaks the
+**equal split** too: the proposer selects the valid set that contains the most of
+*its own* shares, padding its `reward/K` slot count above its fair share. Any
+reward rule that reads the chosen set is grindable by set selection.
+
+### 6.2 The fix: canonical `K`-lowest set (validity rule §5.5)
+
+The cure removes the freedom at its root: a block's `K` shares **must be the
+globally `K`-lowest** in the gossiped share pool, not merely *some* `K` with
+`mean ≤ tau`. A validator rejects a block that omits a share it holds with
+`h < h_{K-1}` (§5.5). With the set forced:
+
+- **equal split:** the proposer cannot swap in extra own-shares — the set is not
+  its to choose — so its slot count is exactly what it legitimately mined. Fair.
+- **lottery fallback:** `idx = H(shares) mod K` is now a function of a fixed set,
+  so it is fixed. The proposer cannot resample it without changing the set, which
+  the rule forbids. Fair (`win-prob = fair`, `d = 0` in the sim).
+
+### 6.3 Residual vectors, all EV-negative
+
+1. **Own-share withholding.** A miner can decline to gossip one of its own low
+   shares so the canonical set legitimately excludes it. But a withheld share is a
+   *forfeited* reward slot (and, if it was the minimum, a forfeited proposal). It
+   buys no new set — only a worse one — so it is strictly EV-losing (consistent
+   with the no-advantage withholding result, §10.2). It cannot be used to *add*
+   own-slots (that needs omitting *others'* lower shares, which §5.5 catches).
+2. **Re-mining the set.** To legitimately change the canonical set the attacker
+   must produce a *new* share below the current `h_{K-1}` — i.e. do fresh
+   sub-`tau_share` RandomX work — for at most a one-slot shift and a `1/K` lottery
+   re-roll. That is full share-work spent to chase a fractional reward: dominated
+   by spending the same work mining honestly.
+3. **Partial-view races.** Two validators may hold different pools near the
+   `K`-th share at block time. This is the only non-trivial residual and is an
+   **implementation** question, not a design hole: resolved by a gossip-inclusion
+   deadline / small grace window (a share counts against §5.5 only if gossiped
+   before `timestamp − grace`), tuned in the Observe phase (§13.3). It bounds
+   disagreement, it does not reopen steering — the attacker still cannot *choose*
+   a non-canonical set, only exploit timing at the single boundary slot.
+
+**Conclusion.** Under §5.5 both reward mechanisms are grind-proof: set selection
+is eliminated (`d = 0`), and every residual costs more work than it returns.
+Without §5.5 the design is grindable (10 % → 83 % lottery capture; equal-split
+slot-padding), which is why §5.5 is a validity rule, not an optimization.
 
 ## 7. Difficulty retarget — reuse ASERT unchanged
 
@@ -187,7 +257,13 @@ machinery beyond the (improved, §12.2) time-to-finality distribution.
    (~6–7 outputs, ~1.4 GB/yr). *Remaining:* measure real proving cost on the
    Spark FFI (needs a build) and confirm the commitment-sum check against the
    live `sketch-gk-proof + libspark-ffi` path.
-3. Grinding-resistance proof for the lottery fallback’s `H(shares) mod K`.
+3. ~~Grinding-resistance proof for the lottery fallback’s `H(shares) mod K`~~ —
+   **done (§6)**: set selection, not slot selection, is the vector, and it breaks
+   *both* the lottery and the equal split (sim: 10 % hashrate → ~83 % lottery
+   capture). Nulled by the **canonical `K`-lowest** validity rule (§5.5, `d=0`);
+   residuals (own-share withholding, re-mining) are EV-negative. *Remaining impl
+   item:* the partial-view gossip-inclusion deadline / grace window (§6.3.3),
+   to be tuned empirically in the Observe phase.
 4. ~~`K` final value~~ — **done**: K=20 (the 95%-in-band knee), by full cost
    accounting; K=16 is the lighter power-of-two alternative.
 5. Full Phase-C selfish-mining write-up beyond the depth/finality split (done)
