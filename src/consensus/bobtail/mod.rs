@@ -33,13 +33,16 @@
 //! coordinated post-audit hard fork; see `bobtail-spec.md` §10.
 
 pub mod biguint;
+pub mod health;
 pub mod kmean;
 pub mod shares;
 
-pub use kmean::k_mean_meets_target;
+pub use kmean::{bar_fill_bps, k_mean_meets_target};
+pub use health::{BobtailHealth, ViewDivergence};
 pub use shares::{
-    block_shares_valid, canonical_k_lowest, equal_split, lottery_index, max_pool_size,
-    omits_lower_share, retain_lowest, ResolvedShare, ShareProof, BOBTAIL_POOL_SAFETY,
+    block_shares_valid, canonical_k_lowest, count_omitted_lower, equal_split, lottery_index,
+    max_pool_size, omits_lower_share, retain_lowest, ResolvedShare, ShareProof,
+    BOBTAIL_POOL_SAFETY,
 };
 
 use crate::primitives::{Hash, PublicKey};
@@ -96,6 +99,9 @@ pub struct BobtailObservation {
     pub proposer: Option<PublicKey>,
     /// The fallback single-output lottery winner's index into `canonical_set`.
     pub lottery_winner: Option<usize>,
+    /// Detection-only health of the candidate (distinct owners, slot
+    /// concentration, bar margin). `None` until the pool reaches `k`.
+    pub health: Option<BobtailHealth>,
 }
 
 /// Compute the shadow [`BobtailObservation`] for a gossiped share `pool` against
@@ -114,12 +120,14 @@ pub fn observe(pool: &[ResolvedShare], target: &Hash, k: usize) -> BobtailObserv
             meets_bar: false,
             proposer: None,
             lottery_winner: None,
+            health: None,
         };
     }
     let hashes: Vec<Hash> = canonical_set.iter().map(|s| s.hash).collect();
     let meets_bar = k_mean_meets_target(&hashes, target);
     let proposer = Some(canonical_set[0].share.miner_pubkey);
     let lottery_winner = Some(lottery_index(&canonical_set));
+    let set_health = Some(health::health(&canonical_set, target));
     BobtailObservation {
         k,
         pool_size: pool.len(),
@@ -127,6 +135,7 @@ pub fn observe(pool: &[ResolvedShare], target: &Hash, k: usize) -> BobtailObserv
         meets_bar,
         proposer,
         lottery_winner,
+        health: set_health,
     }
 }
 
@@ -168,6 +177,7 @@ mod tests {
         assert!(!obs.meets_bar);
         assert!(obs.proposer.is_none());
         assert!(obs.lottery_winner.is_none());
+        assert!(obs.health.is_none(), "no health below quorum");
     }
 
     /// A full, low pool yields a candidate: canonical set of size k, proposer =
@@ -189,6 +199,10 @@ mod tests {
         assert!(obs.meets_bar);
         assert_eq!(obs.proposer, Some(PublicKey::from_bytes([1u8; 32])));
         assert!(obs.lottery_winner.unwrap() < 4);
+        let h = obs.health.expect("a full pool carries health");
+        assert_eq!(h.distinct_owners, 4, "4 distinct owners in the set");
+        assert_eq!(h.max_owner_slots, 1, "no slot concentration");
+        assert!(h.bar_fill_bps < 10_000, "cleared τ with headroom");
     }
 
     /// The gate is fail-closed: with the placeholder heights, nothing is armed.

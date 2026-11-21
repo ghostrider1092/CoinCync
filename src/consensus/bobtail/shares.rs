@@ -51,7 +51,7 @@ impl ResolvedShare {
 
     /// Owner identity used for set membership (pubkey bytes + nonce uniquely
     /// name a share; a given owner may hold several distinct shares).
-    fn ident(&self) -> ([u8; 32], u64) {
+    pub fn ident(&self) -> ([u8; 32], u64) {
         (*self.share.miner_pubkey.as_bytes(), self.share.nonce)
     }
 }
@@ -107,15 +107,25 @@ pub fn canonical_k_lowest(pool: &[ResolvedShare], k: usize) -> Vec<ResolvedShare
 /// still grinding. A hash-only check would let a proposer swap between
 /// equal-hash shares to steer the proposer slot / lottery winner.
 pub fn omits_lower_share(chosen: &[ResolvedShare], pool: &[ResolvedShare]) -> bool {
-    // The block's canonical-greatest included share (its "h_{K-1}" slot).
+    count_omitted_lower(chosen, pool) > 0
+}
+
+/// How many shares the validator holds that are canonically-lower than the
+/// block's greatest included share yet were omitted (the §5.5 violations).
+/// [`omits_lower_share`] is exactly `count_omitted_lower(..) > 0`; the count
+/// itself is what the Observe view-divergence telemetry reports — *how far*
+/// apart two views are, not merely whether they differ.
+pub fn count_omitted_lower(chosen: &[ResolvedShare], pool: &[ResolvedShare]) -> usize {
+    // The block's canonical-greatest included share (its "h_{K-1}" slot). An
+    // empty chosen set carries no PoW at all; "omits a lower share" is not the
+    // rule that rejects it (the k-mean bar does), so it is not an omission.
     let Some(max_key) = chosen.iter().map(canon_key).max() else {
-        // An empty chosen set carries no PoW at all; "omits a lower share" is
-        // not the rule that rejects it (the k-mean bar does). Not an omission.
-        return false;
+        return 0;
     };
     let included: HashSet<([u8; 32], u64)> = chosen.iter().map(|s| s.ident()).collect();
     pool.iter()
-        .any(|p| canon_key(p) < max_key && !included.contains(&p.ident()))
+        .filter(|p| canon_key(p) < max_key && !included.contains(&p.ident()))
+        .count()
 }
 
 /// Full PoW-axis validity of a block's share set — the single predicate the

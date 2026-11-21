@@ -62,6 +62,39 @@ pub fn k_mean_meets_target(samples: &[Hash], target: &Hash) -> bool {
     lhs <= rhs
 }
 
+/// How "full" the k-mean bar is, in basis points: `2·Σh / (T·K·(K+1)) · 10000`.
+///
+/// `10000` = exactly at `τ`; `< 10000` = headroom below `τ` (a healthy block,
+/// cleared the bar with room to spare); `> 10000` = over `τ` (would fail
+/// [`k_mean_meets_target`]). A detection-only health metric for the Observe
+/// gauge — it says how close the current candidate is to the acceptance edge.
+/// Saturates at `u64::MAX` (degenerate target / far over bar); empty set → MAX.
+///
+/// Consistency: `bar_fill_bps(s, t) <= 10000` iff `k_mean_meets_target(s, t)`.
+pub fn bar_fill_bps(samples: &[Hash], target: &Hash) -> u64 {
+    let k = samples.len();
+    if k == 0 {
+        return u64::MAX;
+    }
+    let mut sum = U512::zero();
+    for h in samples {
+        sum += U512::from_big_endian(h.as_bytes());
+    }
+    let t = U512::from_big_endian(target.as_bytes());
+    let k = k as u64;
+    let lhs = sum * U512::from(2u64);
+    let rhs = t * U512::from(k) * U512::from(k + 1);
+    if rhs.is_zero() {
+        return u64::MAX;
+    }
+    let q = lhs * U512::from(10_000u64) / rhs;
+    if q > U512::from(u64::MAX) {
+        u64::MAX
+    } else {
+        q.low_u64()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +172,29 @@ mod tests {
             !k_mean_meets_target(&over, &target),
             "one unit over τ must fail",
         );
+    }
+
+    /// `bar_fill_bps <= 10000` must agree exactly with `k_mean_meets_target`,
+    /// and report headroom below τ / overshoot above it.
+    #[test]
+    fn bar_fill_tracks_the_bar() {
+        let target = h(0x10); // small (hard) target so τ bites
+        let k = 4usize;
+
+        // Mean 0.5·T, τ = 2.5·T → well under: fill < 10000 and meets.
+        let low = vec![h(0x08); k];
+        assert!(bar_fill_bps(&low, &target) < 10_000);
+        assert!(k_mean_meets_target(&low, &target));
+
+        // Mean 8·T ≫ τ → fill > 10000 and fails.
+        let high = vec![h(0x80); k];
+        assert!(bar_fill_bps(&high, &target) > 10_000);
+        assert!(!k_mean_meets_target(&high, &target));
+
+        // Exactly at τ (K=3, T=0x10 → τ=2T=0x20): fill == 10000 and meets.
+        let at = vec![h(0x20); 3];
+        assert_eq!(bar_fill_bps(&at, &h(0x10)), 10_000);
+        assert!(k_mean_meets_target(&at, &h(0x10)));
     }
 
     /// No overflow / panic at the extreme: K large, all samples max, max target.

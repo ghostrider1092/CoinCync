@@ -282,8 +282,12 @@ machinery beyond the (improved, §12.2) time-to-finality distribution.
    the emission-exact equal split and the set-bound lottery (`shares::equal_split`
    / `lottery_index`), a composite validity predicate (`block_shares_valid`), the
    pool-flood bound (`retain_lowest` / `max_pool_size`, keep only the lowest
-   `4·C_SHARE·K`), and the read-only `observe()` gauge — all unit-tested. The
-   omission check compares over the full canonical total order (hash, pubkey,
-   nonce), closing the equal-hash swap. *Remaining:* proof-share gossip + relay
-   (§3), the `CYNC-POW-00x` diagnostic hookup that renders `observe()`, then the
-   adversarial testnet soak, before any Enforce height is chosen.
+   `4·C_SHARE·K`), the read-only `observe()` gauge, and the detection-only Observe
+   telemetry (`health::BobtailHealth` — distinct owners, slot concentration,
+   bar-fill margin — plus `view_divergence`, the partial-view split early-warning
+   that counts a block's canonically-lower omitted shares and its shares unseen
+   locally) — all unit-tested. The omission check compares over the full canonical
+   total order (hash, pubkey, nonce), closing the equal-hash swap. *Remaining:*
+   proof-share gossip + relay (§3), the `CYNC-POW-00x` diagnostic that renders
+   `observe()` / `view_divergence` onto the diagnostics bus, then the adversarial
+   testnet soak, before any Enforce height is chosen.
