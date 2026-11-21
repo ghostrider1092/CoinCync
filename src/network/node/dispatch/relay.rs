@@ -338,6 +338,20 @@ pub(super) async fn handle_txs(
                     continue;
                 }
 
+                // DEDUP BEFORE the expensive full validation (H2 / #441): if we
+                // have already seen this tx on the stem (stempool) or diffusion
+                // (fluffed) path, a re-send is a replay — skip the full CLSAG +
+                // range-proof verify, which otherwise runs unbounded under
+                // block_in_place on the shared message processor and, for a VALID
+                // replay, is never scored (so the flooder is never banned). This
+                // mirrors the dedup inside dandelion.add_received_tx below, hoisted
+                // ahead of validate_transaction so a replay costs O(1) instead of a
+                // full crypto verify. A genuinely-new tx is still fully validated
+                // once (it is not yet in stempool/fluffed on first receipt).
+                if dandelion.read().await.seen(&tx.hash()) {
+                    continue;
+                }
+
                 // FULL validation BEFORE relay ("accept-then-relay"). The
                 // structural gate above is cheap and does NOT verify ring
                 // signatures, range proofs, or the balance proof (those need

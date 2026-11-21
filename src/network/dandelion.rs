@@ -206,6 +206,15 @@ impl DandelionRouter {
         }
     }
 
+    /// Read-only dedup check: has this tx already been seen on the stem
+    /// (stempool) or diffusion (fluffed) path? Used by the relay handler to
+    /// skip the expensive full-crypto re-validation of a replayed tx before
+    /// `add_received_tx` would dedup it anyway (H2 / #441). Mirrors the
+    /// stempool/fluffed guard inside `add_received_tx`.
+    pub fn seen(&self, hash: &Hash) -> bool {
+        self.stempool.contains_key(hash) || self.fluffed.contains_key(hash)
+    }
+
     // ─── Peer Management ─────────────────────────────────────────────────
 
     /// Set the full list of outbound peers.  Called by node.rs whenever the
