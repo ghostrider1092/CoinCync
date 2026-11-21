@@ -170,6 +170,14 @@ pub enum MessageType {
     /// never receive it (they reject unknown message types).
     ConsensusFingerprint = 52,
 
+    /// Bobtail multi-sample PoW proof-share batch (Firework `CAP_BOBTAIL_SHARES`).
+    /// Observe-phase gossip of low RandomX samples; gated by the capability bit so
+    /// pre-activation peers never receive it, and absent entirely from a build
+    /// without the `bobtail` feature (such a build rejects discriminant 53 as an
+    /// unknown type). See `consensus::bobtail::gossip`.
+    #[cfg(feature = "bobtail")]
+    ProofShares = 53,
+
     // ── Personal Node (Tier 1) Protocol Messages ────────────────────
     /// Request compact block filters for a height range.
     /// Personal nodes send this to network nodes.
@@ -249,6 +257,8 @@ impl TryFrom<u8> for MessageType {
             71 => Ok(MessageType::KeyImageStatus),
             80 => Ok(MessageType::AnchorRequest),
             81 => Ok(MessageType::AnchorResponse),
+            #[cfg(feature = "bobtail")]
+            53 => Ok(MessageType::ProofShares),
             99 => Ok(MessageType::Padding),
             _ => Err(Error::InvalidMessage(format!("unknown type: {}", value))),
         }
@@ -324,6 +334,11 @@ impl MessageType {
             // ChainAnchorStamp (Invention 2) — small, bounded payloads
             MessageType::AnchorRequest => 1024,  // 1 KB
             MessageType::AnchorResponse => 1024, // 1 KB
+
+            // Bobtail proof-share batch — bounded by MAX_SHARES_PER_MSG shares
+            // (each a 40-byte pubkey+nonce), well under 64 KB.
+            #[cfg(feature = "bobtail")]
+            MessageType::ProofShares => 64 * 1024,
 
             // Traffic-shaping cover packet: logical payload before framing.
             MessageType::Padding => 8 * 1024,
@@ -795,6 +810,17 @@ impl Message {
         Ok(Self::new(magic, MessageType::ConsensusFingerprint, payload))
     }
 
+    /// Bobtail proof-share batch (Firework `CAP_BOBTAIL_SHARES`). Only sent to
+    /// peers that advertised the capability. Observe-phase; feature-gated.
+    #[cfg(feature = "bobtail")]
+    pub fn proof_shares(
+        magic: [u8; 4],
+        batch: &crate::consensus::bobtail::ProofShareBatch,
+    ) -> Result<Self> {
+        let payload = borsh::to_vec(batch).map_err(|e| Error::SerializationError(e.to_string()))?;
+        Ok(Self::new(magic, MessageType::ProofShares, payload))
+    }
+
     pub fn ping(magic: [u8; 4]) -> Self {
         use rand::RngCore;
         let mut nonce = [0u8; 8];
@@ -1016,8 +1042,11 @@ mod tests {
     /// authoritative list mirrored from the `TryFrom` impl; any drift between
     /// this and the impl is a wire-compatibility break the sweep tests catch.
     const VALID_DISCRIMINANTS: &[u8] = &[
-        0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 30, 31, 40, 41, 50, 51, 52, 60, 61,
-        62, 63, 64, 65, 70, 71, 80, 81, 99,
+        0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 30, 31, 40, 41, 50, 51, 52,
+        // Bobtail proof-share message (gated); only defined in a `bobtail` build.
+        #[cfg(feature = "bobtail")]
+        53,
+        60, 61, 62, 63, 64, 65, 70, 71, 80, 81, 99,
     ];
 
     /// n distinct hashes (varying the first two bytes so counts up to ~65k
@@ -1105,10 +1134,11 @@ mod tests {
                 .unwrap_or_else(|_| panic!("discriminant {} must be accepted", b));
             assert_eq!(variant as u8, b, "discriminant {} must round-trip", b);
         }
+        let expected = if cfg!(feature = "bobtail") { 34 } else { 33 };
         assert_eq!(
             VALID_DISCRIMINANTS.len(),
-            33,
-            "expected 33 defined message types"
+            expected,
+            "expected {expected} defined message types"
         );
     }
 

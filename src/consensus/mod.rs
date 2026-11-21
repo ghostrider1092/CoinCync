@@ -22,6 +22,14 @@ pub mod block;
 #[cfg(feature = "crosschain-onramp")]
 pub mod crosschain_onramp;
 pub mod difficulty;
+/// Bobtail multi-sample PoW (CIP-Bobtail) — Phase-D reference module,
+/// Observe-only. Off by default; with the `bobtail` feature disabled this
+/// module is not compiled and node behaviour is byte-identical (consensus
+/// fingerprint unchanged). Pure k-mean bar + canonical K-lowest set + reward
+/// logic; NOT wired into the header, validation, apply, or reorg — that is the
+/// coordinated post-audit fork. See docs/design/bobtail-spec.md.
+#[cfg(feature = "bobtail")]
+pub mod bobtail;
 /// Shielded (Spark) transaction payload + apply path (CIP-Shielded Increment 2;
 /// gated off, fail-closed). See docs/design/cip-shielded-txtype.md.
 pub mod shielded;

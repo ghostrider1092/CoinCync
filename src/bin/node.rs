@@ -2435,6 +2435,66 @@ async fn start_node(
                         let (anchor, tx_root, height) = candidate.pow_inputs();
                         let target = candidate.header.target;
                         let start_tip = chain_m.tip_hash();
+
+                        // Bobtail Observe send-side (gated, fail-closed until the
+                        // Observe height): grind a bounded budget of proof-shares
+                        // — RandomX(prev||pubkey||nonce) < tau_share, a separate
+                        // grind from block PoW — and gossip them. Dormant in a
+                        // default build and before BOBTAIL_OBSERVE_HEIGHT.
+                        #[cfg(feature = "bobtail")]
+                        {
+                            use coincync::consensus::bobtail;
+                            if bobtail::bobtail_observe_active_at(chain_m.network(), height) {
+                                let prev = start_tip;
+                                let pk = candidate.header.miner_pubkey;
+                                let tau = bobtail::tau_share_target(
+                                    &target,
+                                    bobtail::BOBTAIL_K,
+                                    bobtail::BOBTAIL_C_SHARE,
+                                );
+                                let start = nonce_base;
+                                const SHARE_BUDGET: u64 = 256;
+                                let shares = tokio::task::spawn_blocking(move || {
+                                    bobtail::collect_shares(
+                                        &prev,
+                                        pk,
+                                        start,
+                                        SHARE_BUDGET,
+                                        &tau,
+                                        |s, p| {
+                                            coincync::consensus::compute_pow_hash(
+                                                coincync::consensus::PowAlgorithm::RandomX,
+                                                p,
+                                                s.nonce,
+                                                &coincync::primitives::Hash::from_bytes(
+                                                    *s.miner_pubkey.as_bytes(),
+                                                ),
+                                                height,
+                                            )
+                                            .unwrap_or_else(|_| {
+                                                coincync::primitives::Hash::from_bytes([0xFF; 32])
+                                            })
+                                        },
+                                    )
+                                })
+                                .await
+                                .unwrap_or_default();
+                                if !shares.is_empty() {
+                                    let n = shares.len();
+                                    let batch = bobtail::ProofShareBatch {
+                                        prev_hash: prev,
+                                        shares,
+                                    };
+                                    let _ = p2p_m.broadcast_proof_shares(&batch).await;
+                                    tracing::debug!(
+                                        target: "bobtail",
+                                        "observe: mined + gossiped {n} proof-share(s) for tip 0x{}",
+                                        &prev.to_hex()[..8]
+                                    );
+                                }
+                            }
+                        }
+
                         let stop = Arc::new(AtomicBool::new(false));
                         // Watcher: abandon this candidate the moment the tip moves.
                         let stop_w = stop.clone();

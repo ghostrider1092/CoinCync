@@ -70,6 +70,10 @@ fn unix_now() -> u64 {
     crate::clock::unix_now()
 }
 
+/// Bobtail proof-share inbound handler (feature `bobtail`, Observe-only).
+#[cfg(feature = "bobtail")]
+mod bobtail_shares;
+
 /// Process received message
 /// The header has already been validated and stripped by the message framer;
 /// type and payload arrive separately to avoid another payload-sized copy.
@@ -340,6 +344,11 @@ pub(super) async fn process_message(
 
         MessageType::Alert | MessageType::AnchorRequest | MessageType::AnchorResponse => {
             trace!("Ignoring unsupported message type: {:?}", msg_type);
+        }
+
+        #[cfg(feature = "bobtail")]
+        MessageType::ProofShares => {
+            bobtail_shares::handle_proof_shares(peer_id, payload, magic, chain, senders).await;
         }
 
         MessageType::Padding => unreachable!("padding is discarded before peer accounting"),
