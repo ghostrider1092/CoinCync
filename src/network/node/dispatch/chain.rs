@@ -551,7 +551,14 @@ pub(super) async fn handle_blocks(
                             crate::network::scoring::MisbehaviorType::InvalidBlockPoW,
                         );
                     }
-                    continue;
+                    // M1 (#443): STOP processing the rest of the batch. A provably-
+                    // invalid-PoW block instant-bans the peer (InvalidBlockPoW = -100);
+                    // `continue` would RandomX-hash every remaining block in the message
+                    // (up to MAX_BLOCK_HASHES) for a peer we have already judged
+                    // malicious — the amplification this guards against. The actual
+                    // disconnect still happens on the maintenance tick; breaking just
+                    // denies the attacker the rest of the batch's RandomX work.
+                    break;
                 }
                 if let Some(addr) = peers.get(&peer_id).map(|p| p.addr) {
                     scorer
