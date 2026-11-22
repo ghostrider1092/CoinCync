@@ -404,8 +404,15 @@ pub(super) async fn handle_txs(
                                 // Snapshot first so an awaited send never holds a DashMap guard.
                                 let senders_snapshot: Vec<tokio::sync::mpsc::Sender<Vec<u8>>> =
                                     senders.iter().map(|s| s.value().clone()).collect();
+                                // L1 (#446): non-blocking fan-out. A blocking send().await
+                                // here lets a single slow-reader peer (full PEER_QUEUE_SIZE)
+                                // stall the shared message processor until WRITE_TIMEOUT on
+                                // every fluff broadcast. try_send is best-effort: a full-queue
+                                // peer is skipped (it catches up via normal relay) and the
+                                // processor never blocks. Matches the padding/eviction paths,
+                                // which already use try_send.
                                 for sender in senders_snapshot {
-                                    let _ = sender.send(data.clone()).await;
+                                    let _ = sender.try_send(data.clone());
                                 }
                             }
                         }

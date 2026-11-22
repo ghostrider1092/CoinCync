@@ -95,6 +95,11 @@ use std::collections::HashMap;
 /// Maximum pending transactions in the stempool
 const MAX_STEMPOOL: usize = 10_000;
 
+/// Hard cap on fluffed-tx dedup records (L2 / #446). The `fluffed` map is
+/// otherwise only time-pruned (600s) in tick(); this bounds its worst-case size
+/// independent of tx rate, mirroring MAX_STEMPOOL. 2x the stempool is generous.
+const MAX_FLUFFED: usize = 20_000;
+
 /// Minimum outbound peers for adequate privacy
 const MIN_PEERS_FOR_PRIVACY: usize = 3;
 
@@ -402,7 +407,7 @@ impl DandelionRouter {
             );
             // Remove from stempool, mark as fluffed
             let entry = self.stempool.remove(&hash);
-            self.fluffed.insert(hash, now);
+            Self::insert_fluffed_bounded(&mut self.fluffed, hash, now);
             if let Some(e) = entry {
                 return StemAction::Fluff(e.tx);
             }
@@ -419,7 +424,7 @@ impl DandelionRouter {
                 "FLUFF: Tx {} received in fluff epoch — broadcasting",
                 &hash.to_hex()[..16]
             );
-            self.fluffed.insert(hash, now);
+            Self::insert_fluffed_bounded(&mut self.fluffed, hash, now);
             return StemAction::Fluff(tx);
         }
 
@@ -476,7 +481,7 @@ impl DandelionRouter {
                         &hash.to_hex()[..16]
                     );
                     if let Some(entry) = self.stempool.remove(&hash) {
-                        self.fluffed.insert(hash, now);
+                        Self::insert_fluffed_bounded(&mut self.fluffed, hash, now);
                         actions.fluff.push((hash, entry.tx, entry.source));
                         crate::metrics::dandelion::EMBARGO_FLUFFS_TOTAL.inc();
                     }
@@ -522,7 +527,7 @@ impl DandelionRouter {
                         &hash.to_hex()[..16]
                     );
                     if let Some(entry) = self.stempool.remove(&hash) {
-                        self.fluffed.insert(hash, now);
+                        Self::insert_fluffed_bounded(&mut self.fluffed, hash, now);
                         actions.fluff.push((hash, entry.tx, entry.source));
                     }
                 }
@@ -597,6 +602,19 @@ impl DandelionRouter {
     /// (2) only fall back to evicting local entries if no peer
     /// entries exist. This means an attacker's flood eats their
     /// own oldest txs before touching ours.
+    /// Insert a fluffed-tx record, evicting the oldest if at MAX_FLUFFED (L2 /
+    /// #446). Takes only the `fluffed` field (not &mut self) so it stays
+    /// borrow-safe at the call sites. The 600s time-prune in tick() still runs;
+    /// this just makes the worst-case size bound explicit.
+    fn insert_fluffed_bounded(fluffed: &mut HashMap<Hash, u64>, hash: Hash, now: u64) {
+        if fluffed.len() >= MAX_FLUFFED && !fluffed.contains_key(&hash) {
+            if let Some(oldest) = fluffed.iter().min_by_key(|(_, ts)| **ts).map(|(h, _)| *h) {
+                fluffed.remove(&oldest);
+            }
+        }
+        fluffed.insert(hash, now);
+    }
+
     fn enforce_stempool_limit(&mut self) {
         while self.stempool.len() >= MAX_STEMPOOL {
             // Prefer evicting a peer-sourced entry.
