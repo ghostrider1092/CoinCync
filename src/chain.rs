@@ -1457,9 +1457,35 @@ impl Blockchain {
     /// Apply verified `SparkPayload` v2 txs to the `SparkPoolStore`: `add_coin`
     /// per minted coin (keyed by its deterministic outpoint), `mark_tag_spent`
     /// per spend tag — in lock-step with the Phase-2 checkpoint already taken.
-    /// Re-verifies to obtain the tags (validation ran the same check pre-apply,
-    /// so a fault here is a consensus fault → halt, matching `apply_shielded_txs`).
     /// Gated on both features; inert when the pool store is `None`.
+    ///
+    /// # Verify/apply parity contract (L7 / #446)
+    ///
+    /// This runs INSIDE the in-memory commit critical section (the tip/UTXO are
+    /// already applied under the write lock), so a failure here is past the point
+    /// of a clean block-reject — the tip has advanced. Each `panic!` below is
+    /// therefore a fail-closed HALT, and is UNREACHABLE by construction:
+    /// `verify_block_spark_v2_at_height` (the gate, run BEFORE this commit)
+    /// rejects every input that would make apply fail. A panic here means an edit
+    /// broke that parity — a bug — for which halting (preserve on-disk state,
+    /// operator investigates, restart re-syncs the block) is the correct response,
+    /// NOT a reject that would fork this node off. Maintain the mapping on any edit
+    /// to EITHER function:
+    ///
+    /// | apply failure                         | pre-empted in verify by |
+    /// |---------------------------------------|-------------------------|
+    /// | `spend_tags` extraction returns None  | the batched Grootle verify authenticated this exact bundle and returned its tags |
+    /// | `apply_spark_payload` tag already-spent | batched `T ∉ spent_tags` (pool set) + intra-block `seen_tags` |
+    /// | `apply_spark_payload` length / outpoint | `payload.outputs` forced empty (bare-output reject) ⇒ its coin loop never runs; output_contexts length is built to match |
+    /// | `verify_mint_bundle` returns None     | the IDENTICAL `verify_mint_bundle` call (mint unparseable) |
+    /// | duplicate mint outpoint/content       | `store.index_of` + `coin_content_present` + per-block `seen_content` |
+    /// | `apply_value_balance` pool-underflow  | the `simulated_pool` cumulative pre-check — underflow is apply_value_balance's ONLY failure mode |
+    /// | post-apply `security_sweep` halt      | defense-in-depth backstop for an unforeseen invariant break (intentionally kept) |
+    ///
+    /// The representative double-spend direction is locked by the
+    /// `spark_v2_chain_hooks_feed_and_verify_a_real_shielded_tx` regression test:
+    /// after a spend is applied, verify REJECTS the re-proposed (now-spent) spend
+    /// before apply could halt on the already-spent linking tag.
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
     fn apply_spark_v2_txs(&self, transactions: &[Transaction], height: u64) {
         let store = match &self.spark_pool_store {
