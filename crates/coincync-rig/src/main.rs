@@ -764,18 +764,51 @@ fn print_runsolo_metadata(
     }
 
     // ── PRIVACY / ZK POSTURE (honest) ───────────────────────────────
-    // No SRS/circuit/nullifier/commitment values invented — this is a
-    // transparent PoW miner; shielded machinery is node-side and inactive.
+    // No SRS/circuit/nullifier/commitment values invented — the miner is always
+    // a transparent RandomX PoW miner (coinbase is transparent; the Spark/shielded
+    // machinery is node-side opt-in mint/spend, never a miner function). The pool's
+    // ACTIVATION state, though, is live chain state: read it from the node's
+    // get_info (`shielded_active` / `shielded_activation_height`) rather than
+    // asserting a fixed posture, so the banner can never claim "inactive" after the
+    // pool has already activated (it is height-gated and compiled into the node).
+    let shielded_active = info
+        .and_then(|i| i.get("shielded_active"))
+        .and_then(|v| v.as_bool());
+    let shielded_act_h = info
+        .and_then(|i| i.get("shielded_activation_height"))
+        .and_then(|v| v.as_u64());
+    let node_height = info.and_then(|i| i.get("height")).and_then(|v| v.as_u64());
+    let (pool_state, pool_col) = match shielded_active {
+        Some(true) => ("ACTIVE", green),
+        Some(false) => ("inactive", amber),
+        None => ("node-side", muted),
+    };
     row(
         "PRIVACY",
         [
             p("transparent RandomX PoW", body),
             p("shielded/Spark node-side", muted),
-            p("INACTIVE", amber),
+            p(pool_state, pool_col),
         ]
         .join(&sep),
     );
-    cont(p("activation height not yet reached — see node logs", muted));
+    // Concrete activation detail, only when the node actually told us: live pool →
+    // confirm since when; not-yet → the remaining block distance; permanently off
+    // (u64::MAX, e.g. mainnet pre-audit) → say so; unknown → point at the node.
+    match (shielded_active, shielded_act_h, node_height) {
+        (Some(true), Some(h), _) => cont(p(&format!("shielded pool live since height {h}"), green)),
+        (Some(false), Some(h), Some(now)) if h != u64::MAX => cont(p(
+            &format!("activates at height {h} — {} block(s) remaining", h.saturating_sub(now)),
+            muted,
+        )),
+        (Some(false), Some(h), None) if h != u64::MAX => {
+            cont(p(&format!("activates at height {h}"), muted))
+        }
+        (Some(false), Some(h), _) if h == u64::MAX => {
+            cont(p("shielded disabled on this network", muted))
+        }
+        _ => cont(p("shielded status — query the node", muted)),
+    }
     println!();
 }
 
