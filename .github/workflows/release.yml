@@ -117,7 +117,12 @@ jobs:
           cp out/coincync-node out/coincync-rig out/coincync-wallet out/cyncswap pkg/
           cp deploy/coincync-node.service release/README.md release/coincync.conf.example pkg/
           cp deploy/ops/verify-community-bootstrap.sh deploy/ops/install-testnet-node.sh pkg/
-          chmod +x pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
+          # Ship the binaries executable too — the Docker artifact copy lands them
+          # 0644 in out/, so without this `./coincync-node` fails with "Permission
+          # denied" after `tar xzf`. chmod is content-neutral, so the SHA256SUMS
+          # content hashes and the Docker-match check below are unaffected.
+          chmod +x pkg/coincync-node pkg/coincync-rig pkg/coincync-wallet pkg/cyncswap \
+                   pkg/verify-community-bootstrap.sh pkg/install-testnet-node.sh
           # Re-generate SHA256SUMS.txt over the FULL tarball contents
           # (Docker's out/SHA256SUMS only covers the binaries; the
           # tarball has extra service files + install scripts too).
