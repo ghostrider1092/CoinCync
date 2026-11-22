@@ -645,14 +645,23 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 Some(p2p) => p2p
                     .connected_peers()
                     .into_iter()
-                    .map(|p| serialize_peer_info(&p, state.minimize_metadata))
+                    // H3 (#442): FORCE-minimize addr + peer-id on get_peers,
+                    // regardless of state.minimize_metadata. get_peers is on the
+                    // public /rpc allowlist, and minimize_metadata defaults to
+                    // !listen_loopback — false for a loopback-bound RPC fronted by
+                    // nginx (the standard public deployment), which exposed every
+                    // peer's IP:port + stable id prefix to unauthenticated clients.
+                    // Peer topology is never safe to expose publicly on a privacy
+                    // chain; an operator needing raw peer addrs reads them on-box.
+                    .map(|p| serialize_peer_info(&p, true))
                     .collect(),
                 None => Vec::new(),
             };
             Ok::<_, ErrorObjectOwned>(json!({
                 "count": peers_json.len(),
                 "peers": peers_json,
-                "metadata_minimized": state.minimize_metadata,
+                // H3 (#442): get_peers is always minimized now, so report it.
+                "metadata_minimized": true,
             }))
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;

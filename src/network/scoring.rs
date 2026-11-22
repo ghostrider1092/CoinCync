@@ -610,7 +610,14 @@ const MSG_RATE_LIMITS: &[(u8, u32)] = &[
     (62, 50), // MessageType::GetOutputDigests     — 5/sec (digest range req)
     (64, 20), // MessageType::GetFilterCheckpoints — 2/sec (zero-body, cheap to spam)
     (70, 50), // MessageType::GetKeyImageStatus    — 5/sec (DHT ki query)
-               // Responses (Headers, Blocks, Txs, Addr, BlockData, Filters, etc.)
+    // Txs (21) is BOTH a response AND an UNSOLICITED relay type. It was lumped
+    // with "responses we asked for" and left unlimited, but an inbound Txs forces
+    // a full CLSAG + range-proof verify per tx before dedup (relay.rs handle_txs),
+    // so an unsolicited-relay flood is a CPU-DoS (H2 / #441). Cap it. The
+    // dedup-before-validate check in handle_txs is the primary defense; this is
+    // defense-in-depth against a flood of genuinely-new txs.
+    (21, 100), // MessageType::Txs — 10/sec (unsolicited-relay flood guard)
+               // Other responses (Headers, Blocks, Addr, BlockData, Filters, etc.)
                // are intentionally NOT rate-limited here — we asked for them.
                // Runaway response volume is caught elsewhere by MAX_MESSAGE_SIZE
                // + per-shard framer caps.
