@@ -2446,7 +2446,24 @@ async fn start_node(
                             use coincync::consensus::bobtail;
                             if bobtail::bobtail_observe_active_at(chain_m.network(), height) {
                                 let prev = start_tip;
-                                let pk = candidate.header.miner_pubkey;
+                                // Observe share owner: a STABLE, per-node identity used ONLY for the
+                                // concentration / divergence telemetry (health.rs tallies distinct
+                                // owners by these bytes). The block header's miner_pubkey is zeroed
+                                // (#222, on-chain unlinkability), so it cannot serve here — it would
+                                // collapse every miner to one owner and make CYNC-POW-004 a
+                                // meaningless constant. Domain-hash the payout spend pubkey into an
+                                // opaque id: stable per node, distinct across miners with distinct
+                                // payout addresses, and — unlike the pre-#222 raw header pubkey — it
+                                // never reveals the payout key (shares are off-chain gossip among
+                                // bobtail peers). Detection-only Observe data, NOT the Enforce
+                                // reward/sybil binding (a separate post-audit design).
+                                let pk = coincync::primitives::PublicKey::from_bytes(
+                                    *coincync::primitives::hash_domain(
+                                        b"coincync-bobtail-observe-share-owner-v1",
+                                        spend.as_bytes(),
+                                    )
+                                    .as_bytes(),
+                                );
                                 let tau = bobtail::tau_share_target(
                                     &target,
                                     bobtail::BOBTAIL_K,
