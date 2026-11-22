@@ -121,6 +121,18 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             let status = health.as_str();
             let health_score = health.score();
 
+            // Shielded (Lelantus-Spark) pool activation status — height-gated and
+            // compiled in (constants::shielded_activation_height). Testnet fires at
+            // SHIELDED_TESTNET_ACTIVATION_HEIGHT; mainnet stays u64::MAX until
+            // audited. Exposed so the rig/explorer show the LIVE pool state instead
+            // of a hardcoded posture: a node past the activation height is running
+            // shielded consensus now.
+            let shielded_net = state.chain.network();
+            let shielded_activation_height =
+                crate::constants::shielded_activation_height(shielded_net);
+            let shielded_active =
+                crate::constants::shielded_tx_active_at_height(shielded_net, height);
+
             Ok::<_, ErrorObjectOwned>(json!({
                 // Identity
                 "version":                 env!("CARGO_PKG_VERSION"),
@@ -174,6 +186,12 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 "anonymity_set":           anonymity_set,
                 "available_outputs":       anonymity_set, // back-compat alias
                 "effective_ring_size":     effective_ring_size,
+                // Shielded (Lelantus-Spark) pool activation — the live truth a
+                // miner/explorer should display. `shielded_activation_height` is
+                // u64::MAX when permanently disabled (mainnet, pre-audit); a node
+                // whose `height` >= this value is running shielded consensus now.
+                "shielded_active":         shielded_active,
+                "shielded_activation_height": shielded_activation_height,
                 // Health / monitoring
                 "status":                  status,
                 "health_score":            health_score,
