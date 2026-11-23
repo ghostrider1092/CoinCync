@@ -61,6 +61,14 @@
 //!   TESTS: `reservation_releases_bytes_on_drop`, `slot_decrements_through_panic_unwind`,
 //!   `slot_drops_on_tokio_task_cancel`.
 
+// Cast hygiene (modernization Tier-1c): production code is clean of unjustified
+// numeric casts. Any new intentional cast must carry a justified `#[allow]`.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -161,7 +169,7 @@ impl ConnectionTracker {
             IpAddr::V4(v4) => {
                 let octets = v4.octets();
                 // IPv4 /16: first two octets.
-                ((octets[0] as u32) << 8) | (octets[1] as u32)
+                (u32::from(octets[0]) << 8) | u32::from(octets[1])
             }
             IpAddr::V6(v6) => {
                 // AUDIT (2026-07-01): use the first 32 bits (/32) instead of
@@ -180,7 +188,7 @@ impl ConnectionTracker {
                 // bits; IPv4 /16 still fits and is zero-extended into the
                 // upper half.
                 let segments = v6.segments();
-                ((segments[0] as u32) << 16) | (segments[1] as u32)
+                (u32::from(segments[0]) << 16) | u32::from(segments[1])
             }
         }
     }
@@ -558,6 +566,9 @@ impl Drop for OutboundSubnetSlot {
 
 #[cfg(test)]
 mod tests {
+    // Test-only casts (bounded loop indices → u8) are low-risk; the module deny
+    // below still enforces the production code.
+    #![allow(clippy::cast_possible_truncation)]
     use super::*;
 
     fn addr(n: u8) -> SocketAddr {
