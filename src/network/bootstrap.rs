@@ -76,6 +76,14 @@
 //!   `load_from_file_accepts_empty_array`,
 //!   `load_from_file_rejects_too_many_entries`.
 
+// Cast hygiene (modernization Tier-1c): clean of unjustified numeric casts.
+// Any new cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -367,7 +375,7 @@ impl PeerAddress {
     pub fn new(addr: SocketAddr) -> Self {
         PeerAddress {
             addr,
-            last_seen: chrono::Utc::now().timestamp() as u64,
+            last_seen: u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0),
             services: 0,
         }
     }
@@ -479,11 +487,11 @@ impl AddressManager {
         match addr.ip() {
             std::net::IpAddr::V4(v4) => {
                 let o = v4.octets();
-                ((o[0] as u64) << 8) | (o[1] as u64)
+                (u64::from(o[0]) << 8) | u64::from(o[1])
             }
             std::net::IpAddr::V6(v6) => {
                 let s = v6.segments();
-                0x1_0000_0000 | ((s[0] as u64) << 16) | (s[1] as u64)
+                0x1_0000_0000 | (u64::from(s[0]) << 16) | u64::from(s[1])
             }
         }
     }
@@ -766,7 +774,7 @@ impl AddressManager {
 
         // Update last_seen
         if let Some(peer) = self.addresses.iter_mut().find(|a| a.addr == addr) {
-            peer.last_seen = chrono::Utc::now().timestamp() as u64;
+            peer.last_seen = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
         }
     }
 
@@ -929,6 +937,13 @@ pub async fn setup_upnp(internal_port: u16, external_port: u16) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // Test-only casts (bounded fixtures / indices) are low-risk; the module deny
+    // still enforces production code.
+    #![allow(
+        clippy::cast_lossless,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     use super::*;
 
     #[test]
