@@ -69,6 +69,15 @@
 //!   TESTS: `checksum_detects_corrupted_unencrypted_body`,
 //!   `walletdata_drop_with_mnemonic_phrase_does_not_panic`.
 
+// Cast hygiene (modernization Tier-1c): this module is clean of unjustified
+// numeric casts. The file-format / hash-preimage length prefixes carry inline
+// `#[allow]`s; any NEW cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::io::{Read, Write};
 use std::path::Path;
 // `File` is only used in the non-Unix fallback branches for
@@ -905,6 +914,11 @@ pub fn save_wallet(path: &Path, data: &WalletData, password: Option<&str>) -> Re
 /// `password: None` writes an unencrypted v3 file. `password: Some(_)`
 /// writes an encrypted v3 file (used only by the round-trip-test
 /// helper that wants to materialize a v3 file to then load + upgrade).
+// The `len() as u32` length prefixes below are part of the on-disk wallet file
+// format and the integrity-hash preimage; the casts are intentional and bounded
+// (header/data lengths far below u32::MAX). Do NOT change them — the file layout
+// and the hash must stay byte-stable.
+#[allow(clippy::cast_possible_truncation)]
 pub(crate) fn save_v3_internal(
     path: &Path,
     data: &WalletData,
@@ -1284,6 +1298,9 @@ pub fn change_password(path: &Path, old_password: &str, new_password: &str) -> R
 ///
 /// Compared to v3, the only difference is the 32-byte HMAC suffix and
 /// the `version=4` byte inside the header.
+// `len() as u32` prefixes feed the on-disk format and the blake3 keyed-hash
+// preimage; intentional and bounded. Do NOT change — keep the bytes stable.
+#[allow(clippy::cast_possible_truncation)]
 pub fn save_v4(path: &Path, data: &WalletData, password: &str) -> Result<()> {
     // Fresh header with new random salt + nonce + version=4.
     let mut header = WalletHeader::new_v4(true);

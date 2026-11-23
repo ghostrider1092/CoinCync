@@ -11,6 +11,15 @@
 //! This module is the format + verification core (no I/O). The `release-attest`
 //! binary wraps it for hashing artifacts, signing, and verifying.
 
+// Cast hygiene (modernization Tier-1c): this module is clean of unjustified
+// numeric casts. The signing-preimage length prefixes carry an inline `#[allow]`
+// with a signature warning; any NEW cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -50,6 +59,11 @@ impl ReleaseManifest {
     /// Canonical bytes maintainers sign. Length-prefixed + domain-tagged so it
     /// is deterministic and unambiguous (no field-boundary collisions), and
     /// order-independent because `new` sorts the artifacts.
+    // Each `.len() as u32` below is a length prefix in the SIGNED release-manifest
+    // preimage; the cast is intentional and truncation cannot occur for real
+    // metadata (lengths far below u32::MAX). Do NOT change it — the signed bytes
+    // must stay byte-for-byte identical, or existing signatures fail to verify.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn signing_bytes(&self) -> [u8; 32] {
         let mut h = Sha256::new();
         h.update(RELEASE_MANIFEST_DOMAIN);
