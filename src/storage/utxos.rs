@@ -63,6 +63,15 @@
 //!   all-or-nothing. TESTS: `batch_from_block_and_disconnect_are_exact_inverses`,
 //!   `reorg_batches_replace_orphaned_outputs_in_decoy_catalog`.
 
+// Cast hygiene (modernization Tier-1c): clean of unjustified numeric casts.
+// Output-index casts carry fn-scoped `#[allow]`s (bounded by MAX_TX_OUTPUTS=16);
+// any new cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::db::{Database, OutputIndexEntry};
 use crate::decoy::{HeightOutputCount, OutputLocator, ResolvedDecoyOutput};
 use crate::error::{Error, Result};
@@ -471,7 +480,7 @@ impl UtxoSet {
             .range(..=up_to_height)
             .map(|(height, keys)| HeightOutputCount {
                 height: *height,
-                count: keys.len() as u32,
+                count: u32::try_from(keys.len()).unwrap_or(u32::MAX),
             })
             .collect()
     }
@@ -821,6 +830,9 @@ impl UtxoSet {
     /// Create a batch from a block's transactions
     ///
     /// Extracts all UTXO operations from a block for efficient batch application
+    // The `idx as u8` output index below is bounded by MAX_TX_OUTPUTS (16), so the
+    // u8 is exact (it keys the per-output storage entry).
+    #[allow(clippy::cast_possible_truncation)]
     pub fn batch_from_block(
         block_height: u64,
         transactions: &[crate::transaction::Transaction],
@@ -895,6 +907,8 @@ impl UtxoSet {
     /// `mark_key_image_spent()` only records the key image — it does NOT remove
     /// the output from the set (unlike `spend_output()` which is not used for
     /// ring-sig chains).
+    // `idx as u8` is an output index, bounded by MAX_TX_OUTPUTS (16) → exact.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn batch_disconnect_block(transactions: &[crate::transaction::Transaction]) -> UtxoBatch {
         let mut batch = UtxoBatch::with_capacity(
             0,
@@ -1022,6 +1036,13 @@ impl crate::security::SecurityDetail for UtxoSecurityDetail<'_> {
 
 #[cfg(test)]
 mod tests {
+    // Test-only casts (bounded fixtures, index values) are low-risk; the module
+    // deny still enforces production code.
+    #![allow(
+        clippy::cast_lossless,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     use super::*;
     use crate::decoy::OutputLocator;
     use crate::primitives::PublicKey;

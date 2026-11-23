@@ -89,6 +89,15 @@
 //!   TESTS: `light_sync_stats_accumulate_across_digests_including_coinbase`,
 //!   `scan_output_digest_loses_lock_height_funds_correctness_hole`.
 
+// Cast hygiene (modernization Tier-1c): clean of unjustified numeric casts.
+// Output-index casts carry inline `#[allow]`s (bounded by MAX_TX_OUTPUTS=16); any
+// new cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -210,6 +219,9 @@ impl BlockDigest {
                 if idx > 255 {
                     break;
                 } // Same safety as WalletScanner
+                // `idx` is an output index, bounded by MAX_TX_OUTPUTS (16), so the
+                // u8 is exact; it is a digest input and must stay u8.
+                #[allow(clippy::cast_possible_truncation)]
                 let mut digest = OutputDigest::from_output(output, tx_hash, idx as u8);
                 // audit H-4: mark coinbase outputs so the light client uses the
                 // coinbase detection path (plaintext amount, no view-tag gate).
@@ -245,7 +257,10 @@ impl BlockDigest {
             hash,
             prev_hash: block.header.prev_hash,
             timestamp: block.header.timestamp.as_secs(),
-            output_count: outputs.len() as u16,
+            // A 2 MiB MAX_BLOCK_SIZE over >=96 bytes/output bounds this to ~21,845
+            // (<< u16::MAX); the saturating conversion is defense-in-depth for a
+            // light client (this field is redundant with `outputs`, not a preimage).
+            output_count: u16::try_from(outputs.len()).unwrap_or(u16::MAX),
             outputs,
         }
     }
@@ -616,7 +631,7 @@ impl LightWalletSync {
                     .get(&(output.tx_hash, output.output_index))
                     .copied();
                 self.stats.outputs_found += 1;
-                self.stats.total_amount += decrypted.amount as u128;
+                self.stats.total_amount += u128::from(decrypted.amount);
                 found.push(decrypted);
             }
         }
@@ -670,12 +685,12 @@ impl LightWalletSync {
         self.stats.digests_scanned += digests.len() as u64;
         self.stats.outputs_scanned += digests.iter().map(|d| d.outputs.len() as u64).sum::<u64>();
         self.stats.outputs_found += all_found.len() as u64;
-        self.stats.total_amount += all_found.iter().map(|o| o.amount as u128).sum::<u128>();
+        self.stats.total_amount += all_found.iter().map(|o| u128::from(o.amount)).sum::<u128>();
         self.stats.bytes_processed += digests
             .iter()
             .map(|d| d.estimated_size() as u64)
             .sum::<u64>();
-        self.stats.scan_time_ms += start.elapsed().as_millis() as u64;
+        self.stats.scan_time_ms += u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         // Update position to last digest (only reached once the batch validated).
         if let Some(last) = digests.last() {
@@ -693,7 +708,8 @@ impl LightWalletSync {
     pub fn estimate_bandwidth(block_count: u64, avg_outputs_per_block: u16) -> usize {
         let header_bytes = 82; // BlockDigest header
         let output_bytes = OutputDigest::estimated_size();
-        (block_count as usize) * (header_bytes + (avg_outputs_per_block as usize) * output_bytes)
+        usize::try_from(block_count).unwrap_or(usize::MAX)
+            * (header_bytes + usize::try_from(avg_outputs_per_block).unwrap_or(usize::MAX) * output_bytes)
     }
 }
 
@@ -1016,6 +1032,13 @@ fn decrypt_amount_light(encrypted: &[u8], shared_secret: &[u8; 32]) -> (u64, Bli
 
 #[cfg(test)]
 mod tests {
+    // Test-only casts (amounts, bounded fixtures) are low-risk; the module deny
+    // still enforces production code.
+    #![allow(
+        clippy::cast_lossless,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     use super::*;
     use crate::config::NetworkType;
     use crate::consensus::{Block, BlockHeader};
