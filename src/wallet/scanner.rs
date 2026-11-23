@@ -94,6 +94,15 @@
 //!   position drift double-counting or skipping blocks. TESTS:
 //!   `set_position_roundtrips_and_rescan_is_idempotent`.
 
+// Cast hygiene (modernization Tier-1c): clean of unjustified numeric casts.
+// Output-index casts carry fn-scoped `#[allow]`s (bounded by MAX_TX_OUTPUTS=16);
+// any new cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -945,6 +954,8 @@ impl WalletScanner {
     }
 
     /// Scan a transaction
+    // `idx as u8` below is an output index, bounded by MAX_TX_OUTPUTS (16) → exact.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn scan_transaction(&mut self, tx: &Transaction) -> Vec<DecryptedOutput> {
         let tx_hash = tx.hash();
         let mut found = Vec::new();
@@ -977,7 +988,7 @@ impl WalletScanner {
 
             if let Some(decrypted) = self.scan_output(output, idx as u8, tx_hash, is_revealed) {
                 self.stats.outputs_found += 1;
-                self.stats.total_amount += decrypted.amount as u128;
+                self.stats.total_amount += u128::from(decrypted.amount);
                 found.push(decrypted);
             }
         }
@@ -1180,12 +1191,14 @@ impl WalletScanner {
             }
         }
 
-        self.stats.scan_time_ms = start.elapsed().as_millis() as u64;
+        self.stats.scan_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         all_found
     }
 
     /// Scan blocks in parallel (for catch-up sync)
+    // `idx as u8` output indices are bounded by MAX_TX_OUTPUTS (16) → exact.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn scan_blocks_parallel(&mut self, blocks: &[Block]) -> Vec<DecryptedOutput> {
         let start = std::time::Instant::now();
 
@@ -1256,8 +1269,8 @@ impl WalletScanner {
             .map(|tx| tx.outputs.len().min(256) as u64)
             .sum::<u64>();
         self.stats.outputs_found += all_found.len() as u64;
-        self.stats.total_amount += all_found.iter().map(|o| o.amount as u128).sum::<u128>();
-        self.stats.scan_time_ms = start.elapsed().as_millis() as u64;
+        self.stats.total_amount += all_found.iter().map(|o| u128::from(o.amount)).sum::<u128>();
+        self.stats.scan_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         // Update position to last block
         if let Some(last) = blocks.last() {
@@ -1607,7 +1620,7 @@ impl BackgroundScanner {
             outputs_found: stats.outputs_found,
             outputs_spent: 0, // Updated separately
             scan_started: 0,  // Set when scan starts
-            last_scan_time: chrono::Utc::now().timestamp() as u64,
+            last_scan_time: u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0),
         };
 
         self.db.update_scan_state(&state)?;
@@ -1922,6 +1935,13 @@ pub fn decrypted_to_utxo(
 
 #[cfg(test)]
 mod tests {
+    // Test-only casts (bounded fixtures, amounts, indices) are low-risk; the
+    // module deny still enforces production code.
+    #![allow(
+        clippy::cast_lossless,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     use super::*;
     use crate::config::NetworkType;
     // Phase A1 (audit fix): test below at line 1083 builds a Transaction
