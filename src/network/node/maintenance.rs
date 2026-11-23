@@ -641,8 +641,7 @@ fn update_mesh_floor(
         .count();
     if connected < MESH_FLOOR_PEERS {
         *below_streak = below_streak.saturating_add(1);
-        if *below_streak >= MESH_FLOOR_SUSTAIN_TICKS
-            && !mesh_degraded.swap(true, Ordering::Relaxed)
+        if *below_streak >= MESH_FLOOR_SUSTAIN_TICKS && !mesh_degraded.swap(true, Ordering::Relaxed)
         {
             warn!(
                 target: "node::heartbeat",
@@ -857,9 +856,7 @@ async fn run_self_heal_tick(
     };
 
     let since_progress = now.saturating_duration_since(state.last_progress_at);
-    let since_last_heal = state
-        .last_heal_at
-        .map(|t| now.saturating_duration_since(t));
+    let since_last_heal = state.last_heal_at.map(|t| now.saturating_duration_since(t));
 
     let action = self_heal_decision(
         local_height,
@@ -977,12 +974,12 @@ mod self_heal_tests {
     #[test]
     fn synced_node_does_not_recover() {
         let action = self_heal_decision(
-            100,          // local_height
-            100,          // last_height (no advance)
-            STALL,        // long since progress
-            200,          // target far ahead
-            true,         // is_synced
-            None,         // never healed
+            100,   // local_height
+            100,   // last_height (no advance)
+            STALL, // long since progress
+            200,   // target far ahead
+            true,  // is_synced
+            None,  // never healed
         );
         assert_eq!(action, SelfHealAction::None);
     }
@@ -991,12 +988,10 @@ mod self_heal_tests {
     #[test]
     fn behind_but_progressing_does_not_recover() {
         let action = self_heal_decision(
-            150,          // local_height advanced...
-            100,          // ...past last_height
-            STALL,        // even though wall-clock says long (stale sample)
-            200,
-            false,
-            None,
+            150,   // local_height advanced...
+            100,   // ...past last_height
+            STALL, // even though wall-clock says long (stale sample)
+            200, false, None,
         );
         assert_eq!(action, SelfHealAction::None);
     }
@@ -1040,12 +1035,12 @@ mod self_heal_tests {
     #[test]
     fn stalled_and_behind_recovers() {
         let action = self_heal_decision(
-            100,          // local frozen
-            100,          // no advance
-            STALL,        // for the full window
-            200,          // peers far ahead
-            false,        // not synced
-            None,         // first recovery
+            100,   // local frozen
+            100,   // no advance
+            STALL, // for the full window
+            200,   // peers far ahead
+            false, // not synced
+            None,  // first recovery
         );
         assert_eq!(action, SelfHealAction::Recover);
         // Exactly at the boundary (target == local + slack + 1) still recovers.
@@ -1067,14 +1062,7 @@ mod self_heal_tests {
     fn rate_limited_within_min_gap_does_not_recover() {
         // Just healed (0s ago) and stalled again: suppressed.
         assert_eq!(
-            self_heal_decision(
-                100,
-                100,
-                STALL,
-                200,
-                false,
-                Some(Duration::from_secs(0))
-            ),
+            self_heal_decision(100, 100, STALL, 200, false, Some(Duration::from_secs(0))),
             SelfHealAction::None
         );
         // Still inside the window (MIN_GAP - 1): suppressed.
@@ -1121,9 +1109,19 @@ mod self_heal_tests {
 
         let (pruned, _expired, retriggered) = self_heal_recover(&mut sync, &connected, 1_000_000);
 
-        assert_eq!(pruned, 1, "the phantom (disconnected) peer-height is purged");
-        assert_eq!(sync.true_best_height(), 200, "target shrinks to the real peer");
-        assert!(!sync.is_synced(), "still behind the connected peer -> not synced");
+        assert_eq!(
+            pruned, 1,
+            "the phantom (disconnected) peer-height is purged"
+        );
+        assert_eq!(
+            sync.true_best_height(),
+            200,
+            "target shrinks to the real peer"
+        );
+        assert!(
+            !sync.is_synced(),
+            "still behind the connected peer -> not synced"
+        );
         assert!(retriggered, "behind + idle -> header pull re-armed");
     }
 
@@ -1187,15 +1185,22 @@ mod discovery_tests {
             .collect();
 
         assert!(
-            book.contains(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), default_port)),
+            book.contains(&SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
+                default_port
+            )),
             "a connected inbound peer is seeded at (its ip, default port); got {book:?}"
         );
         assert!(
-            !book.iter().any(|a| a.ip() == IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            !book
+                .iter()
+                .any(|a| a.ip() == IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
             "an outbound peer is not added by inbound discovery"
         );
         assert!(
-            !book.iter().any(|a| a.ip() == IpAddr::V4(Ipv4Addr::new(7, 7, 7, 7))),
+            !book
+                .iter()
+                .any(|a| a.ip() == IpAddr::V4(Ipv4Addr::new(7, 7, 7, 7))),
             "an inbound peer whose handshake is not complete is skipped"
         );
     }

@@ -266,7 +266,10 @@ async fn rest_block_transactions_returns_list_shape() {
         .await
         .unwrap();
     assert_eq!(json.get("height").and_then(|v| v.as_u64()), Some(0));
-    assert!(json.get("transactions").map(|v| v.is_array()).unwrap_or(false));
+    assert!(json
+        .get("transactions")
+        .map(|v| v.is_array())
+        .unwrap_or(false));
     assert!(json.get("tx_count").is_some());
     rest.abort();
 }
@@ -374,7 +377,11 @@ async fn rest_submit_transaction_rejects_non_hex_and_oversize_400() {
     );
     // Over the 1 MiB cap (still valid hex chars) → 400.
     assert_eq!(
-        submit_status(&c, serde_json::json!({ "tx_hex": "a".repeat(1024 * 1024 + 2) })).await,
+        submit_status(
+            &c,
+            serde_json::json!({ "tx_hex": "a".repeat(1024 * 1024 + 2) })
+        )
+        .await,
         reqwest::StatusCode::BAD_REQUEST
     );
     rest.abort();
@@ -404,7 +411,10 @@ async fn rest_submit_transaction_rate_limits_at_5_per_sec() {
             too_many += 1;
         }
     }
-    assert!(too_many > 0, "expected some 429 under submit burst (5/s cap)");
+    assert!(
+        too_many > 0,
+        "expected some 429 under submit burst (5/s cap)"
+    );
     rest.abort();
 }
 
@@ -456,7 +466,10 @@ async fn rest_search_resolves_height_and_block_hash() {
         .json()
         .await
         .unwrap();
-    assert_eq!(by_height.get("type").and_then(|v| v.as_str()), Some("block"));
+    assert_eq!(
+        by_height.get("type").and_then(|v| v.as_str()),
+        Some("block")
+    );
 
     // Hash resolution: fetch genesis hash from /status, then search it.
     let status: serde_json::Value = c
@@ -571,7 +584,10 @@ async fn rest_peers_is_count_only_with_auth_note() {
         .unwrap();
     let obj = json.as_object().unwrap();
     assert!(obj.contains_key("peer_count"));
-    assert!(obj.contains_key("note"), "peers must carry the auth/privacy note");
+    assert!(
+        obj.contains_key("note"),
+        "peers must carry the auth/privacy note"
+    );
     // No detailed per-peer topology fields leak here.
     assert!(!obj.contains_key("peers"));
     rest.abort();
@@ -689,7 +705,10 @@ async fn rest_cors_allows_known_origin_and_omits_unknown() {
         .await
         .unwrap();
     assert!(
-        denied.headers().get("access-control-allow-origin").is_none(),
+        denied
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none(),
         "unknown origin must NOT be reflected in access-control-allow-origin"
     );
     rest.abort();
@@ -703,13 +722,21 @@ async fn rest_cors_allows_known_origin_and_omits_unknown() {
 async fn rest_explorer_mount_present_only_when_enabled() {
     // serve_explorer = false → GET / is not routed.
     let (_rpc_off, rest_off) = start_rpc_and_rest_ex(19796, 19798, false).await;
-    let off = client().get("http://127.0.0.1:19798/").send().await.unwrap();
+    let off = client()
+        .get("http://127.0.0.1:19798/")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(off.status(), reqwest::StatusCode::NOT_FOUND);
     rest_off.abort();
 
     // serve_explorer = true → GET / serves the embedded explorer HTML.
     let (_rpc_on, rest_on) = start_rpc_and_rest_ex(19801, 19803, true).await;
-    let on = client().get("http://127.0.0.1:19803/").send().await.unwrap();
+    let on = client()
+        .get("http://127.0.0.1:19803/")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(on.status(), reqwest::StatusCode::OK);
     let ctype = on
         .headers()
@@ -765,7 +792,10 @@ async fn rest_ws_ping_pong_and_per_ip_cap() {
             _ => break,
         }
     }
-    assert!(got_pong, "server must answer a `ping` text frame with a pong");
+    assert!(
+        got_pong,
+        "server must answer a `ping` text frame with a pong"
+    );
 
     // The 6th connection from the same (unknown) bucket must be rejected 429.
     match tokio_tungstenite::connect_async(url).await {

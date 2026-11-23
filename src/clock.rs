@@ -289,8 +289,14 @@ mod tests {
 
         // Advance virtual elapsed-time past the timeout — deterministically fires.
         let now = advance_sim_mono(Duration::from_secs(31));
-        assert_eq!(now.saturating_duration_since(start), Duration::from_secs(31));
-        assert!(start.elapsed() >= Duration::from_secs(30), "timeout must now fire");
+        assert_eq!(
+            now.saturating_duration_since(start),
+            Duration::from_secs(31)
+        );
+        assert!(
+            start.elapsed() >= Duration::from_secs(30),
+            "timeout must now fire"
+        );
 
         // Arithmetic: a deadline is start + timeout.
         let deadline = start + Duration::from_secs(30);

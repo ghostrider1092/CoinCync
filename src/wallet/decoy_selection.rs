@@ -52,7 +52,10 @@ pub fn audit_ring_ages(member_heights: &[u64], spend_height: u64) -> RingAudit {
     }
     let distinct_age_decades = decades.len();
     let (ok, reason) = if distinct_age_decades < 2 {
-        (false, Some("ring decoy ages cluster in a single order of magnitude"))
+        (
+            false,
+            Some("ring decoy ages cluster in a single order of magnitude"),
+        )
     } else {
         (true, None)
     };

@@ -46,9 +46,9 @@ pub mod shares;
 pub use hashrate::ShareHashrate;
 
 pub use gossip::{Admit, ProofShareBatch, SharePool, CAP_BOBTAIL_SHARES, PROOF_SHARES_MSG_TYPE};
-pub use mining::collect_shares;
 pub use health::{BobtailHealth, ViewDivergence};
 pub use kmean::{bar_fill_bps, k_mean_meets_target, tau_share_target};
+pub use mining::collect_shares;
 pub use shares::{
     block_shares_valid, canonical_k_lowest, count_omitted_lower, equal_split, lottery_index,
     max_pool_size, omits_lower_share, retain_lowest, ResolvedShare, ShareProof,
@@ -181,7 +181,11 @@ mod tests {
     fn rs(owner: u8, nonce: u64, b0: u8) -> ResolvedShare {
         let mut b = [0u8; 32];
         b[0] = b0;
-        ResolvedShare::new(PublicKey::from_bytes([owner; 32]), nonce, Hash::from_bytes(b))
+        ResolvedShare::new(
+            PublicKey::from_bytes([owner; 32]),
+            nonce,
+            Hash::from_bytes(b),
+        )
     }
 
     /// K=1 recovers single-sample PoW: the observation's bar equals
@@ -230,7 +234,11 @@ mod tests {
         }
         let obs = observe(&pool, &target, 4);
         assert_eq!(obs.canonical_set.len(), 4);
-        assert_eq!(obs.canonical_set[0].hash.as_bytes()[0], 0x05, "minimum first");
+        assert_eq!(
+            obs.canonical_set[0].hash.as_bytes()[0],
+            0x05,
+            "minimum first"
+        );
         assert!(obs.meets_bar);
         assert_eq!(obs.proposer, Some(PublicKey::from_bytes([1u8; 32])));
         assert!(obs.lottery_winner.unwrap() < 4);
@@ -247,7 +255,10 @@ mod tests {
         assert_eq!(BOBTAIL_OBSERVE_HEIGHT, u64::MAX);
         assert_eq!(BOBTAIL_ACTIVATION_HEIGHT, u64::MAX);
         // mainnet: Observe off even at huge heights (fail-closed).
-        assert!(!bobtail_observe_active_at(NetworkType::Mainnet, u64::MAX - 1));
+        assert!(!bobtail_observe_active_at(
+            NetworkType::Mainnet,
+            u64::MAX - 1
+        ));
         // testnet: armed at the flag-day Observe height; off below it.
         assert!(bobtail_observe_active_at(
             NetworkType::Testnet,

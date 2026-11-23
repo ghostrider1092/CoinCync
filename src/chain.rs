@@ -179,12 +179,12 @@ use crate::transaction::Transaction;
 // a valid import path for existing callers and tests; behavior and the public
 // API are unchanged. Chain MUTATION (block connect/disconnect, UTXO/state
 // application, reorg execution) stays in this file.
+#[allow(deprecated)]
+pub use crate::consensus::finality::max_reorg_depth;
 pub use crate::consensus::finality::{
     evaluate_reorg_acceptability, max_reorg_depth_for, BOOTSTRAP_MESS_HEIGHT,
     MESS_EXPONENT_DIVISOR, REORG_UNCONDITIONAL_DEPTH,
 };
-#[allow(deprecated)]
-pub use crate::consensus::finality::max_reorg_depth;
 
 /// Shared blockchain type for concurrent access
 pub type SharedBlockchain = Arc<Blockchain>;
@@ -596,9 +596,7 @@ impl Blockchain {
             // (in-memory here; the persistent node uses `with_database`). Gated
             // OFF in production, so default builds stay byte-identical.
             #[cfg(feature = "sketch-gk-proof")]
-            spark_pool_store: Some(Arc::new(
-                crate::storage::spark_pool::SparkPoolStore::new(),
-            )),
+            spark_pool_store: Some(Arc::new(crate::storage::spark_pool::SparkPoolStore::new())),
             cut_through: None,
             security_log: Arc::new(crate::security::IncidentLog::default()),
             // CIP-009.D rolling finality: dormant until the operator
@@ -871,11 +869,9 @@ impl Blockchain {
             if let Some(t) = s.staging_trees() {
                 let base = trees.len();
                 trees.extend_from_slice(&t);
-                for (i, k, v) in
-                    crate::storage::spark_pool::SparkPoolStore::staged_ops_to_writes(
-                        &s.take_staged_ops(),
-                    )
-                {
+                for (i, k, v) in crate::storage::spark_pool::SparkPoolStore::staged_ops_to_writes(
+                    &s.take_staged_ops(),
+                ) {
                     ops.push((base + i, k, v));
                 }
             }
@@ -1055,7 +1051,11 @@ impl Blockchain {
         use crate::security::SecurityDetail;
         let (total_supply, total_burned, tip_height) = {
             let inner = self.inner.read();
-            (inner.stats.total_supply, inner.stats.total_burned, inner.stats.height)
+            (
+                inner.stats.total_supply,
+                inner.stats.total_burned,
+                inner.stats.height,
+            )
         };
         // `with_tip` adds the schedule reconciliation: recompute the
         // deterministic emission sum at the tip and flag any drift from the
@@ -1221,8 +1221,11 @@ impl Blockchain {
             // must be backed by its transparent commitments (no cross-veil
             // inflation). The shielded side's own conservation is proven by the
             // libspark bundle in verify_spark_payload below.
-            let pseudo_outputs: Vec<[u8; 32]> =
-                tx.inputs.iter().map(|i| i.pseudo_output_commitment).collect();
+            let pseudo_outputs: Vec<[u8; 32]> = tx
+                .inputs
+                .iter()
+                .map(|i| i.pseudo_output_commitment)
+                .collect();
             let output_commitments: Vec<[u8; 32]> =
                 tx.outputs.iter().map(|o| o.commitment).collect();
             crate::consensus::spark_payload::verify_transparent_shielded_balance(
@@ -1301,7 +1304,10 @@ impl Blockchain {
                 let (_total, coins) = spark_connector::ffi::verify_mint_bundle(mint)
                     .ok_or_else(|| format!("spark v2 tx {idx}: mint bundle unparseable"))?;
                 for (i, coin) in coins.iter().enumerate() {
-                    let op = crate::consensus::spark_payload::derive_outpoint(&input_outpoints, i as u32);
+                    let op = crate::consensus::spark_payload::derive_outpoint(
+                        &input_outpoints,
+                        i as u32,
+                    );
                     if store.index_of(&op).is_some() {
                         return Err(format!(
                             "spark v2 tx {idx}: mint coin outpoint already in the pool \
@@ -1351,8 +1357,7 @@ impl Blockchain {
             // Honest output coins commit to a random serial — identical bytes are
             // always a duplicate, never two real coins. Fail-closed.
             if let Some(sb) = &payload.spend {
-                if let Some((out_coins, _out_ctx)) =
-                    spark_connector::ffi::spend_outputs(&sb.bundle)
+                if let Some((out_coins, _out_ctx)) = spark_connector::ffi::spend_outputs(&sb.bundle)
                 {
                     for coin in &out_coins {
                         let content = *blake3::hash(&coin.0).as_bytes();
@@ -1409,9 +1414,8 @@ impl Blockchain {
             // floor no longer keeps such a spend out of a block.
             if payload.mint.is_none() {
                 if let Some(sb) = &payload.spend {
-                    let bundle_fee = spark_connector::ffi::spend_fee(&sb.bundle).ok_or_else(|| {
-                        format!("spark v2 tx {idx}: unreadable spend bundle fee")
-                    })?;
+                    let bundle_fee = spark_connector::ffi::spend_fee(&sb.bundle)
+                        .ok_or_else(|| format!("spark v2 tx {idx}: unreadable spend bundle fee"))?;
                     if payload.value_balance as i128 != bundle_fee as i128 {
                         return Err(format!(
                             "spark v2 tx {idx}: value_balance {} != spend bundle fee {} \
@@ -1549,7 +1553,10 @@ impl Blockchain {
                         &input_outpoints,
                         i as u32,
                     );
-                    if store.add_coin(op, coin.clone(), mint_ctx.clone(), height).is_none() {
+                    if store
+                        .add_coin(op, coin.clone(), mint_ctx.clone(), height)
+                        .is_none()
+                    {
                         panic!(
                             "CONSENSUS FAULT: duplicate mint coin outpoint (tx {idx}, h{height}). \
                              Halting."
@@ -1564,8 +1571,7 @@ impl Blockchain {
             // the mint feed. A coin already present (idempotent reorg re-apply)
             // is skipped, not a fault.
             if let Some(sb) = &payload.spend {
-                if let Some((out_coins, out_ctx)) =
-                    spark_connector::ffi::spend_outputs(&sb.bundle)
+                if let Some((out_coins, out_ctx)) = spark_connector::ffi::spend_outputs(&sb.bundle)
                 {
                     for coin in &out_coins {
                         let key = blake3::hash(&coin.0).as_bytes().to_vec();
@@ -1578,12 +1584,14 @@ impl Blockchain {
             // grows it, unshield shrinks it). A negative result is impossible —
             // verify_block_spark_v2 pre-checked cumulative balance — so an Err
             // here is a consensus fault → halt (preserve on-disk state).
-            store.apply_value_balance(payload.value_balance).unwrap_or_else(|e| {
-                panic!(
+            store
+                .apply_value_balance(payload.value_balance)
+                .unwrap_or_else(|e| {
+                    panic!(
                     "CONSENSUS FAULT: spark v2 pool-value apply failed (tx {idx}, h{height}): {e}. \
                      Validation should have rejected. Halting."
                 )
-            });
+                });
         }
 
         // Secret Service, post-apply: run the pool's O(1) consensus guard over
@@ -1883,7 +1891,8 @@ impl Blockchain {
                 // fork-point finality floor still apply independently.)
                 tracing::error!(
                     "finality guard: chain-state read failed while checking rollback to {}: {}",
-                    target_height, e
+                    target_height,
+                    e
                 );
             }
             if let Ok(Some(state)) = state_res {
@@ -2214,7 +2223,9 @@ impl Blockchain {
         {
             if matches!(
                 status,
-                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+                BlockStatus::Accepted
+                    | BlockStatus::AcceptedFork
+                    | BlockStatus::AcceptedReorg { .. }
             ) {
                 let _ = crate::block_integrity_live_breaker::on_block_connected(
                     self.total_outputs_ever(),
@@ -2248,7 +2259,9 @@ impl Blockchain {
         {
             if matches!(
                 status,
-                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+                BlockStatus::Accepted
+                    | BlockStatus::AcceptedFork
+                    | BlockStatus::AcceptedReorg { .. }
             ) {
                 let (total_supply, total_burned) = {
                     let inner = self.inner.read();
@@ -2286,10 +2299,15 @@ impl Blockchain {
         {
             if matches!(
                 status,
-                BlockStatus::Accepted | BlockStatus::AcceptedFork | BlockStatus::AcceptedReorg { .. }
+                BlockStatus::Accepted
+                    | BlockStatus::AcceptedFork
+                    | BlockStatus::AcceptedReorg { .. }
             ) {
-                let pool_value =
-                    self.spark_pool_store.as_ref().map(|s| s.pool_value()).unwrap_or(0);
+                let pool_value = self
+                    .spark_pool_store
+                    .as_ref()
+                    .map(|s| s.pool_value())
+                    .unwrap_or(0);
                 let _ = crate::shielded_live_breaker::on_block_connected(pool_value);
                 let surface = crate::breaker_recovery::BreakerSurface::Shielded;
                 if crate::fuse::enforce_trips(
@@ -2353,7 +2371,9 @@ impl Blockchain {
                 network_magic: magic,
                 version: 1,
                 height: crate::primitives::Height::new(h),
-                timestamp: crate::primitives::Timestamp::from_secs(base_ts + (h - start_height + 1) * block_time),
+                timestamp: crate::primitives::Timestamp::from_secs(
+                    base_ts + (h - start_height + 1) * block_time,
+                ),
                 prev_hash,
                 tx_root: Hash::zero(),
                 anchor: Hash::zero(),
@@ -2414,13 +2434,17 @@ impl Blockchain {
         let expected_height = if block.header.height.as_u64() == 0 {
             0
         } else {
-            parent.as_ref().map(|p| p.header.height.as_u64() + 1).unwrap_or(0)
+            parent
+                .as_ref()
+                .map(|p| p.header.height.as_u64() + 1)
+                .unwrap_or(0)
         };
 
         if block.header.height.as_u64() != expected_height {
             return Ok(BlockStatus::Invalid(format!(
                 "Invalid height: expected {}, got {}",
-                expected_height, block.header.height.as_u64()
+                expected_height,
+                block.header.height.as_u64()
             )));
         }
 
@@ -2670,10 +2694,12 @@ impl Blockchain {
                     // the pre-apply guard mirroring the transparent key-image
                     // check. Inert while the store is None (gated off).
                     if let Some(ref sstore) = self.shielded_store {
-                        if let Err(e) = crate::consensus::shielded::check_block_shielded_double_spends(
-                            &block.transactions,
-                            |t| sstore.is_nullifier_spent(t),
-                        ) {
+                        if let Err(e) =
+                            crate::consensus::shielded::check_block_shielded_double_spends(
+                                &block.transactions,
+                                |t| sstore.is_nullifier_spent(t),
+                            )
+                        {
                             let reason = format!("shielded double-spend: {}", e);
                             tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
                             return Ok(BlockStatus::Invalid(reason));
@@ -2693,14 +2719,17 @@ impl Blockchain {
                     // (SparkPayload) against the SparkPoolStore. Inert unless both
                     // features are on and the pool store is initialized.
                     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
-                    if let Err(reason) = self
-                        .verify_block_spark_v2_at_height(&block.transactions, block.header.height.as_u64())
-                    {
+                    if let Err(reason) = self.verify_block_spark_v2_at_height(
+                        &block.transactions,
+                        block.header.height.as_u64(),
+                    ) {
                         tracing::warn!("Block {} rejected: {}", &hash.to_hex()[..16], reason);
                         return Ok(BlockStatus::Invalid(reason));
                     }
 
-                    inner.height_to_hash.insert(block.header.height.as_u64(), hash);
+                    inner
+                        .height_to_hash
+                        .insert(block.header.height.as_u64(), hash);
                     inner.tip = ChainTip {
                         hash,
                         height: block.header.height.as_u64(),
@@ -2764,7 +2793,10 @@ impl Blockchain {
                     self.checkpoint_phase2_stores(block.header.height.as_u64());
 
                     // SECURITY (CC-001): Apply block's UTXO mutations to track spent/unspent
-                    let batch = UtxoSet::batch_from_block(block.header.height.as_u64(), &block.transactions);
+                    let batch = UtxoSet::batch_from_block(
+                        block.header.height.as_u64(),
+                        &block.transactions,
+                    );
                     inner.utxos.apply_batch(batch);
 
                     // ATOMIC PHASE-2 COMMIT (siblings): stage each initialized
@@ -2809,7 +2841,9 @@ impl Blockchain {
                     self.apply_spark_v2_txs(&block.transactions, block.header.height.as_u64());
 
                     // Bound memory: evict output_index entries older than 1000 blocks
-                    inner.utxos.evict_old_outputs(block.header.height.as_u64(), 1000);
+                    inner
+                        .utxos
+                        .evict_old_outputs(block.header.height.as_u64(), 1000);
 
                     // SECURITY: Evict old blocks from in-memory cache to prevent
                     // unbounded RAM growth. Older blocks fall back to database lookup.
@@ -2844,12 +2878,17 @@ impl Blockchain {
                         let bytes = crate::db::serialize(&entry).map_err(|e| {
                             Error::Internal(format!(
                                 "serialize OutputIndexEntry failed at height {}: {}",
-                                block.header.height.as_u64(), e
+                                block.header.height.as_u64(),
+                                e
                             ))
                         })?;
                         output_additions.push((*output.stealth_address.as_bytes(), bytes));
                     }
-                    tx_index_adds.push((*tx.hash().as_bytes(), block.header.height.as_u64(), tx_idx as u32));
+                    tx_index_adds.push((
+                        *tx.hash().as_bytes(),
+                        block.header.height.as_u64(),
+                        tx_idx as u32,
+                    ));
                 }
 
                 // Index transactions for O(1) lookup by hash.
@@ -2896,7 +2935,8 @@ impl Blockchain {
                     if block.header.height.as_u64() > 0
                         && block.header.height.as_u64() % crate::constants::CHECKPOINT_INTERVAL == 0
                     {
-                        if let Err(e) = db.state.add_checkpoint(block.header.height.as_u64(), &hash) {
+                        if let Err(e) = db.state.add_checkpoint(block.header.height.as_u64(), &hash)
+                        {
                             tracing::error!(
                                 "Failed to record checkpoint at height {}: {}",
                                 block.header.height.as_u64(),
@@ -3029,7 +3069,8 @@ impl Blockchain {
                 // is `None` or the feature is off.
                 #[cfg(feature = "rolling-finality")]
                 if let Some(ref rf) = self.rolling_finality {
-                    if block.header.height.as_u64() >= self.network.rolling_finality_enable_height() {
+                    if block.header.height.as_u64() >= self.network.rolling_finality_enable_height()
+                    {
                         // CIP-009.D attestations live in the coinbase
                         // transaction's `extra` field. Pre-activation
                         // miners typically have no coinbase or an empty
@@ -3050,15 +3091,18 @@ impl Blockchain {
                         match rf.on_accepted_block(block.header.height.as_u64(), coinbase_extra) {
                             OnBlockOutcome::Malformed(e) => tracing::warn!(
                                 "finality: malformed CIP-009.D attestation in block {}: {:?}",
-                                block.header.height.as_u64(), e
+                                block.header.height.as_u64(),
+                                e
                             ),
                             OnBlockOutcome::Rejected(e) => tracing::warn!(
                                 "finality: attestation rejected in block {}: {:?}",
-                                block.header.height.as_u64(), e
+                                block.header.height.as_u64(),
+                                e
                             ),
                             OnBlockOutcome::NewlyFinalized { height, .. } => tracing::info!(
                                 "finality: soft-final height advanced to {} (via block {})",
-                                height, block.header.height.as_u64()
+                                height,
+                                block.header.height.as_u64()
                             ),
                             // NoAttestation (normal in ENABLE) / Recorded: nothing to surface.
                             OnBlockOutcome::NoAttestation | OnBlockOutcome::Recorded => {}
@@ -3206,7 +3250,8 @@ impl Blockchain {
                 // is `None` or the feature is off.
                 #[cfg(feature = "rolling-finality")]
                 if let Some(ref rf) = self.rolling_finality {
-                    if block.header.height.as_u64() >= self.network.rolling_finality_enforce_height()
+                    if block.header.height.as_u64()
+                        >= self.network.rolling_finality_enforce_height()
                         && rf.would_reorg_violate_finality(fork_point)
                     {
                         let soft_final = rf.current_soft_final_height().unwrap_or(0);
@@ -3570,8 +3615,10 @@ impl Blockchain {
                             }
 
                             if diff_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
-                                let expected_target = self
-                                    .expected_next_target(&diff_blocks, fork_block.header.height.as_u64());
+                                let expected_target = self.expected_next_target(
+                                    &diff_blocks,
+                                    fork_block.header.height.as_u64(),
+                                );
                                 if fork_block.header.target != expected_target {
                                     tracing::warn!(
                                         "Fork block {} at height {} has wrong difficulty target",
@@ -3645,7 +3692,8 @@ impl Blockchain {
                         // mutation for this block. Gated OFF today.
                         {
                             let post_emitted = inner.stats.total_supply.saturating_add(
-                                calculate_block_reward(fork_block.header.height.as_u64()).as_atomic() as u128,
+                                calculate_block_reward(fork_block.header.height.as_u64())
+                                    .as_atomic() as u128,
                             );
                             let post_burned = inner
                                 .stats
@@ -3780,12 +3828,10 @@ impl Blockchain {
                                     hash.to_hex(),
                                     errors
                                 );
-                                reorg_error =
-                                    Some(format!("Invalid reorg tip block: {}", errors));
+                                reorg_error = Some(format!("Invalid reorg tip block: {}", errors));
                             }
                             Err(e) => {
-                                reorg_error =
-                                    Some(format!("Reorg tip validation error: {}", e));
+                                reorg_error = Some(format!("Reorg tip validation error: {}", e));
                             }
                         }
                     }
@@ -3833,9 +3879,10 @@ impl Blockchain {
                     }
                     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
                     if reorg_error.is_none() {
-                        if let Err(reason) = self
-                            .verify_block_spark_v2_at_height(&block.transactions, block.header.height.as_u64())
-                        {
+                        if let Err(reason) = self.verify_block_spark_v2_at_height(
+                            &block.transactions,
+                            block.header.height.as_u64(),
+                        ) {
                             reorg_error = Some(format!(
                                 "spark v2 spend invalid in reorg tip block: {}",
                                 reason
@@ -3852,7 +3899,8 @@ impl Blockchain {
                     // `reorg_error.is_none()` so a prior failure's message wins.
                     if reorg_error.is_none() {
                         let post_emitted = inner.stats.total_supply.saturating_add(
-                            calculate_block_reward(block.header.height.as_u64()).as_atomic() as u128,
+                            calculate_block_reward(block.header.height.as_u64()).as_atomic()
+                                as u128,
                         );
                         let post_burned = inner
                             .stats
@@ -3905,7 +3953,8 @@ impl Blockchain {
                                 // just above. Inert while stores are None.
                                 self.rewind_phase2_stores(fork_block.header.height.as_u64());
                                 // Subtract the emission we added for this fork block
-                                let emission = calculate_block_reward(fork_block.header.height.as_u64());
+                                let emission =
+                                    calculate_block_reward(fork_block.header.height.as_u64());
                                 // Burn accumulator, in lockstep with the supply
                                 // subtract below (undoing this fork block's add).
                                 let fee_burn = block_fee_burn(self.network, fork_block);
@@ -4072,8 +4121,10 @@ impl Blockchain {
                             }
 
                             if diff_blocks.len() >= 2 && !cfg!(feature = "test-fast-pow") {
-                                let expected_target =
-                                    self.expected_next_target(&diff_blocks, block.header.height.as_u64());
+                                let expected_target = self.expected_next_target(
+                                    &diff_blocks,
+                                    block.header.height.as_u64(),
+                                );
                                 if block.header.target != expected_target {
                                     tracing::warn!(
                                         "Reorg tip block {} at height {} has wrong difficulty target",
@@ -4121,7 +4172,8 @@ impl Blockchain {
                             // and every one is rewound here, unguarded).
                             // Inert while stores are None.
                             self.rewind_phase2_stores(fork_block.header.height.as_u64());
-                            let emission = calculate_block_reward(fork_block.header.height.as_u64());
+                            let emission =
+                                calculate_block_reward(fork_block.header.height.as_u64());
                             // Burn accumulator, in lockstep with the supply
                             // subtract below (undoing this fork block's add).
                             let fee_burn = block_fee_burn(self.network, fork_block);
@@ -4167,8 +4219,9 @@ impl Blockchain {
                         }
 
                         // Remove fork block height mappings
-                        for h in
-                            (fork_point + 1..=pre_reorg_tip.height.max(block.header.height.as_u64())).rev()
+                        for h in (fork_point + 1
+                            ..=pre_reorg_tip.height.max(block.header.height.as_u64()))
+                            .rev()
                         {
                             inner.height_to_hash.remove(&h);
                         }
@@ -4208,8 +4261,10 @@ impl Blockchain {
                         // shielded/spark/kernel stores activate; inert while None).
                         self.checkpoint_phase2_stores(block.header.height.as_u64());
                         // Apply the new tip block (the triggering block)
-                        let tip_batch =
-                            UtxoSet::batch_from_block(block.header.height.as_u64(), &block.transactions);
+                        let tip_batch = UtxoSet::batch_from_block(
+                            block.header.height.as_u64(),
+                            &block.transactions,
+                        );
                         inner.utxos.apply_batch(tip_batch);
                         // Shielded (Spark) pool apply for the reorg TIP block,
                         // mirroring the fork-block loop and the clean-extend path.
@@ -4363,7 +4418,9 @@ impl Blockchain {
                                 }
                             };
 
-                        inner.height_to_hash.insert(block.header.height.as_u64(), hash);
+                        inner
+                            .height_to_hash
+                            .insert(block.header.height.as_u64(), hash);
                     }
                 }
 
@@ -4419,34 +4476,34 @@ impl Blockchain {
                         let mut height_sets: Vec<(u64, [u8; 32])> = Vec::new();
                         let mut ti_adds: Vec<([u8; 32], u64, u32)> = Vec::new();
 
-                        let collect_block_outputs =
-                            |b: &crate::consensus::Block,
-                             oi: &mut Vec<([u8; 32], Vec<u8>)>,
-                             hs: &mut Vec<(u64, [u8; 32])>,
-                             ti: &mut Vec<([u8; 32], u64, u32)>| -> Result<()> {
-                                let h = b.header.height.as_u64();
-                                hs.push((h, *b.hash().as_bytes()));
-                                for (idx, tx) in b.transactions.iter().enumerate() {
-                                    let is_coinbase = tx.is_coinbase();
-                                    for output in &tx.outputs {
-                                        let entry = crate::db::OutputIndexEntry {
-                                            commitment: output.commitment,
-                                            height: h,
-                                            is_coinbase,
-                                            lock_height: output.lock_height,
-                                        };
-                                        let data = crate::db::serialize(&entry).map_err(|e| {
-                                            Error::Internal(format!(
-                                                "serialize OutputIndexEntry failed at height {}: {}",
-                                                h, e
-                                            ))
-                                        })?;
-                                        oi.push((*output.stealth_address.as_bytes(), data));
-                                    }
-                                    ti.push((*tx.hash().as_bytes(), h, idx as u32));
+                        let collect_block_outputs = |b: &crate::consensus::Block,
+                                                     oi: &mut Vec<([u8; 32], Vec<u8>)>,
+                                                     hs: &mut Vec<(u64, [u8; 32])>,
+                                                     ti: &mut Vec<([u8; 32], u64, u32)>|
+                         -> Result<()> {
+                            let h = b.header.height.as_u64();
+                            hs.push((h, *b.hash().as_bytes()));
+                            for (idx, tx) in b.transactions.iter().enumerate() {
+                                let is_coinbase = tx.is_coinbase();
+                                for output in &tx.outputs {
+                                    let entry = crate::db::OutputIndexEntry {
+                                        commitment: output.commitment,
+                                        height: h,
+                                        is_coinbase,
+                                        lock_height: output.lock_height,
+                                    };
+                                    let data = crate::db::serialize(&entry).map_err(|e| {
+                                        Error::Internal(format!(
+                                            "serialize OutputIndexEntry failed at height {}: {}",
+                                            h, e
+                                        ))
+                                    })?;
+                                    oi.push((*output.stealth_address.as_bytes(), data));
                                 }
-                                Ok(())
-                            };
+                                ti.push((*tx.hash().as_bytes(), h, idx as u32));
+                            }
+                            Ok(())
+                        };
 
                         for fork_block in &fork_blocks {
                             collect_block_outputs(
@@ -4536,7 +4593,10 @@ impl Blockchain {
                                 fork_block.header.height.as_u64(),
                             );
                         }
-                        self.persist_output_index(&block.transactions, block.header.height.as_u64());
+                        self.persist_output_index(
+                            &block.transactions,
+                            block.header.height.as_u64(),
+                        );
                     }
                     Ok(())
                 })(); // R-34: close the write-guard scope before handling errors
@@ -4875,8 +4935,7 @@ pub(crate) fn block_fee_burn(network: crate::config::NetworkType, block: &Block)
 
     // Integer congestion, mirroring validation.rs `max_coinbase` exactly.
     let size = block.size();
-    let congestion_pct =
-        ((size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128) as u64;
+    let congestion_pct = ((size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128) as u64;
     let congested = congestion_pct >= crate::constants::CONGESTION_THRESHOLD;
 
     crate::consensus::fee_market::distribute_fee(total_fees, congested)
@@ -5032,7 +5091,9 @@ mod tests {
             tip_hash: block.hash(),
             height: block.header.height.as_u64(),
             total_difficulty: 1,
-            total_supply: u128::from(calculate_block_reward(block.header.height.as_u64()).as_atomic()),
+            total_supply: u128::from(
+                calculate_block_reward(block.header.height.as_u64()).as_atomic(),
+            ),
             total_burned: 0,
             last_checkpoint: 0,
         }
@@ -5151,8 +5212,16 @@ mod tests {
             "a bad-parent block must be rejected (Orphan/Invalid), got {status:?}"
         );
 
-        assert_eq!(chain.tip().hash, tip_before, "tip moved after a failed apply");
-        assert_eq!(chain.height(), height_before, "height moved after a failed apply");
+        assert_eq!(
+            chain.tip().hash,
+            tip_before,
+            "tip moved after a failed apply"
+        );
+        assert_eq!(
+            chain.height(),
+            height_before,
+            "height moved after a failed apply"
+        );
         assert_eq!(
             chain.stats().total_difficulty,
             stats_before.total_difficulty,
@@ -5163,7 +5232,11 @@ mod tests {
             stats_before.total_blocks,
             "total_blocks moved after a failed apply"
         );
-        assert_eq!(chain.utxo_count(), utxo_before, "utxo set changed after a failed apply");
+        assert_eq!(
+            chain.utxo_count(),
+            utxo_before,
+            "utxo set changed after a failed apply"
+        );
     }
 
     /// #108 (reopen): reopening the database restores the expected chain. After
@@ -5206,13 +5279,21 @@ mod tests {
         );
         assert_eq!(reloaded.tip().hash, tip, "tip not restored on reopen");
         assert_eq!(reloaded.height(), height, "height not restored on reopen");
-        assert_eq!(reloaded.stats().total_supply, supply, "supply not restored on reopen");
+        assert_eq!(
+            reloaded.stats().total_supply,
+            supply,
+            "supply not restored on reopen"
+        );
         assert_eq!(
             reloaded.stats().total_blocks,
             total_blocks,
             "block count not restored on reopen"
         );
-        assert_eq!(reloaded.utxo_count(), utxos, "utxo set not restored on reopen");
+        assert_eq!(
+            reloaded.utxo_count(),
+            utxos,
+            "utxo set not restored on reopen"
+        );
         // Fresh-init and reloaded now agree on the canonical genesis base.
         assert_eq!(
             reloaded.stats().total_difficulty,
@@ -5705,7 +5786,12 @@ mod tests {
         // node opened on the same database (open_with_db replay).
         assert!(
             store
-                .add_coin(b"outpoint-1".to_vec(), CoinBytes(vec![7u8; 40]), b"ctx".to_vec(), 1)
+                .add_coin(
+                    b"outpoint-1".to_vec(),
+                    CoinBytes(vec![7u8; 40]),
+                    b"ctx".to_vec(),
+                    1
+                )
                 .is_some(),
             "coin must be added"
         );
@@ -5749,12 +5835,20 @@ mod tests {
             .spark_pool_store
             .as_ref()
             .unwrap()
-            .add_coin(b"outpoint-stats".to_vec(), CoinBytes(vec![9u8; 40]), b"ctx".to_vec(), 1)
+            .add_coin(
+                b"outpoint-stats".to_vec(),
+                CoinBytes(vec![9u8; 40]),
+                b"ctx".to_vec(),
+                1,
+            )
             .expect("coin added to live pool");
 
         // The sketch store the OLD stats read stays empty…
         let sketch_size = chain.spark_store.as_ref().map(|s| s.size()).unwrap_or(0);
-        assert_eq!(sketch_size, 0, "sketch spark_store is not fed by the libspark pool");
+        assert_eq!(
+            sketch_size, 0,
+            "sketch spark_store is not fed by the libspark pool"
+        );
 
         // …while the live pool the FIXED stats read reflects the real coin set.
         let live_size = chain
@@ -5762,7 +5856,10 @@ mod tests {
             .as_ref()
             .map(|s| s.coin_count())
             .unwrap_or(0);
-        assert_eq!(live_size, 1, "get_privacy_stats must report the live spark_pool coin_count");
+        assert_eq!(
+            live_size, 1,
+            "get_privacy_stats must report the live spark_pool coin_count"
+        );
     }
 
     /// Integration of the COMPLETE shielded spend path through the chain's
@@ -5796,7 +5893,9 @@ mod tests {
         let blinds: Vec<Scalar> = (0..4).map(|_| Scalar::random(&mut rng)).collect();
         for i in 0..4 {
             store.append_commitment(NoteCommitmentEntry {
-                commitment: bound_coin_commitment(vals[i], &sers[i], &blinds[i]).compress().to_bytes(),
+                commitment: bound_coin_commitment(vals[i], &sers[i], &blinds[i])
+                    .compress()
+                    .to_bytes(),
                 height: 1,
                 tx_index: 0,
                 position: 0,
@@ -5806,7 +5905,9 @@ mod tests {
         let ob = Scalar::random(&mut rng);
         let (s_out, r_out) = (Scalar::random(&mut rng), Scalar::random(&mut rng));
         let outputs = vec![ShieldedOutput {
-            note_commitment: bound_coin_commitment(6, &s_out, &r_out).compress().to_bytes(),
+            note_commitment: bound_coin_commitment(6, &s_out, &r_out)
+                .compress()
+                .to_bytes(),
             value_commitment: value_commitment(6, &ob).compress().to_bytes(),
             range_proof: prove_value_range(6, &ob, &mut rng).unwrap().encode(),
             mint_binding: prove_mint_binding(6, &s_out, &r_out, &ob, &mut rng).encode(),
@@ -5831,7 +5932,8 @@ mod tests {
             }
         };
         let inputs = vec![mk(0, &vb0, &mut rng), mk(1, &vb1, &mut rng)];
-        let bal = prove_balance(&[5, 3], &[vb0, vb1], &[6], &[ob], fee, &message, &mut rng).unwrap();
+        let bal =
+            prove_balance(&[5, 3], &[vb0, vb1], &[6], &[ob], fee, &message, &mut rng).unwrap();
         let payload = ShieldedPayload {
             version: SHIELDED_PAYLOAD_VERSION,
             inputs,
@@ -5850,7 +5952,9 @@ mod tests {
         };
 
         // The chain's store-aware verifier accepts the complete tx.
-        assert!(Blockchain::verify_block_shielded_spends(&store, std::slice::from_ref(&tx)).is_ok());
+        assert!(
+            Blockchain::verify_block_shielded_spends(&store, std::slice::from_ref(&tx)).is_ok()
+        );
 
         // Tampering an output commitment breaks the tx message binding → rejected.
         let mut bad_tx = tx.clone();
@@ -5858,7 +5962,8 @@ mod tests {
         bad.outputs[0].note_commitment = [8u8; 32];
         bad_tx.extra = bad.encode();
         assert!(
-            Blockchain::verify_block_shielded_spends(&store, std::slice::from_ref(&bad_tx)).is_err(),
+            Blockchain::verify_block_shielded_spends(&store, std::slice::from_ref(&bad_tx))
+                .is_err(),
             "tampered output must be rejected"
         );
     }
@@ -5926,16 +6031,23 @@ mod tests {
 
         // The mint FEED hook: applies the v2 payload → pool gains N coins.
         chain.apply_spark_v2_txs(std::slice::from_ref(&mint_tx), 1);
-        assert_eq!(store.coin_count(), n, "mint tx fed the pool via the chain hook");
+        assert_eq!(
+            store.coin_count(),
+            n,
+            "mint tx fed the pool via the chain hook"
+        );
 
         // Build a spend of the coin at vout 2 over the anchored cover set.
         let owned_op = derive_outpoint(&[], 2);
-        let spend_payload = build_spend_payload(seed, store.as_ref(), &owned_op, 3_000, 0, 1).unwrap();
+        let spend_payload =
+            build_spend_payload(seed, store.as_ref(), &owned_op, 3_000, 0, 1).unwrap();
         let spend_tx = bound_spend_tx(spend_payload);
 
         // Pre-apply verify hook: accepts the unspent spend.
         assert!(
-            chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_ok(),
+            chain
+                .verify_block_spark_v2(std::slice::from_ref(&spend_tx))
+                .is_ok(),
             "chain verify hook accepts the unspent spend"
         );
         // Apply hook: marks the tag spent AND feeds the spend's output coin(s)
@@ -5948,7 +6060,9 @@ mod tests {
         );
         // Now the same spend is rejected by the verify hook (tag no longer unspent).
         assert!(
-            chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_err(),
+            chain
+                .verify_block_spark_v2(std::slice::from_ref(&spend_tx))
+                .is_err(),
             "chain verify hook rejects the now-spent spend (double-spend guard)"
         );
     }
@@ -5990,17 +6104,36 @@ mod tests {
         let n = 8usize;
         let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
         let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
-        chain.apply_spark_v2_txs(std::slice::from_ref(&mk_shielded_tx(mint_payload.encode())), 1);
+        chain.apply_spark_v2_txs(
+            std::slice::from_ref(&mk_shielded_tx(mint_payload.encode())),
+            1,
+        );
         assert_eq!(store.coin_count(), n);
 
         // Two transfers of two DISTINCT owned coins, both pool-internal
         // (value_balance == 0) and anchored at the same (cover_set_id,
         // anchor_height) so they share ONE cover set — the batch amortization case.
         let addr_b = address_from_seed(b"batch-equiv-recipient").expect("recipient address");
-        let pa = build_transfer_payload(seed, store.as_ref(), &derive_outpoint(&[], 2), 100, 0, 1, &addr_b)
-            .expect("transfer a builds");
-        let pb = build_transfer_payload(seed, store.as_ref(), &derive_outpoint(&[], 5), 100, 0, 1, &addr_b)
-            .expect("transfer b builds");
+        let pa = build_transfer_payload(
+            seed,
+            store.as_ref(),
+            &derive_outpoint(&[], 2),
+            100,
+            0,
+            1,
+            &addr_b,
+        )
+        .expect("transfer a builds");
+        let pb = build_transfer_payload(
+            seed,
+            store.as_ref(),
+            &derive_outpoint(&[], 5),
+            100,
+            0,
+            1,
+            &addr_b,
+        )
+        .expect("transfer b builds");
 
         // Per-tx verify (fee/value_balance are ignored by the libspark verify —
         // the bundle self-verifies — so 0 is fine; value_balance == 0 here anyway).
@@ -6017,7 +6150,10 @@ mod tests {
         assert_eq!(batched.len(), 2);
         assert_eq!(batched[0], single_a, "batch tags[0] == per-tx verify a");
         assert_eq!(batched[1], single_b, "batch tags[1] == per-tx verify b");
-        assert_ne!(single_a, single_b, "distinct notes yield distinct linking tags");
+        assert_ne!(
+            single_a, single_b,
+            "distinct notes yield distinct linking tags"
+        );
 
         // A two-spend BLOCK verifies through the (batched) verify_block_spark_v2.
         let tx_a = bound_spend_tx(pa);
@@ -6028,7 +6164,9 @@ mod tests {
 
         // A within-block DUPLICATE tag (the same note spent twice) is rejected.
         assert!(
-            chain.verify_block_spark_v2(&[tx_a.clone(), tx_a.clone()]).is_err(),
+            chain
+                .verify_block_spark_v2(&[tx_a.clone(), tx_a.clone()])
+                .is_err(),
             "a block spending the same note twice is rejected (duplicate linking tag)"
         );
     }
@@ -6073,31 +6211,62 @@ mod tests {
         let n = 8usize;
         let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
         let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
-        chain.apply_spark_v2_txs(std::slice::from_ref(&mk_shielded_tx(mint_payload.encode())), 1);
+        chain.apply_spark_v2_txs(
+            std::slice::from_ref(&mk_shielded_tx(mint_payload.encode())),
+            1,
+        );
         assert_eq!(store.coin_count(), n);
 
         // Two transfers of two DISTINCT coins anchored at DIFFERENT heights →
         // two distinct (cover_set_id, anchor_height) group KEYS in one batch.
         let addr_b = address_from_seed(b"multi-group-recipient").expect("recipient address");
-        let pa = build_transfer_payload(seed, store.as_ref(), &derive_outpoint(&[], 2), 100, 0, 1, &addr_b)
-            .expect("group-(0,1) transfer builds");
-        let pb = build_transfer_payload(seed, store.as_ref(), &derive_outpoint(&[], 5), 100, 0, 2, &addr_b)
-            .expect("group-(0,2) transfer builds");
+        let pa = build_transfer_payload(
+            seed,
+            store.as_ref(),
+            &derive_outpoint(&[], 2),
+            100,
+            0,
+            1,
+            &addr_b,
+        )
+        .expect("group-(0,1) transfer builds");
+        let pb = build_transfer_payload(
+            seed,
+            store.as_ref(),
+            &derive_outpoint(&[], 5),
+            100,
+            0,
+            2,
+            &addr_b,
+        )
+        .expect("group-(0,2) transfer builds");
         assert_eq!(pa.spend.as_ref().unwrap().anchor_height, 1);
-        assert_eq!(pb.spend.as_ref().unwrap().anchor_height, 2, "second spend is a DIFFERENT group");
+        assert_eq!(
+            pb.spend.as_ref().unwrap().anchor_height,
+            2,
+            "second spend is a DIFFERENT group"
+        );
 
         let t_a = verify_spark_payload(store.as_ref(), &backend, &pa, 0).expect("verify a");
         let t_b = verify_spark_payload(store.as_ref(), &backend, &pb, 0).expect("verify b");
-        assert_ne!(t_a, t_b, "distinct notes in distinct groups → distinct tags");
+        assert_ne!(
+            t_a, t_b,
+            "distinct notes in distinct groups → distinct tags"
+        );
 
         // Batched verify spans the two groups and returns the same per-spend tags,
         // in input order — each group reconstructed + verified independently.
-        let batched =
-            verify_spark_payloads_batch(store.as_ref(), &backend, &[(pa, 0), (pb, 0)])
-                .expect("batch across two groups");
+        let batched = verify_spark_payloads_batch(store.as_ref(), &backend, &[(pa, 0), (pb, 0)])
+            .expect("batch across two groups");
         assert_eq!(batched.len(), 2);
-        assert_eq!(batched[0], t_a, "group-(0,1) tag preserved in a multi-group batch");
-        assert_eq!(batched[1], t_b, "group-(0,2) tag preserved in a multi-group batch");
+        assert_eq!(
+            batched[0], t_a,
+            "group-(0,1) tag preserved in a multi-group batch"
+        );
+        assert_eq!(
+            batched[1], t_b,
+            "group-(0,2) tag preserved in a multi-group batch"
+        );
     }
 
     /// IN-BLOCK shielded-consensus SOAK. Drives mint → spend → double-spend →
@@ -6198,7 +6367,9 @@ mod tests {
             let wseed = format!("soak-{seed0}-{cycles}");
 
             // ── MINT a fresh cover set (shield-in) at height 1 ───────────────
-            let values: Vec<u64> = (0..n as u64).map(|i| 1_000 + (rand() % 9_000) + i).collect();
+            let values: Vec<u64> = (0..n as u64)
+                .map(|i| 1_000 + (rand() % 9_000) + i)
+                .collect();
             let (mint_payload, _) = build_mint_payload(wseed.as_bytes(), &values, &[])
                 .unwrap_or_else(|| anomaly!("build_mint"));
             let mint_tx = mk(mint_payload.encode());
@@ -6226,11 +6397,21 @@ mod tests {
 
             // ── TRANSFER a coin to wallet B; B must recover it, sender must not ─
             let xfer_op = derive_outpoint(&[], xfer_vout);
-            let xfer_payload =
-                build_transfer_payload(wseed.as_bytes(), store.as_ref(), &xfer_op, 100, 0, 1, &addr_b)
-                    .unwrap_or_else(|| anomaly!("build_transfer"));
+            let xfer_payload = build_transfer_payload(
+                wseed.as_bytes(),
+                store.as_ref(),
+                &xfer_op,
+                100,
+                0,
+                1,
+                &addr_b,
+            )
+            .unwrap_or_else(|| anomaly!("build_transfer"));
             let xfer_tx = bound_spend_tx(xfer_payload.clone());
-            if chain.verify_block_spark_v2(std::slice::from_ref(&xfer_tx)).is_err() {
+            if chain
+                .verify_block_spark_v2(std::slice::from_ref(&xfer_tx))
+                .is_err()
+            {
                 anomaly!("valid_transfer_rejected");
             }
             let before_xfer = store.coin_count();
@@ -6252,9 +6433,9 @@ mod tests {
                 if !recipient_recovers {
                     anomaly!("recipient_cannot_recover_transfer");
                 }
-                let sender_recovers = out_coins
-                    .iter()
-                    .any(|c| matches!(backend.identify(wseed.as_bytes(), c, &out_ctx), Ok(Some(_))));
+                let sender_recovers = out_coins.iter().any(|c| {
+                    matches!(backend.identify(wseed.as_bytes(), c, &out_ctx), Ok(Some(_)))
+                });
                 if sender_recovers {
                     anomaly!("sender_recovered_transfer_output");
                 }
@@ -6263,10 +6444,14 @@ mod tests {
 
             // ── SPEND a different owned coin (self-spend, change back to self) ─
             let owned_op = derive_outpoint(&[], spend_vout);
-            let spend_payload = build_spend_payload(wseed.as_bytes(), store.as_ref(), &owned_op, 100, 0, 1)
-                .unwrap_or_else(|| anomaly!("build_spend"));
+            let spend_payload =
+                build_spend_payload(wseed.as_bytes(), store.as_ref(), &owned_op, 100, 0, 1)
+                    .unwrap_or_else(|| anomaly!("build_spend"));
             let spend_tx = bound_spend_tx(spend_payload);
-            if chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_err() {
+            if chain
+                .verify_block_spark_v2(std::slice::from_ref(&spend_tx))
+                .is_err()
+            {
                 anomaly!("valid_spend_rejected");
             }
             let before = store.coin_count();
@@ -6277,7 +6462,10 @@ mod tests {
             invariants!();
 
             // ── ADVERSARIAL: the same spend is now a double-spend → REJECT ────
-            if chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_ok() {
+            if chain
+                .verify_block_spark_v2(std::slice::from_ref(&spend_tx))
+                .is_ok()
+            {
                 anomaly!("double_spend_accepted");
             }
 
@@ -6315,16 +6503,17 @@ mod tests {
         use crate::consensus::spark_payload::build::{build_mint_payload, build_transfer_payload};
         use crate::consensus::spark_payload::derive_outpoint;
         use crate::consensus::{compute_full_anchor, compute_pow_hash, BlockHeader, PowAlgorithm};
-        use crate::crypto::{
-            coinbase_stealth_address, BlindingFactor, PedersenCommitment,
-        };
+        use crate::crypto::{coinbase_stealth_address, BlindingFactor, PedersenCommitment};
         use crate::emission::calculate_block_reward;
         use crate::primitives::{hash_domain, merkle_root, Hash, PublicKey};
         use crate::transaction::{Transaction, TxOutput, TxType};
         use spark_connector::ffi::address_from_seed;
 
         let act = crate::constants::shielded_activation_height(NetworkType::Regtest);
-        assert_eq!(act, 100, "regtest activates shielded at 100 under sketch-gk-proof");
+        assert_eq!(
+            act, 100,
+            "regtest activates shielded at 100 under sketch-gk-proof"
+        );
 
         std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
         crate::consensus::bind_randomx_genesis_for_network(NetworkType::Regtest);
@@ -6356,8 +6545,7 @@ mod tests {
             .clone();
         let values: Vec<u64> = vec![5_000, 6_000, 7_000, 8_000];
         let n = values.len();
-        let (mint_payload, _) =
-            build_mint_payload(wseed, &values, &[]).expect("build mint");
+        let (mint_payload, _) = build_mint_payload(wseed, &values, &[]).expect("build mint");
         let mk = |extra: Vec<u8>, fee: u64| Transaction {
             version: 1,
             tx_type: TxType::Shielded,
@@ -6389,7 +6577,9 @@ mod tests {
         let fee = shielded_tx.fee.as_atomic();
         // Sanity: the bundle itself is valid (independent of the block gate).
         assert!(
-            chain.verify_block_spark_v2(std::slice::from_ref(&shielded_tx)).is_ok(),
+            chain
+                .verify_block_spark_v2(std::slice::from_ref(&shielded_tx))
+                .is_ok(),
             "the transfer bundle must be independently valid"
         );
 
@@ -6470,8 +6660,14 @@ mod tests {
                 .mixed_hash;
             let mut nonce = 0u64;
             loop {
-                let pow = compute_pow_hash(PowAlgorithm::RandomX, &header.anchor, nonce, &tx_root, height)
-                    .expect("randomx");
+                let pow = compute_pow_hash(
+                    PowAlgorithm::RandomX,
+                    &header.anchor,
+                    nonce,
+                    &tx_root,
+                    height,
+                )
+                .expect("randomx");
                 if pow.meets_difficulty(&target) {
                     break;
                 }
@@ -6509,7 +6705,11 @@ mod tests {
             "below activation (h=50 < 100) the shielded tx must be rejected BY THE \
              ACTIVATION GATE (check_shielded_tx), got {msg_a}"
         );
-        assert_eq!(chain.height(), 49, "rejected block must not advance the tip");
+        assert_eq!(
+            chain.height(),
+            49,
+            "rejected block must not advance the tip"
+        );
 
         // ── Seed to 99, then submit the SAME shielded tx at height 100 (= activation)
         // through add_block → the activation gate OPENS: the tx is no longer rejected
@@ -6584,7 +6784,9 @@ mod tests {
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
     #[test]
     fn spark_v2_authenticated_mint_bundle_feeds_pool() {
-        use crate::consensus::spark_payload::{derive_outpoint, SparkPayload, SPARK_PAYLOAD_VERSION};
+        use crate::consensus::spark_payload::{
+            derive_outpoint, SparkPayload, SPARK_PAYLOAD_VERSION,
+        };
         use crate::storage::spark_pool::SparkPoolStore;
         use crate::transaction::{Transaction, TxType};
         use spark_connector::ffi::{build_mint_bundle, serial_context};
@@ -6641,8 +6843,12 @@ mod tests {
     #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
     #[test]
     fn spark_v2_replayed_mint_bundle_rejected_by_content() {
-        use crate::consensus::spark_payload::{derive_outpoint, SparkPayload, SPARK_PAYLOAD_VERSION};
-        use crate::crypto::{BlindingFactor, ClsagSignature, KeyImage, PedersenCommitment, PublicPoint};
+        use crate::consensus::spark_payload::{
+            derive_outpoint, SparkPayload, SPARK_PAYLOAD_VERSION,
+        };
+        use crate::crypto::{
+            BlindingFactor, ClsagSignature, KeyImage, PedersenCommitment, PublicPoint,
+        };
         use crate::storage::spark_pool::SparkPoolStore;
         use crate::transaction::{Transaction, TxInput, TxType};
         use spark_connector::ffi::{build_mint_bundle, serial_context};
@@ -6677,7 +6883,11 @@ mod tests {
             .encode(),
         };
         chain.apply_spark_v2_txs(std::slice::from_ref(&first_tx), 1);
-        assert_eq!(store.coin_count(), values.len(), "first mint pooled all coins");
+        assert_eq!(
+            store.coin_count(),
+            values.len(),
+            "first mint pooled all coins"
+        );
 
         // Replay: the SAME bundle under a DIFFERENT non-empty input set. The gate's
         // outpoint check derives `derive_outpoint(&[key_image], i)` ≠ the pooled
@@ -6722,7 +6932,11 @@ mod tests {
             "expected content-replay rejection, got: {err}"
         );
         // The pool was not inflated: the replay never applied.
-        assert_eq!(store.coin_count(), values.len(), "replay left the pool unchanged");
+        assert_eq!(
+            store.coin_count(),
+            values.len(),
+            "replay left the pool unchanged"
+        );
     }
 
     /// #380 (spend-output feed): a spend's OUTPUT coin whose bytes are ALREADY
@@ -6765,7 +6979,10 @@ mod tests {
         let n = 8usize;
         let values: Vec<u64> = (0..n as u64).map(|i| 10_000 + i).collect();
         let (mint_payload, _ctx) = build_mint_payload(seed, &values, &[]).unwrap();
-        chain.apply_spark_v2_txs(std::slice::from_ref(&mk_shielded_tx(mint_payload.encode())), 1);
+        chain.apply_spark_v2_txs(
+            std::slice::from_ref(&mk_shielded_tx(mint_payload.encode())),
+            1,
+        );
         assert_eq!(store.coin_count(), n, "mint funded the pool");
 
         // A real spend of an owned coin; it produces an output (change) coin.
@@ -6781,7 +6998,9 @@ mod tests {
 
         // Control: with its output coin NOT yet pooled, the spend is accepted.
         assert!(
-            chain.verify_block_spark_v2(std::slice::from_ref(&spend_tx)).is_ok(),
+            chain
+                .verify_block_spark_v2(std::slice::from_ref(&spend_tx))
+                .is_ok(),
             "spend with a fresh output coin is accepted"
         );
 
@@ -6791,7 +7010,12 @@ mod tests {
         let sb = spend_payload.spend.as_ref().expect("spend present");
         let (out_coins, out_ctx) = spend_outputs(&sb.bundle).expect("spend has outputs");
         store
-            .add_coin(b"preload-outpoint".to_vec(), out_coins[0].clone(), out_ctx, 1)
+            .add_coin(
+                b"preload-outpoint".to_vec(),
+                out_coins[0].clone(),
+                out_ctx,
+                1,
+            )
             .expect("preload coin into the pool");
         let pooled_after_preload = store.coin_count();
 
@@ -7049,13 +7273,22 @@ mod tests {
         assert_eq!(block_fee_burn(TEST_NET, &b), 900_000);
 
         // Zero fees → nothing burned.
-        assert_eq!(block_fee_burn(TEST_NET, &burn_test_block(act + 10, 2, &[])), 0);
-        assert_eq!(block_fee_burn(TEST_NET, &burn_test_block(act + 10, 3, &[0])), 0);
+        assert_eq!(
+            block_fee_burn(TEST_NET, &burn_test_block(act + 10, 2, &[])),
+            0
+        );
+        assert_eq!(
+            block_fee_burn(TEST_NET, &burn_test_block(act + 10, 3, &[0])),
+            0
+        );
 
         // Below the activation height miners claim all fees, nothing burned
         // (only reachable when activation > 0 — the testnet feature).
         if act > 0 {
-            assert_eq!(block_fee_burn(TEST_NET, &burn_test_block(act - 1, 4, &fees)), 0);
+            assert_eq!(
+                block_fee_burn(TEST_NET, &burn_test_block(act - 1, 4, &fees)),
+                0
+            );
         }
     }
 
@@ -7075,7 +7308,10 @@ mod tests {
         // Apply A the way every connect site does: += block_fee_burn.
         let mut stats = ChainStats::default();
         for blk in [&a1, &a2] {
-            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(TEST_NET, blk)).unwrap();
+            stats.total_burned = stats
+                .total_burned
+                .checked_add(block_fee_burn(TEST_NET, blk))
+                .unwrap();
         }
         assert_eq!(stats.total_burned, sum(&[&a1, &a2]));
         assert!(stats.total_burned > 0, "chain A must burn something");
@@ -7083,14 +7319,20 @@ mod tests {
         // Reorg: disconnect A in reverse order, then apply B — the exact
         // -=/+= pattern wired at the reorg disconnect/apply sites.
         for blk in [&a2, &a1] {
-            stats.total_burned = stats.total_burned.checked_sub(block_fee_burn(TEST_NET, blk)).unwrap();
+            stats.total_burned = stats
+                .total_burned
+                .checked_sub(block_fee_burn(TEST_NET, blk))
+                .unwrap();
         }
         assert_eq!(
             stats.total_burned, 0,
             "apply-then-disconnect must return to the pre-apply value (+=/-= symmetry)"
         );
         for blk in [&b1, &b2, &b3] {
-            stats.total_burned = stats.total_burned.checked_add(block_fee_burn(TEST_NET, blk)).unwrap();
+            stats.total_burned = stats
+                .total_burned
+                .checked_add(block_fee_burn(TEST_NET, blk))
+                .unwrap();
         }
         // Reorg-correct: total_burned == Σ burn over the NEW canonical chain,
         // NOT path-dependent on the disconnected A branch.
@@ -7148,7 +7390,8 @@ mod tests {
 
         assert_eq!(chain.tip_hash(), genesis_hash, "tip back at genesis");
         assert_eq!(
-            chain.stats().total_burned, 0,
+            chain.stats().total_burned,
+            0,
             "disconnecting every fee-carrying block returns total_burned to 0"
         );
     }
@@ -7191,7 +7434,7 @@ mod tests {
             inner.stats.tip_hash = h2h;
             inner.stats.total_supply = u64::MAX as u128; // headroom for emission subtract
             inner.stats.total_burned = burn1 + burn2; // headroom for burn subtract
-            // Advance the block/tx counters exactly as the connect path would.
+                                                      // Advance the block/tx counters exactly as the connect path would.
             inner.stats.total_blocks = base_blocks + 2;
             inner.stats.total_transactions = base_txs + added_txs;
         }
@@ -7511,7 +7754,10 @@ mod tests {
         let chain = Blockchain::with_database(Arc::clone(&db), NetworkType::Testnet);
         let ki = KeyImage::from_bytes([0x22; 32]);
         db.utxos.mark_key_image(&ki).unwrap();
-        assert!(chain.is_spent(&ki), "DB-marked key image found via fallback");
+        assert!(
+            chain.is_spent(&ki),
+            "DB-marked key image found via fallback"
+        );
     }
 
     #[test]
@@ -7545,18 +7791,29 @@ mod tests {
         let view = NodeChainView::new(&chain);
 
         // Known output → anchors to its on-chain commitment, stealth, height.
-        let oref = crate::crypto::DisclosureOutputRef { tx_hash: tx.hash(), output_index: 0 };
+        let oref = crate::crypto::DisclosureOutputRef {
+            tx_hash: tx.hash(),
+            output_index: 0,
+        };
         let anchor = view.anchor(&oref).unwrap().expect("output should anchor");
         assert_eq!(anchor.commitment, tx.outputs[0].commitment);
-        assert_eq!(anchor.stealth_address, *tx.outputs[0].stealth_address.as_bytes());
+        assert_eq!(
+            anchor.stealth_address,
+            *tx.outputs[0].stealth_address.as_bytes()
+        );
         assert_eq!(anchor.block_height, height);
 
         // Unknown tx → no anchor.
-        let unknown =
-            crate::crypto::DisclosureOutputRef { tx_hash: Hash::from_bytes([0xAB; 32]), output_index: 0 };
+        let unknown = crate::crypto::DisclosureOutputRef {
+            tx_hash: Hash::from_bytes([0xAB; 32]),
+            output_index: 0,
+        };
         assert!(view.anchor(&unknown).unwrap().is_none());
         // Out-of-range output index on a known tx → no anchor.
-        let bad_idx = crate::crypto::DisclosureOutputRef { tx_hash: tx.hash(), output_index: 250 };
+        let bad_idx = crate::crypto::DisclosureOutputRef {
+            tx_hash: tx.hash(),
+            output_index: 250,
+        };
         assert!(view.anchor(&bad_idx).unwrap().is_none());
 
         // Key-image spentness tracks the real spent set. The disclosure suite's
@@ -7607,8 +7864,9 @@ mod tests {
         use std::collections::HashSet;
 
         // ── Builders (pure; no shared mutable capture) ──────────────────────
-        let mk_commit =
-            |seed: u64| PedersenCommitment::commit(seed, &BlindingFactor::random(&mut OsRng)).to_bytes();
+        let mk_commit = |seed: u64| {
+            PedersenCommitment::commit(seed, &BlindingFactor::random(&mut OsRng)).to_bytes()
+        };
         let mk_out = |commitment: [u8; 32]| TxOutput {
             stealth_address: PublicKey::from_bytes([3u8; 32]),
             tx_public_key: PublicKey::from_bytes([4u8; 32]),
@@ -7637,8 +7895,9 @@ mod tests {
         };
         // A decoy tx with `n` distinct outputs, seeded for distinct commitments.
         let dec = |seed: u64, n: usize| -> Transaction {
-            let outs: Vec<TxOutput> =
-                (0..n).map(|i| mk_out(mk_commit(seed * 100 + i as u64))).collect();
+            let outs: Vec<TxOutput> = (0..n)
+                .map(|i| mk_out(mk_commit(seed * 100 + i as u64)))
+                .collect();
             mk_tx(seed, outs)
         };
 
@@ -7653,7 +7912,10 @@ mod tests {
         let treasury_blinding = BlindingFactor::random(&mut OsRng);
         let treasury_commitment = PedersenCommitment::commit(value, &treasury_blinding).to_bytes();
         let treasury_tx = mk_tx(1, vec![mk_out(treasury_commitment)]);
-        let treasury_ref = DisclosureOutputRef { tx_hash: treasury_tx.hash(), output_index: 0 };
+        let treasury_ref = DisclosureOutputRef {
+            tx_hash: treasury_tx.hash(),
+            output_index: 0,
+        };
 
         // Outputs the auditor cannot anchor (must never be drawn as a decoy).
         let mut unanchorable: HashSet<(Hash, u8)> = HashSet::new();
@@ -7728,10 +7990,15 @@ mod tests {
             // The treasury and the unanchorable outputs must never be drawn.
             for d in &decoys {
                 let key = (d.tx_hash, d.output_index);
-                assert_ne!(key, (treasury_ref.tx_hash, treasury_ref.output_index),
-                    "iter {iter}: treasury returned as its own decoy");
-                assert!(!unanchorable.contains(&key),
-                    "iter {iter}: non-anchorable output returned as a decoy");
+                assert_ne!(
+                    key,
+                    (treasury_ref.tx_hash, treasury_ref.output_index),
+                    "iter {iter}: treasury returned as its own decoy"
+                );
+                assert!(
+                    !unanchorable.contains(&key),
+                    "iter {iter}: non-anchorable output returned as a decoy"
+                );
             }
 
             // Assemble the anonymity set: treasury + (anon_size - 1) decoys.
@@ -7747,7 +8014,10 @@ mod tests {
                     continue;
                 }
                 commitments.push(d.commitment);
-                refs.push(DisclosureOutputRef { tx_hash: d.tx_hash, output_index: d.output_index });
+                refs.push(DisclosureOutputRef {
+                    tx_hash: d.tx_hash,
+                    output_index: d.output_index,
+                });
             }
             assert_eq!(commitments.len(), anon_size, "iter {iter}: set not filled");
 
@@ -7864,7 +8134,11 @@ mod tests {
         let mut max_h = 0u64;
         for _ in 0..24 {
             let (decoys, _tip, _th) = collect_anchorable_solvency_decoys(&chain, 16, None);
-            assert!(decoys.len() >= 16, "sampler returned too few decoys: {}", decoys.len());
+            assert!(
+                decoys.len() >= 16,
+                "sampler returned too few decoys: {}",
+                decoys.len()
+            );
             for d in &decoys {
                 // Genesis-coinbase decoys (not in this map) are irrelevant here.
                 if let Some(&h) = tx_height.get(&d.tx_hash) {
@@ -7873,7 +8147,10 @@ mod tests {
                 }
             }
         }
-        assert!(min_h <= top / 4, "decoys never reached the old end (min height {min_h})");
+        assert!(
+            min_h <= top / 4,
+            "decoys never reached the old end (min height {min_h})"
+        );
         assert!(
             max_h >= top - 10,
             "decoys never reached the recent end (max height {max_h}); aged-band regression"
@@ -7973,7 +8250,11 @@ mod tests {
         let err = chain.rollback_to_height(3).unwrap_err();
         assert!(matches!(err, Error::InvalidState(_)), "got {err:?}");
         assert!(err.to_string().contains("finality"), "{err}");
-        assert_eq!(chain.height(), 10, "finality rejection must not mutate the tip");
+        assert_eq!(
+            chain.height(),
+            10,
+            "finality rejection must not mutate the tip"
+        );
     }
 
     #[test]
@@ -7995,7 +8276,11 @@ mod tests {
                     .map(|t| t.hash())
             })
             .collect();
-        assert_eq!(want.len(), 2, "each staged block carries one non-coinbase tx");
+        assert_eq!(
+            want.len(),
+            2,
+            "each staged block carries one non-coinbase tx"
+        );
 
         {
             let mut inner = chain.inner.write();
@@ -8015,7 +8300,10 @@ mod tests {
 
         let orphaned = chain.rollback_to_height(0).unwrap();
         assert_eq!(orphaned.len(), 2);
-        assert!(orphaned.iter().all(|t| !t.is_coinbase()), "no coinbase returned");
+        assert!(
+            orphaned.iter().all(|t| !t.is_coinbase()),
+            "no coinbase returned"
+        );
         let got: Vec<Hash> = orphaned.iter().map(|t| t.hash()).collect();
         for w in &want {
             assert!(got.contains(w), "missing an orphaned non-coinbase tx");

@@ -29,14 +29,22 @@ struct VerifyAuditParams {
     now: Option<u64>,
 }
 
-fn decode_verifying_key(hex_key: &str) -> std::result::Result<ed25519_dalek::VerifyingKey, ErrorObjectOwned> {
-    let bytes = hex::decode(hex_key)
-        .map_err(|e| ErrorObjectOwned::owned(-32602, format!("issuer_pubkey: bad hex: {e}"), None::<()>))?;
+fn decode_verifying_key(
+    hex_key: &str,
+) -> std::result::Result<ed25519_dalek::VerifyingKey, ErrorObjectOwned> {
+    let bytes = hex::decode(hex_key).map_err(|e| {
+        ErrorObjectOwned::owned(-32602, format!("issuer_pubkey: bad hex: {e}"), None::<()>)
+    })?;
     let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
         ErrorObjectOwned::owned(-32602, "issuer_pubkey: expected 32 bytes", None::<()>)
     })?;
-    ed25519_dalek::VerifyingKey::from_bytes(&arr)
-        .map_err(|e| ErrorObjectOwned::owned(-32602, format!("issuer_pubkey: invalid key: {e}"), None::<()>))
+    ed25519_dalek::VerifyingKey::from_bytes(&arr).map_err(|e| {
+        ErrorObjectOwned::owned(
+            -32602,
+            format!("issuer_pubkey: invalid key: {e}"),
+            None::<()>,
+        )
+    })
 }
 
 /// Maximum inclusive block span for CPU-heavy audit RPCs (`*_in_range`, `full_chain_audit`).
@@ -386,13 +394,21 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             // signing bytes over a different payload and reports a misleading
             // `signature_valid: false`; instead fail closed with a clear reason.
             let (raw,): (serde_json::Value,) = params.parse().map_err(|e: ErrorObjectOwned| {
-                ErrorObjectOwned::owned(-32602, format!("params: [ {{package, issuer_pubkey, auditor, now?}} ]: {e}"), None::<()>)
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("params: [ {{package, issuer_pubkey, auditor, now?}} ]: {e}"),
+                    None::<()>,
+                )
             })?;
             if let Some(reason) = crate::compliance::unsupported_audit_fields(raw.get("package")) {
                 return Err(ErrorObjectOwned::owned(-32010, reason, None::<()>));
             }
             let p: VerifyAuditParams = serde_json::from_value(raw).map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("params: [ {{package, issuer_pubkey, auditor, now?}} ]: {e}"), None::<()>)
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("params: [ {{package, issuer_pubkey, auditor, now?}} ]: {e}"),
+                    None::<()>,
+                )
             })?;
 
             let issuer = decode_verifying_key(&p.issuer_pubkey)?;
@@ -406,20 +422,18 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             let signature_valid = p
                 .package
                 .verify_signature(&issuer, &p.auditor)
-                .map_err(|e| ErrorObjectOwned::owned(-32603, format!("signature check: {e}"), None::<()>))?;
+                .map_err(|e| {
+                    ErrorObjectOwned::owned(-32603, format!("signature check: {e}"), None::<()>)
+                })?;
 
             let view = NodeChainView::new(&state.chain);
-            let anchored_valid = p
-                .package
-                .package
-                .verify_anchored(now, &view)
-                .map_err(|e| ErrorObjectOwned::owned(-32603, format!("anchored verify: {e}"), None::<()>))?;
+            let anchored_valid = p.package.package.verify_anchored(now, &view).map_err(|e| {
+                ErrorObjectOwned::owned(-32603, format!("anchored verify: {e}"), None::<()>)
+            })?;
 
-            let rec = p
-                .package
-                .package
-                .reconcile()
-                .map_err(|e| ErrorObjectOwned::owned(-32603, format!("reconcile: {e}"), None::<()>))?;
+            let rec = p.package.package.reconcile().map_err(|e| {
+                ErrorObjectOwned::owned(-32603, format!("reconcile: {e}"), None::<()>)
+            })?;
 
             let report = p.package.to_report(now);
 
@@ -464,8 +478,9 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                     None::<()>,
                 ));
             }
-            let bytes = hex::decode(&hex_ki)
-                .map_err(|e| ErrorObjectOwned::owned(-32602, format!("bad hex: {e}"), None::<()>))?;
+            let bytes = hex::decode(&hex_ki).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("bad hex: {e}"), None::<()>)
+            })?;
             if bytes.len() != 32 {
                 return Err(ErrorObjectOwned::owned(
                     -32602,
@@ -493,7 +508,11 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             // so the treasury can never be returned as one of its own decoys
             // (which would shrink the caller's distinct set below `anon_size`).
             let raw: serde_json::Value = params.parse().map_err(|e: ErrorObjectOwned| {
-                ErrorObjectOwned::owned(-32602, format!("params: [count, exclude?]: {e}"), None::<()>)
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("params: [count, exclude?]: {e}"),
+                    None::<()>,
+                )
             })?;
             let arr = raw.as_array().ok_or_else(|| {
                 ErrorObjectOwned::owned(-32602, "params must be a positional array", None::<()>)
@@ -502,7 +521,9 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 .first()
                 .and_then(|v| v.as_u64())
                 .and_then(|c| usize::try_from(c).ok())
-                .ok_or_else(|| ErrorObjectOwned::owned(-32602, "params[0] (count) must be a u64", None::<()>))?;
+                .ok_or_else(|| {
+                    ErrorObjectOwned::owned(-32602, "params[0] (count) must be a u64", None::<()>)
+                })?;
             if count == 0 || count > 256 {
                 return Err(ErrorObjectOwned::owned(
                     -32602,
@@ -514,14 +535,29 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             let exclude: Option<(Hash, u8)> = match arr.get(1) {
                 Some(v) if !v.is_null() => {
                     let tx_hex = v.get("tx_hash").and_then(|x| x.as_str()).ok_or_else(|| {
-                        ErrorObjectOwned::owned(-32602, "exclude.tx_hash must be a hex string", None::<()>)
+                        ErrorObjectOwned::owned(
+                            -32602,
+                            "exclude.tx_hash must be a hex string",
+                            None::<()>,
+                        )
                     })?;
                     let tx_hash = Hash::from_hex(tx_hex).ok_or_else(|| {
-                        ErrorObjectOwned::owned(-32602, "exclude.tx_hash: bad 32-byte hex", None::<()>)
+                        ErrorObjectOwned::owned(
+                            -32602,
+                            "exclude.tx_hash: bad 32-byte hex",
+                            None::<()>,
+                        )
                     })?;
-                    let oi_u64 = v.get("output_index").and_then(|x| x.as_u64()).ok_or_else(|| {
-                        ErrorObjectOwned::owned(-32602, "exclude.output_index must be a u64", None::<()>)
-                    })?;
+                    let oi_u64 =
+                        v.get("output_index")
+                            .and_then(|x| x.as_u64())
+                            .ok_or_else(|| {
+                                ErrorObjectOwned::owned(
+                                    -32602,
+                                    "exclude.output_index must be a u64",
+                                    None::<()>,
+                                )
+                            })?;
                     let oi = u8::try_from(oi_u64).map_err(|_| {
                         ErrorObjectOwned::owned(
                             -32602,
@@ -686,8 +722,12 @@ mod tests {
         let blinding = BlindingFactor::random(&mut OsRng);
         let commitment = PedersenCommitment::commit(value, &blinding);
         let bp = create_balance_proof(value, &blinding, &commitment, 1_000_000).unwrap();
-        let dp = DisclosureProof::from_balance(&bp, "treasury solvency >= 1,000,000", Some(2_000_000_000))
-            .unwrap();
+        let dp = DisclosureProof::from_balance(
+            &bp,
+            "treasury solvency >= 1,000,000",
+            Some(2_000_000_000),
+        )
+        .unwrap();
 
         // Take the genesis block and overwrite one output's commitment to the
         // proof's, so the proof anchors to a real (DB-resident) output.
@@ -695,7 +735,10 @@ mod tests {
         assert!(!block.transactions.is_empty() && !block.transactions[0].outputs.is_empty());
         block.transactions[0].outputs[0].commitment = commitment.to_bytes();
         let tx_hash = block.transactions[0].hash();
-        let output_ref = DisclosureOutputRef { tx_hash, output_index: 0 };
+        let output_ref = DisclosureOutputRef {
+            tx_hash,
+            output_index: 0,
+        };
 
         // Org signs the package for one named auditor.
         let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
@@ -712,8 +755,10 @@ mod tests {
         db.blocks.insert(&block).unwrap();
         db.blocks.set_height_hash(0, &block.hash()).unwrap();
         db.index_tx(tx_hash.as_bytes(), 0, 0).unwrap();
-        let chain =
-            crate::chain::Blockchain::with_database(Arc::clone(&db), crate::config::NetworkType::Testnet);
+        let chain = crate::chain::Blockchain::with_database(
+            Arc::clone(&db),
+            crate::config::NetworkType::Testnet,
+        );
 
         let module = create_rpc_module(rpc_state(chain)).unwrap();
 
@@ -757,7 +802,8 @@ mod tests {
         let signed_json = serde_json::to_value(&signed).unwrap();
 
         let module = create_rpc_module(rpc_state(crate::chain::Blockchain::new())).unwrap();
-        let req = json!({ "package": signed_json, "issuer_pubkey": "not-hex", "auditor": "Auditor One" });
+        let req =
+            json!({ "package": signed_json, "issuer_pubkey": "not-hex", "auditor": "Auditor One" });
         let err = module
             .call::<_, serde_json::Value>("verify_audit_package", jsonrpsee::rpc_params![req])
             .await

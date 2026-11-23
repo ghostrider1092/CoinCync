@@ -157,7 +157,13 @@ impl Report {
     pub fn new(code: &str) -> Self {
         let diagnostic = lookup(code)
             .unwrap_or_else(|| panic!("diagnostics: unknown code {code:?} (not in CATALOG)"));
-        Report { diagnostic, at: None, expected: None, got: None, reproduce: None }
+        Report {
+            diagnostic,
+            at: None,
+            expected: None,
+            got: None,
+            reproduce: None,
+        }
     }
 
     /// Where on the chain the failure occurred.
@@ -853,7 +859,12 @@ mod tests {
             assert!(seen.insert(d.code), "duplicate diagnostic code {}", d.code);
             // CYNC-<DOMAIN>-<NNN>
             let parts: Vec<&str> = d.code.split('-').collect();
-            assert_eq!(parts.len(), 3, "code {} must be CYNC-<DOMAIN>-<NNN>", d.code);
+            assert_eq!(
+                parts.len(),
+                3,
+                "code {} must be CYNC-<DOMAIN>-<NNN>",
+                d.code
+            );
             assert_eq!(parts[0], "CYNC", "code {} must start with CYNC", d.code);
             assert_eq!(
                 parts[1],
@@ -862,7 +873,12 @@ mod tests {
                 d.code,
                 d.domain.as_str()
             );
-            assert_eq!(parts[2].len(), 3, "code {} must end in a 3-digit number", d.code);
+            assert_eq!(
+                parts[2].len(),
+                3,
+                "code {} must end in a 3-digit number",
+                d.code
+            );
             assert!(
                 parts[2].chars().all(|c| c.is_ascii_digit()),
                 "code {} must end in digits",

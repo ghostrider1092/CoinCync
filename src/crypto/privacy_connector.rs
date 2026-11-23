@@ -418,18 +418,58 @@ pub fn privacy_feature_registry(gate: &ConnectorGate) -> Vec<PrivacyFeature> {
     };
     vec![
         // Live wallet/network features — always on in the default build.
-        PrivacyFeature { name: "decoy-defense", status: FeatureStatus::Active, note: "ring decoy selection in the live send path" },
-        PrivacyFeature { name: "encrypted-memos", status: FeatureStatus::Active, note: "ECDH-encrypted memo on the first output" },
-        PrivacyFeature { name: "scoped-view-keys", status: FeatureStatus::Active, note: "per-epoch scoped disclosure keys" },
-        PrivacyFeature { name: "auto-churn", status: FeatureStatus::Active, note: "opt-in self-send churn engine" },
-        PrivacyFeature { name: "traffic-shaping", status: FeatureStatus::Active, note: "jitter + size-norm + cover packets (default-on)" },
+        PrivacyFeature {
+            name: "decoy-defense",
+            status: FeatureStatus::Active,
+            note: "ring decoy selection in the live send path",
+        },
+        PrivacyFeature {
+            name: "encrypted-memos",
+            status: FeatureStatus::Active,
+            note: "ECDH-encrypted memo on the first output",
+        },
+        PrivacyFeature {
+            name: "scoped-view-keys",
+            status: FeatureStatus::Active,
+            note: "per-epoch scoped disclosure keys",
+        },
+        PrivacyFeature {
+            name: "auto-churn",
+            status: FeatureStatus::Active,
+            note: "opt-in self-send churn engine",
+        },
+        PrivacyFeature {
+            name: "traffic-shaping",
+            status: FeatureStatus::Active,
+            note: "jitter + size-norm + cover packets (default-on)",
+        },
         // Deliberately disabled.
-        PrivacyFeature { name: "deniable-wallets", status: FeatureStatus::Disabled, note: "disabled pending structural rewrite + audit (C37/C38/C39)" },
+        PrivacyFeature {
+            name: "deniable-wallets",
+            status: FeatureStatus::Disabled,
+            note: "disabled pending structural rewrite + audit (C37/C38/C39)",
+        },
         // Gated consensus schemes — routed through this connector.
-        PrivacyFeature { name: "lelantus-spark", status: scheme_status(Scheme::LelantusSpark), note: "serial-tag spend proofs; hand-rolled ZK awaits audit" },
-        PrivacyFeature { name: "mw-cut-through", status: scheme_status(Scheme::MwCutThrough), note: "kernel excess-signature verified pruning" },
-        PrivacyFeature { name: "shielded-pool", status: scheme_status(Scheme::Shielded), note: "note-commitment + nullifier pool" },
-        PrivacyFeature { name: "dead-mans-switch", status: scheme_status(Scheme::DeadMansSwitch), note: "recovery-address sweep authorization" },
+        PrivacyFeature {
+            name: "lelantus-spark",
+            status: scheme_status(Scheme::LelantusSpark),
+            note: "serial-tag spend proofs; hand-rolled ZK awaits audit",
+        },
+        PrivacyFeature {
+            name: "mw-cut-through",
+            status: scheme_status(Scheme::MwCutThrough),
+            note: "kernel excess-signature verified pruning",
+        },
+        PrivacyFeature {
+            name: "shielded-pool",
+            status: scheme_status(Scheme::Shielded),
+            note: "note-commitment + nullifier pool",
+        },
+        PrivacyFeature {
+            name: "dead-mans-switch",
+            status: scheme_status(Scheme::DeadMansSwitch),
+            note: "recovery-address sweep authorization",
+        },
     ]
 }
 
@@ -445,7 +485,10 @@ mod tests {
     #[test]
     fn inert_on_mainnet_without_audit() {
         let g = ConnectorGate::new(NetworkType::Mainnet, 1000, Some(1));
-        assert!(g.check(Scheme::MwCutThrough).is_err(), "mainnet must be inert while unaudited");
+        assert!(
+            g.check(Scheme::MwCutThrough).is_err(),
+            "mainnet must be inert while unaudited"
+        );
         // The interlock is CONNECTOR_AUDITED — it ships false.
         assert!(!CONNECTOR_AUDITED);
     }
@@ -453,13 +496,19 @@ mod tests {
     #[test]
     fn inert_without_activation_height() {
         let g = ConnectorGate::new(NetworkType::Regtest, 1000, None);
-        assert!(g.check(Scheme::MwCutThrough).is_err(), "no activation height => inert");
+        assert!(
+            g.check(Scheme::MwCutThrough).is_err(),
+            "no activation height => inert"
+        );
     }
 
     #[test]
     fn inert_below_activation_height() {
         let g = ConnectorGate::new(NetworkType::Regtest, 10, Some(50));
-        assert!(g.check(Scheme::MwCutThrough).is_err(), "below activation height => inert");
+        assert!(
+            g.check(Scheme::MwCutThrough).is_err(),
+            "below activation height => inert"
+        );
     }
 
     #[test]
@@ -467,7 +516,10 @@ mod tests {
         let mut g = regtest_active();
         assert!(g.check(Scheme::MwCutThrough).is_ok());
         g.kill();
-        assert!(g.check(Scheme::MwCutThrough).is_err(), "kill switch must refuse");
+        assert!(
+            g.check(Scheme::MwCutThrough).is_err(),
+            "kill switch must refuse"
+        );
     }
 
     #[test]
@@ -477,7 +529,10 @@ mod tests {
         assert!(g.admit(Scheme::MwCutThrough).is_ok());
         assert!(g.admit(Scheme::MwCutThrough).is_err(), "3rd op exceeds cap");
         g.reset_block();
-        assert!(g.admit(Scheme::MwCutThrough).is_ok(), "cap resets per block");
+        assert!(
+            g.admit(Scheme::MwCutThrough).is_ok(),
+            "cap resets per block"
+        );
     }
 
     #[test]
@@ -485,7 +540,10 @@ mod tests {
         let g = regtest_active();
         // Even value-conserving conversions are refused while unaudited.
         let err = convert_value(&g, Scheme::MwCutThrough, 100, 100);
-        assert!(err.is_err(), "converter must be disabled while CONNECTOR_AUDITED=false");
+        assert!(
+            err.is_err(),
+            "converter must be disabled while CONNECTOR_AUDITED=false"
+        );
     }
 
     #[test]
@@ -552,7 +610,11 @@ mod tests {
         use crate::transaction::recovery::RecoveryMeta;
         let mut g = regtest_active();
         let addr = [7u8; 32];
-        let meta = RecoveryMeta { output_index: 0, recovery_address: addr, timeout_blocks: 720 };
+        let meta = RecoveryMeta {
+            output_index: 0,
+            recovery_address: addr,
+            timeout_blocks: 720,
+        };
 
         // Wrong recovery address → rejected.
         assert!(connect_recovery_sweep(&mut g, &meta, 100, 1000, [1u8; 32]).is_err());

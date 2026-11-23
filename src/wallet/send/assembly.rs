@@ -62,8 +62,7 @@ pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
         payment_id,
     } = prepared;
 
-    let mut builder =
-        TransactionBuilder::transfer().with_target_height(context.target_height());
+    let mut builder = TransactionBuilder::transfer().with_target_height(context.target_height());
     if let Some(memo) = memo.as_deref() {
         builder = builder.with_memo(memo);
     }
@@ -145,11 +144,7 @@ pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
 /// more to fee than we pay the recipient is never intended, and silently
 /// destroying that value would be a fund-loss footgun. The error is actionable
 /// (consolidate, or use a standard send). Small excesses still flow to fee.
-fn drip_pair_final_fee(
-    estimated_fee: u64,
-    change_amount: u64,
-    total_send: u64,
-) -> Result<Amount> {
+fn drip_pair_final_fee(estimated_fee: u64, change_amount: u64, total_send: u64) -> Result<Amount> {
     if change_amount > total_send {
         return Err(crate::error::Error::InvalidTransaction(format!(
             "drip-pair (--split-output) would burn {} atomic to fee — more than the {} atomic \
@@ -157,7 +152,9 @@ fn drip_pair_final_fee(
             change_amount, total_send
         )));
     }
-    Ok(Amount::from_atomic(estimated_fee.saturating_add(change_amount)))
+    Ok(Amount::from_atomic(
+        estimated_fee.saturating_add(change_amount),
+    ))
 }
 
 #[cfg(test)]
@@ -170,7 +167,11 @@ mod drip_guard_tests {
         // Excess (change) below the amount sent is the intended behaviour:
         // it folds into the fee and the tx is built.
         let fee = drip_pair_final_fee(1_000, 500, 1_000_000).expect("small excess ok");
-        assert_eq!(fee.as_atomic(), 1_500, "fee = estimated_fee + folded excess");
+        assert_eq!(
+            fee.as_atomic(),
+            1_500,
+            "fee = estimated_fee + folded excess"
+        );
     }
 
     #[test]

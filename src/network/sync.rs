@@ -2699,8 +2699,14 @@ mod tests {
         // Peek: true for the issuer, false cross-peer — and it consumes nothing.
         assert!(sync.is_header_nonce_outstanding(n, &peers[0]));
         assert!(!sync.is_header_nonce_outstanding(n, &peers[1]));
-        assert!(sync.is_header_nonce_outstanding(n, &peers[0]), "peek is idempotent");
-        assert!(sync.headers_request_pending(), "peek must not clear the request clock");
+        assert!(
+            sync.is_header_nonce_outstanding(n, &peers[0]),
+            "peek is idempotent"
+        );
+        assert!(
+            sync.headers_request_pending(),
+            "peek must not clear the request clock"
+        );
 
         // The real consume still works afterwards (single-use).
         assert!(sync.validate_header_nonce(n, &peers[0]));
@@ -3058,10 +3064,16 @@ mod tests {
         let mut sync = ChainSync::new(100, Hash::zero());
         sync.set_local_total_difficulty(1_000);
         sync.update_peer_difficulty_for(peers[0], 9_000); // we are now work-behind
-        assert!(sync.best_known_difficulty() > 1_000, "precondition: behind on work");
+        assert!(
+            sync.best_known_difficulty() > 1_000,
+            "precondition: behind on work"
+        );
         // Pin the grace anchor + last-progress at t=0 for deterministic time.
         sync.set_work_substantiation_for_test(Some(0), 0);
-        assert!(sync.work_behind_substantiated(0), "fresh claim gates the miner");
+        assert!(
+            sync.work_behind_substantiated(0),
+            "fresh claim gates the miner"
+        );
         assert!(
             sync.work_behind_substantiated(WORK_SUBSTANTIATION_GRACE_SECS - 1),
             "still within grace → still gated"
@@ -3083,11 +3095,17 @@ mod tests {
         // (a) Not behind: equal height, no work claim → do not retrigger.
         let mut sync = ChainSync::new(100, Hash::zero());
         sync.set_local_total_difficulty(1_000);
-        assert!(!sync.should_retrigger_sync_at(100, 2, 0), "equal height, no work claim");
+        assert!(
+            !sync.should_retrigger_sync_at(100, 2, 0),
+            "equal height, no work claim"
+        );
 
         // (b) Height arm: a peer more than `slack` blocks taller → retrigger.
         sync.update_peer_height_for(peers[0], 110);
-        assert!(sync.should_retrigger_sync_at(100, 2, 0), "taller peer beyond slack");
+        assert!(
+            sync.should_retrigger_sync_at(100, 2, 0),
+            "taller peer beyond slack"
+        );
 
         // (c) Work arm (#126): a peer NOT taller in height but heavier in
         // cumulative work → retrigger, which the old height-only test never did.
@@ -3146,7 +3164,7 @@ mod tests {
         sync.set_local_total_difficulty(1_000);
         sync.update_peer_difficulty_for(peers[0], 9_000); // behind; grace anchor stamped
         sync.set_work_substantiation_for_test(Some(0), 0); // pin anchor at t=0
-        // Liar re-advertises the identical claim many times, "later" each tick.
+                                                           // Liar re-advertises the identical claim many times, "later" each tick.
         for _ in 0..10 {
             sync.update_peer_difficulty_for(peers[0], 9_000);
         }
@@ -3965,7 +3983,7 @@ mod tests {
         let _ = (
             sync.best_known_difficulty(),
             1_000,
-            "best_known_difficulty is recomputed by refresh_best_known, not retain"
+            "best_known_difficulty is recomputed by refresh_best_known, not retain",
         );
     }
 
@@ -4176,7 +4194,11 @@ mod tests {
         for start in [SyncState::Synced, SyncState::Idle] {
             let mut sync = ChainSync::new(100, Hash::zero());
             sync.set_state(start);
-            assert!(sync.trigger_resync(), "trigger_resync fires from {:?}", start);
+            assert!(
+                sync.trigger_resync(),
+                "trigger_resync fires from {:?}",
+                start
+            );
             assert_eq!(sync.state(), SyncState::Headers);
         }
         for start in [
@@ -4207,7 +4229,11 @@ mod tests {
         sync.update_peer_height_for(peers[0], 5);
         sync.on_block_processed(Hash::zero(), 5);
         assert_eq!(sync.local_height, 5);
-        assert_eq!(sync.best_known_height(), 5, "best_known re-derived to local");
+        assert_eq!(
+            sync.best_known_height(),
+            5,
+            "best_known re-derived to local"
+        );
         assert_eq!(
             sync.state(),
             SyncState::ConfirmingSynced,
@@ -4273,7 +4299,10 @@ mod tests {
         let mut sync = ChainSync::new(100, Hash::zero());
 
         assert!(!sync.headers_request_pending(), "no request → not pending");
-        assert!(!sync.headers_timed_out(1_000), "no request → never timed out");
+        assert!(
+            !sync.headers_timed_out(1_000),
+            "no request → never timed out"
+        );
 
         sync.begin_headers_request(peers[0], 1_000).unwrap();
         assert!(sync.headers_request_pending(), "request now pending");

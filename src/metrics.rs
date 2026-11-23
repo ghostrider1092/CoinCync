@@ -147,7 +147,10 @@ pub static CHAIN_HEIGHT: Lazy<IntGauge> =
     Lazy::new(|| register_int_gauge("coincync_chain_height", "Current chain tip height"));
 /// Seconds since the tip block's timestamp (staleness / liveness signal).
 pub static TIP_AGE_SECONDS: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge("coincync_tip_age_seconds", "Seconds since the tip block timestamp")
+    register_gauge(
+        "coincync_tip_age_seconds",
+        "Seconds since the tip block timestamp",
+    )
 });
 /// Current block difficulty (tip target).
 pub static DIFFICULTY: Lazy<Gauge> =
@@ -156,26 +159,37 @@ pub static DIFFICULTY: Lazy<Gauge> =
 pub static TOTAL_DIFFICULTY: Lazy<Gauge> =
     Lazy::new(|| register_gauge("coincync_total_difficulty", "Cumulative chain work"));
 /// Total confirmed transactions seen on-chain.
-pub static TOTAL_TRANSACTIONS: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge("coincync_total_transactions", "Total on-chain transactions")
-});
+pub static TOTAL_TRANSACTIONS: Lazy<IntGauge> =
+    Lazy::new(|| register_int_gauge("coincync_total_transactions", "Total on-chain transactions"));
 
 // ── Emission / supply (transparency for a 0%-tax fair-launch coin) ──
 /// Circulating supply in atomic units (`total_supply - total_burned`).
 pub static CIRCULATING_SUPPLY: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge("coincync_circulating_supply_atomic", "Circulating supply (atomic units)")
+    register_gauge(
+        "coincync_circulating_supply_atomic",
+        "Circulating supply (atomic units)",
+    )
 });
 /// Total emitted supply in atomic units.
 pub static TOTAL_SUPPLY: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge("coincync_total_supply_atomic", "Total emitted supply (atomic units)")
+    register_gauge(
+        "coincync_total_supply_atomic",
+        "Total emitted supply (atomic units)",
+    )
 });
 /// Cumulative fees burned in atomic units.
 pub static FEE_BURNED_TOTAL: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge("coincync_fee_burned_total_atomic", "Cumulative fees burned (atomic units)")
+    register_gauge(
+        "coincync_fee_burned_total_atomic",
+        "Cumulative fees burned (atomic units)",
+    )
 });
 /// Current per-block coinbase reward in atomic units.
 pub static BLOCK_REWARD: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge("coincync_block_reward_atomic", "Current block reward (atomic units)")
+    register_gauge(
+        "coincync_block_reward_atomic",
+        "Current block reward (atomic units)",
+    )
 });
 
 // ── Sync / IBD (catches the wedge incidents) ──
@@ -224,7 +238,10 @@ pub static DB_SIZE_BYTES: Lazy<IntGauge> =
 pub static REORG_TOTAL: Lazy<IntCounter> =
     Lazy::new(|| register_int_counter("coincync_reorg_total", "Cumulative chain reorganizations"));
 pub static ORPHAN_BLOCKS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter("coincync_orphan_blocks_total", "Cumulative orphan/stale blocks")
+    register_int_counter(
+        "coincync_orphan_blocks_total",
+        "Cumulative orphan/stale blocks",
+    )
 });
 /// Depth of each reorganization (distribution).
 pub static REORG_DEPTH: Lazy<Histogram> = Lazy::new(|| {

@@ -145,13 +145,37 @@ impl SecurityReport {
 
     /// Raise a **consensus-critical** invariant alert (deterministic, cheap —
     /// safe to halt on when `Critical`).
-    pub fn raise_consensus(&mut self, detail: &'static str, severity: Severity, code: &'static str, message: impl Into<String>) {
-        self.alerts.push(Alert { detail, severity, class: AlertClass::Consensus, code, message: message.into() });
+    pub fn raise_consensus(
+        &mut self,
+        detail: &'static str,
+        severity: Severity,
+        code: &'static str,
+        message: impl Into<String>,
+    ) {
+        self.alerts.push(Alert {
+            detail,
+            severity,
+            class: AlertClass::Consensus,
+            code,
+            message: message.into(),
+        });
     }
 
     /// Raise an **operational** heuristic alert (log/page only — never halts).
-    pub fn raise_operational(&mut self, detail: &'static str, severity: Severity, code: &'static str, message: impl Into<String>) {
-        self.alerts.push(Alert { detail, severity, class: AlertClass::Operational, code, message: message.into() });
+    pub fn raise_operational(
+        &mut self,
+        detail: &'static str,
+        severity: Severity,
+        code: &'static str,
+        message: impl Into<String>,
+    ) {
+        self.alerts.push(Alert {
+            detail,
+            severity,
+            class: AlertClass::Operational,
+            code,
+            message: message.into(),
+        });
     }
 
     /// Fold another report's alerts in.
@@ -175,7 +199,9 @@ impl SecurityReport {
 
     /// The critical alerts of any class, if any.
     pub fn criticals(&self) -> impl Iterator<Item = &Alert> {
-        self.alerts.iter().filter(|a| a.severity == Severity::Critical)
+        self.alerts
+            .iter()
+            .filter(|a| a.severity == Severity::Critical)
     }
 
     /// True iff nothing at all was raised.
@@ -185,7 +211,10 @@ impl SecurityReport {
 
     /// Count of alerts at or above a severity.
     pub fn count_at_least(&self, severity: Severity) -> usize {
-        self.alerts.iter().filter(|a| a.severity >= severity).count()
+        self.alerts
+            .iter()
+            .filter(|a| a.severity >= severity)
+            .count()
     }
 
     /// The strongest recommended response across all alerts (graduated
@@ -193,13 +222,21 @@ impl SecurityReport {
     /// `Halt`/`Quarantine` both mean "reject the block"; post-apply, `Halt`
     /// stops the node; `BanPeer`/`Throttle` are peer/rate actions.
     pub fn disposition(&self) -> Disposition {
-        self.alerts.iter().map(Alert::disposition).max().unwrap_or(Disposition::Accept)
+        self.alerts
+            .iter()
+            .map(Alert::disposition)
+            .max()
+            .unwrap_or(Disposition::Accept)
     }
 
     /// The distinct detail labels that fired — the *breadth* of the incident.
     pub fn distinct_details(&self) -> usize {
         use std::collections::HashSet;
-        self.alerts.iter().map(|a| a.detail).collect::<HashSet<_>>().len()
+        self.alerts
+            .iter()
+            .map(|a| a.detail)
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     /// Cross-surface correlation: a coordinated attack is suspected when
@@ -274,7 +311,13 @@ impl Baseline {
     /// `alpha` in (0,1] is the smoothing factor (higher = more reactive).
     /// `warmup` observations must accrue before anything is flagged.
     pub fn new(alpha: f64, warmup: u64) -> Self {
-        Self { mean: 0.0, var: 0.0, alpha: alpha.clamp(f64::MIN_POSITIVE, 1.0), samples: 0, warmup }
+        Self {
+            mean: 0.0,
+            var: 0.0,
+            alpha: alpha.clamp(f64::MIN_POSITIVE, 1.0),
+            samples: 0,
+            warmup,
+        }
     }
 
     /// Fold one observation into the baseline.
@@ -406,8 +449,12 @@ impl IncidentLog {
     /// Recent incidents at or above a severity, newest last.
     pub fn recent_at_least(&self, severity: Severity, n: usize) -> Vec<Incident> {
         let g = self.inner.read();
-        let mut out: Vec<Incident> =
-            g.ring.iter().filter(|i| i.alert.severity >= severity).cloned().collect();
+        let mut out: Vec<Incident> = g
+            .ring
+            .iter()
+            .filter(|i| i.alert.severity >= severity)
+            .cloned()
+            .collect();
         let start = out.len().saturating_sub(n);
         out.drain(..start);
         out
@@ -432,7 +479,12 @@ impl IncidentLog {
 
     /// How many retained incidents carry `code`.
     pub fn repeat_count(&self, code: &str) -> usize {
-        self.inner.read().ring.iter().filter(|i| i.alert.code == code).count()
+        self.inner
+            .read()
+            .ring
+            .iter()
+            .filter(|i| i.alert.code == code)
+            .count()
     }
 
     /// Distinct `(detail, code)` pairs in the retained window — the *breadth* of
@@ -491,10 +543,20 @@ mod tests {
         fn sweep(&self) -> SecurityReport {
             let mut r = SecurityReport::clean();
             if self.consensus_critical {
-                r.raise_consensus(self.label, Severity::Critical, "mock-crit", "invariant broken");
+                r.raise_consensus(
+                    self.label,
+                    Severity::Critical,
+                    "mock-crit",
+                    "invariant broken",
+                );
             }
             if self.operational_critical {
-                r.raise_operational(self.label, Severity::Critical, "mock-op-crit", "severe anomaly");
+                r.raise_operational(
+                    self.label,
+                    Severity::Critical,
+                    "mock-op-crit",
+                    "severe anomaly",
+                );
             }
             for _ in 0..self.warnings {
                 r.raise_operational(self.label, Severity::Warning, "mock-warn", "anomaly");
@@ -505,8 +567,18 @@ mod tests {
 
     #[test]
     fn command_aggregates_details_and_halts_only_on_consensus_critical() {
-        let clean = MockDetail { label: "a", consensus_critical: false, operational_critical: false, warnings: 1 };
-        let broken = MockDetail { label: "b", consensus_critical: true, operational_critical: false, warnings: 2 };
+        let clean = MockDetail {
+            label: "a",
+            consensus_critical: false,
+            operational_critical: false,
+            warnings: 1,
+        };
+        let broken = MockDetail {
+            label: "b",
+            consensus_critical: true,
+            operational_critical: false,
+            warnings: 2,
+        };
         let details: [&dyn SecurityDetail; 2] = [&clean, &broken];
 
         let report = SecurityCommand::sweep_all(&details);
@@ -524,17 +596,33 @@ mod tests {
         // The load-bearing Stage-2 property: an operational heuristic firing at
         // Critical severity is visible (has_critical) but must NOT halt the node
         // — otherwise a false-positive heuristic wedges the chain.
-        let noisy = MockDetail { label: "a", consensus_critical: false, operational_critical: true, warnings: 3 };
+        let noisy = MockDetail {
+            label: "a",
+            consensus_critical: false,
+            operational_critical: true,
+            warnings: 3,
+        };
         let details: [&dyn SecurityDetail; 1] = [&noisy];
-        let report = SecurityCommand::assert_consensus_safe(&details).expect("operational critical does not halt");
+        let report = SecurityCommand::assert_consensus_safe(&details)
+            .expect("operational critical does not halt");
         assert!(report.has_critical(), "still visible for paging");
         assert!(!report.has_consensus_halt(), "but never a consensus halt");
     }
 
     #[test]
     fn all_clean_details_pass() {
-        let a = MockDetail { label: "a", consensus_critical: false, operational_critical: false, warnings: 0 };
-        let b = MockDetail { label: "b", consensus_critical: false, operational_critical: false, warnings: 0 };
+        let a = MockDetail {
+            label: "a",
+            consensus_critical: false,
+            operational_critical: false,
+            warnings: 0,
+        };
+        let b = MockDetail {
+            label: "b",
+            consensus_critical: false,
+            operational_critical: false,
+            warnings: 0,
+        };
         let details: [&dyn SecurityDetail; 2] = [&a, &b];
         let ok = SecurityCommand::assert_consensus_safe(&details).expect("no consensus halt");
         assert!(ok.is_clean());
@@ -544,7 +632,13 @@ mod tests {
     fn incident_log_records_bounds_and_queries() {
         let log = IncidentLog::new(3); // small cap to exercise eviction
         for h in 1..=5u64 {
-            log.push_alert("t", Severity::Warning, AlertClass::Operational, "warn", format!("at {h}"));
+            log.push_alert(
+                "t",
+                Severity::Warning,
+                AlertClass::Operational,
+                "warn",
+                format!("at {h}"),
+            );
         }
         // Bounded to the last 3; total counts all 5.
         assert_eq!(log.total(), 5);
@@ -552,19 +646,45 @@ mod tests {
         assert_eq!(recent.len(), 3, "ring bounded to cap");
         assert_eq!(recent.first().unwrap().alert.message, "at 3");
         assert_eq!(recent.last().unwrap().alert.message, "at 5");
-        assert_eq!(recent.last().unwrap().seq, 5, "monotonic seq survives eviction");
+        assert_eq!(
+            recent.last().unwrap().seq,
+            5,
+            "monotonic seq survives eviction"
+        );
 
         // A consensus halt is counted separately.
         assert_eq!(log.total_consensus_halts(), 0);
-        log.push_alert("t", Severity::Critical, AlertClass::Consensus, "crit", "broke");
+        log.push_alert(
+            "t",
+            Severity::Critical,
+            AlertClass::Consensus,
+            "crit",
+            "broke",
+        );
         assert_eq!(log.total_consensus_halts(), 1);
         assert_eq!(log.recent_at_least(Severity::Critical, 10).len(), 1);
     }
 
     // Convenience so the tests can push alerts without building structs.
     impl IncidentLog {
-        fn push_alert(&self, detail: &'static str, sev: Severity, class: AlertClass, code: &'static str, msg: impl Into<String>) -> u64 {
-            self.record(0, Alert { detail, severity: sev, class, code, message: msg.into() })
+        fn push_alert(
+            &self,
+            detail: &'static str,
+            sev: Severity,
+            class: AlertClass,
+            code: &'static str,
+            msg: impl Into<String>,
+        ) -> u64 {
+            self.record(
+                0,
+                Alert {
+                    detail,
+                    severity: sev,
+                    class,
+                    code,
+                    message: msg.into(),
+                },
+            )
         }
     }
 
@@ -591,7 +711,10 @@ mod tests {
         }
         assert!((b.mean() - 100.0).abs() < 5.0, "mean settled near 100");
         // A value near the norm is fine; a large excursion is anomalous.
-        assert!(!b.is_anomalous(101.0, 3.0), "within-norm value is not anomalous");
+        assert!(
+            !b.is_anomalous(101.0, 3.0),
+            "within-norm value is not anomalous"
+        );
         assert!(b.is_anomalous(1000.0, 3.0), "10x excursion is anomalous");
     }
 
@@ -600,11 +723,29 @@ mod tests {
         let log = IncidentLog::new(100);
         // Same code five times → repeat signal.
         for _ in 0..5 {
-            log.push_alert("pool", Severity::Warning, AlertClass::Operational, "high-mint-velocity", "burst");
+            log.push_alert(
+                "pool",
+                Severity::Warning,
+                AlertClass::Operational,
+                "high-mint-velocity",
+                "burst",
+            );
         }
         // Two other distinct codes once each.
-        log.push_alert("pool", Severity::Warning, AlertClass::Operational, "high-spend-ratio", "drain");
-        log.push_alert("utxo", Severity::Warning, AlertClass::Operational, "dust-flood", "spam");
+        log.push_alert(
+            "pool",
+            Severity::Warning,
+            AlertClass::Operational,
+            "high-spend-ratio",
+            "drain",
+        );
+        log.push_alert(
+            "utxo",
+            Severity::Warning,
+            AlertClass::Operational,
+            "dust-flood",
+            "spam",
+        );
 
         assert_eq!(log.repeat_count("high-mint-velocity"), 5);
         assert_eq!(log.repeat_count("nope"), 0);
@@ -625,7 +766,10 @@ mod tests {
         b.update(1e300);
         let _ = b.is_anomalous(f64::MAX, 3.0); // no panic
         let _ = b.is_anomalous(f64::NAN, 3.0); // NaN comparison → false, no panic
-        assert!(!Baseline::new(0.5, 1000).is_anomalous(1e18, 3.0), "still in warmup, never flags");
+        assert!(
+            !Baseline::new(0.5, 1000).is_anomalous(1e18, 3.0),
+            "still in warmup, never flags"
+        );
 
         // IncidentLog with the minimum cap floods to a bounded ring but counts all.
         let log = IncidentLog::new(0); // clamped to >= 1
@@ -645,13 +789,34 @@ mod tests {
     #[test]
     fn graduated_response_ladder_and_report_disposition() {
         // Per-alert ladder.
-        let halt = Alert { detail: "d", severity: Severity::Critical, class: AlertClass::Consensus, code: "c", message: String::new() };
-        let ban = Alert { detail: "d", severity: Severity::Critical, class: AlertClass::Operational, code: "c", message: String::new() };
-        let thr = Alert { detail: "d", severity: Severity::Warning, class: AlertClass::Operational, code: "c", message: String::new() };
+        let halt = Alert {
+            detail: "d",
+            severity: Severity::Critical,
+            class: AlertClass::Consensus,
+            code: "c",
+            message: String::new(),
+        };
+        let ban = Alert {
+            detail: "d",
+            severity: Severity::Critical,
+            class: AlertClass::Operational,
+            code: "c",
+            message: String::new(),
+        };
+        let thr = Alert {
+            detail: "d",
+            severity: Severity::Warning,
+            class: AlertClass::Operational,
+            code: "c",
+            message: String::new(),
+        };
         assert_eq!(halt.disposition(), Disposition::Halt);
         assert_eq!(ban.disposition(), Disposition::BanPeer);
         assert_eq!(thr.disposition(), Disposition::Throttle);
-        assert!(Disposition::Halt > Disposition::BanPeer && Disposition::BanPeer > Disposition::Throttle);
+        assert!(
+            Disposition::Halt > Disposition::BanPeer
+                && Disposition::BanPeer > Disposition::Throttle
+        );
 
         // Report takes the strongest response present.
         let mut r = SecurityReport::clean();
@@ -667,7 +832,10 @@ mod tests {
         // One noisy detail, even with a critical, is not "coordinated".
         let mut single = SecurityReport::clean();
         single.raise_operational("mempool", Severity::Critical, "flood", "x");
-        assert!(!single.coordinated_attack_suspected(), "one surface is not coordinated");
+        assert!(
+            !single.coordinated_attack_suspected(),
+            "one surface is not coordinated"
+        );
 
         // Two distinct surfaces + a critical → coordinated attack suspected
         // (e.g. peer isolation while the pool misbehaves — a staged attack).

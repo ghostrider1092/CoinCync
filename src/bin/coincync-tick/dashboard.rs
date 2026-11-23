@@ -204,7 +204,11 @@ impl Snapshot {
                 "cicada" => format!("next housekeeping {}s", hk),
                 "stick_insect" => "envelope 2048B  UA /coincync/".into(),
                 "locust" => {
-                    let density = if mode == Mode::Calm { 0 } else { (20 + tick % 70) as u32 };
+                    let density = if mode == Mode::Calm {
+                        0
+                    } else {
+                        (20 + tick % 70) as u32
+                    };
                     format!("{}  density {}%", relay, density)
                 }
                 "forager" => match mode {
@@ -218,14 +222,34 @@ impl Snapshot {
                     Mode::Flood => "state STRESSED".into(),
                     Mode::Eclipse => "state CONCENTRATED".into(),
                 },
-                "spider" => if mode == Mode::Calm { "standing by".into() }
-                            else { format!("signature {}", mode.label().to_uppercase()) },
-                "mantis" => if mode == Mode::Flood { "tarpit hold x5 (escalating)".into() }
-                            else { "armed · no malice feed".into() },
-                "army_ant" => if matches!(mode, Mode::Partition | Mode::Eclipse) { "bridging 3 diverse legs".into() }
-                              else { "armed".into() },
-                "centipede" => if mode == Mode::Partition { "relay 3 diverse legs".into() }
-                               else { "legs standby".into() },
+                "spider" => {
+                    if mode == Mode::Calm {
+                        "standing by".into()
+                    } else {
+                        format!("signature {}", mode.label().to_uppercase())
+                    }
+                }
+                "mantis" => {
+                    if mode == Mode::Flood {
+                        "tarpit hold x5 (escalating)".into()
+                    } else {
+                        "armed · no malice feed".into()
+                    }
+                }
+                "army_ant" => {
+                    if matches!(mode, Mode::Partition | Mode::Eclipse) {
+                        "bridging 3 diverse legs".into()
+                    } else {
+                        "armed".into()
+                    }
+                }
+                "centipede" => {
+                    if mode == Mode::Partition {
+                        "relay 3 diverse legs".into()
+                    } else {
+                        "legs standby".into()
+                    }
+                }
                 "firefly" => "cover cap armed · needs pulse feed".into(),
                 "pheromone" => "trail evaporating each round".into(),
                 _ => String::new(),
@@ -256,11 +280,19 @@ impl Snapshot {
         for a in &report.allowed {
             self.allowed += 1;
             allowed_this += 1;
-            self.ledger.push_front(LedgerRow { ts: hms.into(), action: a.clone(), denied: false });
+            self.ledger.push_front(LedgerRow {
+                ts: hms.into(),
+                action: a.clone(),
+                denied: false,
+            });
         }
         for (a, _reason) in &report.denied {
             self.denied += 1;
-            self.ledger.push_front(LedgerRow { ts: hms.into(), action: a.clone(), denied: true });
+            self.ledger.push_front(LedgerRow {
+                ts: hms.into(),
+                action: a.clone(),
+                denied: true,
+            });
         }
         while self.ledger.len() > 200 {
             self.ledger.pop_back();
@@ -279,7 +311,11 @@ impl Snapshot {
         self.ci = (self.ci + 1) % CICADA.len();
         self.next_housekeeping_s = CICADA[self.ci];
 
-        self.ram_pct = if self.mode == Mode::Calm { 0 } else { (8 + (self.tick * 7) % 60) as u16 };
+        self.ram_pct = if self.mode == Mode::Calm {
+            0
+        } else {
+            (8 + (self.tick * 7) % 60) as u16
+        };
         self.mempool = match self.mode {
             Mode::Flood => ((40 + self.tick * 13) % 400) as u32,
             Mode::Calm => 0,
@@ -291,7 +327,11 @@ impl Snapshot {
             Mode::Flood => 16,
             Mode::Eclipse => 12,
         };
-        self.relay_mode = if matches!(self.mode, Mode::Flood | Mode::Partition) { "Gregarious" } else { "Solitary" };
+        self.relay_mode = if matches!(self.mode, Mode::Flood | Mode::Partition) {
+            "Gregarious"
+        } else {
+            "Solitary"
+        };
 
         let mut rows: Vec<(String, bool)> =
             vec![(format!("housekeep in {}s", self.next_housekeeping_s), false)];
@@ -319,7 +359,11 @@ impl Snapshot {
                 self.allowed += 1;
                 allowed_this += 1;
             }
-            self.ledger.push_front(LedgerRow { ts: clock_hms.clone(), action: a, denied: d });
+            self.ledger.push_front(LedgerRow {
+                ts: clock_hms.clone(),
+                action: a,
+                denied: d,
+            });
         }
         while self.ledger.len() > 200 {
             self.ledger.pop_back();
@@ -378,7 +422,10 @@ pub fn draw(f: &mut Frame, s: &Snapshot) {
 fn pill<'a>(label: &'a str, val: &'a str, val_col: Color) -> Vec<Span<'a>> {
     vec![
         Span::styled(format!(" {label} "), Style::default().fg(MUTED)),
-        Span::styled(format!("{val} "), Style::default().fg(val_col).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{val} "),
+            Style::default().fg(val_col).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("· ", Style::default().fg(INK_LINE)),
     ]
 }
@@ -386,8 +433,14 @@ fn pill<'a>(label: &'a str, val: &'a str, val_col: Color) -> Vec<Span<'a>> {
 fn header(f: &mut Frame, area: Rect, s: &Snapshot) {
     let sim = s.mode.is_sim();
     let mut spans = vec![
-        Span::styled(" ▲ ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-        Span::styled("The Colony", Style::default().fg(PARCH).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " ▲ ",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "The Colony",
+            Style::default().fg(PARCH).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("  coincync-tick   ", Style::default().fg(MUTED)),
     ];
     if sim {
@@ -403,7 +456,12 @@ fn header(f: &mut Frame, area: Rect, s: &Snapshot) {
         spans.extend(pill("kill switch", "disarmed", MUTED));
     }
 
-    let right = format!("tick {}   up {}m{:02}s ", s.tick, s.uptime_s / 60, s.uptime_s % 60);
+    let right = format!(
+        "tick {}   up {}m{:02}s ",
+        s.tick,
+        s.uptime_s / 60,
+        s.uptime_s % 60
+    );
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -411,10 +469,15 @@ fn header(f: &mut Frame, area: Rect, s: &Snapshot) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let cut = Layout::horizontal([Constraint::Min(0), Constraint::Length(right.len() as u16 + 1)]).split(inner);
+    let cut = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(right.len() as u16 + 1),
+    ])
+    .split(inner);
     f.render_widget(Paragraph::new(Line::from(spans)), cut[0]);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(right, Style::default().fg(MUTED)))).alignment(Alignment::Right),
+        Paragraph::new(Line::from(Span::styled(right, Style::default().fg(MUTED))))
+            .alignment(Alignment::Right),
         cut[1],
     );
 }
@@ -436,16 +499,30 @@ fn vitals(f: &mut Frame, area: Rect, s: &Snapshot) {
     ])
     .split(inner);
 
-    let gstyle = |v: u16| Style::default().fg(if v > 75 { RUST } else if v > 45 { AMBER } else { SAGE });
+    let gstyle = |v: u16| {
+        Style::default().fg(if v > 75 {
+            RUST
+        } else if v > 45 {
+            AMBER
+        } else {
+            SAGE
+        })
+    };
     f.render_widget(
-        Gauge::default().gauge_style(gstyle(s.ram_pct)).percent(s.ram_pct.min(100))
-            .label(format!("RAM {:>3}%", s.ram_pct)).use_unicode(true),
+        Gauge::default()
+            .gauge_style(gstyle(s.ram_pct))
+            .percent(s.ram_pct.min(100))
+            .label(format!("RAM {:>3}%", s.ram_pct))
+            .use_unicode(true),
         rows[0],
     );
     let mem_pct = ((s.mempool as f64 / 400.0) * 100.0).min(100.0) as u16;
     f.render_widget(
-        Gauge::default().gauge_style(gstyle(mem_pct)).percent(mem_pct)
-            .label(format!("mempool {} txs", s.mempool)).use_unicode(true),
+        Gauge::default()
+            .gauge_style(gstyle(mem_pct))
+            .percent(mem_pct)
+            .label(format!("mempool {} txs", s.mempool))
+            .use_unicode(true),
         rows[1],
     );
 
@@ -456,19 +533,33 @@ fn vitals(f: &mut Frame, area: Rect, s: &Snapshot) {
         ])
     };
     let peers_c = if s.peers == 0 { MUTED } else { AMBER };
-    let mode_c = if s.relay_mode == "Solitary" { SAGE } else { AMBER };
+    let mode_c = if s.relay_mode == "Solitary" {
+        SAGE
+    } else {
+        AMBER
+    };
     let text = vec![
         kv("swap", format!("{}%", s.swap_pct), SAGE),
         kv("peers scored", s.peers.to_string(), peers_c),
         kv("relay mode", s.relay_mode.to_string(), mode_c),
-        kv("next housekeep", format!("{}s", s.next_housekeeping_s), AMBER),
+        kv(
+            "next housekeep",
+            format!("{}s", s.next_housekeeping_s),
+            AMBER,
+        ),
         kv("wire envelope", format!("{} B", s.envelope_b), PARCH),
         Line::from(""),
         Line::from(vec![
             Span::styled("allowed ", Style::default().fg(MUTED)),
-            Span::styled(s.allowed.to_string(), Style::default().fg(SAGE).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                s.allowed.to_string(),
+                Style::default().fg(SAGE).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  denied ", Style::default().fg(MUTED)),
-            Span::styled(s.denied.to_string(), Style::default().fg(RUST).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                s.denied.to_string(),
+                Style::default().fg(RUST).add_modifier(Modifier::BOLD),
+            ),
         ]),
     ];
     f.render_widget(Paragraph::new(text), rows[3]);
@@ -483,7 +574,10 @@ fn vitals(f: &mut Frame, area: Rect, s: &Snapshot) {
 
 fn roster(f: &mut Frame, area: Rect, s: &Snapshot) {
     let block = Block::default()
-        .title(Span::styled(" CASTES · 11 shipped ", Style::default().fg(AMBER_DIM)))
+        .title(Span::styled(
+            " CASTES · 11 shipped ",
+            Style::default().fg(AMBER_DIM),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(INK_LINE));
     let inner = block.inner(area);
@@ -504,13 +598,22 @@ fn roster(f: &mut Frame, area: Rect, s: &Snapshot) {
             } else {
                 Style::default().fg(PARCH).add_modifier(Modifier::BOLD)
             };
-            let marker = if c.responding && s.mode.is_sim() { "▸ " } else { "  " };
+            let marker = if c.responding && s.mode.is_sim() {
+                "▸ "
+            } else {
+                "  "
+            };
             let line = Line::from(vec![
                 Span::styled(marker, Style::default().fg(AMBER)),
                 Span::styled(format!("{:<13}", c.id), name_style),
-                Span::styled(format!("{:<13} ", c.status.tag()),
-                    Style::default().fg(if dim { MUTED } else { status_color(c.status) })),
-                Span::styled(c.micro.clone(), Style::default().fg(if dim { DIM2 } else { MUTED })),
+                Span::styled(
+                    format!("{:<13} ", c.status.tag()),
+                    Style::default().fg(if dim { MUTED } else { status_color(c.status) }),
+                ),
+                Span::styled(
+                    c.micro.clone(),
+                    Style::default().fg(if dim { DIM2 } else { MUTED }),
+                ),
             ]);
             items.push(ListItem::new(line));
         }
@@ -520,20 +623,38 @@ fn roster(f: &mut Frame, area: Rect, s: &Snapshot) {
 
 fn ledger(f: &mut Frame, area: Rect, s: &Snapshot) {
     let block = Block::default()
-        .title(Span::styled(" WOULD-DO LEDGER · authorized, logged only ", Style::default().fg(AMBER_DIM)))
+        .title(Span::styled(
+            " WOULD-DO LEDGER · authorized, logged only ",
+            Style::default().fg(AMBER_DIM),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(INK_LINE));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let rows: Vec<ListItem> = s.ledger.iter().take(inner.height as usize).map(|r| {
-        let (tag, tag_col) = if r.denied { ("DENIED", RUST) } else { ("WOULD ", TEAL) };
-        ListItem::new(Line::from(vec![
-            Span::styled(format!("{} ", r.ts), Style::default().fg(DIM2)),
-            Span::styled(format!("{} ", tag), Style::default().fg(tag_col).add_modifier(Modifier::BOLD)),
-            Span::styled(r.action.clone(), Style::default().fg(if r.denied { MUTED } else { PARCH })),
-        ]))
-    }).collect();
+    let rows: Vec<ListItem> = s
+        .ledger
+        .iter()
+        .take(inner.height as usize)
+        .map(|r| {
+            let (tag, tag_col) = if r.denied {
+                ("DENIED", RUST)
+            } else {
+                ("WOULD ", TEAL)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{} ", r.ts), Style::default().fg(DIM2)),
+                Span::styled(
+                    format!("{} ", tag),
+                    Style::default().fg(tag_col).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    r.action.clone(),
+                    Style::default().fg(if r.denied { MUTED } else { PARCH }),
+                ),
+            ]))
+        })
+        .collect();
     f.render_widget(List::new(rows), inner);
 }
 
@@ -542,12 +663,19 @@ fn footer(f: &mut Frame, area: Rect, s: &Snapshot) {
     let msg = if sim {
         Span::styled(format!("  {}", s.caption()), Style::default().fg(RUST))
     } else {
-        Span::styled("  advisory only · consensus unaffected · a colony bug degrades margin, never validity",
-            Style::default().fg(SAGE))
+        Span::styled(
+            "  advisory only · consensus unaffected · a colony bug degrades margin, never validity",
+            Style::default().fg(SAGE),
+        )
     };
-    let keys = Span::styled("0 calm  1 partition  2 flood  3 eclipse  ·  q quit ",
-        Style::default().fg(MUTED));
+    let keys = Span::styled(
+        "0 calm  1 partition  2 flood  3 eclipse  ·  q quit ",
+        Style::default().fg(MUTED),
+    );
     let cut = Layout::horizontal([Constraint::Min(0), Constraint::Length(48)]).split(area);
     f.render_widget(Paragraph::new(Line::from(msg)), cut[0]);
-    f.render_widget(Paragraph::new(Line::from(keys)).alignment(Alignment::Right), cut[1]);
+    f.render_widget(
+        Paragraph::new(Line::from(keys)).alignment(Alignment::Right),
+        cut[1],
+    );
 }

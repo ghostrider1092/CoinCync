@@ -103,8 +103,7 @@ impl SpendCoordinator {
         }
 
         let retained_reservations = selected_outputs.len();
-        let reservation_expires_at =
-            target_height.saturating_add(RESERVATION_EXPIRY_BLOCKS);
+        let reservation_expires_at = target_height.saturating_add(RESERVATION_EXPIRY_BLOCKS);
 
         match self
             .rpc
@@ -239,7 +238,9 @@ mod tests {
         balance.mark_spent(utxo.tx_hash, utxo.output_index);
 
         let error = validate_input_bindings(&balance, &[binding(&utxo)]).unwrap_err();
-        assert!(error.to_string().contains("no longer an unspent wallet output"));
+        assert!(error
+            .to_string()
+            .contains("no longer an unspent wallet output"));
     }
 
     #[test]
@@ -248,7 +249,9 @@ mod tests {
         let balance = Balance::new();
 
         let error = validate_input_bindings(&balance, &[binding(&utxo)]).unwrap_err();
-        assert!(error.to_string().contains("no longer an unspent wallet output"));
+        assert!(error
+            .to_string()
+            .contains("no longer an unspent wallet output"));
     }
 
     #[test]
@@ -397,7 +400,11 @@ mod tests {
         // may not have received the bytes) and the reservation is retained.
         let coordinator = spend_coordinator("http://127.0.0.1:1");
         let target_height = 11;
-        let built = built_spend(Hash::from_bytes([0x11; 32]), target_height, vec![binding(&utxo)]);
+        let built = built_spend(
+            Hash::from_bytes([0x11; 32]),
+            target_height,
+            vec![binding(&utxo)],
+        );
 
         let submission = coordinator
             .submit_reserved(&mut wallet, "pw", built)
@@ -434,7 +441,11 @@ mod tests {
 
         let coordinator = spend_coordinator("http://127.0.0.1:1");
         let target_height = 11;
-        let built = built_spend(Hash::from_bytes([0x22; 32]), target_height, vec![binding(&utxo)]);
+        let built = built_spend(
+            Hash::from_bytes([0x22; 32]),
+            target_height,
+            vec![binding(&utxo)],
+        );
         let submission = coordinator
             .submit_reserved(&mut wallet, "pw", built)
             .await

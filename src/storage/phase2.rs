@@ -178,7 +178,10 @@ pub fn check_lockstep(stores: &[&dyn Phase2Store], height: u64) -> Result<usize,
 pub fn check_root_integrity(stores: &[&dyn Phase2Store]) -> Result<(), String> {
     fn short(root: &[u8; 32]) -> String {
         // First 4 bytes are enough to disambiguate in an alert message.
-        format!("{:02x}{:02x}{:02x}{:02x}", root[0], root[1], root[2], root[3])
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}",
+            root[0], root[1], root[2], root[3]
+        )
     }
     let mut mismatches: Vec<String> = Vec::new();
     for s in stores {
@@ -376,7 +379,9 @@ mod tests {
                 *skip = false;
                 return; // simulate a declined checkpoint → desync
             }
-            self.stack.lock().push(self.elements.load(Ordering::Relaxed));
+            self.stack
+                .lock()
+                .push(self.elements.load(Ordering::Relaxed));
         }
         fn checkpoint_count(&self) -> usize {
             self.stack.lock().len()
@@ -416,7 +421,14 @@ mod tests {
             let depth = checkpoint_all(&stores, h).expect("stores agree");
             assert_eq!(depth, h as usize);
         }
-        assert_eq!((a.checkpoint_count(), b.checkpoint_count(), c.checkpoint_count()), (10, 10, 10));
+        assert_eq!(
+            (
+                a.checkpoint_count(),
+                b.checkpoint_count(),
+                c.checkpoint_count()
+            ),
+            (10, 10, 10)
+        );
     }
 
     #[test]
@@ -427,7 +439,10 @@ mod tests {
         let stores: [&dyn Phase2Store; 2] = [&a, &b];
         let err = checkpoint_all(&stores, 1).unwrap_err();
         assert!(err.contains("diverged"), "got: {err}");
-        assert!(err.contains("a=1") && err.contains("b=0"), "names both depths: {err}");
+        assert!(
+            err.contains("a=1") && err.contains("b=0"),
+            "names both depths: {err}"
+        );
     }
 
     #[test]
@@ -450,7 +465,11 @@ mod tests {
         let outcomes = rewind_all(&stores);
         assert!(matches!(outcomes[0], ("empty", RewindOutcome::EmptyNoop)));
         assert!(matches!(outcomes[1], ("full", RewindOutcome::RolledBack)));
-        assert_eq!(full.element_count(), 1, "full rewound to the checkpoint boundary");
+        assert_eq!(
+            full.element_count(),
+            1,
+            "full rewound to the checkpoint boundary"
+        );
     }
 
     #[test]
@@ -462,7 +481,10 @@ mod tests {
         s.add_element(); // 2 elements, but no checkpoint taken
         let stores: [&dyn Phase2Store; 1] = [&s];
         let outcomes = rewind_all(&stores);
-        assert!(matches!(outcomes[0].1, RewindOutcome::Stranded { remaining: 2 }));
+        assert!(matches!(
+            outcomes[0].1,
+            RewindOutcome::Stranded { remaining: 2 }
+        ));
     }
 
     #[test]
@@ -519,7 +541,10 @@ mod tests {
         b.add_element();
         let stores: [&dyn Phase2Store; 2] = [&a, &b];
         // No override → maintained root == contents root for both.
-        assert!(check_root_integrity(&stores).is_ok(), "honest stores must agree");
+        assert!(
+            check_root_integrity(&stores).is_ok(),
+            "honest stores must agree"
+        );
     }
 
     #[test]
@@ -534,7 +559,10 @@ mod tests {
         let err = check_root_integrity(&stores).unwrap_err();
         assert!(err.contains("root drift"), "got: {err}");
         assert!(err.contains("b:"), "must name the drifted store: {err}");
-        assert!(!err.contains("a:"), "must not implicate the honest store: {err}");
+        assert!(
+            !err.contains("a:"),
+            "must not implicate the honest store: {err}"
+        );
     }
 
     #[test]
@@ -543,17 +571,30 @@ mod tests {
         // BridgeTree-backed ShieldedStore) is skipped, not falsely flagged.
         struct NoRecompute;
         impl Phase2Store for NoRecompute {
-            fn store_label(&self) -> &'static str { "no-recompute" }
+            fn store_label(&self) -> &'static str {
+                "no-recompute"
+            }
             fn checkpoint_at_height(&self, _h: u64) {}
-            fn checkpoint_count(&self) -> usize { 0 }
-            fn rewind(&self) -> bool { false }
-            fn element_count(&self) -> usize { 0 }
-            fn current_root(&self) -> [u8; 32] { [0x11; 32] }
+            fn checkpoint_count(&self) -> usize {
+                0
+            }
+            fn rewind(&self) -> bool {
+                false
+            }
+            fn element_count(&self) -> usize {
+                0
+            }
+            fn current_root(&self) -> [u8; 32] {
+                [0x11; 32]
+            }
             // recompute_root() uses the trait default → None.
         }
         let n = NoRecompute;
         let stores: [&dyn Phase2Store; 1] = [&n];
-        assert!(check_root_integrity(&stores).is_ok(), "None recompute must be skipped");
+        assert!(
+            check_root_integrity(&stores).is_ok(),
+            "None recompute must be skipped"
+        );
     }
 
     #[test]
@@ -569,7 +610,10 @@ mod tests {
             report.alerts.iter().any(|al| al.code == "root-drift"),
             "must raise the root-drift alert"
         );
-        assert!(!report.has_consensus_halt(), "root-integrity is operational, never a halt");
+        assert!(
+            !report.has_consensus_halt(),
+            "root-integrity is operational, never a halt"
+        );
         assert_ne!(report.disposition(), Disposition::Halt);
     }
 
@@ -581,7 +625,10 @@ mod tests {
         let spark = SparkStore::new();
         let stores: [&dyn Phase2Store; 2] = [&kernel, &spark];
         // Empty stores: recompute == current.
-        assert!(check_root_integrity(&stores).is_ok(), "empty real stores agree");
+        assert!(
+            check_root_integrity(&stores).is_ok(),
+            "empty real stores agree"
+        );
         assert_eq!(kernel.recompute_root(), Some(kernel.current_root()));
         assert_eq!(spark.recompute_root(), Some(spark.current_root()));
         // ShieldedStore cannot recompute → None (skipped by the guard).
@@ -609,13 +656,20 @@ mod tests {
         for _ in 0..5 {
             for (label, outcome) in rewind_all(&stores) {
                 assert!(
-                    matches!(outcome, RewindOutcome::RolledBack | RewindOutcome::EmptyNoop),
+                    matches!(
+                        outcome,
+                        RewindOutcome::RolledBack | RewindOutcome::EmptyNoop
+                    ),
                     "{label} failed to roll back cleanly"
                 );
             }
         }
         assert_eq!(
-            (shielded.checkpoint_count(), spark.checkpoint_count(), kernel.checkpoint_count()),
+            (
+                shielded.checkpoint_count(),
+                spark.checkpoint_count(),
+                kernel.checkpoint_count()
+            ),
             (0, 0, 0),
             "all three drained in lock-step"
         );

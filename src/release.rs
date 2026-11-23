@@ -149,8 +149,16 @@ mod tests {
             "2.0.0".into(),
             "cfb979a1".into(),
             vec![
-                ArtifactHash { name: "coincync-node".into(), sha256: sha256_hex(b"node-bytes"), size: 10 },
-                ArtifactHash { name: "coincync-wallet".into(), sha256: sha256_hex(b"wallet-bytes"), size: 12 },
+                ArtifactHash {
+                    name: "coincync-node".into(),
+                    sha256: sha256_hex(b"node-bytes"),
+                    size: 10,
+                },
+                ArtifactHash {
+                    name: "coincync-wallet".into(),
+                    sha256: sha256_hex(b"wallet-bytes"),
+                    size: 12,
+                },
             ],
         )
     }
@@ -161,19 +169,39 @@ mod tests {
             "1".into(),
             "c".into(),
             vec![
-                ArtifactHash { name: "b".into(), sha256: "x".into(), size: 1 },
-                ArtifactHash { name: "a".into(), sha256: "y".into(), size: 2 },
+                ArtifactHash {
+                    name: "b".into(),
+                    sha256: "x".into(),
+                    size: 1,
+                },
+                ArtifactHash {
+                    name: "a".into(),
+                    sha256: "y".into(),
+                    size: 2,
+                },
             ],
         );
         let b = ReleaseManifest::new(
             "1".into(),
             "c".into(),
             vec![
-                ArtifactHash { name: "a".into(), sha256: "y".into(), size: 2 },
-                ArtifactHash { name: "b".into(), sha256: "x".into(), size: 1 },
+                ArtifactHash {
+                    name: "a".into(),
+                    sha256: "y".into(),
+                    size: 2,
+                },
+                ArtifactHash {
+                    name: "b".into(),
+                    sha256: "x".into(),
+                    size: 1,
+                },
             ],
         );
-        assert_eq!(a.signing_bytes(), b.signing_bytes(), "artifact order must not affect the preimage");
+        assert_eq!(
+            a.signing_bytes(),
+            b.signing_bytes(),
+            "artifact order must not affect the preimage"
+        );
         assert_eq!(a.signing_bytes(), a.signing_bytes());
     }
 
@@ -190,7 +218,10 @@ mod tests {
         assert!(verify_signatures(&m, &sigs1, &maintainers, 2).is_err());
 
         // Two distinct maintainers: meets 2-of-3.
-        let sigs2 = vec![(k1.verifying_key(), m.sign(&k1)), (k2.verifying_key(), m.sign(&k2))];
+        let sigs2 = vec![
+            (k1.verifying_key(), m.sign(&k1)),
+            (k2.verifying_key(), m.sign(&k2)),
+        ];
         assert_eq!(verify_signatures(&m, &sigs2, &maintainers, 2).unwrap(), 2);
     }
 
@@ -221,7 +252,9 @@ mod tests {
         // Same signature against a manifest with a changed version must fail.
         let mut tampered = m.clone();
         tampered.version = "2.0.1".into();
-        assert!(verify_signatures(&tampered, &[(k1.verifying_key(), sig)], &maintainers, 1).is_err());
+        assert!(
+            verify_signatures(&tampered, &[(k1.verifying_key(), sig)], &maintainers, 1).is_err()
+        );
     }
 
     #[test]

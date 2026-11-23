@@ -57,7 +57,10 @@ pub struct FaultReport {
 impl FaultReport {
     /// A clean tick (no fault).
     pub fn healthy() -> Self {
-        Self { faulty: false, faults: Vec::new() }
+        Self {
+            faulty: false,
+            faults: Vec::new(),
+        }
     }
 
     /// Build from any iterator of fault labels. `faulty` is set iff non-empty —
@@ -69,7 +72,10 @@ impl FaultReport {
         S: Into<String>,
     {
         let faults: Vec<String> = labels.into_iter().map(Into::into).collect();
-        Self { faulty: !faults.is_empty(), faults }
+        Self {
+            faulty: !faults.is_empty(),
+            faults,
+        }
     }
 }
 
@@ -94,11 +100,17 @@ pub enum FuseSignal {
 // breaker feature is off and the helper is momentarily unused.
 #[allow(dead_code)]
 fn env_u32(name: &str, default: u32) -> u32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 #[allow(dead_code)]
 fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// The fuse box: one registry of recovery breakers keyed by surface, plus the
@@ -119,7 +131,8 @@ impl FuseBox {
     /// Install a breaker for one surface (the "extension"), with that surface's
     /// recommended recovery policy.
     pub fn install(&mut self, surface: BreakerSurface) {
-        self.breakers.insert(surface, RecoveryBreaker::for_surface(surface));
+        self.breakers
+            .insert(surface, RecoveryBreaker::for_surface(surface));
     }
 
     /// Install a breaker for **every** surface — the universal box. Idempotent
@@ -133,7 +146,10 @@ impl FuseBox {
     /// Whether a surface's breaker is currently isolating. `false` if not
     /// installed.
     pub fn isolating(&self, surface: BreakerSurface) -> bool {
-        self.breakers.get(&surface).map(|b| b.is_isolating()).unwrap_or(false)
+        self.breakers
+            .get(&surface)
+            .map(|b| b.is_isolating())
+            .unwrap_or(false)
     }
 
     /// A surface's current state, or `None` if not installed.
@@ -336,9 +352,9 @@ pub fn reset() {
 pub const fn default_arm_height(surface: BreakerSurface) -> u64 {
     match surface {
         // Latch money/integrity surfaces are consensus-armable — all OFF today.
-        BreakerSurface::Shielded
-        | BreakerSurface::Supply
-        | BreakerSurface::BlockIntegrity => u64::MAX,
+        BreakerSurface::Shielded | BreakerSurface::Supply | BreakerSurface::BlockIntegrity => {
+            u64::MAX
+        }
         // Load/local surfaces are never consensus-armed (local config instead).
         _ => u64::MAX,
     }
@@ -373,8 +389,9 @@ pub fn effective_arm_height(surface: BreakerSurface) -> u64 {
             surface,
             BreakerSurface::Shielded | BreakerSurface::Supply | BreakerSurface::BlockIntegrity
         ) {
-            if let Some(h) =
-                std::env::var("COINCYNC_CHAOS_ARM").ok().and_then(|v| v.parse::<u64>().ok())
+            if let Some(h) = std::env::var("COINCYNC_CHAOS_ARM")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
             {
                 return h;
             }
@@ -416,9 +433,18 @@ mod arm_tests {
     #[test]
     fn fail_closed_only_when_armed_at_height_and_isolating() {
         assert!(!fail_closed_due(49, 50, true), "below the arm height");
-        assert!(!fail_closed_due(100, 50, false), "at height but not isolating");
-        assert!(fail_closed_due(50, 50, true), "exactly at the arm height + isolating");
-        assert!(fail_closed_due(100, 50, true), "past the arm height + isolating -> fail closed");
+        assert!(
+            !fail_closed_due(100, 50, false),
+            "at height but not isolating"
+        );
+        assert!(
+            fail_closed_due(50, 50, true),
+            "exactly at the arm height + isolating"
+        );
+        assert!(
+            fail_closed_due(100, 50, true),
+            "past the arm height + isolating -> fail closed"
+        );
         assert!(!fail_closed_due(100, u64::MAX, true), "u64::MAX = off");
     }
 }
@@ -452,7 +478,10 @@ mod tests {
         for _ in 0..10 {
             fb.observe_fault(BreakerSurface::Supply, &FaultReport::healthy());
         }
-        assert!(fb.isolating(BreakerSurface::Supply), "money surface must latch");
+        assert!(
+            fb.isolating(BreakerSurface::Supply),
+            "money surface must latch"
+        );
         fb.rearm(BreakerSurface::Supply);
         assert!(!fb.isolating(BreakerSurface::Supply));
     }
@@ -461,7 +490,10 @@ mod tests {
     fn observe_fault_auto_installs_unknown_surface() {
         let mut fb = FuseBox::new();
         // No install_all; feeding an unknown surface must register it, not drop it.
-        fb.observe_fault(BreakerSurface::Reorg, &FaultReport::from_labels(["DeepReorg"]));
+        fb.observe_fault(
+            BreakerSurface::Reorg,
+            &FaultReport::from_labels(["DeepReorg"]),
+        );
         assert!(fb.isolating(BreakerSurface::Reorg));
     }
 
@@ -484,7 +516,10 @@ mod tests {
         for _ in 0..6 {
             fb.observe_signal(FuseSignal::PeerConnected);
         }
-        assert!(!fb.isolating(BreakerSurface::P2p), "a diverse-enough peer count reconnects");
+        assert!(
+            !fb.isolating(BreakerSurface::P2p),
+            "a diverse-enough peer count reconnects"
+        );
     }
 
     #[test]
@@ -497,11 +532,17 @@ mod tests {
             fb.observe_signal(FuseSignal::TxArrived);
         }
         fb.observe_signal(FuseSignal::WindowTick); // flush → 20 > 5 → flood
-        assert!(fb.isolating(BreakerSurface::Mempool), "an arrival flood trips the fuse");
+        assert!(
+            fb.isolating(BreakerSurface::Mempool),
+            "an arrival flood trips the fuse"
+        );
         // Quiet windows → recover (heal streak + probe).
         for _ in 0..5 {
             fb.observe_signal(FuseSignal::WindowTick);
         }
-        assert!(!fb.isolating(BreakerSurface::Mempool), "quiet windows reconnect the mempool fuse");
+        assert!(
+            !fb.isolating(BreakerSurface::Mempool),
+            "quiet windows reconnect the mempool fuse"
+        );
     }
 }

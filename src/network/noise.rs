@@ -841,7 +841,10 @@ mod tests {
         ct.write_encrypted(&mut framed, b"authentic payload")
             .await
             .unwrap();
-        assert!(framed.len() > 2, "framed message has a length prefix + body");
+        assert!(
+            framed.len() > 2,
+            "framed message has a length prefix + body"
+        );
         // Flip a byte in the ciphertext body (past the 2-byte length prefix).
         let last = framed.len() - 1;
         framed[last] ^= 0xFF;
@@ -877,7 +880,7 @@ mod tests {
         .await;
         match res {
             Ok(Ok(_)) => panic!("garbage handshake msg1 must not succeed"),
-            Ok(Err(_)) => {}  // rejected outright — good
+            Ok(Err(_)) => {}    // rejected outright — good
             Err(_elapsed) => {} // stalled waiting for msg3 — bounded, no false success
         }
     }
@@ -891,8 +894,8 @@ mod tests {
         client.write_all(&100u16.to_be_bytes()).await.unwrap();
         client.write_all(&[1, 2, 3]).await.unwrap();
         drop(client); // EOF before the claimed 100 bytes arrive
-        // EOF should make the read error promptly; time-box anyway so a
-        // regression can never hang the whole suite.
+                      // EOF should make the read error promptly; time-box anyway so a
+                      // regression can never hang the whole suite.
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             NoiseHandshake::responder(id).execute(&mut server),

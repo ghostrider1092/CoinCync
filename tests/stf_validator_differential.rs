@@ -77,7 +77,13 @@ fn valid_params() -> P {
     }
 }
 
-fn build_output(seed: u8, enc_len: usize, memo_len: usize, stealth_zero: bool, commit_zero: bool) -> TxOutput {
+fn build_output(
+    seed: u8,
+    enc_len: usize,
+    memo_len: usize,
+    stealth_zero: bool,
+    commit_zero: bool,
+) -> TxOutput {
     let p = valid_point_bytes(seed);
     let stealth = if stealth_zero { [0u8; 32] } else { p };
     let commitment = if commit_zero {
@@ -96,7 +102,12 @@ fn build_output(seed: u8, enc_len: usize, memo_len: usize, stealth_zero: bool, c
     }
 }
 
-fn build_input(seed: u8, ring_size: usize, ki_zero: bool, ki_override: Option<[u8; 32]>) -> TxInput {
+fn build_input(
+    seed: u8,
+    ring_size: usize,
+    ki_zero: bool,
+    ki_override: Option<[u8; 32]>,
+) -> TxInput {
     let secret = SecretScalar::from_bytes([seed.wrapping_add(1); 32]);
     let pub_point = secret.to_public();
     let crypto_ki = CryptoKeyImage::from_secret(&secret);
@@ -134,7 +145,11 @@ fn build(p: &P) -> Transaction {
     if !p.coinbase {
         // dup_ki forces every input to share one key image (a duplicate when
         // there are >= 2 inputs).
-        let dup = if p.dup_ki { Some(valid_point_bytes(200)) } else { None };
+        let dup = if p.dup_ki {
+            Some(valid_point_bytes(200))
+        } else {
+            None
+        };
         for i in 0..p.num_inputs {
             inputs.push(build_input(i as u8, p.ring_size, p.ki_zero, dup));
         }
@@ -306,14 +321,26 @@ fn single_rule_mutation_matrix_agrees() {
     assert_agree("empty-outputs", &m(&|p| p.num_outputs = 0));
     assert_agree("fee-zero", &m(&|p| p.fee = 0));
     assert_agree("fee-one", &m(&|p| p.fee = 1));
-    assert_agree("ring-too-small", &m(&|p| p.ring_size = BOOTSTRAP_MIN_RING_SIZE - 1));
-    assert_agree("ring-at-min", &m(&|p| p.ring_size = BOOTSTRAP_MIN_RING_SIZE));
+    assert_agree(
+        "ring-too-small",
+        &m(&|p| p.ring_size = BOOTSTRAP_MIN_RING_SIZE - 1),
+    );
+    assert_agree(
+        "ring-at-min",
+        &m(&|p| p.ring_size = BOOTSTRAP_MIN_RING_SIZE),
+    );
     assert_agree("range-empty", &m(&|p| p.range_empty = true));
-    assert_agree("dup-key-image", &m(&|p| {
-        p.num_inputs = 2;
-        p.dup_ki = true;
-    }));
-    assert_agree("too-many-outputs", &m(&|p| p.num_outputs = MAX_TX_OUTPUTS + 1));
+    assert_agree(
+        "dup-key-image",
+        &m(&|p| {
+            p.num_inputs = 2;
+            p.dup_ki = true;
+        }),
+    );
+    assert_agree(
+        "too-many-outputs",
+        &m(&|p| p.num_outputs = MAX_TX_OUTPUTS + 1),
+    );
     assert_agree("outputs-at-max", &m(&|p| p.num_outputs = MAX_TX_OUTPUTS));
     assert_agree("enc-amount-empty", &m(&|p| p.enc_len = 0));
     assert_agree("enc-amount-64", &m(&|p| p.enc_len = 64));
@@ -328,10 +355,13 @@ fn single_rule_mutation_matrix_agrees() {
     assert_agree("two-distinct-inputs", &m(&|p| p.num_inputs = 2));
     // Coinbase baseline (exempt from fee/ring/range/key-image rules).
     assert_agree("coinbase", &m(&|p| p.coinbase = true));
-    assert_agree("coinbase-empty-range", &m(&|p| {
-        p.coinbase = true;
-        p.range_empty = true;
-    }));
+    assert_agree(
+        "coinbase-empty-range",
+        &m(&|p| {
+            p.coinbase = true;
+            p.range_empty = true;
+        }),
+    );
 }
 
 proptest! {

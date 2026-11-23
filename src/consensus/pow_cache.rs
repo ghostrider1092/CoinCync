@@ -197,16 +197,36 @@ mod tests {
         // of one solution shares it — the amplification-collapse property.
         let bind = Hash::from_bytes([3u8; 32]);
         let k = pow_preimage_key(&ph, 5, 1000, 42, &txr, &bind);
-        assert_eq!(k, pow_preimage_key(&ph, 5, 1000, 42, &txr, &bind), "deterministic");
+        assert_eq!(
+            k,
+            pow_preimage_key(&ph, 5, 1000, 42, &txr, &bind),
+            "deterministic"
+        );
         // Each genuine RandomX-input field MUST change the key (else we'd cache
         // across truly different solutions).
-        assert_ne!(k, pow_preimage_key(&ph, 5, 1001, 42, &txr, &bind), "timestamp");
+        assert_ne!(
+            k,
+            pow_preimage_key(&ph, 5, 1001, 42, &txr, &bind),
+            "timestamp"
+        );
         assert_ne!(k, pow_preimage_key(&ph, 5, 1000, 43, &txr, &bind), "nonce");
         assert_ne!(k, pow_preimage_key(&ph, 6, 1000, 42, &txr, &bind), "height");
-        assert_ne!(k, pow_preimage_key(&Hash::from_bytes([9u8; 32]), 5, 1000, 42, &txr, &bind), "prev_hash");
-        assert_ne!(k, pow_preimage_key(&ph, 5, 1000, 42, &Hash::from_bytes([9u8; 32]), &bind), "tx_root");
+        assert_ne!(
+            k,
+            pow_preimage_key(&Hash::from_bytes([9u8; 32]), 5, 1000, 42, &txr, &bind),
+            "prev_hash"
+        );
+        assert_ne!(
+            k,
+            pow_preimage_key(&ph, 5, 1000, 42, &Hash::from_bytes([9u8; 32]), &bind),
+            "tx_root"
+        );
         // audit §1: a different header-binding must change the key.
-        assert_ne!(k, pow_preimage_key(&ph, 5, 1000, 42, &txr, &Hash::from_bytes([9u8; 32])), "binding");
+        assert_ne!(
+            k,
+            pow_preimage_key(&ph, 5, 1000, 42, &txr, &Hash::from_bytes([9u8; 32])),
+            "binding"
+        );
     }
 
     #[test]
@@ -267,7 +287,10 @@ mod tests {
             &bind,
         );
         let err = res.unwrap_err().to_string();
-        assert!(err.contains("Algorithm mismatch"), "unexpected error: {err}");
+        assert!(
+            err.contains("Algorithm mismatch"),
+            "unexpected error: {err}"
+        );
     }
 
     // ---- pow_hash_cached: §1 — reused anchor under a different binding rejected ----
@@ -357,11 +380,29 @@ mod tests {
         let (height, ts, nonce) = (5u64, 1_000u64, 42u64);
 
         let anchor = compute_full_anchor(&prev, height, ts, &bind).unwrap();
-        let h1 = pow_hash_cached(&prev, height, ts, nonce, &tx_root, &anchor.mixed_hash, 0, &bind)
-            .unwrap();
+        let h1 = pow_hash_cached(
+            &prev,
+            height,
+            ts,
+            nonce,
+            &tx_root,
+            &anchor.mixed_hash,
+            0,
+            &bind,
+        )
+        .unwrap();
         // Second call for the same preimage key must be a cache hit (same output).
-        let h2 = pow_hash_cached(&prev, height, ts, nonce, &tx_root, &anchor.mixed_hash, 0, &bind)
-            .unwrap();
+        let h2 = pow_hash_cached(
+            &prev,
+            height,
+            ts,
+            nonce,
+            &tx_root,
+            &anchor.mixed_hash,
+            0,
+            &bind,
+        )
+        .unwrap();
         assert_eq!(h1, h2, "cache hit must return the cold-miss output");
     }
 }

@@ -192,8 +192,9 @@ pub(super) fn spawn_listener_acceptor(
         // `MAX_INBOUND` count cannot see. A permit is taken at accept time and
         // released when the connection task ends, so an IP-diverse half-open
         // flood can no longer hold unbounded tasks + ~64 KiB handshake buffers.
-        let inbound_permits =
-            Arc::new(tokio::sync::Semaphore::new(MAX_INBOUND + INBOUND_HANDSHAKE_SLACK));
+        let inbound_permits = Arc::new(tokio::sync::Semaphore::new(
+            MAX_INBOUND + INBOUND_HANDSHAKE_SLACK,
+        ));
         loop {
             let accepted = tokio::select! {
                 biased;
@@ -469,8 +470,8 @@ pub(super) fn spawn_outbound_connector(
         // seedless config (e.g. regtest, or a node deliberately run with no
         // seeds) would otherwise trip the isolation branch every backoff
         // interval and log a no-op warning forever.
-        let connector_has_seeds = !connector_bootstrap.dns_seeds.is_empty()
-            || !connector_bootstrap.seed_nodes.is_empty();
+        let connector_has_seeds =
+            !connector_bootstrap.dns_seeds.is_empty() || !connector_bootstrap.seed_nodes.is_empty();
 
         // Log proxy status on startup
         if let Some(ref proxy) = connector_proxy {
@@ -1263,7 +1264,10 @@ mod tests {
         // A second consecutive failure must not SHORTEN the backoff (exponential).
         record_connect_backoff(&backoffs, addr).await;
         let second = backoffs.lock().await.get(&addr).map(|(t, _)| *t).unwrap();
-        assert!(second >= first, "repeated failures must not shorten the backoff");
+        assert!(
+            second >= first,
+            "repeated failures must not shorten the backoff"
+        );
     }
 
     #[test]

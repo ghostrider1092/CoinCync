@@ -131,7 +131,10 @@ impl ColonyGuards {
     /// Sensible defaults: Act OFF, floor of 4 netgroups / 4 outbound, default
     /// per-action budgets.
     pub fn with_defaults() -> Self {
-        Self::new(DiversityFloor::default(), ActionRateLimiter::with_default_budgets())
+        Self::new(
+            DiversityFloor::default(),
+            ActionRateLimiter::with_default_budgets(),
+        )
     }
 
     /// Arm the kill switch (allow Act). Only ever called on explicit operator

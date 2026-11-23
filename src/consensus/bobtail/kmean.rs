@@ -155,7 +155,10 @@ mod tests {
         let k = 4usize;
 
         let low = vec![h(0x08); k];
-        assert!(k_mean_meets_target(&low, &target), "mean 0.5·T < τ must pass");
+        assert!(
+            k_mean_meets_target(&low, &target),
+            "mean 0.5·T < τ must pass"
+        );
 
         let high = vec![h(0x80); k];
         assert!(

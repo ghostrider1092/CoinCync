@@ -63,11 +63,26 @@ fn empirical_sampler_tracks_supplied_output_histogram() {
     // count, so the heavy height dominates — whereas a uniform-by-height law
     // would give each of the 5 heights only ~20%.
     let heights = vec![
-        HeightOutputCount { height: 0, count: 2 },
-        HeightOutputCount { height: 1, count: 2 },
-        HeightOutputCount { height: 2, count: 100 }, // heavy: 100 of 108
-        HeightOutputCount { height: 3, count: 2 },
-        HeightOutputCount { height: 4, count: 2 },
+        HeightOutputCount {
+            height: 0,
+            count: 2,
+        },
+        HeightOutputCount {
+            height: 1,
+            count: 2,
+        },
+        HeightOutputCount {
+            height: 2,
+            count: 100,
+        }, // heavy: 100 of 108
+        HeightOutputCount {
+            height: 3,
+            count: 2,
+        },
+        HeightOutputCount {
+            height: 4,
+            count: 2,
+        },
     ];
     let raw = DecoyDistributionSnapshot {
         snapshot_height: 4,
@@ -82,8 +97,7 @@ fn empirical_sampler_tracks_supplied_output_histogram() {
     let trials = 5000usize;
     let mut heavy_hits = 0usize;
     for _ in 0..trials {
-        let picked =
-            sample_candidate_locators_empirical(&snap, 0, 1, &excluded, &mut rng).unwrap();
+        let picked = sample_candidate_locators_empirical(&snap, 0, 1, &excluded, &mut rng).unwrap();
         assert_eq!(picked.len(), 1);
         if picked[0].height == 2 {
             heavy_hits += 1;
@@ -192,11 +206,7 @@ fn gamma_sampling_is_conditioned_and_unique() {
             sample_candidate_locators(&snapshot, 100, 16, &HashSet::new(), &mut rng).unwrap();
         assert_eq!(selected.iter().copied().collect::<HashSet<_>>().len(), 16);
         assert!(selected.iter().all(|locator| locator.height <= 29_901));
-        observed.extend(
-            selected
-                .iter()
-                .map(|locator| spend_height - locator.height),
-        );
+        observed.extend(selected.iter().map(|locator| spend_height - locator.height));
     }
 
     let gamma = Gamma::new(DECOY_GAMMA_SHAPE, DECOY_GAMMA_SCALE).unwrap();
@@ -294,8 +304,7 @@ fn minimum_age_is_measured_at_the_next_spend_height() {
     })
     .unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(4);
-    let selected =
-        sample_candidate_locators(&snapshot, 10, 1, &HashSet::new(), &mut rng).unwrap();
+    let selected = sample_candidate_locators(&snapshot, 10, 1, &HashSet::new(), &mut rng).unwrap();
     assert_eq!(
         selected,
         vec![OutputLocator {
@@ -399,10 +408,7 @@ fn covered_lookup_allocates_transaction_wide_unique_decoys() {
     assert_eq!(rings.len(), 2);
     assert_eq!(rings.ring_size(), 16);
     assert_eq!(rings.real_outputs(), real_outputs.as_slice());
-    assert!(rings
-        .rings()
-        .iter()
-        .all(|ring| ring.decoys().len() == 15));
+    assert!(rings.rings().iter().all(|ring| ring.decoys().len() == 15));
 
     let left: HashSet<_> = rings.rings()[0]
         .decoys()

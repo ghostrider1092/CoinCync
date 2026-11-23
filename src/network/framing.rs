@@ -742,7 +742,11 @@ mod tests {
         let payload = vec![7u8; 1234];
         let header = MessageHeader::new(magic, MessageType::Blocks, &payload);
         let bytes = borsh::to_vec(&header).unwrap();
-        assert_eq!(bytes.len(), HEADER_SIZE, "header must be exactly HEADER_SIZE");
+        assert_eq!(
+            bytes.len(),
+            HEADER_SIZE,
+            "header must be exactly HEADER_SIZE"
+        );
 
         let decoded: MessageHeader = borsh::from_slice(&bytes).unwrap();
         assert_eq!(decoded.magic, header.magic);
@@ -753,7 +757,10 @@ mod tests {
         // magic[0..4] ‖ msg_type[4] ‖ length u32 LE [5..9] ‖ checksum[9..13].
         assert_eq!(&bytes[0..4], &magic);
         assert_eq!(bytes[4], MessageType::Blocks as u8);
-        assert_eq!(u32::from_le_bytes(bytes[5..9].try_into().unwrap()), payload.len() as u32);
+        assert_eq!(
+            u32::from_le_bytes(bytes[5..9].try_into().unwrap()),
+            payload.len() as u32
+        );
         assert_eq!(&bytes[9..13], &header.checksum);
     }
 
@@ -1059,7 +1066,9 @@ mod tests {
             // Header split across two writes.
             peer.write_all(&wire_for_task[..5]).await.unwrap();
             tokio::task::yield_now().await;
-            peer.write_all(&wire_for_task[5..HEADER_SIZE]).await.unwrap();
+            peer.write_all(&wire_for_task[5..HEADER_SIZE])
+                .await
+                .unwrap();
             tokio::task::yield_now().await;
             // Payload split across two writes.
             peer.write_all(&wire_for_task[HEADER_SIZE..HEADER_SIZE + 50])
@@ -1124,7 +1133,9 @@ mod tests {
         let mut framer = MessageFramer::new(reader, writer, magic);
         let too_big = vec![0u8; MessageType::Ping.max_size() + 1];
         assert!(matches!(
-            framer.write_message(MessageType::Ping as u8, &too_big).await,
+            framer
+                .write_message(MessageType::Ping as u8, &too_big)
+                .await,
             Err(Error::MessageTooLarge)
         ));
     }

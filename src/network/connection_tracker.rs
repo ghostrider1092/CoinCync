@@ -593,9 +593,15 @@ mod tests {
         // Raised cap of 4: four from one IP admitted, the fifth refused.
         let raised = ConnectionTracker::new_with_cap(1024, 4);
         for i in 0..4 {
-            assert!(raised.try_track_connection(&a), "conn {i} should fit under cap 4");
+            assert!(
+                raised.try_track_connection(&a),
+                "conn {i} should fit under cap 4"
+            );
         }
-        assert!(!raised.try_track_connection(&a), "5th must be refused at cap 4");
+        assert!(
+            !raised.try_track_connection(&a),
+            "5th must be refused at cap 4"
+        );
 
         // Default constructor keeps the default cap (2).
         let default = ConnectionTracker::new(1024);
@@ -726,8 +732,7 @@ mod tests {
         // `untrack_outbound_subnet` (which catches the opposite error — a double
         // release) for full accounting coverage of the outbound counter.
         let t = std::sync::Arc::new(ConnectionTracker::new(1024));
-        let subnet_sum =
-            || -> usize { t.outbound_subnet_snapshot().iter().map(|(_, c)| *c).sum() };
+        let subnet_sum = || -> usize { t.outbound_subnet_snapshot().iter().map(|(_, c)| *c).sum() };
         {
             let mut slots = Vec::new();
             for i in 0..MAX_OUTBOUND_PER_SUBNET as u8 {
@@ -742,7 +747,11 @@ mod tests {
                 "all slots counted while held"
             );
         } // slots drop here → each Drop decrements
-        assert_eq!(subnet_sum(), 0, "every slot's Drop returned the counter to zero");
+        assert_eq!(
+            subnet_sum(),
+            0,
+            "every slot's Drop returned the counter to zero"
+        );
         // Full room restored: a fresh dial into the /16 is admitted again.
         assert!(t.try_track_outbound_subnet(&addr_in(10, 0, 0)));
     }

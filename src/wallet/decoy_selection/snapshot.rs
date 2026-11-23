@@ -80,11 +80,6 @@ impl TryFrom<DecoyDistributionSnapshot> for ValidatedDecoySnapshot {
         }
 
         let id = SnapshotId::from_distribution(&snapshot);
-        Ok(Self::new(
-            snapshot,
-            cumulative_counts,
-            id,
-            spend_height,
-        ))
+        Ok(Self::new(snapshot, cumulative_counts, id, spend_height))
     }
 }

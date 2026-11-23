@@ -98,6 +98,9 @@ mod tests {
         // rejected (this is the anti-inflation guarantee of the turnstile).
         assert!(verify_value_crossing(&t, &shielded(value + 1, &b), &proof).is_err());
         // Transparent input of a different value → rejected.
-        assert!(verify_value_crossing(&transparent(value + 1, &r_t), &shielded(value, &b), &proof).is_err());
+        assert!(
+            verify_value_crossing(&transparent(value + 1, &r_t), &shielded(value, &b), &proof)
+                .is_err()
+        );
     }
 }

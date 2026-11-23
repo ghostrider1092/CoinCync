@@ -189,7 +189,12 @@ impl Sim {
 
     fn link_delay(&mut self) -> u64 {
         let span = self.cfg.max_delay.saturating_sub(self.cfg.min_delay);
-        self.cfg.min_delay + if span == 0 { 0 } else { self.rng.gen_range(0..=span) }
+        self.cfg.min_delay
+            + if span == 0 {
+                0
+            } else {
+                self.rng.gen_range(0..=span)
+            }
     }
 
     fn on_mine(&mut self, miner: NodeId) {
@@ -206,7 +211,12 @@ impl Sim {
         let target = self.nodes[miner].chain.next_target();
         let base = self.base_ts + h * self.cfg.block_spacing_secs;
         let miner_pk = self.nodes[miner].spend_pub;
-        let (cb, _) = build_coinbase(h, &self.nodes[miner].spend_pub, &self.nodes[miner].view_pub, 0);
+        let (cb, _) = build_coinbase(
+            h,
+            &self.nodes[miner].spend_pub,
+            &self.nodes[miner].view_pub,
+            0,
+        );
         let peers = self.nodes[miner].peers.clone();
 
         match self.nodes[miner].behavior {
@@ -228,8 +238,15 @@ impl Sim {
                 let a = mine_block(&parent, h, base, target, vec![cb], miner_pk, self.magic);
                 let mut b_ts = base + 1;
                 let b = loop {
-                    let cand =
-                        mine_block(&parent, h, b_ts, target, vec![cb_b.clone()], miner_pk, self.magic);
+                    let cand = mine_block(
+                        &parent,
+                        h,
+                        b_ts,
+                        target,
+                        vec![cb_b.clone()],
+                        miner_pk,
+                        self.magic,
+                    );
                     if cand.hash() != a.hash() {
                         break cand;
                     }

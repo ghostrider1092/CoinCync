@@ -192,7 +192,10 @@ impl Session {
     fn apply_launch_args(&mut self, msg: &Value) {
         // Optional: raise the floor threshold to catch a sharp drop before the
         // absolute floor, e.g. "floorMultiple": 8.
-        if let Some(mult) = msg.pointer("/arguments/floorMultiple").and_then(Value::as_u64) {
+        if let Some(mult) = msg
+            .pointer("/arguments/floorMultiple")
+            .and_then(Value::as_u64)
+        {
             self.engine.floor_threshold =
                 coincync::consensus::difficulty::MIN_DIFFICULTY.saturating_mul(mult as u128);
         }
@@ -244,10 +247,14 @@ impl Session {
                     // keep running
                 }
                 None => {
-                    self.send_event(w, "output", json!({
-                        "category": "console",
-                        "output": "Replay finished — difficulty never reached the floor.\n"
-                    }))?;
+                    self.send_event(
+                        w,
+                        "output",
+                        json!({
+                            "category": "console",
+                            "output": "Replay finished — difficulty never reached the floor.\n"
+                        }),
+                    )?;
                     self.send_event(w, "terminated", json!({}))?;
                     self.send_event(w, "exited", json!({ "exitCode": 0 }))?;
                     return Ok(());
@@ -304,16 +311,16 @@ impl Session {
     }
 
     fn variables(&self, msg: &Value) -> Value {
-        let want = msg.pointer("/arguments/variablesReference").and_then(Value::as_i64);
+        let want = msg
+            .pointer("/arguments/variablesReference")
+            .and_then(Value::as_i64);
         if want != Some(BLOCK_SCOPE_REF) {
             return json!({ "variables": [] });
         }
         let Some(s) = &self.engine.last else {
             return json!({ "variables": [] });
         };
-        let var = |name: &str, value: String| {
-            json!({ "name": name, "value": value, "variablesReference": 0 })
-        };
+        let var = |name: &str, value: String| json!({ "name": name, "value": value, "variablesReference": 0 });
         json!({ "variables": [
             var("height", s.height.to_string()),
             var("block_index", s.index.to_string()),

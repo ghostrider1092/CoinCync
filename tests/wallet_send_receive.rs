@@ -120,7 +120,10 @@ fn rings_for(
         .expect("covered request");
 
     let real_by_locator: std::collections::HashMap<OutputLocator, &RealOutputIdentity> =
-        real_outputs.iter().map(|real| (real.locator(), real)).collect();
+        real_outputs
+            .iter()
+            .map(|real| (real.locator(), real))
+            .collect();
     let outputs: Vec<ResolvedDecoyOutput> = request
         .locators()
         .iter()
@@ -182,14 +185,13 @@ fn send_transfer(
     balance.add_utxo(mature_utxo(UTXO_AMOUNT, 0xA0, 0, 100));
     balance.add_utxo(mature_utxo(UTXO_AMOUNT, 0xB0, 1, 110));
 
-    let prepared =
-        prepare_privacy_transaction(
-            &balance,
-            SendRequest::new(vec![payment], context),
-            &SpendKeys::Single(sender),
-            rng,
-        )
-            .expect("prepare");
+    let prepared = prepare_privacy_transaction(
+        &balance,
+        SendRequest::new(vec![payment], context),
+        &SpendKeys::Single(sender),
+        rng,
+    )
+    .expect("prepare");
     let rings = rings_for(&prepared.real_outputs(), context.ring_size(), rng);
     build_prepared_privacy_transaction(prepared, rings, rng).expect("build")
 }
@@ -204,7 +206,12 @@ fn expected_change(amount: u64) -> u64 {
 /// Build a coinbase `TxOutput` exactly as `mining::block_builder` does:
 /// ECDH-derived stealth address + plaintext little-endian amount + sender-side
 /// view tag + zero-blinding commitment.
-fn coinbase_output(spend_pub: &PublicKey, view_pub: &PublicKey, height: u64, amount: u64) -> TxOutput {
+fn coinbase_output(
+    spend_pub: &PublicKey,
+    view_pub: &PublicKey,
+    height: u64,
+    amount: u64,
+) -> TxOutput {
     let miner_secret = [0x9Au8; 32];
     let (stealth, tx_secret) =
         coinbase_stealth_address(spend_pub, view_pub, height, 0, &miner_secret)
@@ -266,7 +273,10 @@ fn symmetry_main_address_payment_and_change_detected_and_decrypt() {
         1,
         "recipient detects exactly the payment output"
     );
-    assert_eq!(recipient_found[0].amount, amount, "payment decrypts exactly");
+    assert_eq!(
+        recipient_found[0].amount, amount,
+        "payment decrypts exactly"
+    );
     assert!(
         recipient_found[0].subaddress_index.is_none(),
         "a main-address payment is not attributed to a subaddress"
@@ -300,8 +310,13 @@ fn symmetry_subaddress_payment_detected_spendable_and_decrypts() {
     let account = 0u32;
     let index = 7u32;
     // D_i (spend) and C_i = a*D_i (view) via the canonical subaddress derivation.
-    let sub = Subaddress::generate(&recipient.spend_public, &recipient.view_secret, account, index)
-        .expect("subaddress");
+    let sub = Subaddress::generate(
+        &recipient.spend_public,
+        &recipient.view_secret,
+        account,
+        index,
+    )
+    .expect("subaddress");
     let amount = 12_000_000u64;
 
     let tx = send_transfer(
@@ -321,12 +336,20 @@ fn symmetry_subaddress_payment_detected_spendable_and_decrypts() {
         .iter()
         .find(|output| output.subaddress_index == Some((account, index)))
         .expect("subaddress payment detected on the subaddress key");
-    assert_eq!(payment.amount, amount, "subaddress payment decrypts exactly");
+    assert_eq!(
+        payment.amount, amount,
+        "subaddress payment decrypts exactly"
+    );
 
     // Spendability: the key image is derived with the +m subaddress offset and
     // the UTXO carries the (account, index) association.
-    let utxo = decrypted_to_utxo(payment, &recipient.view_secret, &recipient.spend_secret, 600)
-        .expect("decrypted_to_utxo");
+    let utxo = decrypted_to_utxo(
+        payment,
+        &recipient.view_secret,
+        &recipient.spend_secret,
+        600,
+    )
+    .expect("decrypted_to_utxo");
     assert_eq!(utxo.subaddress_account, Some(account));
     assert_eq!(utxo.subaddress_index, Some(index));
     assert_eq!(utxo.amount, Amount::from_atomic(amount));
@@ -421,8 +444,13 @@ fn negative_control_subaddress_marked_standard_is_undetectable_by_recipient() {
     let recipient = epoch_from_seed(0x80);
     let account = 0u32;
     let index = 9u32;
-    let sub = Subaddress::generate(&recipient.spend_public, &recipient.view_secret, account, index)
-        .expect("subaddress");
+    let sub = Subaddress::generate(
+        &recipient.spend_public,
+        &recipient.view_secret,
+        account,
+        index,
+    )
+    .expect("subaddress");
     let amount = 15_000_000u64;
 
     // BUG: subaddress destination, but flagged standard (is_subaddress = false).

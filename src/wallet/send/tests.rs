@@ -1,14 +1,16 @@
 use super::assembly::build_prepared_privacy_transaction;
-use super::fee::{calculate_fee, estimate_fee_with_multiplier, estimate_tx_size, scaled_fee, FeeMultiplier};
+use super::fee::{
+    calculate_fee, estimate_fee_with_multiplier, estimate_tx_size, scaled_fee, FeeMultiplier,
+};
 use super::inputs::add_prepared_inputs;
 use super::prepare::prepare_privacy_transaction;
-use super::SpendKeys;
 use super::selection::{select_utxos, select_utxos_uniform};
 use super::types::{
     CoinSelection, Payment, PreparedInput, PreparedPrivacyTransaction, SendRequest, SpendContext,
     TransferShape, VestingRequest,
 };
 use super::vesting::{build_prepared_vesting_transaction, prepare_vesting};
+use super::SpendKeys;
 use crate::constants::{MIN_OUTPUT_AMOUNT, STANDARD_INPUT_COUNT};
 use crate::crypto::{BlindingFactor, PedersenCommitment, SecretScalar};
 use crate::decoy::{
@@ -74,12 +76,8 @@ fn make_utxo(amount: u64, index: u8) -> UTXO {
 fn uniform_selection_reports_when_no_pair_covers() {
     let utxos: Vec<UTXO> = (0..4).map(|index| make_utxo(50, index)).collect();
     let refs: Vec<&UTXO> = utxos.iter().collect();
-    let err = select_utxos_uniform(
-        &refs,
-        Amount::from_atomic(101),
-        &mut rand::rngs::OsRng,
-    )
-    .unwrap_err();
+    let err =
+        select_utxos_uniform(&refs, Amount::from_atomic(101), &mut rand::rngs::OsRng).unwrap_err();
 
     match err {
         Error::NoUtxoPairCovers {
@@ -102,12 +100,8 @@ fn uniform_selection_reports_when_no_pair_covers() {
 fn uniform_selection_requires_two_inputs() {
     let single = vec![make_utxo(1_000_000, 0)];
     let refs: Vec<&UTXO> = single.iter().collect();
-    let err = select_utxos_uniform(
-        &refs,
-        Amount::from_atomic(100),
-        &mut rand::rngs::OsRng,
-    )
-    .unwrap_err();
+    let err =
+        select_utxos_uniform(&refs, Amount::from_atomic(100), &mut rand::rngs::OsRng).unwrap_err();
 
     match err {
         Error::InsufficientInputs { have, need } => {
@@ -127,12 +121,8 @@ fn uniform_selection_finds_optimal_non_largest_pair() {
         make_utxo(40, 3),
     ];
     let refs: Vec<&UTXO> = utxos.iter().collect();
-    let chosen = select_utxos_uniform(
-        &refs,
-        Amount::from_atomic(90),
-        &mut rand::rngs::OsRng,
-    )
-    .unwrap();
+    let chosen =
+        select_utxos_uniform(&refs, Amount::from_atomic(90), &mut rand::rngs::OsRng).unwrap();
 
     assert_eq!(chosen.len(), 2);
     assert_eq!(
@@ -274,7 +264,10 @@ fn rings_for(
         .expect("covered request");
 
     let real_by_locator: std::collections::HashMap<OutputLocator, &RealOutputIdentity> =
-        real_outputs.iter().map(|real| (real.locator(), real)).collect();
+        real_outputs
+            .iter()
+            .map(|real| (real.locator(), real))
+            .collect();
     let outputs: Vec<ResolvedDecoyOutput> = request
         .locators()
         .iter()
@@ -337,9 +330,13 @@ fn prepare_uniform_standard_satisfies_inputs_equal_payments_plus_change_plus_fee
     balance.add_utxo(utxo_with_locator(40_000_000, 0xA0, 0, 10, 100));
     balance.add_utxo(utxo_with_locator(40_000_000, 0xB0, 1, 10, 110));
 
-    let prepared =
-        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &SpendKeys::Single(&keys), &mut rng)
-            .expect("prepare");
+    let prepared = prepare_privacy_transaction(
+        &balance,
+        SendRequest::new(vec![pay], context),
+        &SpendKeys::Single(&keys),
+        &mut rng,
+    )
+    .expect("prepare");
     assert_eq!(prepared.shape, TransferShape::UniformStandard);
 
     let input_sum: u64 = prepared
@@ -382,9 +379,13 @@ fn prepare_change_below_min_still_balances_inputs_equal_payments_plus_change_plu
         Amount::from_atomic(total_send),
     );
 
-    let prepared =
-        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &SpendKeys::Single(&keys), &mut rng)
-            .expect("prepare");
+    let prepared = prepare_privacy_transaction(
+        &balance,
+        SendRequest::new(vec![pay], context),
+        &SpendKeys::Single(&keys),
+        &mut rng,
+    )
+    .expect("prepare");
     assert_eq!(prepared.change_amount, change);
     assert!(prepared.change_amount < MIN_OUTPUT_AMOUNT);
 
@@ -418,8 +419,12 @@ fn prepare_insufficient_funds_errors_without_reserving() {
     balance.add_utxo(utxo_with_locator(1_000_000, 0xA0, 0, 10, 100));
     balance.add_utxo(utxo_with_locator(1_000_000, 0xB0, 1, 10, 110));
 
-    let result =
-        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &SpendKeys::Single(&keys), &mut rng);
+    let result = prepare_privacy_transaction(
+        &balance,
+        SendRequest::new(vec![pay], context),
+        &SpendKeys::Single(&keys),
+        &mut rng,
+    );
     assert!(result.is_err(), "insufficient balance must error");
     assert!(
         balance.all_reservations().is_empty(),
@@ -445,8 +450,12 @@ fn prepare_saturating_total_plus_fee_does_not_wrap_into_satisfiable_required() {
     balance.add_utxo(utxo_with_locator(1_000_000, 0xA0, 0, 10, 100));
     balance.add_utxo(utxo_with_locator(1_000_000, 0xB0, 1, 10, 110));
 
-    let result =
-        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &SpendKeys::Single(&keys), &mut rng);
+    let result = prepare_privacy_transaction(
+        &balance,
+        SendRequest::new(vec![pay], context),
+        &SpendKeys::Single(&keys),
+        &mut rng,
+    );
     assert!(
         result.is_err(),
         "a saturated required must fail closed, not wrap to a satisfiable target"
@@ -469,8 +478,14 @@ fn fee_multiplier_nan_falls_back_to_neutral_one() {
 #[test]
 fn fee_multiplier_negative_zero_and_huge_are_clamped() {
     let neutral = estimate_fee_with_multiplier(2, 2, 500, 1.0).as_atomic();
-    assert_eq!(estimate_fee_with_multiplier(2, 2, 500, -5.0).as_atomic(), neutral);
-    assert_eq!(estimate_fee_with_multiplier(2, 2, 500, 0.0).as_atomic(), neutral);
+    assert_eq!(
+        estimate_fee_with_multiplier(2, 2, 500, -5.0).as_atomic(),
+        neutral
+    );
+    assert_eq!(
+        estimate_fee_with_multiplier(2, 2, 500, 0.0).as_atomic(),
+        neutral
+    );
 
     let ceiling = estimate_fee_with_multiplier(2, 2, 500, 100.0).as_atomic();
     let huge = estimate_fee_with_multiplier(2, 2, 500, 1_000_000.0).as_atomic();
@@ -527,7 +542,9 @@ fn build_prepared_uniform_drip_pair_emits_two_outputs_no_change() {
         Amount::from_atomic(per_output),
     );
     let request = SendRequest::new(vec![pay, pay], context);
-    let prepared = prepare_privacy_transaction(&balance, request, &SpendKeys::Single(&keys), &mut rng).expect("prepare");
+    let prepared =
+        prepare_privacy_transaction(&balance, request, &SpendKeys::Single(&keys), &mut rng)
+            .expect("prepare");
     assert_eq!(prepared.shape, TransferShape::UniformDripPair);
     assert_eq!(prepared.change_amount, excess);
 
@@ -564,9 +581,13 @@ fn build_prepared_uniform_standard_change_below_min_adds_dummy_and_folds_to_fee(
         recipient.view_public,
         Amount::from_atomic(total_send),
     );
-    let prepared =
-        prepare_privacy_transaction(&balance, SendRequest::new(vec![pay], context), &SpendKeys::Single(&keys), &mut rng)
-            .expect("prepare");
+    let prepared = prepare_privacy_transaction(
+        &balance,
+        SendRequest::new(vec![pay], context),
+        &SpendKeys::Single(&keys),
+        &mut rng,
+    )
+    .expect("prepare");
     assert_eq!(prepared.shape, TransferShape::UniformStandard);
     assert!(prepared.change_amount < MIN_OUTPUT_AMOUNT);
 
@@ -712,12 +733,20 @@ fn shield_in_tx_satisfies_mint_consensus_gates() {
     );
     let tx = build_shield_in_transaction(prepared, rings, &mut rng).expect("build shield-in tx");
 
-    assert_eq!(tx.tx_type, TxType::Shielded, "shield-in is a TxType::Shielded tx");
+    assert_eq!(
+        tx.tx_type,
+        TxType::Shielded,
+        "shield-in is a TxType::Shielded tx"
+    );
 
     // The transparent↔shielded value bridge the node checks at block level: the
     // tx's pseudo-output commitments must exceed its transparent output
     // commitments + fee by exactly the shielded amount.
-    let pseudo: Vec<[u8; 32]> = tx.inputs.iter().map(|i| i.pseudo_output_commitment).collect();
+    let pseudo: Vec<[u8; 32]> = tx
+        .inputs
+        .iter()
+        .map(|i| i.pseudo_output_commitment)
+        .collect();
     let outs: Vec<[u8; 32]> = tx.outputs.iter().map(|o| o.commitment).collect();
     let decoded = SparkPayload::decode(&tx.extra).expect("decode payload");
     assert!(
@@ -729,8 +758,11 @@ fn shield_in_tx_satisfies_mint_consensus_gates() {
 
     // The authenticated mint value proof: the minted coins' total value equals the
     // shielded-in amount (−value_balance).
-    verify_mint_shield_in(decoded.mint.as_ref().expect("mint bundle"), decoded.value_balance)
-        .expect("mint value proof + conservation holds");
+    verify_mint_shield_in(
+        decoded.mint.as_ref().expect("mint bundle"),
+        decoded.value_balance,
+    )
+    .expect("mint value proof + conservation holds");
 }
 
 // ===========================================================================
@@ -743,7 +775,10 @@ fn shield_in_tx_satisfies_mint_consensus_gates() {
 fn spend_context_with_ring_size_rejects_small_ring_and_derives_min_age() {
     let err = SpendContext::with_ring_size(500, 1).unwrap_err();
     match err {
-        Error::InvalidRingSize { expected: 2, got: 1 } => {}
+        Error::InvalidRingSize {
+            expected: 2,
+            got: 1,
+        } => {}
         other => panic!("expected InvalidRingSize{{2,1}}, got {other:?}"),
     }
     let context = SpendContext::with_ring_size(500, 8).expect("valid ring size");
@@ -799,7 +834,8 @@ fn prepare_vesting_stamps_unlock_height_onto_output_lock_height() {
         unlock_height,
         context,
     );
-    let prepared = prepare_vesting(&balance, request, &SpendKeys::Single(&keys), &mut rng).expect("prepare vesting");
+    let prepared = prepare_vesting(&balance, request, &SpendKeys::Single(&keys), &mut rng)
+        .expect("prepare vesting");
     let rings = rings_for(&prepared.real_outputs(), ring_size, &mut rng);
     let tx = build_prepared_vesting_transaction(prepared, rings, &mut rng).expect("build vesting");
 
@@ -832,7 +868,13 @@ fn prepare_vesting_fee_growth_loop_reselects_until_inputs_cover_fee() {
     // covering `amount + fee` needs several inputs.
     let mut balance = Balance::new();
     for i in 0..20u8 {
-        balance.add_utxo(utxo_with_locator(4_000_000, 0xC0 + i, i, 10, 100 + i as u64));
+        balance.add_utxo(utxo_with_locator(
+            4_000_000,
+            0xC0 + i,
+            i,
+            10,
+            100 + i as u64,
+        ));
     }
     let request = VestingRequest::new(
         Payment::new(
@@ -843,7 +885,8 @@ fn prepare_vesting_fee_growth_loop_reselects_until_inputs_cover_fee() {
         5_000,
         context,
     );
-    let prepared = prepare_vesting(&balance, request, &SpendKeys::Single(&keys), &mut rng).expect("prepare vesting");
+    let prepared = prepare_vesting(&balance, request, &SpendKeys::Single(&keys), &mut rng)
+        .expect("prepare vesting");
     let input_sum: u64 = prepared
         .inputs
         .iter()

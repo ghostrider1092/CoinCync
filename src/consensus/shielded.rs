@@ -255,7 +255,11 @@ mod tests {
         // Unshielding 31 (more than the pool holds) is rejected — the
         // no-inflation-across-the-veil invariant.
         assert!(pool.apply(31).is_err());
-        assert_eq!(pool.total(), 30, "a rejected apply must not mutate the pool");
+        assert_eq!(
+            pool.total(),
+            30,
+            "a rejected apply must not mutate the pool"
+        );
         // Exactly draining the pool is fine.
         pool.apply(30).unwrap();
         assert_eq!(pool.total(), 0);
@@ -334,8 +338,15 @@ mod tests {
             balance_proof: vec![],
         };
         apply_shielded_payload(&store, &p, 10, 0).unwrap();
-        assert_eq!(store.tree_size(), 2, "both notes appended to the accumulator");
-        assert!(store.is_nullifier_spent(&[9u8; 32]), "serial tag marked spent");
+        assert_eq!(
+            store.tree_size(),
+            2,
+            "both notes appended to the accumulator"
+        );
+        assert!(
+            store.is_nullifier_spent(&[9u8; 32]),
+            "serial tag marked spent"
+        );
 
         // Re-spending the same serial tag is a double spend → fail-closed, and
         // its note must NOT have been appended (tag spent before append).
@@ -348,6 +359,10 @@ mod tests {
         };
         let err = apply_shielded_payload(&store, &dbl, 11, 0).unwrap_err();
         assert!(matches!(err, Error::DuplicateNullifier), "got: {err:?}");
-        assert_eq!(store.tree_size(), 2, "double-spend must not append its note");
+        assert_eq!(
+            store.tree_size(),
+            2,
+            "double-spend must not append its note"
+        );
     }
 }

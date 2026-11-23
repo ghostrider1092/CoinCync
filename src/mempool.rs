@@ -113,7 +113,11 @@ mod revalidation_gate_tests {
     #[test]
     fn needs_full_revalidation_after_block_149() {
         // A reorg ALWAYS needs the full sweep (UTXO set changes under txs).
-        for net in [NetworkType::Testnet, NetworkType::Regtest, NetworkType::Mainnet] {
+        for net in [
+            NetworkType::Testnet,
+            NetworkType::Regtest,
+            NetworkType::Mainnet,
+        ] {
             assert!(
                 needs_full_revalidation_after_block(true, net, 1_000, false, false),
                 "reorg must force a full mempool revalidation"
@@ -142,12 +146,18 @@ mod revalidation_gate_tests {
     fn needs_full_revalidation_only_for_shielded_blocks_while_shielded_pending() {
         let net = NetworkType::Testnet;
         // A shielded tx in the block while one is pending: sweep.
-        assert!(needs_full_revalidation_after_block(false, net, 100, true, true));
+        assert!(needs_full_revalidation_after_block(
+            false, net, 100, true, true
+        ));
         // A block without a shielded tx cannot change the pool, so a pending
         // shielded tx stays minable: no sweep.
-        assert!(!needs_full_revalidation_after_block(false, net, 100, false, true));
+        assert!(!needs_full_revalidation_after_block(
+            false, net, 100, false, true
+        ));
         // Nothing shielded pending: the block's shielded txs are irrelevant.
-        assert!(!needs_full_revalidation_after_block(false, net, 100, true, false));
+        assert!(!needs_full_revalidation_after_block(
+            false, net, 100, true, false
+        ));
     }
 }
 
@@ -514,9 +524,9 @@ impl Mempool {
             Error::InvalidState(_) => "invalid_state",
             Error::InvalidMessage(_) => "invalid_message",
             Error::SerializationError(_) => "serialization",
-            Error::CryptoError(_)
-            | Error::SparkVerifyFailed
-            | Error::MwCutthroughVerifyFailed => "crypto",
+            Error::CryptoError(_) | Error::SparkVerifyFailed | Error::MwCutthroughVerifyFailed => {
+                "crypto"
+            }
             _ => "other",
         };
         crate::metrics::record_mempool_reject(reason);
@@ -1249,7 +1259,10 @@ impl Mempool {
                 // fluff. Structurally valid, so validate_transaction passed, but
                 // re-proposing it stalls the miner (spend) or HALTS block apply on
                 // a duplicate mint coin (mint). Evict before it poisons templates.
-                invalid_hashes.push((*hash, "shielded tx no longer minable (re-added after confirm)".into()));
+                invalid_hashes.push((
+                    *hash,
+                    "shielded tx no longer minable (re-added after confirm)".into(),
+                ));
             }
         }
 
@@ -1342,11 +1355,7 @@ impl Mempool {
     /// selection (same fee-ordered, size-capped, key-image-deduped set), but
     /// returning cached-metadata [`TxSummary`]s instead of cloning full
     /// transactions or recomputing each hash/size. See issue #118.
-    pub fn get_transaction_summaries(
-        &self,
-        max_size: usize,
-        max_count: usize,
-    ) -> Vec<TxSummary> {
+    pub fn get_transaction_summaries(&self, max_size: usize, max_count: usize) -> Vec<TxSummary> {
         let mut result = Vec::new();
         let mut total_size = 0;
         let mut selected_key_images: HashSet<KeyImage> = HashSet::new();
@@ -1877,12 +1886,9 @@ impl SharedMempool {
     /// Cached-metadata summaries (issue #118) — see
     /// [`Mempool::get_transaction_summaries`]. JSON is built by the caller after
     /// this returns, so the read lock is released before serialization.
-    pub fn get_transaction_summaries(
-        &self,
-        max_size: usize,
-        max_count: usize,
-    ) -> Vec<TxSummary> {
-        self.read_lock().get_transaction_summaries(max_size, max_count)
+    pub fn get_transaction_summaries(&self, max_size: usize, max_count: usize) -> Vec<TxSummary> {
+        self.read_lock()
+            .get_transaction_summaries(max_size, max_count)
     }
 
     pub fn stats(&self) -> MempoolStats {
@@ -2074,13 +2080,20 @@ impl SharedMempool {
 /// Pure mempool-pressure signal (testable in isolation): what percent full the
 /// mempool is, and whether that reaches the warning threshold. Returns
 /// `Some((pct, message))` at/above the threshold.
-fn mempool_pressure(current_bytes: usize, max_bytes: usize, warn_pct: u64) -> Option<(u64, String)> {
+fn mempool_pressure(
+    current_bytes: usize,
+    max_bytes: usize,
+    warn_pct: u64,
+) -> Option<(u64, String)> {
     if max_bytes == 0 {
         return None;
     }
     let pct = (current_bytes as u128 * 100 / max_bytes as u128) as u64;
     if pct >= warn_pct {
-        Some((pct, format!("mempool {pct}% full ({current_bytes}/{max_bytes} bytes)")))
+        Some((
+            pct,
+            format!("mempool {pct}% full ({current_bytes}/{max_bytes} bytes)"),
+        ))
     } else {
         None
     }
@@ -2100,7 +2113,10 @@ impl<'a> MempoolSecurityDetail<'a> {
     pub const DEFAULT_WARN_PCT: u64 = 90;
 
     pub fn new(mempool: &'a Mempool) -> Self {
-        Self { mempool, warn_pct: Self::DEFAULT_WARN_PCT }
+        Self {
+            mempool,
+            warn_pct: Self::DEFAULT_WARN_PCT,
+        }
     }
 
     pub fn with_warn_pct(mempool: &'a Mempool, warn_pct: u64) -> Self {
@@ -2120,7 +2136,11 @@ impl crate::security::SecurityDetail for MempoolSecurityDetail<'_> {
             mempool_pressure(self.mempool.size(), self.mempool.max_size(), self.warn_pct)
         {
             // Operational only — the mempool is not consensus state.
-            let sev = if pct >= 100 { Severity::Critical } else { Severity::Warning };
+            let sev = if pct >= 100 {
+                Severity::Critical
+            } else {
+                Severity::Warning
+            };
             r.raise_operational("mempool", sev, "mempool-pressure", msg);
         }
         r
@@ -2133,9 +2153,18 @@ mod security_detail_tests {
 
     #[test]
     fn mempool_pressure_pure_signal() {
-        assert!(super::mempool_pressure(270, 300, 90).is_some(), "90% full warns");
-        assert!(super::mempool_pressure(100, 300, 90).is_none(), "33% full is quiet");
-        assert!(super::mempool_pressure(0, 0, 90).is_none(), "empty cap → no divide-by-zero");
+        assert!(
+            super::mempool_pressure(270, 300, 90).is_some(),
+            "90% full warns"
+        );
+        assert!(
+            super::mempool_pressure(100, 300, 90).is_none(),
+            "33% full is quiet"
+        );
+        assert!(
+            super::mempool_pressure(0, 0, 90).is_none(),
+            "empty cap → no divide-by-zero"
+        );
         let (pct, _) = super::mempool_pressure(300, 300, 90).unwrap();
         assert_eq!(pct, 100);
     }
@@ -2150,7 +2179,10 @@ mod security_detail_tests {
         // Even a full mempool (simulated via warn_pct 0) is operational, never a
         // consensus halt — the mempool is node-local.
         let report2 = MempoolSecurityDetail::with_warn_pct(&mp, 0).sweep();
-        assert!(!report2.has_consensus_halt(), "mempool alerts never halt consensus");
+        assert!(
+            !report2.has_consensus_halt(),
+            "mempool alerts never halt consensus"
+        );
     }
 }
 
@@ -2283,7 +2315,9 @@ mod shielded_mempool_admission_172 {
         let (_t, coins) = spark_connector::ffi::verify_mint_bundle(mint).unwrap();
         for (i, coin) in coins.iter().enumerate() {
             let op = derive_outpoint(&inputs, i as u32);
-            store.add_coin(op, coin.clone(), contexts[0].clone(), 1).unwrap();
+            store
+                .add_coin(op, coin.clone(), contexts[0].clone(), 1)
+                .unwrap();
         }
 
         // Two spends of coin #2 — different OUTPUT values so the bundles (hence
@@ -2292,13 +2326,19 @@ mod shielded_mempool_admission_172 {
         let op2 = derive_outpoint(&inputs, 2);
         let op3 = derive_outpoint(&inputs, 3);
         let tx_2a = with_floor_fee(mk_shielded_tx(
-            build_spend_payload(seed, &store, &op2, 3_000, 0, 1).unwrap().encode(),
+            build_spend_payload(seed, &store, &op2, 3_000, 0, 1)
+                .unwrap()
+                .encode(),
         ));
         let tx_2b = with_floor_fee(mk_shielded_tx(
-            build_spend_payload(seed, &store, &op2, 3_100, 0, 1).unwrap().encode(),
+            build_spend_payload(seed, &store, &op2, 3_100, 0, 1)
+                .unwrap()
+                .encode(),
         ));
         let tx_3 = with_floor_fee(mk_shielded_tx(
-            build_spend_payload(seed, &store, &op3, 3_000, 0, 1).unwrap().encode(),
+            build_spend_payload(seed, &store, &op3, 3_000, 0, 1)
+                .unwrap()
+                .encode(),
         ));
 
         // Sanity: coin #2's two spends share a tag; coin #3 differs; the txids differ.
@@ -2307,7 +2347,11 @@ mod shielded_mempool_admission_172 {
         let tag_3 = Mempool::shielded_linking_tags(&tx_3).unwrap();
         assert_eq!(tag_2a, tag_2b, "same coin → same linking tag");
         assert_ne!(tag_2a, tag_3, "different coin → different linking tag");
-        assert_ne!(tx_2a.hash(), tx_2b.hash(), "distinct bundles → distinct txids");
+        assert_ne!(
+            tx_2a.hash(),
+            tx_2b.hash(),
+            "distinct bundles → distinct txids"
+        );
 
         let mut mp = Mempool::new();
         // First spend of coin #2 is ADMITTED — proves the shielded relaxations
@@ -2332,7 +2376,10 @@ mod shielded_mempool_admission_172 {
         assert_eq!(snap.len(), 2, "two pending spends → two pending tags");
         for t in tag_2a.iter().chain(tag_3.iter()) {
             assert!(snap.contains(t), "pending tag present in snapshot");
-            assert!(mp.contains_linking_tag(t), "snapshot agrees with per-tag query");
+            assert!(
+                mp.contains_linking_tag(t),
+                "snapshot agrees with per-tag query"
+            );
         }
         // Removing the first frees its tag → the previously-conflicting spend admits.
         mp.remove(&h2a);
@@ -2698,8 +2745,12 @@ mod extra_tests {
         let chain = NoneThenStable {
             calls: AtomicUsize::new(0),
         };
-        let result: Result<u64> =
-            retry_stable_admission(&chain, |generation| AdmissionAttempt::Complete(Ok(generation)));
-        assert_eq!(result.expect("should complete after the updating window"), 1);
+        let result: Result<u64> = retry_stable_admission(&chain, |generation| {
+            AdmissionAttempt::Complete(Ok(generation))
+        });
+        assert_eq!(
+            result.expect("should complete after the updating window"),
+            1
+        );
     }
 }

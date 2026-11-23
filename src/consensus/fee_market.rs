@@ -635,7 +635,10 @@ mod tests {
             burned: Amount::from_atomic(40),
             to_protocol: Amount::from_atomic(0),
         };
-        assert!(!under.is_valid(), "buckets summing below total must be invalid");
+        assert!(
+            !under.is_valid(),
+            "buckets summing below total must be invalid"
+        );
 
         // Over-sum: 60 + 50 + 0 = 110 != 100.
         let over = FeeDistribution {
@@ -644,7 +647,10 @@ mod tests {
             burned: Amount::from_atomic(50),
             to_protocol: Amount::from_atomic(0),
         };
-        assert!(!over.is_valid(), "buckets summing above total must be invalid");
+        assert!(
+            !over.is_valid(),
+            "buckets summing above total must be invalid"
+        );
 
         // Exact: 70 + 30 + 0 = 100.
         let exact = FeeDistribution {
@@ -653,7 +659,10 @@ mod tests {
             burned: Amount::from_atomic(30),
             to_protocol: Amount::from_atomic(0),
         };
-        assert!(exact.is_valid(), "buckets summing exactly to total must be valid");
+        assert!(
+            exact.is_valid(),
+            "buckets summing exactly to total must be valid"
+        );
     }
 
     /// calculate_congestion: empty slice => 0; oversized inputs cap at 100.
@@ -682,7 +691,10 @@ mod tests {
         let zero_size = vec![(Amount::from_atomic(100), 0usize)];
         let stats2 = block_fee_stats(9, &zero_size, false);
         assert_eq!(stats2.tx_count, 1);
-        assert_eq!(stats2.avg_fee_per_byte, 0, "total_size==0 must guard the division");
+        assert_eq!(
+            stats2.avg_fee_per_byte, 0,
+            "total_size==0 must guard the division"
+        );
     }
 
     /// calculate_priority_fee: priority is clamped to [0,100], and non-finite /
@@ -706,7 +718,10 @@ mod tests {
 
         // NaN priority must not panic and must yield a finite, bounded fee.
         let nan_fee = calculate_priority_fee(1000, 0, f64::NAN).as_atomic();
-        assert!(nan_fee >= base, "NaN priority must saturate, not underflow/panic");
+        assert!(
+            nan_fee >= base,
+            "NaN priority must saturate, not underflow/panic"
+        );
 
         // Extreme size + priority: chained saturating ops must not panic and
         // stay within u64 (Amount is u64-backed).
@@ -779,7 +794,10 @@ mod tests {
                 via_free.burned.as_atomic(),
                 "burned mismatch at congestion {congestion_pct}"
             );
-            assert_eq!(via_calc.to_protocol.as_atomic(), via_free.to_protocol.as_atomic());
+            assert_eq!(
+                via_calc.to_protocol.as_atomic(),
+                via_free.to_protocol.as_atomic()
+            );
             assert_eq!(via_calc.total.as_atomic(), via_free.total.as_atomic());
         }
     }
@@ -796,15 +814,31 @@ mod reservoir_tests {
 
     #[test]
     fn conserves_value_and_never_mints_in_all_regimes() {
-        for &(r0, f) in &[(0u64, 0u64), (0, 1_000), (500_000, 1_000), (10_000_000, 250_000)] {
-            for c in [0u64, LOW_WATER - 1, LOW_WATER, 50, HIGH_WATER, HIGH_WATER + 1, 100] {
+        for &(r0, f) in &[
+            (0u64, 0u64),
+            (0, 1_000),
+            (500_000, 1_000),
+            (10_000_000, 250_000),
+        ] {
+            for c in [
+                0u64,
+                LOW_WATER - 1,
+                LOW_WATER,
+                50,
+                HIGH_WATER,
+                HIGH_WATER + 1,
+                100,
+            ] {
                 let t = step(r0, f, c);
                 assert_eq!(
                     t.to_miner.as_atomic() + t.reservoir_after.as_atomic() + t.burned.as_atomic(),
                     r0 + f,
                     "value not conserved at r0={r0} f={f} c={c}"
                 );
-                assert!(t.to_miner.as_atomic() <= f + r0, "minted at r0={r0} f={f} c={c}");
+                assert!(
+                    t.to_miner.as_atomic() <= f + r0,
+                    "minted at r0={r0} f={f} c={c}"
+                );
             }
         }
     }
@@ -813,14 +847,23 @@ mod reservoir_tests {
     fn charges_when_uncongested() {
         let t = step(0, 10_000, 0);
         assert!(t.reservoir_after.as_atomic() > 0, "reservoir should charge");
-        assert!(t.to_miner.as_atomic() < 10_000, "miner paid less than fees while charging");
+        assert!(
+            t.to_miner.as_atomic() < 10_000,
+            "miner paid less than fees while charging"
+        );
     }
 
     #[test]
     fn discharges_when_congested_and_funded() {
         let t = step(1_000_000, 10_000, 100);
-        assert!(t.to_miner.as_atomic() > 10_000, "miner topped up from the reservoir");
-        assert!(t.reservoir_after.as_atomic() < 1_000_000, "reservoir drawn down");
+        assert!(
+            t.to_miner.as_atomic() > 10_000,
+            "miner topped up from the reservoir"
+        );
+        assert!(
+            t.reservoir_after.as_atomic() < 1_000_000,
+            "reservoir drawn down"
+        );
     }
 
     #[test]
@@ -835,7 +878,11 @@ mod reservoir_tests {
     fn never_exceeds_cap() {
         let t = step(CAP_ATOMIC, 1_000_000, 0);
         assert!(t.reservoir_after.as_atomic() <= CAP_ATOMIC, "cap respected");
-        assert_eq!(t.to_miner.as_atomic(), 1_000_000, "at cap, all fees go to the miner");
+        assert_eq!(
+            t.to_miner.as_atomic(),
+            1_000_000,
+            "at cap, all fees go to the miner"
+        );
     }
 
     #[test]
@@ -887,7 +934,10 @@ mod reservoir_tests {
 
         // Bounded, and issuance-neutral over the whole run (net consumer): all
         // fees end up with miners, in the reservoir, or burned — never minted.
-        assert!(reservoir.as_atomic() <= CAP_ATOMIC, "reservoir stayed within the cap");
+        assert!(
+            reservoir.as_atomic() <= CAP_ATOMIC,
+            "reservoir stayed within the cap"
+        );
         assert_eq!(
             miner_total + reservoir.as_atomic() as u128 + burned_total,
             fees_total,

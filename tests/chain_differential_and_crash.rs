@@ -456,7 +456,10 @@ fn light_randomx() {
 /// canonical state plus "a reorg occurred somewhere", never on a specific
 /// intermediate variant.
 fn add(chain: &Blockchain, block: &Block, label: &str) -> (bool, Vec<Transaction>) {
-    match chain.add_block(block.clone()).unwrap_or_else(|e| panic!("add {label}: {e:?}")) {
+    match chain
+        .add_block(block.clone())
+        .unwrap_or_else(|e| panic!("add {label}: {e:?}"))
+    {
         BlockStatus::AcceptedReorg { orphaned_txs } => (true, orphaned_txs),
         BlockStatus::Accepted | BlockStatus::AcceptedFork => (false, Vec::new()),
         other => panic!("add {label}: unexpected status {other:?}"),
@@ -756,7 +759,12 @@ fn accepted_reorg_reapplies_real_transfers_correctly() {
         };
         let (coinbase, stealth) = if h == 12 {
             // B12 coinbase claims the transfer's miner fee share.
-            build_coinbase(12, &filler_spend_pk, &filler_view_pk, claimable_fees(12, fee))
+            build_coinbase(
+                12,
+                &filler_spend_pk,
+                &filler_view_pk,
+                claimable_fees(12, fee),
+            )
         } else {
             build_coinbase(h, spk, vpk, 0)
         };
@@ -796,9 +804,20 @@ fn accepted_reorg_reapplies_real_transfers_correctly() {
             vec![coinbase]
         };
 
-        let block = mine_block(&parent, h, base_ts + h * spacing, target, txs, spend_public, magic);
+        let block = mine_block(
+            &parent,
+            h,
+            base_ts + h * spacing,
+            target,
+            txs,
+            spend_public,
+            magic,
+        );
         assert!(
-            matches!(builder.add_block(block.clone()).expect("add B*"), BlockStatus::Accepted),
+            matches!(
+                builder.add_block(block.clone()).expect("add B*"),
+                BlockStatus::Accepted
+            ),
             "B{h} must extend the main chain"
         );
         parent = block.clone();
@@ -858,8 +877,12 @@ fn accepted_reorg_reapplies_real_transfers_correctly() {
     for h in 11..=15u64 {
         let target = fork_target(&fork_lineage, h);
         let txs = if h == 15 {
-            let (fcb, _) =
-                build_coinbase(15, &filler_spend_pk, &filler_view_pk, claimable_fees(15, fee));
+            let (fcb, _) = build_coinbase(
+                15,
+                &filler_spend_pk,
+                &filler_view_pk,
+                claimable_fees(15, fee),
+            );
             vec![fcb, fork_transfer.clone()]
         } else {
             let (fcb, _) = build_coinbase(h, &filler_spend_pk, &filler_view_pk, 0);
@@ -893,13 +916,19 @@ fn accepted_reorg_reapplies_real_transfers_correctly() {
     }
     assert!(reorged, "the heavier fork must trigger an accepted reorg");
     assert!(
-        all_orphaned.iter().any(|t| t.hash() == main_transfer.hash()),
+        all_orphaned
+            .iter()
+            .any(|t| t.hash() == main_transfer.hash()),
         "the accepted reorg must return B12's real transfer as an orphaned tx \
          for mempool restoration"
     );
 
     assert_eq!(builder.tip_hash(), fork_blocks[4].hash(), "tip must be F15");
-    assert_eq!(builder.height(), 15, "height must be 15 on the winning branch");
+    assert_eq!(
+        builder.height(),
+        15,
+        "height must be 15 on the winning branch"
+    );
 
     // KA/KA2's spend was disconnected → their key images are UNSPENT again.
     assert!(
@@ -980,7 +1009,15 @@ fn apply_disconnect_symmetry_and_supply_conservation() {
     for h in 1..=N {
         let target = builder.next_target();
         let (cb, _) = build_coinbase(h, &spend_pub, &view_pub, 0);
-        let blk = mine_block(&parent, h, base_ts + h * spacing, target, vec![cb], spend_pub, magic);
+        let blk = mine_block(
+            &parent,
+            h,
+            base_ts + h * spacing,
+            target,
+            vec![cb],
+            spend_pub,
+            magic,
+        );
         assert!(matches!(
             builder.add_block(blk.clone()).expect("add"),
             BlockStatus::Accepted
@@ -1096,8 +1133,15 @@ fn crash_consistency_invariants_hold_on_reopen() {
         for h in 1..=6u64 {
             let target = chain.next_target();
             let (cb, _) = build_coinbase(h, &spend_pub, &view_pub, 0);
-            let blk =
-                mine_block(&parent, h, base_ts + h * spacing, target, vec![cb], spend_pub, magic);
+            let blk = mine_block(
+                &parent,
+                h,
+                base_ts + h * spacing,
+                target,
+                vec![cb],
+                spend_pub,
+                magic,
+            );
             assert!(matches!(
                 chain.add_block(blk.clone()).expect("add"),
                 BlockStatus::Accepted

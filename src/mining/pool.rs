@@ -1265,14 +1265,25 @@ mod tests {
         {
             let mut s = pool.pplns_shares.write().await;
             *s = vec![
-                PplnsShare { address: "A".into(), difficulty: 100, height: 1, timestamp: 0 },
-                PplnsShare { address: "B".into(), difficulty: 300, height: 1, timestamp: 0 },
+                PplnsShare {
+                    address: "A".into(),
+                    difficulty: 100,
+                    height: 1,
+                    timestamp: 0,
+                },
+                PplnsShare {
+                    address: "B".into(),
+                    difficulty: 300,
+                    height: 1,
+                    timestamp: 0,
+                },
             ];
         }
 
         // reward 1_000_000: fee = 1% = 10_000, net = 990_000.
         // A: 100/400 * 990_000 = 247_500 ; B: 300/400 * 990_000 = 742_500.
-        pool.on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000)).await;
+        pool.on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000))
+            .await;
 
         assert_eq!(pool.get_balance("A").await, Amount::from_atomic(247_500));
         assert_eq!(pool.get_balance("B").await, Amount::from_atomic(742_500));
@@ -1283,7 +1294,8 @@ mod tests {
     async fn test_on_block_found_empty_window_and_zero_total_diff_pay_nothing() {
         // Empty window: block counted, but no payout.
         let pool = MiningPool::new(PoolConfig::default());
-        pool.on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000)).await;
+        pool.on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000))
+            .await;
         assert_eq!(pool.get_balance("A").await, Amount::from_atomic(0));
         assert_eq!(pool.stats().await.blocks_found, 1);
 
@@ -1295,7 +1307,9 @@ mod tests {
             height: 1,
             timestamp: 0,
         }];
-        pool2.on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000)).await;
+        pool2
+            .on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000))
+            .await;
         assert_eq!(pool2.get_balance("A").await, Amount::from_atomic(0));
     }
 
@@ -1316,7 +1330,8 @@ mod tests {
                 .collect();
         }
 
-        pool.on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000)).await;
+        pool.on_block_found(Hash::zero(), 1, Amount::from_atomic(1_000_000))
+            .await;
 
         assert_eq!(pool.pplns_shares.read().await.len(), 4);
     }
@@ -1356,7 +1371,9 @@ mod tests {
         let initial_difficulty = PoolConfig::default().initial_difficulty;
         let pool = MiningPool::new(PoolConfig::default());
 
-        let job = pool.create_job(make_job(&"00".repeat(32), "00").block_template).await;
+        let job = pool
+            .create_job(make_job(&"00".repeat(32), "00").block_template)
+            .await;
 
         // Random 8-hex-char job id.
         assert_eq!(job.job_id.len(), 8);
@@ -1457,7 +1474,12 @@ mod tests {
         let req = submit_req(1, "job01", "00", "00");
         let resp = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
         assert_eq!(err_code(&resp), 20);
-        assert!(resp.error.as_ref().unwrap().message.contains("nonce length"));
+        assert!(resp
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("nonce length"));
     }
 
     #[tokio::test]
@@ -1484,7 +1506,12 @@ mod tests {
         let req = submit_req(1, "job01", "0000", "zzzz");
         let resp = process_stratum_request(&req, &mut miner, &jobs, &pplns, &config).await;
         assert_eq!(err_code(&resp), 20);
-        assert!(resp.error.as_ref().unwrap().message.contains("nonce format"));
+        assert!(resp
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("nonce format"));
     }
 
     #[tokio::test]

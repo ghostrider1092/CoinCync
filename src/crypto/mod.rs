@@ -56,41 +56,40 @@ pub mod privacy_connector;
 // These are real implementations behind feature flags. They do not
 // appear in the production audit perimeter unless their feature is
 // explicitly enabled. See docs/cip/ for activation paths.
+#[cfg(feature = "sketch-gk-proof")]
+pub mod groth_kohlweiss; // CIP-Shielded 2c#1 (real log-size spend proof)
 #[cfg(feature = "sketch-kernel-offsets")]
 pub mod kernel_offset; // CIP-004
-/// Shared Spark commitment generators G/H/K (single source of truth for the
-/// commitment + the one-of-many proof). Non-gated.
-pub mod spark_generators;
 #[cfg(feature = "sketch-lelantus-spark")]
 pub mod lelantus_spark; // CIP-005
 #[cfg(feature = "sketch-privacy-manifold")]
 pub mod privacy_manifold; // Underground — uniform-face transaction envelope
 #[cfg(feature = "sketch-gk-proof")]
-pub mod groth_kohlweiss; // CIP-Shielded 2c#1 (real log-size spend proof)
-#[cfg(feature = "sketch-gk-proof")]
 pub mod spark_balance; // CIP-Shielded (value-balance / excess proof)
+/// Shared Spark commitment generators G/H/K (single source of truth for the
+/// commitment + the one-of-many proof). Non-gated.
+pub mod spark_generators;
 #[cfg(feature = "sketch-gk-proof")]
 pub mod spark_range; // CIP-Shielded (value range binding via BP+)
 #[cfg(feature = "sketch-gk-proof")]
 pub mod spark_turnstile; // CIP-Shielded (transparent⇄shielded value turnstile)
 
+pub mod range_verify_strategy;
+#[cfg(feature = "sketch-gk-proof")]
+pub mod spark_note; // CIP-Shielded (Note Connector: stealth⇄bound-coin detect/recover)
 /// Rolling state-accumulator SPIKE (ECMH over Ristretto). Gated OFF and inert —
 /// the pure commitment rule only, NOT wired into the header/validation/apply
 /// (that is the coordinated-fork follow-up). See the module header. CIP-StateRoot.
 #[cfg(feature = "state-accumulator")]
-pub mod state_accumulator;
-#[cfg(feature = "sketch-gk-proof")]
-pub mod spark_note; // CIP-Shielded (Note Connector: stealth⇄bound-coin detect/recover)
-pub mod range_verify_strategy; // verification-strategy slot for block range proofs
+pub mod state_accumulator; // verification-strategy slot for block range proofs
 
 pub use bulletproofs::{
-    commit, create_aggregated_range_proof,
-    create_aggregated_range_proof_bp_plus, create_aggregated_range_proof_for_height,
-    create_range_proof, create_range_proof_bp_plus, create_range_proof_for_height,
-    verify_coinbase_output, verify_commitment, verify_range_proof, verify_range_proof_bp_plus,
-    verify_range_proof_dispatch, verify_range_proofs, verify_range_proofs_batch,
-    verify_range_proofs_bp_plus, verify_range_proofs_dispatch, BlindingFactor, PedersenCommitment,
-    RangeProof, MAX_AGGREGATION, RANGE_BITS,
+    commit, create_aggregated_range_proof, create_aggregated_range_proof_bp_plus,
+    create_aggregated_range_proof_for_height, create_range_proof, create_range_proof_bp_plus,
+    create_range_proof_for_height, verify_coinbase_output, verify_commitment, verify_range_proof,
+    verify_range_proof_bp_plus, verify_range_proof_dispatch, verify_range_proofs,
+    verify_range_proofs_batch, verify_range_proofs_bp_plus, verify_range_proofs_dispatch,
+    BlindingFactor, PedersenCommitment, RangeProof, MAX_AGGREGATION, RANGE_BITS,
 };
 
 pub use stealth::{

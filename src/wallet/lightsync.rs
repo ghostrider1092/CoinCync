@@ -1497,7 +1497,10 @@ mod tests {
             ),
             "a gap must be rejected"
         );
-        assert_eq!(sync.last_scanned, 0, "position must not advance on rejection");
+        assert_eq!(
+            sync.last_scanned, 0,
+            "position must not advance on rejection"
+        );
     }
 
     /// #87: a batch whose `prev_hash` does not link the preceding digest's hash
@@ -1697,8 +1700,15 @@ mod tests {
         let keys = ScanKeys::new(view_secret, spend_public, 0);
         let mut sync = LightWalletSync::new(vec![keys]);
         let found = sync.scan_digest(&digest);
-        assert_eq!(found.len(), 1, "coinbase reward must be detected on light sync");
-        assert_eq!(found[0].amount, reward, "plaintext coinbase amount recovered");
+        assert_eq!(
+            found.len(),
+            1,
+            "coinbase reward must be detected on light sync"
+        );
+        assert_eq!(
+            found[0].amount, reward,
+            "plaintext coinbase amount recovered"
+        );
         // Coinbase blinding is zero (plaintext amount); compare via bytes since
         // BlindingFactor doesn't implement PartialEq.
         assert_eq!(
@@ -1792,7 +1802,10 @@ mod tests {
         let d3 = mk_digest(3, d2_hash, &vs, &sp);
         let d4 = mk_digest(4, Hash::from_bytes([0xAB; 32]), &vs, &sp);
         let res = sync.scan_digests_parallel(&[d3, d4]);
-        assert!(matches!(res, Err(DigestSequenceError::BrokenLink { height: 4 })));
+        assert!(matches!(
+            res,
+            Err(DigestSequenceError::BrokenLink { height: 4 })
+        ));
         assert_eq!(
             sync.last_scanned(),
             2,

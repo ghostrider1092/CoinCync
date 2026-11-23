@@ -26,7 +26,9 @@
 //! `tests/full_pipeline_real_crypto.rs` (TEST 2/3/4/5/6/7); they are not
 //! duplicated here.
 
-use coincync::constants::{BOOTSTRAP_MIN_RING_SIZE, MAX_TX_SIZE, MIN_FEE_PER_BYTE, TX_EXPIRY_BLOCKS};
+use coincync::constants::{
+    BOOTSTRAP_MIN_RING_SIZE, MAX_TX_SIZE, MIN_FEE_PER_BYTE, TX_EXPIRY_BLOCKS,
+};
 use coincync::crypto::{
     BlindingFactor, ClsagSignature, KeyImage as CryptoKeyImage, PedersenCommitment, SecretScalar,
 };
@@ -245,7 +247,9 @@ struct FakeShadowChain {
 impl ShadowEvictChain for FakeShadowChain {
     fn validate_transaction(&self, tx: &Transaction) -> Result<()> {
         if self.invalid.contains(&tx.hash()) {
-            Err(Error::InvalidTransaction("shadow-evict: no longer valid".into()))
+            Err(Error::InvalidTransaction(
+                "shadow-evict: no longer valid".into(),
+            ))
         } else {
             Ok(())
         }
@@ -285,11 +289,18 @@ fn rejected_admission_evicts_zero_residents_and_leaves_state_untouched() {
     let intruder_ki = intruder.inputs[0].key_image;
     let result = pool.add_skip_crypto(intruder);
 
-    assert!(matches!(result, Err(Error::MempoolFull)), "got {:?}", result);
+    assert!(
+        matches!(result, Err(Error::MempoolFull)),
+        "got {:?}",
+        result
+    );
     assert_eq!(pool.len(), 3, "no resident may be evicted by a rejected tx");
     assert_eq!(pool.size(), size_before, "current_size must be unchanged");
     for ki in &resident_kis {
-        assert!(pool.contains_key_image(ki), "resident key image must survive");
+        assert!(
+            pool.contains_key_image(ki),
+            "resident key image must survive"
+        );
     }
     assert!(
         !pool.contains_key_image(&intruder_ki),
@@ -328,7 +339,8 @@ fn eviction_budget_cannot_be_exceeded_pool_left_untouched() {
     let hi_fee = 8 * (s as u64) * MIN_FEE_PER_BYTE; // 8x floor: admits at any fullness
     let mut pool = Mempool::with_max_size(130 * s);
     for _ in 0..130 {
-        pool.add_skip_crypto(tx(hi_fee, 0)).expect("resident admitted");
+        pool.add_skip_crypto(tx(hi_fee, 0))
+            .expect("resident admitted");
     }
     assert_eq!(pool.len(), 130);
     let size_before = pool.size();
@@ -341,7 +353,11 @@ fn eviction_budget_cannot_be_exceeded_pool_left_untouched() {
     let result = pool.add_skip_crypto(big);
 
     assert!(result.is_err(), "oversized send must be rejected");
-    assert_eq!(pool.len(), 130, "no more than the budget may be evicted -> none on reject");
+    assert_eq!(
+        pool.len(),
+        130,
+        "no more than the budget may be evicted -> none on reject"
+    );
     assert_eq!(pool.size(), size_before);
     assert!(pool.verify_size_invariant());
 }
@@ -359,7 +375,8 @@ fn eviction_that_fits_after_exactly_max_attempts_is_admitted_h8() {
     let resident_fee = 8 * (s as u64) * MIN_FEE_PER_BYTE; // clears the floor at any fullness
     let mut pool = Mempool::with_max_size(100 * s);
     for _ in 0..100 {
-        pool.add_skip_crypto(tx(resident_fee, 0)).expect("resident admitted");
+        pool.add_skip_crypto(tx(resident_fee, 0))
+            .expect("resident admitted");
     }
     assert_eq!(pool.len(), 100, "pool full with exactly 100 residents");
 
@@ -393,7 +410,10 @@ fn fee_exactly_equal_to_min_accepted_boundary_is_lt_not_lte() {
     let mut pool = Mempool::new(); // empty -> fullness 0 -> 1x
     let min = (s as u64) * MIN_FEE_PER_BYTE;
     // fee == min must be accepted (the check is `<`, not `<=`).
-    assert!(pool.add_skip_crypto(tx(min, 0)).is_ok(), "fee == min must admit");
+    assert!(
+        pool.add_skip_crypto(tx(min, 0)).is_ok(),
+        "fee == min must admit"
+    );
     // fee == min-1 must be rejected.
     assert!(matches!(
         pool.add_skip_crypto(tx(min - 1, 0)),
@@ -457,7 +477,11 @@ fn max_size_zero_does_not_divide_by_zero() {
     let s = base_size();
     let mut pool = Mempool::with_max_size(0);
     let result = pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE, 0));
-    assert!(matches!(result, Err(Error::MempoolFull)), "got {:?}", result);
+    assert!(
+        matches!(result, Err(Error::MempoolFull)),
+        "got {:?}",
+        result
+    );
     assert_eq!(pool.len(), 0);
 }
 
@@ -492,7 +516,11 @@ fn rbf_exact_125_percent_bump_accepted() {
     let old_fee = 4 * s * MIN_FEE_PER_BYTE;
     let new_fee = 5 * s * MIN_FEE_PER_BYTE;
     let (pool, _, result) = rbf_scenario(old_fee, 0, new_fee, 0);
-    assert!(result.is_ok(), "exact 125% bump must be accepted: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "exact 125% bump must be accepted: {:?}",
+        result
+    );
     assert_eq!(pool.len(), 1, "RBF replaces, not adds");
 }
 
@@ -504,7 +532,10 @@ fn rbf_124_percent_bump_rejected() {
     let new_fee = 124 * s * MIN_FEE_PER_BYTE;
     let (pool, incumbent, result) = rbf_scenario(old_fee, 0, new_fee, 0);
     assert!(result.is_err(), "124% bump is below the 125% threshold");
-    assert!(pool.contains(&incumbent), "incumbent must survive a failed RBF");
+    assert!(
+        pool.contains(&incumbent),
+        "incumbent must survive a failed RBF"
+    );
     assert_eq!(pool.len(), 1);
 }
 
@@ -515,7 +546,10 @@ fn rbf_equal_fee_rate_rejected_by_strict_greater_guard() {
     // hold at low rates, the explicit `new_rate > old_rate` guard rejects.
     let fee = 100 * s * MIN_FEE_PER_BYTE;
     let (pool, incumbent, result) = rbf_scenario(fee, 0, fee, 0);
-    assert!(result.is_err(), "equal fee-rate must not replace (no-bump guard)");
+    assert!(
+        result.is_err(),
+        "equal fee-rate must not replace (no-bump guard)"
+    );
     assert!(pool.contains(&incumbent));
     assert_eq!(pool.len(), 1);
 }
@@ -529,7 +563,10 @@ fn rbf_higher_absolute_fee_but_lower_fee_rate_does_not_replace() {
     let new_fee = old_fee + 1; // higher ABSOLUTE fee...
     let big_extra = 2 * base_size(); // ...but ~3x the size => lower per-byte rate
     let (pool, incumbent, result) = rbf_scenario(old_fee, 0, new_fee, big_extra);
-    assert!(result.is_err(), "lower fee-rate must not replace despite higher absolute fee");
+    assert!(
+        result.is_err(),
+        "lower fee-rate must not replace despite higher absolute fee"
+    );
     assert!(pool.contains(&incumbent));
     assert_eq!(pool.len(), 1);
 }
@@ -542,8 +579,15 @@ fn rbf_replacement_that_fails_size_check_leaves_incumbent_intact() {
     let s = base_size() as u64;
     let (pool, incumbent, result) =
         rbf_scenario(100 * s * MIN_FEE_PER_BYTE, 0, u64::MAX / 2, MAX_TX_SIZE + 1);
-    assert!(matches!(result, Err(Error::TransactionTooLarge { .. })), "got {:?}", result);
-    assert!(pool.contains(&incumbent), "incumbent must survive an oversized RBF attempt");
+    assert!(
+        matches!(result, Err(Error::TransactionTooLarge { .. })),
+        "got {:?}",
+        result
+    );
+    assert!(
+        pool.contains(&incumbent),
+        "incumbent must survive an oversized RBF attempt"
+    );
     assert_eq!(pool.len(), 1);
 }
 
@@ -568,7 +612,9 @@ fn rbf_multi_key_image_conflict_replaces_all_conflicts() {
     let mut multi = two_input_tx(0, ki_a, ki_b);
     let msize = multi.size() as u64;
     multi.fee = Amount::from_atomic(msize * MIN_FEE_PER_BYTE * 100); // 100x -> clearly higher rate
-    let h = pool.add_skip_crypto(multi).expect("multi-conflict RBF admitted");
+    let h = pool
+        .add_skip_crypto(multi)
+        .expect("multi-conflict RBF admitted");
 
     assert_eq!(pool.len(), 1, "both incumbents replaced by one tx");
     assert!(pool.contains(&h));
@@ -581,12 +627,7 @@ fn rbf_multi_key_image_conflict_replaces_all_conflicts() {
 fn no_two_mempool_txs_share_a_key_image_after_rbf() {
     // Property: after an RBF the key-image set stays a partition (no dup).
     let s = base_size() as u64;
-    let (pool, _, result) = rbf_scenario(
-        4 * s * MIN_FEE_PER_BYTE,
-        0,
-        5 * s * MIN_FEE_PER_BYTE,
-        0,
-    );
+    let (pool, _, result) = rbf_scenario(4 * s * MIN_FEE_PER_BYTE, 0, 5 * s * MIN_FEE_PER_BYTE, 0);
     assert!(result.is_ok());
     // Exactly one tx, exactly one key image tracked.
     let txs = pool.get_block_transactions(usize::MAX, usize::MAX);
@@ -620,11 +661,16 @@ fn eviction_stops_at_equal_or_higher_fee_rate_candidate() {
 
     // Incoming rate 8x: > low(1x), < high(50x). Pool full -> evicts low, fits.
     let incoming = tx(8 * (s as u64) * MIN_FEE_PER_BYTE, 0);
-    let incoming_hash = pool.add_skip_crypto(incoming).expect("mid-rate admitted by evicting low");
+    let incoming_hash = pool
+        .add_skip_crypto(incoming)
+        .expect("mid-rate admitted by evicting low");
 
     assert!(pool.contains(&incoming_hash));
     assert!(!pool.contains(&low_hash), "low-rate resident evicted");
-    assert!(pool.contains_key_image(&high_ki), "high-rate resident protected");
+    assert!(
+        pool.contains_key_image(&high_ki),
+        "high-rate resident protected"
+    );
     assert!(!pool.contains_key_image(&low_ki));
     assert_eq!(pool.len(), 2);
     assert!(pool.verify_size_invariant());
@@ -723,7 +769,10 @@ fn remove_confirmed_evicts_shadow_conflict_with_doublespend_reason() {
     pool.clear_audit_log();
     pool.remove_confirmed(&[tx_a]);
 
-    assert!(!pool.contains(&b_hash), "shadow-conflict tx_B must be evicted");
+    assert!(
+        !pool.contains(&b_hash),
+        "shadow-conflict tx_B must be evicted"
+    );
     assert_eq!(pool.len(), 0);
     // Audit records a DoubleSpend removal for tx_B (and a Confirmed removal for
     // tx_A, which was never resident so it's a no-op remove but still audited).
@@ -739,7 +788,10 @@ fn remove_confirmed_evicts_shadow_conflict_with_doublespend_reason() {
     assert!(
         log.iter().any(|e| matches!(
             e,
-            AuditEvent::TxRemoved { reason: EvictReason::Confirmed, .. }
+            AuditEvent::TxRemoved {
+                reason: EvictReason::Confirmed,
+                ..
+            }
         )),
         "expected a Confirmed removal audit event"
     );
@@ -795,9 +847,12 @@ fn shadow_evict_no_invalid_txs_is_noop() {
     let s = base_size();
     let mut pool = Mempool::new();
     for _ in 0..3 {
-        pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0)).unwrap();
+        pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0))
+            .unwrap();
     }
-    let chain = FakeShadowChain { invalid: HashSet::new() };
+    let chain = FakeShadowChain {
+        invalid: HashSet::new(),
+    };
     pool.shadow_evict_invalid(&chain);
     assert_eq!(pool.len(), 3, "nothing evicted when all txs still validate");
     assert!(pool.verify_size_invariant());
@@ -815,7 +870,9 @@ fn shadow_evict_drops_exactly_the_now_invalid_subset() {
     }
     // Invalidate a subset (2 of 4).
     let invalid: HashSet<Hash> = [hashes[0], hashes[2]].into_iter().collect();
-    let chain = FakeShadowChain { invalid: invalid.clone() };
+    let chain = FakeShadowChain {
+        invalid: invalid.clone(),
+    };
     pool.shadow_evict_invalid(&chain);
 
     assert_eq!(pool.len(), 2, "exactly the invalid subset is evicted");
@@ -835,13 +892,19 @@ fn get_block_transactions_respects_max_size_bytes() {
     let s = base_size();
     let mut pool = Mempool::new();
     for _ in 0..5 {
-        pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 8, 0)).unwrap();
+        pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 8, 0))
+            .unwrap();
     }
     // Budget for ~2 txs.
     let budget = 2 * s + s / 2;
     let selected = pool.get_block_transactions(budget, usize::MAX);
     let total: usize = selected.iter().map(|t| t.size()).sum();
-    assert!(total <= budget, "assembled size {} exceeds budget {}", total, budget);
+    assert!(
+        total <= budget,
+        "assembled size {} exceeds budget {}",
+        total,
+        budget
+    );
     assert!(selected.len() <= 2);
 }
 
@@ -859,7 +922,10 @@ fn get_block_transactions_size_skip_does_not_block_a_later_smaller_tx() {
     // small one still gets selected.
     let selected = pool.get_block_transactions(s + s / 2, usize::MAX);
     let hashes: Vec<Hash> = selected.iter().map(|t| t.hash()).collect();
-    assert!(hashes.contains(&small_hash), "smaller tx must still be selected");
+    assert!(
+        hashes.contains(&small_hash),
+        "smaller tx must still be selected"
+    );
     assert!(!hashes.contains(&big_hash), "oversized tx must be skipped");
 }
 
@@ -904,7 +970,9 @@ fn set_height_beyond_expiry_blocks_evicts_and_audits_expired() {
     let s = base_size();
     let mut pool = Mempool::new();
     // Added at height 0.
-    let h = pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0)).unwrap();
+    let h = pool
+        .add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0))
+        .unwrap();
     assert_eq!(pool.len(), 1);
     pool.clear_audit_log();
 
@@ -915,7 +983,10 @@ fn set_height_beyond_expiry_blocks_evicts_and_audits_expired() {
     assert!(
         pool.audit_log().iter().any(|e| matches!(
             e,
-            AuditEvent::TxRemoved { reason: EvictReason::Expired, .. }
+            AuditEvent::TxRemoved {
+                reason: EvictReason::Expired,
+                ..
+            }
         )),
         "height-expired tx must be audited with Expired reason"
     );
@@ -926,10 +997,15 @@ fn set_height_backwards_reorg_uses_saturating_sub_no_panic() {
     let s = base_size();
     let mut pool = Mempool::new();
     pool.set_height(100); // height_added will be 100
-    let h = pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0)).unwrap();
+    let h = pool
+        .add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0))
+        .unwrap();
     // Reorg to a lower height: saturating_sub keeps age at 0 -> not expired.
     pool.set_height(50);
-    assert!(pool.contains(&h), "reorg to lower height must not expire fresh tx");
+    assert!(
+        pool.contains(&h),
+        "reorg to lower height must not expire fresh tx"
+    );
     assert_eq!(pool.len(), 1);
 }
 
@@ -952,7 +1028,8 @@ fn fee_percentiles_empty_returns_min_fee_and_zero_count() {
 fn fee_percentiles_single_tx_all_equal_and_floored() {
     let s = base_size();
     let mut pool = Mempool::new();
-    pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0)).unwrap();
+    pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0))
+        .unwrap();
     let p = pool.fee_percentiles();
     assert_eq!(p.count, 1);
     assert_eq!(p.p25, p.p90, "single tx: all percentiles equal");
@@ -964,7 +1041,8 @@ fn fee_percentiles_are_monotonic_nondecreasing() {
     let s = base_size();
     let mut pool = Mempool::new();
     for i in 0..20u64 {
-        pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * (i + 1) * 4, 0)).unwrap();
+        pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * (i + 1) * 4, 0))
+            .unwrap();
     }
     let p = pool.fee_percentiles();
     assert_eq!(p.count, 20);
@@ -995,7 +1073,8 @@ fn clear_empties_txs_but_preserves_audit_log() {
     let s = base_size();
     let mut pool = Mempool::new();
     for _ in 0..5 {
-        pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0)).unwrap();
+        pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0))
+            .unwrap();
     }
     let audit_before = pool.audit_log_len();
     assert!(audit_before > 0);
@@ -1036,15 +1115,19 @@ fn audit_log_records_added_rejected_and_removed_events() {
     let good = tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0);
     pool.add_skip_crypto(good.clone()).unwrap();
     let _ = pool.add_skip_crypto(tx(0, 0)); // rejected: FeeTooLow
-    // remove_confirmed emits an audited TxRemoved{Confirmed}; the bare
-    // remove(&hash) API path is intentionally NOT audited (it's a direct
-    // removal, not a mempool-policy event).
+                                            // remove_confirmed emits an audited TxRemoved{Confirmed}; the bare
+                                            // remove(&hash) API path is intentionally NOT audited (it's a direct
+                                            // removal, not a mempool-policy event).
     pool.remove_confirmed(&[good]);
 
     let log = pool.audit_log();
     assert!(log.iter().any(|e| matches!(e, AuditEvent::TxAdded { .. })));
-    assert!(log.iter().any(|e| matches!(e, AuditEvent::TxRejected { .. })));
-    assert!(log.iter().any(|e| matches!(e, AuditEvent::TxRemoved { .. })));
+    assert!(log
+        .iter()
+        .any(|e| matches!(e, AuditEvent::TxRejected { .. })));
+    assert!(log
+        .iter()
+        .any(|e| matches!(e, AuditEvent::TxRemoved { .. })));
 }
 
 #[test]
@@ -1057,18 +1140,27 @@ fn audit_log_capped_at_capacity_drops_oldest() {
     for _ in 0..4200 {
         let _ = pool.add_skip_crypto(cb.clone());
     }
-    assert_eq!(pool.audit_log_len(), 4096, "audit log must cap at AUDIT_LOG_CAPACITY");
+    assert_eq!(
+        pool.audit_log_len(),
+        4096,
+        "audit log must cap at AUDIT_LOG_CAPACITY"
+    );
 }
 
 #[test]
 fn clear_audit_log_empties_without_touching_txs() {
     let s = base_size();
     let mut pool = Mempool::new();
-    let h = pool.add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0)).unwrap();
+    let h = pool
+        .add_skip_crypto(tx((s as u64) * MIN_FEE_PER_BYTE * 4, 0))
+        .unwrap();
     assert!(pool.audit_log_len() > 0);
     pool.clear_audit_log();
     assert_eq!(pool.audit_log_len(), 0);
-    assert!(pool.contains(&h), "clearing the audit log must not touch txs");
+    assert!(
+        pool.contains(&h),
+        "clearing the audit log must not touch txs"
+    );
 }
 
 // ===========================================================================
@@ -1084,7 +1176,8 @@ fn persistence_save_load_round_trip_restores_all_txs() {
     for _ in 0..3 {
         let t = build_valid_tx_for_mempool();
         expected.push(t.hash());
-        pool.add(t).expect("valid tx admitted through full crypto path");
+        pool.add(t)
+            .expect("valid tx admitted through full crypto path");
     }
     let saved = pool.save_to_disk(dir.path()).expect("save");
     assert_eq!(saved, 3);
@@ -1095,7 +1188,11 @@ fn persistence_save_load_round_trip_restores_all_txs() {
     let loaded = restored_pool.load_from_disk(dir.path()).expect("load");
     assert_eq!(loaded, 3, "all saved txs must be restored");
     for h in &expected {
-        assert!(restored_pool.contains(h), "restored mempool must contain {:?}", h);
+        assert!(
+            restored_pool.contains(h),
+            "restored mempool must contain {:?}",
+            h
+        );
     }
     // The .dat file is consumed on load.
     assert!(!dir.path().join("mempool.dat").exists());
@@ -1111,7 +1208,10 @@ fn save_empty_mempool_removes_stale_file_and_returns_zero() {
     let pool = Mempool::new();
     let saved = pool.save_to_disk(dir.path()).expect("save empty");
     assert_eq!(saved, 0);
-    assert!(!path.exists(), "empty save must remove the stale mempool.dat");
+    assert!(
+        !path.exists(),
+        "empty save must remove the stale mempool.dat"
+    );
 }
 
 #[test]
@@ -1133,7 +1233,9 @@ fn save_uses_atomic_rename_and_load_ignores_stray_tmp() {
     let stray = dir.path().join("mempool.dat.tmp");
     std::fs::write(&stray, b"partial-garbage").unwrap();
     let mut restored = Mempool::new();
-    let loaded = restored.load_from_disk(dir.path()).expect("load ignores stray tmp");
+    let loaded = restored
+        .load_from_disk(dir.path())
+        .expect("load ignores stray tmp");
     assert_eq!(loaded, 1);
     assert!(stray.exists(), "load must not touch the stray .tmp file");
 }
@@ -1160,7 +1262,10 @@ fn load_from_disk_skips_invalid_txs_loaded_less_than_file_count() {
 
     let mut pool = Mempool::new();
     let loaded = pool.load_from_disk(dir.path()).expect("load");
-    assert!(loaded < txs.len(), "garbage-crypto txs must be skipped on load");
+    assert!(
+        loaded < txs.len(),
+        "garbage-crypto txs must be skipped on load"
+    );
     assert_eq!(loaded, 0);
     assert!(!path.exists(), "file consumed after load");
 }
@@ -1185,5 +1290,8 @@ fn shared_mempool_wrappers_reflect_contents() {
     assert!(shared.contains(&h));
     assert_eq!(shared.get_all().len(), 1);
     assert_eq!(shared.total_fees().as_atomic(), fee);
-    assert!(shared.oldest_timestamp() > 0, "oldest_timestamp reflects the added tx");
+    assert!(
+        shared.oldest_timestamp() > 0,
+        "oldest_timestamp reflects the added tx"
+    );
 }

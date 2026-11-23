@@ -945,7 +945,10 @@ fn print_startup_banner(
             fp_shown.clone().with(muted),
         ),
     );
-    row("DATA DIR", data_dir.display().to_string().with(body).to_string());
+    row(
+        "DATA DIR",
+        data_dir.display().to_string().with(body).to_string(),
+    );
     row(
         "DB",
         format!(
@@ -955,12 +958,24 @@ fn print_startup_banner(
             db_path.display().to_string().with(muted),
         ),
     );
-    row("P2P", format!("{} {}", "listening".with(muted), listen_addr.to_string().with(body)));
+    row(
+        "P2P",
+        format!(
+            "{} {}",
+            "listening".with(muted),
+            listen_addr.to_string().with(body)
+        ),
+    );
     row("RPC", rpc_listen.to_string().with(body).to_string());
     row("PEERS", peers_line.clone().with(body).to_string());
     row(
         "DANDELION++",
-        format!("{}  {}  {}", "enabled".with(green).bold(), "·".with(muted), dandelion_posture.with(muted)),
+        format!(
+            "{}  {}  {}",
+            "enabled".with(green).bold(),
+            "·".with(muted),
+            dandelion_posture.with(muted)
+        ),
     );
     if !verbose {
         row(
@@ -1832,8 +1847,7 @@ async fn start_node(
                             // shadow_evict doc lists. A FUTURE fork that gates
                             // mempool-tx validity MUST extend this predicate.
                             let needs_full_revalidation = {
-                                let is_reorg =
-                                    matches!(status, BlockStatus::AcceptedReorg { .. });
+                                let is_reorg = matches!(status, BlockStatus::AcceptedReorg { .. });
                                 // A pending shielded tx can stop being minable
                                 // under a NEW BLOCK without a key-image collision
                                 // (its tag gets spent, its mint coins land, the
@@ -2386,11 +2400,18 @@ async fn start_node(
                         );
                         if !allowed {
                             let reason = if peer_count == 0 {
-                                "no peers (pass --allow-solo-mine only on a bootstrap seed)".to_string()
+                                "no peers (pass --allow-solo-mine only on a bootstrap seed)"
+                                    .to_string()
                             } else if !synced {
-                                format!("not synced (height {} / peers at {})", local_height, peer_target)
+                                format!(
+                                    "not synced (height {} / peers at {})",
+                                    local_height, peer_target
+                                )
                             } else if peer_target == 0 {
-                                format!("{} peer(s) connected but none has reported a height yet", peer_count)
+                                format!(
+                                    "{} peer(s) connected but none has reported a height yet",
+                                    peer_count
+                                )
                             } else {
                                 format!(
                                     "height {} is more than {} blocks ahead of every peer (best {}); \
@@ -2408,7 +2429,10 @@ async fn start_node(
                             continue;
                         }
                         if gate_paused_reason.take().is_some() {
-                            info!("miner: resuming at height {} (peers at {})", local_height, peer_target);
+                            info!(
+                                "miner: resuming at height {} (peers at {})",
+                                local_height, peer_target
+                            );
                         }
                         // #186: synced and about to mine — NOW switch to the
                         // full-memory RandomX dataset. Idempotent atomic store;

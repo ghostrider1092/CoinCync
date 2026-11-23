@@ -34,6 +34,7 @@
 //!   TESTS: `prepare_saturating_total_plus_fee_does_not_wrap_into_satisfiable_required`,
 //!   `prepare_insufficient_funds_errors_without_reserving`.
 
+use super::super::{Balance, UTXO};
 use super::fee::{scaled_fee, FeeMultiplier};
 use super::inputs::prepare_input;
 use super::selection::{ensure_spendable, select_utxos, select_utxos_uniform};
@@ -41,7 +42,6 @@ use super::types::{
     CoinSelection, Payment, PreparedPrivacyTransaction, SendRequest, SpendContext, SpendKeys,
     TransferShape,
 };
-use super::super::{Balance, UTXO};
 use crate::constants::{STANDARD_INPUT_COUNT, STANDARD_OUTPUT_COUNT};
 use crate::error::Result;
 use crate::primitives::{Amount, PublicKey};

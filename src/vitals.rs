@@ -218,7 +218,15 @@ mod tests {
     #[test]
     fn vitals_round_trip_and_carry_schema_version() {
         let v = ChainVitals::from_signals(
-            "testnet", 1441, "abcd", Some(30), true, 3, "62735", 0, false,
+            "testnet",
+            1441,
+            "abcd",
+            Some(30),
+            true,
+            3,
+            "62735",
+            0,
+            false,
         );
         assert_eq!(v.schema_version, VITALS_SCHEMA_VERSION);
         assert_eq!(v.status, "healthy");

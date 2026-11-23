@@ -108,9 +108,17 @@ mod gate_tests {
         // at, below or within the margin of the best peer: fine
         assert!(!fork_diverged(10_000, 10_042, FORK_DIVERGENCE_MARGIN));
         assert!(!fork_diverged(10_042, 10_042, FORK_DIVERGENCE_MARGIN));
-        assert!(!fork_diverged(10_042 + FORK_DIVERGENCE_MARGIN, 10_042, FORK_DIVERGENCE_MARGIN));
+        assert!(!fork_diverged(
+            10_042 + FORK_DIVERGENCE_MARGIN,
+            10_042,
+            FORK_DIVERGENCE_MARGIN
+        ));
         // one past the margin, and the real incident (827 vs 107)
-        assert!(fork_diverged(10_042 + FORK_DIVERGENCE_MARGIN + 1, 10_042, FORK_DIVERGENCE_MARGIN));
+        assert!(fork_diverged(
+            10_042 + FORK_DIVERGENCE_MARGIN + 1,
+            10_042,
+            FORK_DIVERGENCE_MARGIN
+        ));
         assert!(fork_diverged(827, 107, FORK_DIVERGENCE_MARGIN));
     }
 
@@ -121,7 +129,11 @@ mod gate_tests {
         assert!(no_peer_near_tip(2399, 0, FORK_DIVERGENCE_MARGIN));
         // a peer at, just behind or ahead of us vouches for the tip
         assert!(!no_peer_near_tip(2403, 2403, FORK_DIVERGENCE_MARGIN));
-        assert!(!no_peer_near_tip(2403, 2403 - FORK_DIVERGENCE_MARGIN, FORK_DIVERGENCE_MARGIN));
+        assert!(!no_peer_near_tip(
+            2403,
+            2403 - FORK_DIVERGENCE_MARGIN,
+            FORK_DIVERGENCE_MARGIN
+        ));
         assert!(!no_peer_near_tip(2401, 2402, FORK_DIVERGENCE_MARGIN));
     }
 }

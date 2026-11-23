@@ -250,9 +250,17 @@ mod tests {
         let parent = Hash::from_bytes([1u8; 32]);
         for i in 0..(MAX_ORPHAN_SIZE as u64 + 50) {
             pool.add(orphan_block(parent, 1, i), 0);
-            assert!(pool.len() <= MAX_ORPHAN_SIZE, "pool exceeded cap at insert {}", i);
+            assert!(
+                pool.len() <= MAX_ORPHAN_SIZE,
+                "pool exceeded cap at insert {}",
+                i
+            );
         }
-        assert_eq!(pool.len(), MAX_ORPHAN_SIZE, "pool settles exactly at the cap");
+        assert_eq!(
+            pool.len(),
+            MAX_ORPHAN_SIZE,
+            "pool settles exactly at the cap"
+        );
     }
 
     // §2: eviction removes the strict oldest (smallest insertion sequence),
@@ -268,7 +276,10 @@ mod tests {
             pool.add(orphan_block(parent, 1, i), 0);
         }
         assert_eq!(pool.len(), MAX_ORPHAN_SIZE);
-        assert!(pool.contains(&first_hash), "oldest still present at exactly cap");
+        assert!(
+            pool.contains(&first_hash),
+            "oldest still present at exactly cap"
+        );
 
         let newest = orphan_block(parent, 1, 9_999);
         let newest_hash = newest.hash();
@@ -293,11 +304,18 @@ mod tests {
         pool.add(other, 0);
         assert_eq!(pool.len(), 3);
 
-        let taken: Vec<Hash> = pool.take_children(&parent).iter().map(|b| b.hash()).collect();
+        let taken: Vec<Hash> = pool
+            .take_children(&parent)
+            .iter()
+            .map(|b| b.hash())
+            .collect();
         assert_eq!(taken.len(), 2);
         assert!(taken.contains(&h1) && taken.contains(&h2));
 
-        assert!(!pool.contains(&h1) && !pool.contains(&h2), "taken children gone from pool");
+        assert!(
+            !pool.contains(&h1) && !pool.contains(&h2),
+            "taken children gone from pool"
+        );
         assert!(pool.contains(&ho), "other parent's child untouched");
         assert_eq!(pool.len(), 1);
         // No dangling secondary-index entries (in-module test can read privates).
@@ -316,7 +334,11 @@ mod tests {
         let mut pool = OrphanPool::new();
         pool.add(orphan_block(Hash::from_bytes([3u8; 32]), 1, 1), 0);
         pool.expire(ORPHAN_TTL_BLOCKS - 1);
-        assert_eq!(pool.len(), 1, "no expiry (and no underflow) below the TTL floor");
+        assert_eq!(
+            pool.len(),
+            1,
+            "no expiry (and no underflow) below the TTL floor"
+        );
 
         // Mature chain: an old orphan expires, a recent one survives.
         let mut pool = OrphanPool::new();
@@ -327,7 +349,10 @@ mod tests {
         pool.add(old, 0); // received_at_height 0
         pool.add(recent, ORPHAN_TTL_BLOCKS + 5); // received_at_height 105
         pool.expire(ORPHAN_TTL_BLOCKS + 10); // cutoff = 10
-        assert!(!pool.contains(&old_h), "orphan older than the TTL window is dropped");
+        assert!(
+            !pool.contains(&old_h),
+            "orphan older than the TTL window is dropped"
+        );
         assert!(pool.contains(&recent_h), "recent orphan survives");
         assert_eq!(pool.len(), 1);
     }

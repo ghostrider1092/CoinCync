@@ -455,11 +455,11 @@ pub fn create_pre_sig_bip340(
     const MAX_RETRIES: u32 = 8;
     let (nonce, _r_plus_t) = (0..MAX_RETRIES)
         .find_map(|counter| {
-            let n = match derive_bip340_nonce(&d_even, aux_rand, msg, &signer_x, adaptor_pt, counter)
-            {
-                Ok(n) => n,
-                Err(_) => return None,
-            };
+            let n =
+                match derive_bip340_nonce(&d_even, aux_rand, msg, &signer_x, adaptor_pt, counter) {
+                    Ok(n) => n,
+                    Err(_) => return None,
+                };
             let r_point = PublicKey::from_secret_key(&secp, &n);
             let r_plus_t = match r_point.combine(adaptor_pt) {
                 Ok(pt) => pt,
@@ -1027,16 +1027,14 @@ mod tests {
         }
 
         // Even-y R + T: accepted (the construction is otherwise valid).
-        let (even_sig, even_x) =
-            create_pre_sig(&seckey, &msg, &adaptor_pt, &even_nonce.unwrap())
-                .expect("create_pre_sig (even)");
+        let (even_sig, even_x) = create_pre_sig(&seckey, &msg, &adaptor_pt, &even_nonce.unwrap())
+            .expect("create_pre_sig (even)");
         verify_pre_sig(&even_sig, &even_x, &adaptor_pt, &msg)
             .expect("verify_pre_sig must accept an even-y R + T pre-signature");
 
         // Odd-y R + T: rejected, specifically for the parity.
-        let (odd_sig, odd_x) =
-            create_pre_sig(&seckey, &msg, &adaptor_pt, &odd_nonce.unwrap())
-                .expect("create_pre_sig (odd)");
+        let (odd_sig, odd_x) = create_pre_sig(&seckey, &msg, &adaptor_pt, &odd_nonce.unwrap())
+            .expect("create_pre_sig (odd)");
         let err = verify_pre_sig(&odd_sig, &odd_x, &adaptor_pt, &msg)
             .expect_err("verify_pre_sig must reject an odd-y R + T pre-signature");
         assert!(
@@ -1057,11 +1055,12 @@ mod tests {
         let m1 = [1u8; 32];
         let m2 = [2u8; 32];
 
-        let k = |sk: &SecretKey, aux: &[u8; 32], m: &[u8; 32], x: &XOnlyPublicKey, t: &PublicKey| {
-            derive_bip340_nonce(sk, aux, m, x, t, 0)
-                .unwrap()
-                .secret_bytes()
-        };
+        let k =
+            |sk: &SecretKey, aux: &[u8; 32], m: &[u8; 32], x: &XOnlyPublicKey, t: &PublicKey| {
+                derive_bip340_nonce(sk, aux, m, x, t, 0)
+                    .unwrap()
+                    .secret_bytes()
+            };
 
         let base = k(&sk, &aux, &m1, &x, &t);
         // deterministic given identical inputs (a bad RNG can't silently reuse)

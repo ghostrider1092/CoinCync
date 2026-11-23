@@ -243,7 +243,8 @@ impl Blockchain {
                     if tip_block.header.height.as_u64() != state.height {
                         return Err(Error::DatabaseError(format!(
                             "chain state height {} does not match tip block height {}",
-                            state.height, tip_block.header.height.as_u64(),
+                            state.height,
+                            tip_block.header.height.as_u64(),
                         )));
                     }
                     let difficulty = calculate_difficulty_from_target(&tip_block.header.target);
@@ -507,11 +508,11 @@ impl Blockchain {
         let cache_start = tip_height.saturating_sub(cache_depth);
 
         let mut prev_hash = Hash::zero(); // genesis prev_hash
-        // Reconstruct the block/tx counters from the actual persisted chain.
-        // ChainStateData does NOT persist total_blocks/total_transactions, so
-        // without this they reload as 0 and undercount forever after a restart
-        // (same "stats field not reconstructed on load" class as the difficulty=0
-        // fix above; surfaced by the L8 db-reopen determinism test 2026-08-18).
+                                          // Reconstruct the block/tx counters from the actual persisted chain.
+                                          // ChainStateData does NOT persist total_blocks/total_transactions, so
+                                          // without this they reload as 0 and undercount forever after a restart
+                                          // (same "stats field not reconstructed on load" class as the difficulty=0
+                                          // fix above; surfaced by the L8 db-reopen determinism test 2026-08-18).
         let mut blocks_applied: u64 = 0;
         let mut txs_applied: u64 = 0;
         for height in 0..=tip_height {

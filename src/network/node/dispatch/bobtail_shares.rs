@@ -17,7 +17,7 @@
 //! the share-domain-tag hardening item) is a pre-Enforce consensus decision and
 //! replaces this at the Enforce fork.
 
-use crate::consensus::bobtail::{self, Admit, ProofShareBatch, ShareProof, SharePool};
+use crate::consensus::bobtail::{self, Admit, ProofShareBatch, SharePool, ShareProof};
 use crate::consensus::{compute_pow_hash, PowAlgorithm};
 use crate::network::peer::PeerId;
 use crate::network::protocol::Message;
@@ -31,8 +31,7 @@ static POOL: std::sync::Mutex<Option<SharePool>> = std::sync::Mutex::new(None);
 
 /// Process-local share-informed hashrate estimator (Observe telemetry). Shares
 /// are a ~C_SHARE*K denser hashrate signal than block intervals.
-static HASHRATE: std::sync::Mutex<Option<bobtail::ShareHashrate>> =
-    std::sync::Mutex::new(None);
+static HASHRATE: std::sync::Mutex<Option<bobtail::ShareHashrate>> = std::sync::Mutex::new(None);
 
 /// Handle an inbound `ProofShares` message: admit + relay. Best-effort and
 /// side-effect-only (never fails the dispatch loop); malformed input is dropped.
@@ -107,8 +106,9 @@ pub(super) async fn handle_proof_shares(
     // ~C_SHARE*K denser hashrate signal than block intervals.
     let hr_sample = {
         let mut guard = HASHRATE.lock().unwrap_or_else(|e| e.into_inner());
-        let hr = guard
-            .get_or_insert_with(|| bobtail::ShareHashrate::new(bobtail::hashrate::DEFAULT_WINDOW_SECS));
+        let hr = guard.get_or_insert_with(|| {
+            bobtail::ShareHashrate::new(bobtail::hashrate::DEFAULT_WINDOW_SECS)
+        });
         hr.record_batch(now, accepted as u64, &tau);
         if emit {
             Some((hr.estimate(now), hr.sample_count()))

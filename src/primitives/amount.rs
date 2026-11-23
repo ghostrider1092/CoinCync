@@ -531,7 +531,10 @@ mod tests {
         assert!(matches!(max.checked_mul(2), Err(Error::AmountOverflow)));
         // A non-overflowing multiply is exact.
         assert_eq!(
-            Amount::from_atomic(1000).checked_mul(3).unwrap().as_atomic(),
+            Amount::from_atomic(1000)
+                .checked_mul(3)
+                .unwrap()
+                .as_atomic(),
             3000
         );
     }

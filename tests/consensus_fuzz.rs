@@ -36,10 +36,19 @@ fn classify(r: &coincync::error::Result<BlockStatus>) -> &'static str {
 }
 
 /// Build a block on top of genesis with fully-specified (mutable) header fields.
-fn block(magic: [u8; 4], version: u8, height: u64, prev: Hash, ts: u64, n_coinbase: usize) -> Block {
+fn block(
+    magic: [u8; 4],
+    version: u8,
+    height: u64,
+    prev: Hash,
+    ts: u64,
+    n_coinbase: usize,
+) -> Block {
     let zero_pk = PublicKey::from_bytes([0u8; 32]);
     let (cb, _) = build_coinbase(height, &zero_pk, &zero_pk, 0);
-    let txs = std::iter::repeat(cb).take(n_coinbase.max(1)).collect::<Vec<_>>();
+    let txs = std::iter::repeat(cb)
+        .take(n_coinbase.max(1))
+        .collect::<Vec<_>>();
     let header = BlockHeader {
         network_magic: magic,
         version,
@@ -65,14 +74,27 @@ fn malformed_blocks_are_rejected_identically_by_every_node() {
     let sim = Sim::new(3);
     let magic = NetworkType::Testnet.magic_bytes();
     let genesis = sim.nodes[0].chain.get_block_by_height(0).unwrap().hash();
-    let good_ts = sim.nodes[0].chain.get_block_by_height(0).unwrap().header.timestamp.as_secs() + 3600;
+    let good_ts = sim.nodes[0]
+        .chain
+        .get_block_by_height(0)
+        .unwrap()
+        .header
+        .timestamp
+        .as_secs()
+        + 3600;
     let far_future = good_ts + 10 * 365 * 24 * 3600;
 
     // Deterministic corpus — each block violates a distinct structural rule.
     let corpus = vec![
-        ("wrong_magic", block([0xDE, 0xAD, 0xBE, 0xEF], 1, 1, genesis, good_ts, 1)),
+        (
+            "wrong_magic",
+            block([0xDE, 0xAD, 0xBE, 0xEF], 1, 1, genesis, good_ts, 1),
+        ),
         ("height_gap", block(magic, 1, 5, genesis, good_ts, 1)),
-        ("bad_prev_link", block(magic, 1, 1, Hash::from_bytes([9u8; 32]), good_ts, 1)),
+        (
+            "bad_prev_link",
+            block(magic, 1, 1, Hash::from_bytes([9u8; 32]), good_ts, 1),
+        ),
         ("version_zero", block(magic, 0, 1, genesis, good_ts, 1)),
         ("version_max", block(magic, 255, 1, genesis, good_ts, 1)),
         ("far_future_ts", block(magic, 1, 1, genesis, far_future, 1)),

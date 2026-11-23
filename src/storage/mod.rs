@@ -13,6 +13,11 @@ mod utxos;
 pub mod kernels;
 /// The unified reorg seam for the three Phase-2 accumulator stores.
 pub mod phase2;
+/// Read-only "Secret Service" protection detail over the Spark pool: guards
+/// (fail-closed invariants), CIA (surveillance scan), FBI (forensic
+/// investigation). Reporting only; never mutates consensus.
+#[cfg(feature = "sketch-gk-proof")]
+pub mod pool_security;
 pub mod shielded;
 pub mod spark;
 /// The libspark-FFI-aligned canonical Spark pool store (coins by outpoint +
@@ -20,11 +25,6 @@ pub mod spark;
 /// `docs/design/cip-triptych-ki-binding.md`.
 #[cfg(feature = "sketch-gk-proof")]
 pub mod spark_pool;
-/// Read-only "Secret Service" protection detail over the Spark pool: guards
-/// (fail-closed invariants), CIA (surveillance scan), FBI (forensic
-/// investigation). Reporting only; never mutates consensus.
-#[cfg(feature = "sketch-gk-proof")]
-pub mod pool_security;
 
 pub use utxos::{OutputRef, UtxoBatch, UtxoSecurityDetail, UtxoSet};
 

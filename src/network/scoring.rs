@@ -113,10 +113,10 @@
 //!   `pong_with_wrong_nonce_is_ignored`,
 //!   `latency_averages_after_the_first_sample`.
 
+use crate::clock::{mono_now, MonoInstant};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
-use crate::clock::{mono_now, MonoInstant};
 
 /// SECURITY (H17-FIX): Per-behavior misbehavior types with specific penalties.
 /// Based on Bitcoin Core's `Misbehaving()` pattern in `net_processing.cpp`
@@ -610,10 +610,10 @@ const MSG_RATE_LIMITS: &[(u8, u32)] = &[
     (62, 50), // MessageType::GetOutputDigests     — 5/sec (digest range req)
     (64, 20), // MessageType::GetFilterCheckpoints — 2/sec (zero-body, cheap to spam)
     (70, 50), // MessageType::GetKeyImageStatus    — 5/sec (DHT ki query)
-               // Responses (Headers, Blocks, Txs, Addr, BlockData, Filters, etc.)
-               // are intentionally NOT rate-limited here — we asked for them.
-               // Runaway response volume is caught elsewhere by MAX_MESSAGE_SIZE
-               // + per-shard framer caps.
+              // Responses (Headers, Blocks, Txs, Addr, BlockData, Filters, etc.)
+              // are intentionally NOT rate-limited here — we asked for them.
+              // Runaway response volume is caught elsewhere by MAX_MESSAGE_SIZE
+              // + per-shard framer caps.
 ];
 
 impl PeerMessageRateTracker {
@@ -1715,7 +1715,10 @@ mod tests {
                 penalties += 1;
             }
         }
-        assert_eq!(over, 50, "every message past the 100 cap is over_limit (dropped)");
+        assert_eq!(
+            over, 50,
+            "every message past the 100 cap is over_limit (dropped)"
+        );
         assert_eq!(penalties, 1, "penalize exactly once per type per window");
     }
 
@@ -2378,7 +2381,10 @@ mod tests {
         for _ in 0..(EMPTY_BLOCKS_BAN_THRESHOLD - 1) {
             score.record_empty_blocks_response();
         }
-        assert_eq!(score.consecutive_empty_blocks, EMPTY_BLOCKS_BAN_THRESHOLD - 1);
+        assert_eq!(
+            score.consecutive_empty_blocks,
+            EMPTY_BLOCKS_BAN_THRESHOLD - 1
+        );
 
         score.record_block_success();
         assert_eq!(
@@ -2420,7 +2426,10 @@ mod tests {
         }
 
         let top = scorer.top_peers_for_download(10);
-        assert!(top.contains(&good), "validated, above-floor peer is included");
+        assert!(
+            top.contains(&good),
+            "validated, above-floor peer is included"
+        );
         assert!(
             !top.contains(&unvalidated),
             "unvalidated peer must be filtered even with a good score"
@@ -2509,7 +2518,10 @@ mod tests {
 
         assert_eq!(removed, 1, "only the disconnected neutral entry is dropped");
         assert!(scorer.get(&a).is_some(), "connected entry kept");
-        assert!(scorer.get(&b).is_none(), "disconnected neutral entry dropped");
+        assert!(
+            scorer.get(&b).is_none(),
+            "disconnected neutral entry dropped"
+        );
         assert!(
             scorer.get(&c).is_some(),
             "disconnected offender kept until it decays back to neutral"

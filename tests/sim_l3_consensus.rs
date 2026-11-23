@@ -56,7 +56,11 @@ fn honest_single_miner_safety_and_liveness() {
             tip,
             "node {i} must converge to the miner's tip"
         );
-        assert_eq!(sim.nodes[i].chain.height(), h0, "node {i} height must match");
+        assert_eq!(
+            sim.nodes[i].chain.height(),
+            h0,
+            "node {i} height must match"
+        );
     }
 
     println!("PASS honest_single_miner_safety_and_liveness: converged 3 nodes to height {h0}");
@@ -151,7 +155,8 @@ fn partition_isolates_nodes_without_breaking_safety() {
     let mut sim = Sim::new(cfg);
     let base = sim.nodes[2].chain.height();
 
-    sim.run().expect("SAFETY must hold under a persistent partition");
+    sim.run()
+        .expect("SAFETY must hold under a persistent partition");
 
     // Connected side advanced and agrees.
     assert!(

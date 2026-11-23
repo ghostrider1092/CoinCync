@@ -157,8 +157,8 @@ impl ChurnEngine {
     /// Draw an exponentially distributed interval and clamp it to the
     /// configured operating window.
     fn next_interval_secs(&self) -> u64 {
-        let mean = self.config.min_interval_secs as f64 / 2.0
-            + self.config.max_interval_secs as f64 / 2.0;
+        let mean =
+            self.config.min_interval_secs as f64 / 2.0 + self.config.max_interval_secs as f64 / 2.0;
         let lambda = 1.0 / mean;
         let distribution = Exp::new(lambda)
             .unwrap_or_else(|_| Exp::new(1.0 / 3_600.0).expect("positive fallback rate"));
@@ -167,10 +167,7 @@ impl ChurnEngine {
         // CSPRNG directly for privacy-critical randomness.
         let sample = distribution.sample(&mut rand::rngs::OsRng) as u64;
 
-        sample.clamp(
-            self.config.min_interval_secs,
-            self.config.max_interval_secs,
-        )
+        sample.clamp(self.config.min_interval_secs, self.config.max_interval_secs)
     }
 
     /// Choose a percentage using u128 arithmetic so a large u64 wallet value
@@ -185,8 +182,7 @@ impl ChurnEngine {
         let percentage = rand::rngs::OsRng
             .gen_range(self.config.min_amount_pct..=self.config.max_amount_pct)
             as u64;
-        let amount =
-            ((spendable_balance as u128) * (percentage as u128) / 100) as u64;
+        let amount = ((spendable_balance as u128) * (percentage as u128) / 100) as u64;
 
         const TYPICAL_PRIVACY_TX_BYTES: u64 = 2_500;
         let fee_reserve = TYPICAL_PRIVACY_TX_BYTES
@@ -254,8 +250,8 @@ impl ChurnEngine {
     }
 
     async fn execute_churn(&self) -> Result<u64, String> {
-        let mut wallet =
-            Wallet::open(self.wallet_path.clone()).map_err(|error| format!("open wallet: {error}"))?;
+        let mut wallet = Wallet::open(self.wallet_path.clone())
+            .map_err(|error| format!("open wallet: {error}"))?;
         wallet
             .unlock(self.wallet_password.as_str())
             .map_err(|error| format!("unlock wallet: {error}"))?;
@@ -296,9 +292,7 @@ impl ChurnEngine {
 
         debug!(
             mature_spendable,
-            two_input_cap,
-            churn_amount,
-            "churn: building self-send"
+            two_input_cap, churn_amount, "churn: building self-send"
         );
 
         let intent = SpendIntent::new(vec![Payment::new(

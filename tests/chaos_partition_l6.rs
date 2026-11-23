@@ -106,7 +106,10 @@ impl Bus {
             self.nodes[i].spend_pub,
             self.magic,
         );
-        let status = self.nodes[i].chain.add_block(blk.clone()).expect("add_block");
+        let status = self.nodes[i]
+            .chain
+            .add_block(blk.clone())
+            .expect("add_block");
         self.nodes[i].known.push(blk);
         status
     }
@@ -206,7 +209,11 @@ fn two_node_partition_heals_to_heavier_chain() {
     // false-convergence class (identical tip, divergent work).
     let (t, h, w) = (bus.tip(1), bus.height(1), bus.work(1));
     for i in 0..2 {
-        assert_eq!(bus.tip(i), t, "node {i} tip must converge to the heavier chain");
+        assert_eq!(
+            bus.tip(i),
+            t,
+            "node {i} tip must converge to the heavier chain"
+        );
         assert_eq!(bus.height(i), h, "node {i} height must converge");
         assert_eq!(bus.work(i), w, "node {i} total_difficulty must converge");
     }

@@ -155,11 +155,11 @@ pub const TESTNET_FALLBACK: &[&str] = &[
     // only — NOT baked in here (DNS is revocable; the fallback stays
     // project-owned). Kept in sync with testnet::TESTNET_SEED_NODES and
     // scripts/fleet-config.json by the tests below.
-    "2.29.34.197:28080", // hel1 — Hetzner (EU, Falkenstein) — seed
+    "2.29.34.197:28080",  // hel1 — Hetzner (EU, Falkenstein) — seed
     "37.27.185.37:28080", // hel2 — Hetzner (EU, Helsinki) — relay
     "77.42.64.199:28080", // hel3 — Hetzner (EU, Helsinki) — relay
     "89.167.93.52:28080", // hel4 — Hetzner (EU, Helsinki) — relay
-    "2.31.63.25:28080",  // nbg1 — Hetzner (DE, Nuremberg) — relay
+    "2.31.63.25:28080",   // nbg1 — Hetzner (DE, Nuremberg) — relay
     "5.161.214.98:28080", // ash1 — Hetzner (US, Ashburn) — relay
     // 2026-11-01: hil1 (Hillsboro, OR US-West) — dedicated full-mode miner +
     // P2P relay added behind the shielded cutover. Owned Hetzner box → baked
@@ -249,7 +249,9 @@ mod tests {
             .values()
             .filter(|n| n["role"].as_str() != Some("api"))
             .map(|n| {
-                let ip = n["ip"].as_str().expect("each fleet node needs a string `ip`");
+                let ip = n["ip"]
+                    .as_str()
+                    .expect("each fleet node needs a string `ip`");
                 format!("{}:{}", ip, port)
             })
             .collect();

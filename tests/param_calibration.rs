@@ -22,14 +22,26 @@ fn simulate_difficulty(spacing: u64, n: u64, start: Hash) -> Vec<u64> {
     let base = 1_000_000u64;
     // Seed two blocks at the start target so ASERT has a full anchor window.
     let mut db = vec![
-        DifficultyBlock { height: 0, timestamp: base, target: start },
-        DifficultyBlock { height: 1, timestamp: base + spacing, target: start },
+        DifficultyBlock {
+            height: 0,
+            timestamp: base,
+            target: start,
+        },
+        DifficultyBlock {
+            height: 1,
+            timestamp: base + spacing,
+            target: start,
+        },
     ];
     let mut out = Vec::new();
     for h in 2..=n + 1 {
         let t = calculate_difficulty(&db, h);
         out.push(t.to_difficulty());
-        db.push(DifficultyBlock { height: h, timestamp: base + h * spacing, target: t });
+        db.push(DifficultyBlock {
+            height: h,
+            timestamp: base + h * spacing,
+            target: t,
+        });
     }
     out
 }
@@ -53,8 +65,12 @@ fn difficulty_retarget_direction_and_stability_s1() {
     // Direction: too-fast blocks (came in 8x too quickly) must make it HARDER;
     // too-slow blocks must make it EASIER. This is exactly what a wrong time
     // unit / inverted sign breaks.
-    let fast = *simulate_difficulty(TARGET_BLOCK_TIME / 8, 60, start).last().unwrap();
-    let slow = *simulate_difficulty(TARGET_BLOCK_TIME * 8, 60, start).last().unwrap();
+    let fast = *simulate_difficulty(TARGET_BLOCK_TIME / 8, 60, start)
+        .last()
+        .unwrap();
+    let slow = *simulate_difficulty(TARGET_BLOCK_TIME * 8, 60, start)
+        .last()
+        .unwrap();
     assert!(
         fast >= mid,
         "too-fast blocks must not LOWER difficulty (fast={fast} mid={mid}) — ASERT unit/sign bug (S1)"
@@ -95,9 +111,14 @@ fn emission_is_monotone_and_bounded_by_the_supply_cap() {
     let mut emitted_blocks = 0u64;
     for h in 0..3_000_000u64 {
         let r = calculate_block_reward(h).as_atomic() as u128;
-        assert!(r <= prev, "reward must be non-increasing across halvings (height {h}: {r} > {prev})");
+        assert!(
+            r <= prev,
+            "reward must be non-increasing across halvings (height {h}: {r} > {prev})"
+        );
         prev = r;
-        cum = cum.checked_add(r).expect("cumulative emission overflowed u128");
+        cum = cum
+            .checked_add(r)
+            .expect("cumulative emission overflowed u128");
         assert!(
             cum <= MAX_SUPPLY,
             "cumulative emission {cum} exceeded MAX_SUPPLY {MAX_SUPPLY} by height {h}"
@@ -106,6 +127,12 @@ fn emission_is_monotone_and_bounded_by_the_supply_cap() {
             emitted_blocks += 1;
         }
     }
-    assert!(emitted_blocks > 0, "the emission schedule must actually pay a subsidy");
-    assert!(cum > MAX_SUPPLY / 2, "most of the supply should be emitted within 3M blocks");
+    assert!(
+        emitted_blocks > 0,
+        "the emission schedule must actually pay a subsidy"
+    );
+    assert!(
+        cum > MAX_SUPPLY / 2,
+        "most of the supply should be emitted within 3M blocks"
+    );
 }

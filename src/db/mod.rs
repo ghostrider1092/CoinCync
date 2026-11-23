@@ -1203,7 +1203,14 @@ impl Database {
         new_state: &[u8],
     ) -> Result<()> {
         // No Phase-2 extra writes — delegates to the shared implementation.
-        self.commit_block_atomic_inner(output_additions, height_set, tx_index_adds, new_state, &[], &[])
+        self.commit_block_atomic_inner(
+            output_additions,
+            height_set,
+            tx_index_adds,
+            new_state,
+            &[],
+            &[],
+        )
     }
 
     /// Like [`commit_block_atomic`](Self::commit_block_atomic), but also applies a
@@ -1476,7 +1483,10 @@ mod reorg_output_index_tests {
         .unwrap();
 
         // X exists in the committed index from the about-to-be-disconnected block.
-        db.output_index.tree.insert(x.as_slice(), old_entry.as_slice()).unwrap();
+        db.output_index
+            .tree
+            .insert(x.as_slice(), old_entry.as_slice())
+            .unwrap();
 
         let new_state = super::serialize(&super::ChainStateData {
             tip_hash: super::Hash::from_bytes([9u8; 32]),
@@ -1489,8 +1499,16 @@ mod reorg_output_index_tests {
         .unwrap();
 
         // Reorg: X removed (old block disconnected) AND re-added (re-mined, new entry).
-        db.apply_reorg_atomic(&[x], &[(x, new_entry.clone())], &[], &[], &new_state, &[], &[])
-            .unwrap();
+        db.apply_reorg_atomic(
+            &[x],
+            &[(x, new_entry.clone())],
+            &[],
+            &[],
+            &new_state,
+            &[],
+            &[],
+        )
+        .unwrap();
 
         // PRE-FIX: X filtered from the insert then removed → None (dropped).
         // POST-FIX: X re-inserted with the new chain's entry.
@@ -1529,7 +1547,10 @@ mod reorg_output_index_tests {
         })
         .unwrap();
 
-        db.output_index.tree.insert(y.as_slice(), first.as_slice()).unwrap();
+        db.output_index
+            .tree
+            .insert(y.as_slice(), first.as_slice())
+            .unwrap();
 
         let new_state = super::serialize(&super::ChainStateData {
             tip_hash: super::Hash::from_bytes([9u8; 32]),
@@ -1546,7 +1567,12 @@ mod reorg_output_index_tests {
             .unwrap();
 
         assert_eq!(
-            db.output_index.tree.get(y.as_slice()).unwrap().unwrap().as_ref(),
+            db.output_index
+                .tree
+                .get(y.as_slice())
+                .unwrap()
+                .unwrap()
+                .as_ref(),
             first.as_slice(),
             "oldest-wins must be preserved for a non-removed shared address"
         );
@@ -1634,7 +1660,11 @@ mod tests {
             Some(Hash::from_bytes(blk_hash)),
             "height index must map h -> tip hash"
         );
-        let oi = db.output_index.get(&stealth).unwrap().expect("output index entry present");
+        let oi = db
+            .output_index
+            .get(&stealth)
+            .unwrap()
+            .expect("output index entry present");
         assert_eq!(oi.commitment, [0x22u8; 32]);
         assert_eq!(oi.height, h);
         assert_eq!(db.get_tx_location(&tx_hash), Some((h, 0)));
@@ -1702,7 +1732,8 @@ mod tests {
         let db = Database::open_temp().unwrap();
         let pool = db.open_tree("test_phase2_pool").unwrap();
         // Pre-seed a coin the reorg will disconnect (delete).
-        pool.insert(b"coin:old", vec![0x01u8; 8].as_slice()).unwrap();
+        pool.insert(b"coin:old", vec![0x01u8; 8].as_slice())
+            .unwrap();
 
         let h = 9u64;
         let blk_hash = [0x77u8; 32];
@@ -1815,14 +1846,38 @@ mod tests {
         // Transparent tip committed...
         assert_eq!(db.state.get_state().unwrap().unwrap().height, h);
         // ...and every Phase-2 family's write landed in the SAME batch.
-        assert_eq!(pool_coins.get(b"c0").unwrap().as_deref(), Some(&[0x00u8; 4][..]));
-        assert_eq!(pool_tags.get(b"tag0").unwrap().as_deref(), Some(&[0x11u8; 8][..]));
-        assert_eq!(pool_meta.get(b"pool_value").unwrap().as_deref(), Some(&[0x22u8; 16][..]));
-        assert_eq!(sh_entries.get(b"e0").unwrap().as_deref(), Some(&[0x33u8; 4][..]));
-        assert_eq!(sh_nulls.get(b"nf0").unwrap().as_deref(), Some(&[0x44u8; 8][..]));
-        assert_eq!(sp_coins.get(b"spc0").unwrap().as_deref(), Some(&[0x55u8; 4][..]));
-        assert_eq!(sp_serials.get(b"ser0").unwrap().as_deref(), Some(&[0x66u8; 8][..]));
-        assert_eq!(kernels.get(b"k0").unwrap().as_deref(), Some(&[0x77u8; 4][..]));
+        assert_eq!(
+            pool_coins.get(b"c0").unwrap().as_deref(),
+            Some(&[0x00u8; 4][..])
+        );
+        assert_eq!(
+            pool_tags.get(b"tag0").unwrap().as_deref(),
+            Some(&[0x11u8; 8][..])
+        );
+        assert_eq!(
+            pool_meta.get(b"pool_value").unwrap().as_deref(),
+            Some(&[0x22u8; 16][..])
+        );
+        assert_eq!(
+            sh_entries.get(b"e0").unwrap().as_deref(),
+            Some(&[0x33u8; 4][..])
+        );
+        assert_eq!(
+            sh_nulls.get(b"nf0").unwrap().as_deref(),
+            Some(&[0x44u8; 8][..])
+        );
+        assert_eq!(
+            sp_coins.get(b"spc0").unwrap().as_deref(),
+            Some(&[0x55u8; 4][..])
+        );
+        assert_eq!(
+            sp_serials.get(b"ser0").unwrap().as_deref(),
+            Some(&[0x66u8; 8][..])
+        );
+        assert_eq!(
+            kernels.get(b"k0").unwrap().as_deref(),
+            Some(&[0x77u8; 4][..])
+        );
     }
 
     /// Atomic Phase-2 reorg across MULTIPLE sibling trees: a reorg batch that
@@ -1836,9 +1891,15 @@ mod tests {
         let sp_coins = db.open_tree("t_sp_coins").unwrap();
         let kernels = db.open_tree("t_kernels").unwrap();
         // Pre-seed one row in each the reorg will disconnect (delete).
-        sh_entries.insert(b"e_old", vec![0x01u8; 4].as_slice()).unwrap();
-        sp_coins.insert(b"c_old", vec![0x02u8; 4].as_slice()).unwrap();
-        kernels.insert(b"k_old", vec![0x03u8; 4].as_slice()).unwrap();
+        sh_entries
+            .insert(b"e_old", vec![0x01u8; 4].as_slice())
+            .unwrap();
+        sp_coins
+            .insert(b"c_old", vec![0x02u8; 4].as_slice())
+            .unwrap();
+        kernels
+            .insert(b"k_old", vec![0x03u8; 4].as_slice())
+            .unwrap();
 
         let h = 13u64;
         let blk_hash = [0xCDu8; 32];
@@ -1877,11 +1938,20 @@ mod tests {
         assert_eq!(db.state.get_state().unwrap().unwrap().height, h);
         // Every sibling's old row deleted and new row added, atomically.
         assert!(sh_entries.get(b"e_old").unwrap().is_none());
-        assert_eq!(sh_entries.get(b"e_new").unwrap().as_deref(), Some(&[0x11u8; 4][..]));
+        assert_eq!(
+            sh_entries.get(b"e_new").unwrap().as_deref(),
+            Some(&[0x11u8; 4][..])
+        );
         assert!(sp_coins.get(b"c_old").unwrap().is_none());
-        assert_eq!(sp_coins.get(b"c_new").unwrap().as_deref(), Some(&[0x22u8; 4][..]));
+        assert_eq!(
+            sp_coins.get(b"c_new").unwrap().as_deref(),
+            Some(&[0x22u8; 4][..])
+        );
         assert!(kernels.get(b"k_old").unwrap().is_none());
-        assert_eq!(kernels.get(b"k_new").unwrap().as_deref(), Some(&[0x33u8; 4][..]));
+        assert_eq!(
+            kernels.get(b"k_new").unwrap().as_deref(),
+            Some(&[0x33u8; 4][..])
+        );
     }
 
     /// The db/blocks.rs:227 invariant stated as an assertion: after every
@@ -2403,7 +2473,7 @@ mod tests {
     /// relies on) and abort inside the closure.
     #[test]
     fn commit_block_atomic_four_tree_set_rolls_back_when_closure_aborts() {
-        use shim::transaction::{Transactional, TransactionError};
+        use shim::transaction::{TransactionError, Transactional};
         let db = Database::open_temp().unwrap();
         let stealth = [0x77u8; 32];
         let tx_hash = [0x88u8; 32];
@@ -2421,7 +2491,12 @@ mod tests {
             Err(TransactionError::Abort("simulated tx-body failure".into()))
         });
         assert!(res.is_err(), "aborted closure must surface an error");
-        assert!(db.output_index.tree.get(stealth.as_slice()).unwrap().is_none());
+        assert!(db
+            .output_index
+            .tree
+            .get(stealth.as_slice())
+            .unwrap()
+            .is_none());
         assert!(db
             .blocks
             .height_index
@@ -2514,7 +2589,10 @@ mod tests {
         };
         db.output_index
             .tree
-            .insert(shared.as_slice(), serialize(&old_shared).unwrap().as_slice())
+            .insert(
+                shared.as_slice(),
+                serialize(&old_shared).unwrap().as_slice(),
+            )
             .unwrap();
         // Stale heights above the new tip.
         for h in [8u64, 9, 10] {
@@ -2596,7 +2674,7 @@ mod tests {
     /// assert every prior entry survived and no new state was written.
     #[test]
     fn apply_reorg_atomic_four_tree_set_unchanged_when_closure_aborts() {
-        use shim::transaction::{Transactional, TransactionError};
+        use shim::transaction::{TransactionError, Transactional};
         let db = Database::open_temp().unwrap();
         let keep = [0x21u8; 32];
         let entry = OutputIndexEntry {

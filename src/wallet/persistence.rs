@@ -2325,7 +2325,11 @@ mod tests {
         // v3 layout: [0..4] hdr_len | magic(4) version(1) encrypted(1)
         // kdf_salt[32] @10..42 | nonce[24] @42..66 | ...
         assert_ne!(&b1[10..42], &b2[10..42], "kdf_salt must be fresh per save");
-        assert_ne!(&b1[42..66], &b2[42..66], "nonce must be fresh per save (no IV reuse)");
+        assert_ne!(
+            &b1[42..66],
+            &b2[42..66],
+            "nonce must be fresh per save (no IV reuse)"
+        );
     }
 
     /// The deniable-wallet creation path is DISABLED (C37/C38/C39). It must
@@ -2381,7 +2385,10 @@ mod tests {
         save_wallet(&path, &data, Some("pw")).unwrap();
 
         let loaded = load_wallet(&path, Some("pw")).unwrap();
-        assert_eq!(loaded.seed, [0xABu8; 32], "view-secret seed must round-trip");
+        assert_eq!(
+            loaded.seed, [0xABu8; 32],
+            "view-secret seed must round-trip"
+        );
         assert_eq!(loaded.label, data.label, "watch-only label must round-trip");
     }
 
@@ -2413,7 +2420,11 @@ mod tests {
             .expect_err("corrupted unencrypted body must fail checksum");
         match err {
             Error::Corruption(msg) => {
-                assert!(msg.contains("checksum"), "expected checksum error, got: {}", msg)
+                assert!(
+                    msg.contains("checksum"),
+                    "expected checksum error, got: {}",
+                    msg
+                )
             }
             other => panic!("expected Corruption(checksum), got: {:?}", other),
         }

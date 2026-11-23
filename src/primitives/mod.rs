@@ -4,16 +4,16 @@
 
 mod address;
 mod amount;
-mod hash;
-mod keys;
 mod difficulty;
+mod hash;
 mod height;
+mod keys;
 mod timestamp;
 
 pub use address::{Address, AddressType, Network};
 pub use amount::Amount;
-pub use hash::{hash_concat, hash_data, hash_domain, merkle_root, Hash};
-pub use keys::{KeyImage, KeyPair, PublicKey, SecretKey, Signature};
 pub use difficulty::Difficulty;
+pub use hash::{hash_concat, hash_data, hash_domain, merkle_root, Hash};
 pub use height::Height;
+pub use keys::{KeyImage, KeyPair, PublicKey, SecretKey, Signature};
 pub use timestamp::Timestamp;

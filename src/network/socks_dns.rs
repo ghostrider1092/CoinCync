@@ -539,8 +539,14 @@ mod tests {
 
     #[test]
     fn skip_name_rejects_truncated_pointer_and_buffer_overrun() {
-        assert!(skip_name(&[0xC0u8], 0).is_err(), "lone pointer high-byte is truncated");
-        assert!(skip_name(&[3u8, b'a'], 0).is_err(), "label claims 3 bytes, only 1 present");
+        assert!(
+            skip_name(&[0xC0u8], 0).is_err(),
+            "lone pointer high-byte is truncated"
+        );
+        assert!(
+            skip_name(&[3u8, b'a'], 0).is_err(),
+            "label claims 3 bytes, only 1 present"
+        );
     }
 
     #[test]
@@ -706,12 +712,8 @@ mod tests {
     async fn resolve_via_socks5_rejects_inactive_proxy() {
         let proxy = ProxyConfig::default(); // enabled = false → inactive
         assert!(!proxy.is_active());
-        let res = resolve_via_socks5(
-            "seed1.coincync.network",
-            &proxy,
-            Duration::from_secs(1),
-        )
-        .await;
+        let res =
+            resolve_via_socks5("seed1.coincync.network", &proxy, Duration::from_secs(1)).await;
         match res {
             Err(Error::ConfigError(_)) => {}
             other => panic!("inactive proxy must yield ConfigError, got {other:?}"),

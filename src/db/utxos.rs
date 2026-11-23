@@ -730,9 +730,15 @@ mod tests {
         let tx_b = Hash::from_bytes([71u8; 32]);
 
         // Two outputs at height 500, one at height 501.
-        utxo_db.add_output(tx_a, 0, make_output(1), 500, false).unwrap();
-        utxo_db.add_output(tx_a, 1, make_output(2), 500, false).unwrap();
-        utxo_db.add_output(tx_b, 0, make_output(3), 501, false).unwrap();
+        utxo_db
+            .add_output(tx_a, 0, make_output(1), 500, false)
+            .unwrap();
+        utxo_db
+            .add_output(tx_a, 1, make_output(2), 500, false)
+            .unwrap();
+        utxo_db
+            .add_output(tx_b, 0, make_output(3), 501, false)
+            .unwrap();
 
         assert_eq!(utxo_db.get_outputs_at_height(500).unwrap().len(), 2);
         assert_eq!(utxo_db.get_outputs_at_height(501).unwrap().len(), 1);
@@ -757,8 +763,12 @@ mod tests {
         let utxo_db = UtxoDb::new(&db).unwrap();
 
         let tx_hash = Hash::from_bytes([80u8; 32]);
-        utxo_db.add_output(tx_hash, 0, make_output(4), 600, false).unwrap();
-        utxo_db.mark_key_image(&KeyImage::from_bytes([81u8; 32])).unwrap();
+        utxo_db
+            .add_output(tx_hash, 0, make_output(4), 600, false)
+            .unwrap();
+        utxo_db
+            .mark_key_image(&KeyImage::from_bytes([81u8; 32]))
+            .unwrap();
 
         assert_eq!(utxo_db.count(), 1);
         assert_eq!(utxo_db.spent_count(), 1);
@@ -789,7 +799,9 @@ mod tests {
         let utxo_db = UtxoDb::new(&db).unwrap();
 
         let tx_hash = Hash::from_bytes([90u8; 32]);
-        utxo_db.add_output(tx_hash, 0, make_output(5), 700, false).unwrap();
+        utxo_db
+            .add_output(tx_hash, 0, make_output(5), 700, false)
+            .unwrap();
 
         // Primary tree sees it.
         assert!(utxo_db.has_output(&tx_hash, 0).unwrap());
@@ -817,7 +829,9 @@ mod tests {
         let utxo_db = Arc::new(UtxoDb::new(&db).unwrap());
 
         let tx_hash = Hash::from_bytes([100u8; 32]);
-        utxo_db.add_output(tx_hash, 0, make_output(6), 800, false).unwrap();
+        utxo_db
+            .add_output(tx_hash, 0, make_output(6), 800, false)
+            .unwrap();
 
         let key_image = KeyImage::from_bytes([101u8; 32]);
 

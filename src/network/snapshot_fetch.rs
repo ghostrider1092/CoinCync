@@ -154,16 +154,13 @@ pub fn is_fresh_datadir(data_dir: &Path, network: NetworkType) -> bool {
 ///
 /// This is a blocking call (blocking HTTP + file I/O + extraction); the async
 /// caller must run it on a blocking thread (`tokio::task::spawn_blocking`).
-pub fn fetch_and_stage(
-    network: NetworkType,
-    staging_dir: &Path,
-) -> Result<PathBuf, FastSyncError> {
+pub fn fetch_and_stage(network: NetworkType, staging_dir: &Path) -> Result<PathBuf, FastSyncError> {
     let url = std::env::var(POINTER_URL_ENV).unwrap_or_else(|_| default_pointer_url(network));
     info!("fast-sync: reading snapshot pointer from {url}");
 
     let ptr_bytes = fetch_bounded(&url, POINTER_MAX_BYTES)?;
-    let ptr: ChainSnapshotPointer =
-        serde_json::from_slice(&ptr_bytes).map_err(|e| FastSyncError::PointerParse(e.to_string()))?;
+    let ptr: ChainSnapshotPointer = serde_json::from_slice(&ptr_bytes)
+        .map_err(|e| FastSyncError::PointerParse(e.to_string()))?;
 
     if ptr.network != net_str(network) {
         return Err(FastSyncError::NetworkMismatch {
@@ -178,7 +175,10 @@ pub fn fetch_and_stage(
 
     std::fs::create_dir_all(staging_dir).map_err(|e| FastSyncError::Io(e.to_string()))?;
     let tar_path = staging_dir.join("snapshot.tar");
-    let cap = ptr.size_bytes.unwrap_or(TARBALL_MAX_BYTES).min(TARBALL_MAX_BYTES);
+    let cap = ptr
+        .size_bytes
+        .unwrap_or(TARBALL_MAX_BYTES)
+        .min(TARBALL_MAX_BYTES);
     let n = download_to_file(&ptr.tarball_url, &tar_path, cap)?;
     info!("fast-sync: downloaded {n} bytes → extracting");
 
@@ -213,7 +213,9 @@ fn resolve_snapshot_root(extract_dir: &Path) -> Result<PathBuf, FastSyncError> {
     }
     match candidates.len() {
         1 => Ok(candidates.pop().unwrap()),
-        0 => Err(FastSyncError::BadArchive("no manifest.json in archive".into())),
+        0 => Err(FastSyncError::BadArchive(
+            "no manifest.json in archive".into(),
+        )),
         _ => Err(FastSyncError::BadArchive(
             "ambiguous archive: multiple manifest.json".into(),
         )),
@@ -224,7 +226,8 @@ fn resolve_snapshot_root(extract_dir: &Path) -> Result<PathBuf, FastSyncError> {
 /// mirrors and tests.
 fn fetch_bounded(url: &str, max: u64) -> Result<Vec<u8>, FastSyncError> {
     if let Some(path) = url.strip_prefix("file://") {
-        let data = std::fs::read(path).map_err(|e| FastSyncError::PointerUnreachable(e.to_string()))?;
+        let data =
+            std::fs::read(path).map_err(|e| FastSyncError::PointerUnreachable(e.to_string()))?;
         if data.len() as u64 > max {
             return Err(FastSyncError::TooLarge { max });
         }
@@ -257,7 +260,8 @@ fn download_to_file(url: &str, path: &Path, max: u64) -> Result<u64, FastSyncErr
     let mut out = std::fs::File::create(path).map_err(|e| FastSyncError::Io(e.to_string()))?;
 
     if let Some(src) = url.strip_prefix("file://") {
-        let mut f = std::fs::File::open(src).map_err(|e| FastSyncError::DownloadFailed(e.to_string()))?;
+        let mut f =
+            std::fs::File::open(src).map_err(|e| FastSyncError::DownloadFailed(e.to_string()))?;
         let n = std::io::copy(&mut f.by_ref().take(max + 1), &mut out)
             .map_err(|e| FastSyncError::DownloadFailed(e.to_string()))?;
         if n > max {
@@ -273,7 +277,10 @@ fn download_to_file(url: &str, path: &Path, max: u64) -> Result<u64, FastSyncErr
         .send()
         .map_err(|e| FastSyncError::DownloadFailed(e.to_string()))?;
     if !resp.status().is_success() {
-        return Err(FastSyncError::DownloadFailed(format!("HTTP {}", resp.status())));
+        return Err(FastSyncError::DownloadFailed(format!(
+            "HTTP {}",
+            resp.status()
+        )));
     }
     let n = std::io::copy(&mut resp.take(max + 1), &mut out)
         .map_err(|e| FastSyncError::DownloadFailed(e.to_string()))?;
@@ -347,7 +354,10 @@ mod tests {
         assert_eq!(ptr.network, "testnet");
         assert_eq!(ptr.height, 10);
         // Cap enforced.
-        assert!(matches!(fetch_bounded(&url, 4), Err(FastSyncError::TooLarge { .. })));
+        assert!(matches!(
+            fetch_bounded(&url, 4),
+            Err(FastSyncError::TooLarge { .. })
+        ));
         let _ = std::fs::remove_file(&tmp);
     }
 

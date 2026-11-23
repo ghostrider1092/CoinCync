@@ -64,7 +64,11 @@ struct State {
 
 fn state() -> &'static Mutex<State> {
     static S: OnceLock<Mutex<State>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(State { samples: HashMap::new() }))
+    S.get_or_init(|| {
+        Mutex::new(State {
+            samples: HashMap::new(),
+        })
+    })
 }
 
 /// Anti-eclipse netgroup key: /16 for IPv4, /32 for IPv6, in disjoint v4/v6
@@ -147,7 +151,11 @@ pub fn sample_count() -> usize {
 /// Test-only: clear all samples so tests don't leak global state into each other.
 #[cfg(test)]
 pub fn reset_for_test() {
-    state().lock().unwrap_or_else(|e| e.into_inner()).samples.clear();
+    state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .samples
+        .clear();
 }
 
 #[cfg(test)]
@@ -188,7 +196,11 @@ mod tests {
             record_offset(&addr(203, 0), -86400 + k); // all 203.0.0.0/16
         }
         assert_eq!(sample_count(), 1, "one /16 is one sample, not many");
-        assert_eq!(offset_secs(), 0, "a single netgroup cannot poison the clock");
+        assert_eq!(
+            offset_secs(),
+            0,
+            "a single netgroup cannot poison the clock"
+        );
     }
 
     #[test]
@@ -239,6 +251,10 @@ mod tests {
             record_offset_at(&addr(10, i), 600, old);
         }
         assert_eq!(sample_count(), 0, "stale samples must be pruned");
-        assert_eq!(offset_secs(), 0, "an expired offset must not shift the future-block cap");
+        assert_eq!(
+            offset_secs(),
+            0,
+            "an expired offset must not shift the future-block cap"
+        );
     }
 }

@@ -1088,8 +1088,14 @@ mod tests {
 
         // scan_prefix([0x10]): exactly the three 0x10.. keys; the 0x11 sibling
         // is excluded by the computed upper_bound.
-        let pref: Vec<Vec<u8>> = t.scan_prefix([0x10u8]).map(|r| r.unwrap().0.to_vec()).collect();
-        assert_eq!(pref, vec![vec![0x10, 0x01], vec![0x10, 0x02], vec![0x10, 0xFF]]);
+        let pref: Vec<Vec<u8>> = t
+            .scan_prefix([0x10u8])
+            .map(|r| r.unwrap().0.to_vec())
+            .collect();
+        assert_eq!(
+            pref,
+            vec![vec![0x10, 0x01], vec![0x10, 0x02], vec![0x10, 0xFF]]
+        );
 
         // Inclusive range keeps the upper endpoint.
         let rng: Vec<Vec<u8>> = t
@@ -1119,7 +1125,7 @@ mod tests {
     /// Multi-tree transaction commits all trees on Ok and none on closure Err.
     #[test]
     fn multi_tree_transaction_commits_all_or_none() {
-        use super::transaction::{Transactional, TransactionError};
+        use super::transaction::{TransactionError, Transactional};
         let (_d, db) = temp_db();
         let a = db.open_tree("ta").unwrap();
         let b = db.open_tree("tb").unwrap();
@@ -1176,7 +1182,10 @@ mod tests {
         let a = db.generate_id().unwrap();
         let b = db.generate_id().unwrap();
         let c = db.generate_id().unwrap();
-        assert!(a < b && b < c, "generate_id must be monotonically increasing");
+        assert!(
+            a < b && b < c,
+            "generate_id must be monotonically increasing"
+        );
 
         let names: Vec<String> = db
             .tree_names()

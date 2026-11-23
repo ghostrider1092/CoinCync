@@ -31,15 +31,18 @@ fn bobtail_observe_end_to_end_with_real_randomx() {
     let height = 1000u64;
     let epoch = height + 1;
     let prev = Hash::from_bytes([0x11; 32]); // a regtest-like parent tip
-    // A target chosen so tau_share = C*K*T admits ~half the samples — enough to
-    // reach K from a small grind budget (real RandomX in WSL light mode is slow).
+                                             // A target chosen so tau_share = C*K*T admits ~half the samples — enough to
+                                             // reach K from a small grind budget (real RandomX in WSL light mode is slow).
     let target = Hash::from_difficulty(128);
     let tau = bobtail::tau_share_target(&target, k, c);
     let hasher = real_hasher(epoch);
     const BUDGET: u64 = 64;
 
     println!("\n=== Bobtail Observe end-to-end (real RandomX, no mocks) ===");
-    println!("K={k}  C_SHARE={c}  parent=0x{}  height={height}", &prev.to_hex()[..12]);
+    println!(
+        "K={k}  C_SHARE={c}  parent=0x{}  height={height}",
+        &prev.to_hex()[..12]
+    );
     println!("tau_share target = 0x{}…", &tau.to_hex()[..16]);
 
     // --- Miner A grinds + would-gossip shares (the real send-side) ---
@@ -54,16 +57,28 @@ fn bobtail_observe_end_to_end_with_real_randomx() {
     // A second miner B so the pool has more than one owner.
     let pk_b = PublicKey::from_bytes([0xB2; 32]);
     let b_shares = bobtail::collect_shares(&prev, pk_b, 0, BUDGET, &tau, &hasher);
-    println!("[miner B] grinded {BUDGET} nonces -> {} shares", b_shares.len());
+    println!(
+        "[miner B] grinded {BUDGET} nonces -> {} shares",
+        b_shares.len()
+    );
 
     // Cap each batch to the wire limit (a real miner gossips its lowest).
     let mut a_shares = a_shares;
     a_shares.truncate(200);
     let mut b_shares = b_shares;
     b_shares.truncate(200);
-    let batch_a = ProofShareBatch { prev_hash: prev, shares: a_shares };
-    let batch_b = ProofShareBatch { prev_hash: prev, shares: b_shares };
-    assert!(batch_a.is_well_formed() && batch_b.is_well_formed(), "wire-valid batches");
+    let batch_a = ProofShareBatch {
+        prev_hash: prev,
+        shares: a_shares,
+    };
+    let batch_b = ProofShareBatch {
+        prev_hash: prev,
+        shares: b_shares,
+    };
+    assert!(
+        batch_a.is_well_formed() && batch_b.is_well_formed(),
+        "wire-valid batches"
+    );
     println!("\n[wire] two ProofShareBatch gossip messages, both well-formed");
 
     // --- Node C receives + admits both batches (the real inbound path) ---
@@ -86,7 +101,10 @@ fn bobtail_observe_end_to_end_with_real_randomx() {
     let obs = pool.observe(&target);
     let h = obs.health.as_ref().expect("a full pool carries health");
     println!("\n--- Observe: what a Bobtail block would be right now ---");
-    println!("  canonical K-lowest set : {} shares", obs.canonical_set.len());
+    println!(
+        "  canonical K-lowest set : {} shares",
+        obs.canonical_set.len()
+    );
     println!("  clears k-mean bar      : {}", obs.meets_bar);
     if let Some(p) = obs.proposer {
         println!("  proposer (global min)  : 0x{}", &p.to_hex()[..8]);
@@ -96,7 +114,10 @@ fn bobtail_observe_end_to_end_with_real_randomx() {
         "  distinct owners        : {}   (max {} / {} slots to one miner)",
         h.distinct_owners, h.max_owner_slots, k
     );
-    println!("  bar fill               : {} bps (10000 = exactly at tau)", h.bar_fill_bps);
+    println!(
+        "  bar fill               : {} bps (10000 = exactly at tau)",
+        h.bar_fill_bps
+    );
 
     // --- CYNC-POW diagnostics on the real observation ---
     match bobtail::diagnostics::concentration_report(&obs) {
@@ -178,5 +199,8 @@ fn share_vs_block_difficulty_is_smoother() {
     );
     println!("  => a share-informed retarget tracks hashrate with ~that much less noise/lag\n");
 
-    assert!(cvs < cvb * 0.3, "share-based estimate must be much tighter (got {cvs} vs {cvb})");
+    assert!(
+        cvs < cvb * 0.3,
+        "share-based estimate must be much tighter (got {cvs} vs {cvb})"
+    );
 }

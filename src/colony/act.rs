@@ -142,9 +142,12 @@ impl ColonyActor {
 
         // spider: detection only — derive attack/partition flags for locust/army_ant.
         let threats = spider::assess(&signals.sentinel);
-        let under_attack = threats
-            .iter()
-            .any(|t| matches!(t, ThreatSignature::EclipsePressure | ThreatSignature::FloodPattern));
+        let under_attack = threats.iter().any(|t| {
+            matches!(
+                t,
+                ThreatSignature::EclipsePressure | ThreatSignature::FloodPattern
+            )
+        });
         let partition = threats
             .iter()
             .any(|t| matches!(t, ThreatSignature::PartitionOnset));

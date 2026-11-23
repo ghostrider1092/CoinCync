@@ -269,7 +269,12 @@ fn bad_prev_hash_on_child_rejected() {
     let parent_block = Block::new(parent_header.clone(), Vec::new());
 
     let wrong_prev = Hash::from_bytes([0xAA; 32]);
-    let child_header = base_header(6, parent_header.timestamp.as_secs() + 1, wrong_prev, expected_magic());
+    let child_header = base_header(
+        6,
+        parent_header.timestamp.as_secs() + 1,
+        wrong_prev,
+        expected_magic(),
+    );
     let child_block = Block::new(child_header, Vec::new());
 
     let utxos = UtxoSet::new();
@@ -789,7 +794,7 @@ fn transfer_with_no_inputs_rejected() {
 #[cfg(all(feature = "sketch-gk-proof", feature = "libspark-ffi"))]
 #[test]
 fn crafted_unshield_cancelling_blindings_rejected_at_mempool_gate() {
-    use coincync::consensus::spark_payload::{SpendBundle, SparkPayload, SPARK_PAYLOAD_VERSION};
+    use coincync::consensus::spark_payload::{SparkPayload, SpendBundle, SPARK_PAYLOAD_VERSION};
     use coincync::consensus::validation::validate_transaction_basic;
     use coincync::crypto::{BlindingFactor, PedersenCommitment};
 

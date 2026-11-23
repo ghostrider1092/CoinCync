@@ -134,7 +134,10 @@ fn test_window_reset() {
     // After window reset, both the counter and the flag clear, so messages
     // are accepted (and unflagged) again.
     let after = tracker.record(MSG_VERSION);
-    assert!(!after.over_limit, "should accept messages after window reset");
+    assert!(
+        !after.over_limit,
+        "should accept messages after window reset"
+    );
     assert!(!after.penalize);
 }
 

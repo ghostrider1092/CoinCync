@@ -420,10 +420,8 @@ mod runtime_tests {
     // whose peer is no longer connected, bounding it to roughly the live set.
     #[test]
     fn prune_rate_trackers_drops_only_absent_peers() {
-        let (live_a, live_b, gone): (PeerId, PeerId, PeerId) =
-            ([1u8; 32], [2u8; 32], [3u8; 32]);
-        let mut trackers: std::collections::HashMap<PeerId, u8> =
-            std::collections::HashMap::new();
+        let (live_a, live_b, gone): (PeerId, PeerId, PeerId) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let mut trackers: std::collections::HashMap<PeerId, u8> = std::collections::HashMap::new();
         trackers.insert(live_a, 0);
         trackers.insert(live_b, 0);
         trackers.insert(gone, 0);
@@ -433,7 +431,10 @@ mod runtime_tests {
 
         assert_eq!(trackers.len(), 2, "only live peers' trackers remain");
         assert!(trackers.contains_key(&live_a) && trackers.contains_key(&live_b));
-        assert!(!trackers.contains_key(&gone), "the disconnected peer's tracker is pruned");
+        assert!(
+            !trackers.contains_key(&gone),
+            "the disconnected peer's tracker is pruned"
+        );
     }
     use crate::network::protocol::MessageType;
     use crate::primitives::Hash;
@@ -527,9 +528,9 @@ mod runtime_tests {
                 msg_type: 200,
                 payload: vec![],
                 received_at: crate::clock::mono_now(),
-                _reservation: Arc::new(
-                    crate::network::connection_tracker::ConnectionTracker::new(1024),
-                )
+                _reservation: Arc::new(crate::network::connection_tracker::ConnectionTracker::new(
+                    1024,
+                ))
                 .reservation(),
             })
             .await
@@ -542,9 +543,9 @@ mod runtime_tests {
                 msg_type: MessageType::Version as u8,
                 payload: vec![0u8; 1025],
                 received_at: crate::clock::mono_now(),
-                _reservation: Arc::new(
-                    crate::network::connection_tracker::ConnectionTracker::new(1024),
-                )
+                _reservation: Arc::new(crate::network::connection_tracker::ConnectionTracker::new(
+                    1024,
+                ))
                 .reservation(),
             })
             .await

@@ -39,7 +39,11 @@ fn make_secret(seed: u8) -> SecretScalar {
 fn make_keyimage(seed: u8) -> (KeyImage, CryptoKeyImage, SecretScalar) {
     let secret = make_secret(seed);
     let crypto_ki = CryptoKeyImage::from_secret(&secret);
-    (KeyImage::from_bytes(crypto_ki.to_bytes()), crypto_ki, secret)
+    (
+        KeyImage::from_bytes(crypto_ki.to_bytes()),
+        crypto_ki,
+        secret,
+    )
 }
 fn make_ring(seed: u8, size: usize) -> Vec<RingMemberRef> {
     (0..size)
@@ -111,7 +115,11 @@ fn mempool_breaker_wired_live_on_real_txs() {
     for seed in 0..10u8 {
         let h = mp.add_skip_crypto(make_transfer(seed)).expect("admit");
         hashes.push(h);
-        println!("  admit seed={seed:<2} real_len={} breaker={:?}", mp.len(), lb::state());
+        println!(
+            "  admit seed={seed:<2} real_len={} breaker={:?}",
+            mp.len(),
+            lb::state()
+        );
     }
     assert_eq!(mp.len(), 10, "ten real txs admitted");
     assert_eq!(
@@ -125,12 +133,19 @@ fn mempool_breaker_wired_live_on_real_txs() {
         mp.remove(h);
     }
     assert_eq!(mp.len(), 0);
-    println!("  drained -> real_len=0 (breaker still {:?}; removals don't tick it)", lb::state());
+    println!(
+        "  drained -> real_len=0 (breaker still {:?}; removals don't tick it)",
+        lb::state()
+    );
 
     // HEAL: re-admit under the cap → healthy observations → recovery.
     for seed in 100..104u8 {
         mp.add_skip_crypto(make_transfer(seed)).expect("re-admit");
-        println!("  heal admit seed={seed:<3} real_len={} breaker={:?}", mp.len(), lb::state());
+        println!(
+            "  heal admit seed={seed:<3} real_len={} breaker={:?}",
+            mp.len(),
+            lb::state()
+        );
     }
     assert_eq!(
         lb::state(),

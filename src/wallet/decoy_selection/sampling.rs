@@ -37,10 +37,7 @@
 
 use super::error::{DecoySelectionError, DecoySelectionResult};
 use super::types::{CoveredRequest, RingPolicy, ValidatedDecoySnapshot};
-use super::{
-    COVERED_LOOKUP_SIZE, DECOY_GAMMA_MAX_RESAMPLES, DECOY_GAMMA_SCALE,
-    DECOY_GAMMA_SHAPE,
-};
+use super::{COVERED_LOOKUP_SIZE, DECOY_GAMMA_MAX_RESAMPLES, DECOY_GAMMA_SCALE, DECOY_GAMMA_SHAPE};
 use crate::decoy::{HeightOutputCount, OutputLocator};
 use rand::distributions::WeightedIndex;
 use rand::seq::SliceRandom;
@@ -113,8 +110,7 @@ pub fn sample_candidate_locators<R: Rng + ?Sized>(
             });
         };
         let target_height = spend_height - age;
-        let Some(locator) =
-            pick_nearest_locator(target_height, eligible, excluded, &selected, rng)
+        let Some(locator) = pick_nearest_locator(target_height, eligible, excluded, &selected, rng)
         else {
             return Err(DecoySelectionError::InsufficientDecoys {
                 available: result.len(),
@@ -242,13 +238,12 @@ pub fn build_covered_request<R: RngCore + CryptoRng + ?Sized>(
         }
     }
 
-    let required_slots = real_locators
-        .len()
-        .checked_mul(ring_size)
-        .ok_or(DecoySelectionError::CoveredLookupSizeOverflow {
+    let required_slots = real_locators.len().checked_mul(ring_size).ok_or(
+        DecoySelectionError::CoveredLookupSizeOverflow {
             input_count: real_locators.len(),
             ring_size,
-        })?;
+        },
+    )?;
     if required_slots > COVERED_LOOKUP_SIZE {
         return Err(DecoySelectionError::CoveredLookupCapacityExceeded {
             input_count: real_locators.len(),

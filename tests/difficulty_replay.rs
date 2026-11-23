@@ -93,7 +93,10 @@ fn asert_converges_to_target_block_time_across_hashrate_regimes() {
     // Warm up well past the long window so both ASERT anchors are populated.
     let mut sim = Sim::warmed_up(DIFFICULTY_LONG_WINDOW + 8);
     let d0 = sim.tip_difficulty();
-    assert!(d0 > 1_000, "sanity: starting difficulty {d0} well above the floor");
+    assert!(
+        d0 > 1_000,
+        "sanity: starting difficulty {d0} well above the floor"
+    );
 
     const REGIME: usize = 600;
     const TAIL: usize = 150; // window over which we judge the settled state

@@ -80,10 +80,7 @@ impl ChainView for NodeChainView<'_> {
     /// each DISTINCT block once (instead of once per ref). For an anonymity set
     /// whose members cluster into a few blocks this is a large win over the
     /// per-ref default.
-    fn anchor_all(
-        &self,
-        refs: &[DisclosureOutputRef],
-    ) -> Result<Vec<Option<ChainAnchor>>> {
+    fn anchor_all(&self, refs: &[DisclosureOutputRef]) -> Result<Vec<Option<ChainAnchor>>> {
         use std::collections::HashMap;
         // 1) Locate each ref (indexed lookup, cheap).
         let locs: Vec<Option<(u64, u32)>> = refs
@@ -208,7 +205,9 @@ pub fn collect_anchorable_solvency_decoys(
                 // resolves elsewhere or not at all and is filtered, so the
                 // sampler and the auditor's anchor path can never disagree. The
                 // commitment then matches by construction (same canonical output).
-                let Ok(tx_pos) = u32::try_from(tx_pos) else { continue };
+                let Ok(tx_pos) = u32::try_from(tx_pos) else {
+                    continue;
+                };
                 if chain.get_tx_location(txh.as_bytes()) != Some((h, tx_pos)) {
                     continue;
                 }

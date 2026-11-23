@@ -193,7 +193,12 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             #[cfg(not(feature = "sketch-gk-proof"))]
             let (root, size) = (
                 state.chain.spark_root(),
-                state.chain.spark_store.as_ref().map(|s| s.size()).unwrap_or(0),
+                state
+                    .chain
+                    .spark_store
+                    .as_ref()
+                    .map(|s| s.size())
+                    .unwrap_or(0),
             );
             Ok::<_, ErrorObjectOwned>(json!({
                 "root": hex::encode(root),
@@ -302,56 +307,60 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
     // shielded balance and spend selection: a spent coin's bytes remain in the
     // cover set, so view-key identification alone over-counts. The tag (Spark
     // `T`) serializes to 34 bytes (68 hex).
-    module.register_method("is_spark_pool_tag_spent", |params, state, _ext| {
-        let (hex_t,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
-            ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
-        })?;
-        // Pre-decode length cap (DoS), as in is_nullifier_spent.
-        if hex_t.len() > 128 {
-            return Err(ErrorObjectOwned::owned(
-                -32602, "tag hex too long (max 128 chars)".to_string(), None::<()>,
-            ));
-        }
-        let bytes = hex::decode(&hex_t).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
-        })?;
-        // Exact-length guard, like is_spark_serial_spent / is_nullifier_spent: the
-        // Spark linking tag `T` serializes to exactly 34 bytes. Without it a
-        // wrong-length tag silently misses the spent-set lookup and returns
-        // spent=false, so a wallet told "available" re-selects an already-spent
-        // note and then builds a spend the node rejects as a duplicate linking tag.
-        if bytes.len() != 34 {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "tag must be 34 bytes".to_string(),
-                None::<()>,
-            ));
-        }
-        // "spent" means UNAVAILABLE to spend: already spent on-chain OR already
-        // on a PENDING mempool spend. The latter matters because a note whose
-        // spend is in the mempool but not yet mined is not in the on-chain spent
-        // set — without it the wallet re-picks the note and the node rejects the
-        // double-spend ("duplicate shielded linking tag in mempool").
-        //
-        // F2: read the MEMPOOL FIRST, then the chain — the same no-gap order
-        // get_spark_spent_tags documents. Block connect adds a tag to the chain
-        // spent set BEFORE removing it from the mempool, so chain-then-mempool
-        // has a window where a spend being mined is in NEITHER read (chain too
-        // early, mempool too late) and this returns `false` for a tag that is in
-        // fact being spent.
-        #[cfg(feature = "sketch-gk-proof")]
-        let spent =
-            state.mempool.contains_linking_tag(&bytes) || state.chain.spark_pool_tag_spent(&bytes);
-        #[cfg(not(feature = "sketch-gk-proof"))]
-        let spent = {
-            let _ = (&bytes, &state);
-            false
-        };
-        Ok::<_, ErrorObjectOwned>(json!({
-            "tag": hex::encode(&bytes),
-            "spent": spent,
-        }))
-    }).map_err(|e| Error::RpcError(e.to_string()))?;
+    module
+        .register_method("is_spark_pool_tag_spent", |params, state, _ext| {
+            let (hex_t,): (String,) = params.parse().map_err(|e: ErrorObjectOwned| {
+                ErrorObjectOwned::owned(-32602, format!("bad params: {}", e), None::<()>)
+            })?;
+            // Pre-decode length cap (DoS), as in is_nullifier_spent.
+            if hex_t.len() > 128 {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "tag hex too long (max 128 chars)".to_string(),
+                    None::<()>,
+                ));
+            }
+            let bytes = hex::decode(&hex_t).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("bad hex: {}", e), None::<()>)
+            })?;
+            // Exact-length guard, like is_spark_serial_spent / is_nullifier_spent: the
+            // Spark linking tag `T` serializes to exactly 34 bytes. Without it a
+            // wrong-length tag silently misses the spent-set lookup and returns
+            // spent=false, so a wallet told "available" re-selects an already-spent
+            // note and then builds a spend the node rejects as a duplicate linking tag.
+            if bytes.len() != 34 {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "tag must be 34 bytes".to_string(),
+                    None::<()>,
+                ));
+            }
+            // "spent" means UNAVAILABLE to spend: already spent on-chain OR already
+            // on a PENDING mempool spend. The latter matters because a note whose
+            // spend is in the mempool but not yet mined is not in the on-chain spent
+            // set — without it the wallet re-picks the note and the node rejects the
+            // double-spend ("duplicate shielded linking tag in mempool").
+            //
+            // F2: read the MEMPOOL FIRST, then the chain — the same no-gap order
+            // get_spark_spent_tags documents. Block connect adds a tag to the chain
+            // spent set BEFORE removing it from the mempool, so chain-then-mempool
+            // has a window where a spend being mined is in NEITHER read (chain too
+            // early, mempool too late) and this returns `false` for a tag that is in
+            // fact being spent.
+            #[cfg(feature = "sketch-gk-proof")]
+            let spent = state.mempool.contains_linking_tag(&bytes)
+                || state.chain.spark_pool_tag_spent(&bytes);
+            #[cfg(not(feature = "sketch-gk-proof"))]
+            let spent = {
+                let _ = (&bytes, &state);
+                false
+            };
+            Ok::<_, ErrorObjectOwned>(json!({
+                "tag": hex::encode(&bytes),
+                "spent": spent,
+            }))
+        })
+        .map_err(|e| Error::RpcError(e.to_string()))?;
 
     // ── get_spark_spent_tags ──────────────────────────────────
     // The wallet-facing counterpart to is_spark_pool_tag_spent: instead of
@@ -586,7 +595,11 @@ mod tests {
             }
         };
         assert_eq!(total, 10, "total reported independent of paging");
-        assert_eq!(seen.len(), 10, "every tag fetched exactly once across pages");
+        assert_eq!(
+            seen.len(),
+            10,
+            "every tag fetched exactly once across pages"
+        );
 
         // An offset past the end yields an empty page but still reports `total`,
         // so the wallet's `offset >= total` guard terminates cleanly.
@@ -631,10 +644,7 @@ mod tests {
         // A mempool tag already mined onto the chain is deduped, not counted twice.
         let (total, page) = spent_tags_overlay_page(&chain_sorted, &[vec![1u8; 34]], 0, 10);
         assert_eq!(total, 2, "a mempool tag already on chain is deduped");
-        assert_eq!(
-            page,
-            vec![hex::encode([1u8; 34]), hex::encode([3u8; 34])]
-        );
+        assert_eq!(page, vec![hex::encode([1u8; 34]), hex::encode([3u8; 34])]);
     }
 
     #[test]
@@ -657,6 +667,10 @@ mod tests {
             }
         };
         assert_eq!(total, 8, "union total independent of paging");
-        assert_eq!(seen.len(), 8, "every chain+mempool tag fetched exactly once");
+        assert_eq!(
+            seen.len(),
+            8,
+            "every chain+mempool tag fetched exactly once"
+        );
     }
 }

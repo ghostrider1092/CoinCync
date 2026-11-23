@@ -553,7 +553,7 @@ mod tests {
         bytes.extend_from_slice(&[2u8; 32]); // tx_public_key
         bytes.extend_from_slice(&[3u8; 32]); // commitment
         bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // encrypted_amount len (huge)
-        // No payload follows.
+                                                          // No payload follows.
         let decoded = borsh::from_slice::<Transaction>(&bytes);
         assert!(
             decoded.is_err(),

@@ -24,7 +24,10 @@ use crate::fuse::{self, FaultReport};
 use crate::p2p_breaker::{detect, PeerObservation};
 
 fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Anti-eclipse netgroup bucket: IPv4 by /16, IPv6 by /32, in disjoint

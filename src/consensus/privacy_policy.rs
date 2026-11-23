@@ -333,7 +333,10 @@ mod tests {
         // decompression. A NON-ZERO byte pattern that is not a valid Ristretto
         // encoding (here [0xFF; 32], whose high bit makes `s` non-canonical) is
         // now rejected — the old all-zeros-only check would have let it through.
-        let tx = mk_tx(vec![mk_input(1)], vec![mk_output([0xFF; 32], valid_commitment())]);
+        let tx = mk_tx(
+            vec![mk_input(1)],
+            vec![mk_output([0xFF; 32], valid_commitment())],
+        );
         assert!(matches!(
             check_tx_privacy(&tx),
             Err(Error::TransparentOutputForbidden)
@@ -344,7 +347,10 @@ mod tests {
     fn non_decompressable_stealth_rejected() {
         // M-3 counterpart of the commitment check: a non-zero, non-decodable
         // stealth address is rejected as a raw/invalid pubkey.
-        let tx = mk_tx(vec![mk_input(1)], vec![mk_output(valid_commitment(), [0xFF; 32])]);
+        let tx = mk_tx(
+            vec![mk_input(1)],
+            vec![mk_output(valid_commitment(), [0xFF; 32])],
+        );
         assert!(matches!(
             check_tx_privacy(&tx),
             Err(Error::RawPubkeyForbidden)
@@ -395,7 +401,10 @@ mod tests {
     fn enforce_rejects_violating_transfer() {
         // Valid coinbase + one transfer with a transparent (identity) commitment
         // → the block is rejected with the transfer's specific violation.
-        let bad_transfer = mk_tx(vec![mk_input(1)], vec![mk_output([0u8; 32], valid_commitment())]);
+        let bad_transfer = mk_tx(
+            vec![mk_input(1)],
+            vec![mk_output([0u8; 32], valid_commitment())],
+        );
         let block = Block::new(mk_header(), vec![coinbase_tx(), bad_transfer]);
         assert!(matches!(
             enforce_privacy_policy(&block),

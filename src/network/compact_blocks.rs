@@ -605,7 +605,10 @@ mod tests {
         let mut mempool_index = HashMap::new();
         mempool_index.insert(short_id, wrong_tx.clone());
         for tx in &block.transactions[2..] {
-            mempool_index.insert(ShortTxId::from_tx_hash(&tx.hash(), compact.nonce), tx.clone());
+            mempool_index.insert(
+                ShortTxId::from_tx_hash(&tx.hash(), compact.nonce),
+                tx.clone(),
+            );
         }
         let reconstructor = BlockReconstructor {
             mempool_index,
@@ -669,6 +672,9 @@ mod tests {
 
         let expected_savings = 1.0 - (expected_compact as f64 / expected_full as f64);
         assert!((savings - expected_savings).abs() < 1e-9);
-        assert!(savings > 0.0, "compact block must be smaller than the full block");
+        assert!(
+            savings > 0.0,
+            "compact block must be smaller than the full block"
+        );
     }
 }

@@ -133,7 +133,9 @@ pub fn anon_pad(bucket: u64, offset: usize) -> [u8; 32] {
     h.update((offset as u64).to_le_bytes());
     let mut wide = [0u8; 64];
     wide.copy_from_slice(&h.finalize());
-    RistrettoPoint::from_uniform_bytes(&wide).compress().to_bytes()
+    RistrettoPoint::from_uniform_bytes(&wide)
+        .compress()
+        .to_bytes()
 }
 
 /// Resolve bucket `bucket_index`'s ordered `N`-commitment window from the full
@@ -388,7 +390,8 @@ pub mod soak_stub {
             serial_tag: &[u8; 32],
             message: &[u8; 32],
         ) -> Result<()> {
-            let expect = spend_challenge(&anon_set.root, &anon_set.commitments, serial_tag, message);
+            let expect =
+                spend_challenge(&anon_set.root, &anon_set.commitments, serial_tag, message);
             if proof == expect {
                 Ok(())
             } else {
@@ -658,8 +661,7 @@ pub mod gk {
         // balance proof would double-count the input (the downstream block/apply
         // guards reject it, but the verifier should stand on its own). Duplicates
         // across txs/blocks remain enforced by the spent-set downstream.
-        let mut seen_nullifiers =
-            std::collections::HashSet::with_capacity(payload.inputs.len());
+        let mut seen_nullifiers = std::collections::HashSet::with_capacity(payload.inputs.len());
         for inp in &payload.inputs {
             if !seen_nullifiers.insert(inp.nullifier) {
                 return Err(Error::DuplicateNullifier);
@@ -681,8 +683,7 @@ pub mod gk {
         let mut v_outs = Vec::with_capacity(payload.outputs.len());
         // Defense-in-depth: reject duplicate note commitments within the payload
         // (apply would otherwise append two identical leaves to the accumulator).
-        let mut seen_commitments =
-            std::collections::HashSet::with_capacity(payload.outputs.len());
+        let mut seen_commitments = std::collections::HashSet::with_capacity(payload.outputs.len());
         for out in &payload.outputs {
             if !seen_commitments.insert(out.note_commitment) {
                 return Err(Error::SparkVerifyFailed);
@@ -774,7 +775,10 @@ mod tests {
         assert_ne!(base, spend_challenge(&root, &set, &[9u8; 32], &msg));
         assert_ne!(base, spend_challenge(&root, &set, &tag, &[9u8; 32]));
         // Set ordering is bound (length-prefixed, so a reorder is a different set).
-        assert_ne!(base, spend_challenge(&root, &[[2u8; 32], [1u8; 32]], &tag, &msg));
+        assert_ne!(
+            base,
+            spend_challenge(&root, &[[2u8; 32], [1u8; 32]], &tag, &msg)
+        );
     }
 
     #[test]
@@ -798,7 +802,8 @@ mod tests {
         // Even a "proof" that would satisfy the soak stub is rejected in prod.
         let stub_proof = spend_challenge(&anon.root, &anon.commitments, &[2u8; 32], &[3u8; 32]);
         assert!(matches!(
-            v.verify(&stub_proof, &anon, &[2u8; 32], &[3u8; 32]).unwrap_err(),
+            v.verify(&stub_proof, &anon, &[2u8; 32], &[3u8; 32])
+                .unwrap_err(),
             Error::SparkVerifyFailed
         ));
         assert!(v.verify(&[], &anon, &[0u8; 32], &[0u8; 32]).is_err());
@@ -821,11 +826,13 @@ mod tests {
     #[test]
     fn bucket_window_is_full_size_ordered_and_nums_padded() {
         // Two full buckets' worth minus a bit, so bucket 1 is partial.
-        let full: Vec<[u8; 32]> = (0..300u32).map(|i| {
-            let mut c = [0u8; 32];
-            c[..4].copy_from_slice(&i.to_le_bytes());
-            c
-        }).collect();
+        let full: Vec<[u8; 32]> = (0..300u32)
+            .map(|i| {
+                let mut c = [0u8; 32];
+                c[..4].copy_from_slice(&i.to_le_bytes());
+                c
+            })
+            .collect();
 
         // Bucket 0: fully populated, exact position order.
         let b0 = bucket_window(&full, 0);
@@ -836,7 +843,10 @@ mod tests {
         // Bucket 1: positions 256..300 are real, 300..512 are NUMS pads.
         let b1 = bucket_window(&full, 1);
         assert_eq!(b1.len(), GK_ANON_SET_SIZE);
-        assert_eq!(b1[0], full[256], "offset 0 of bucket 1 is leaf position 256");
+        assert_eq!(
+            b1[0], full[256],
+            "offset 0 of bucket 1 is leaf position 256"
+        );
         assert_eq!(b1[43], full[299], "last real leaf");
         assert_eq!(b1[44], anon_pad(1, 44), "first pad slot is the NUMS filler");
         // Deterministic: identical inputs → identical window (prover == verifier).
@@ -905,10 +915,16 @@ mod tests {
         // exactly the prover/verifier set-agreement failure the rails guard.
         store.append_commitment(entry([3u8; 32]));
         let anon_drift = StoreAnonSetResolver::new(&store).resolve().unwrap();
-        assert!(StubVerifier.verify(&proof, &anon_drift, &tag, &message).is_err());
+        assert!(StubVerifier
+            .verify(&proof, &anon_drift, &tag, &message)
+            .is_err());
         // Wrong tag / wrong message also rejected.
-        assert!(StubVerifier.verify(&proof, &anon, &[0u8; 32], &message).is_err());
-        assert!(StubVerifier.verify(&proof, &anon, &tag, &[0u8; 32]).is_err());
+        assert!(StubVerifier
+            .verify(&proof, &anon, &[0u8; 32], &message)
+            .is_err());
+        assert!(StubVerifier
+            .verify(&proof, &anon, &tag, &[0u8; 32])
+            .is_err());
     }
 
     /// End-to-end through the WHOLE assembly line with the REAL proof: mint Spark
@@ -955,7 +971,9 @@ mod tests {
         let message = [0x5A; 32];
 
         let proof_bytes = GkSpendProver.prove(&witness, &anon, &message).unwrap();
-        let nullifier = SparkSpendProofV2::from_bytes(&proof_bytes).unwrap().nullifier();
+        let nullifier = SparkSpendProofV2::from_bytes(&proof_bytes)
+            .unwrap()
+            .nullifier();
 
         // Consensus independently re-resolves the same bucket and verifies.
         let anon_v = StoreAnonSetResolver::new(&store).resolve_bucket(0).unwrap();
@@ -1002,7 +1020,10 @@ mod tests {
         use rand::{Rng, SeedableRng};
         use std::time::{Duration, Instant};
 
-        let budget = std::env::var("SOAK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60u64);
+        let budget = std::env::var("SOAK_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60u64);
         let base_seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1068,7 +1089,11 @@ mod tests {
             let mut out_vals = Vec::with_capacity(m);
             let mut remaining = out_total;
             for i in 0..m {
-                let v = if i == m - 1 { remaining } else { rng.gen::<u64>() % (remaining + 1) };
+                let v = if i == m - 1 {
+                    remaining
+                } else {
+                    rng.gen::<u64>() % (remaining + 1)
+                };
                 remaining -= v;
                 out_vals.push(v);
             }
@@ -1080,7 +1105,9 @@ mod tests {
                 let ob = Scalar::random(&mut rng);
                 let (s_out, r_out) = (Scalar::random(&mut rng), Scalar::random(&mut rng));
                 outputs.push(ShieldedOutput {
-                    note_commitment: bound_coin_commitment(ov, &s_out, &r_out).compress().to_bytes(),
+                    note_commitment: bound_coin_commitment(ov, &s_out, &r_out)
+                        .compress()
+                        .to_bytes(),
                     value_commitment: value_commitment(ov, &ob).compress().to_bytes(),
                     range_proof: prove_value_range(ov, &ob, &mut rng).unwrap().encode(),
                     mint_binding: prove_mint_binding(ov, &s_out, &r_out, &ob, &mut rng).encode(),
@@ -1107,7 +1134,14 @@ mod tests {
                 in_blinds.push(ib);
             }
             let bal = prove_balance_with_delta(
-                &in_vals, &in_blinds, &out_vals, &out_blinds, fee, value_balance, &message, &mut rng,
+                &in_vals,
+                &in_blinds,
+                &out_vals,
+                &out_blinds,
+                fee,
+                value_balance,
+                &message,
+                &mut rng,
             )
             .unwrap();
             let payload = ShieldedPayload {
@@ -1131,7 +1165,9 @@ mod tests {
             let mut tampered = payload.clone();
             tampered.value_balance = value_balance.wrapping_add(1);
             if verify_shielded_payload(&store, &tampered, fee).is_ok() {
-                panic!("[soak] FALSE ACCEPT tampered-value_balance iter {iters} (seed {iter_seed})");
+                panic!(
+                    "[soak] FALSE ACCEPT tampered-value_balance iter {iters} (seed {iter_seed})"
+                );
             }
             rejected += 2;
 
@@ -1222,7 +1258,9 @@ mod tests {
         let blinds: Vec<Scalar> = (0..4).map(|_| Scalar::random(&mut rng)).collect();
         for i in 0..4 {
             store.append_commitment(NoteCommitmentEntry {
-                commitment: bound_coin_commitment(vals[i], &sers[i], &blinds[i]).compress().to_bytes(),
+                commitment: bound_coin_commitment(vals[i], &sers[i], &blinds[i])
+                    .compress()
+                    .to_bytes(),
                 height: 1,
                 tx_index: 0,
                 position: 0,
@@ -1256,9 +1294,8 @@ mod tests {
             .map(|c| PeerPoint::decode_non_identity(*c).unwrap().into_point())
             .collect();
         let mk_input = |l: usize, vb: &Scalar, rng: &mut ChaCha20Rng| {
-            let sp =
-                prove_spend_bound(&coins, l, vals[l], &sers[l], &blinds[l], vb, &message, rng)
-                    .unwrap();
+            let sp = prove_spend_bound(&coins, l, vals[l], &sers[l], &blinds[l], vb, &message, rng)
+                .unwrap();
             ShieldedInput {
                 bucket_index: 0,
                 nullifier: sp.nullifier(),
@@ -1268,7 +1305,8 @@ mod tests {
         };
         let inputs = vec![mk_input(0, &vb0, &mut rng), mk_input(1, &vb1, &mut rng)];
 
-        let bal = prove_balance(&[5, 3], &[vb0, vb1], &[6], &[ob], fee, &message, &mut rng).unwrap();
+        let bal =
+            prove_balance(&[5, 3], &[vb0, vb1], &[6], &[ob], fee, &message, &mut rng).unwrap();
         let payload = ShieldedPayload {
             version: crate::consensus::shielded::SHIELDED_PAYLOAD_VERSION,
             inputs,
@@ -1311,7 +1349,9 @@ mod tests {
             let serial = Scalar::random(&mut rng);
             let blinding = Scalar::random(&mut rng);
             store.append_commitment(NoteCommitmentEntry {
-                commitment: bound_coin_commitment(value, &serial, &blinding).compress().to_bytes(),
+                commitment: bound_coin_commitment(value, &serial, &blinding)
+                    .compress()
+                    .to_bytes(),
                 height: 1,
                 tx_index: 0,
                 position: 0,
@@ -1320,17 +1360,40 @@ mod tests {
         }
         // Spend coins at offsets 1 (2000) and 3 (4000) = 6000 in; fee 500; one 5500 output.
         let inputs = vec![
-            SpendNote { bucket_index: 0, member_index: 1, value: openings[1].0, serial: openings[1].1, blinding: openings[1].2 },
-            SpendNote { bucket_index: 0, member_index: 3, value: openings[3].0, serial: openings[3].1, blinding: openings[3].2 },
+            SpendNote {
+                bucket_index: 0,
+                member_index: 1,
+                value: openings[1].0,
+                serial: openings[1].1,
+                blinding: openings[1].2,
+            },
+            SpendNote {
+                bucket_index: 0,
+                member_index: 3,
+                value: openings[3].0,
+                serial: openings[3].1,
+                blinding: openings[3].2,
+            },
         ];
         let fee = 500u64;
-        let outputs = vec![NewNote { value: 5500, serial: Scalar::random(&mut rng), coin_blinding: Scalar::random(&mut rng) }];
+        let outputs = vec![NewNote {
+            value: 5500,
+            serial: Scalar::random(&mut rng),
+            coin_blinding: Scalar::random(&mut rng),
+        }];
 
         let payload = build_shielded_payload(&store, &inputs, &outputs, fee, 0, &mut rng).unwrap();
-        assert!(verify_shielded_payload(&store, &payload, fee).is_ok(), "built payload must verify");
+        assert!(
+            verify_shielded_payload(&store, &payload, fee).is_ok(),
+            "built payload must verify"
+        );
 
         // Builder rejects a non-conserving tx up front.
-        let bad = vec![NewNote { value: 9999, serial: Scalar::random(&mut rng), coin_blinding: Scalar::random(&mut rng) }];
+        let bad = vec![NewNote {
+            value: 9999,
+            serial: Scalar::random(&mut rng),
+            coin_blinding: Scalar::random(&mut rng),
+        }];
         assert!(build_shielded_payload(&store, &inputs, &bad, fee, 0, &mut rng).is_err());
     }
 
@@ -1354,7 +1417,9 @@ mod tests {
             let serial = Scalar::random(&mut rng);
             let blinding = Scalar::random(&mut rng);
             store.append_commitment(NoteCommitmentEntry {
-                commitment: bound_coin_commitment(value, &serial, &blinding).compress().to_bytes(),
+                commitment: bound_coin_commitment(value, &serial, &blinding)
+                    .compress()
+                    .to_bytes(),
                 height: 1,
                 tx_index: 0,
                 position: 0,
@@ -1362,13 +1427,32 @@ mod tests {
             openings.push((value, serial, blinding));
         }
         let inputs = vec![
-            SpendNote { bucket_index: 0, member_index: 1, value: openings[1].0, serial: openings[1].1, blinding: openings[1].2 },
-            SpendNote { bucket_index: 0, member_index: 3, value: openings[3].0, serial: openings[3].1, blinding: openings[3].2 },
+            SpendNote {
+                bucket_index: 0,
+                member_index: 1,
+                value: openings[1].0,
+                serial: openings[1].1,
+                blinding: openings[1].2,
+            },
+            SpendNote {
+                bucket_index: 0,
+                member_index: 3,
+                value: openings[3].0,
+                serial: openings[3].1,
+                blinding: openings[3].2,
+            },
         ];
         let fee = 500u64;
-        let outputs = vec![NewNote { value: 5500, serial: Scalar::random(&mut rng), coin_blinding: Scalar::random(&mut rng) }];
+        let outputs = vec![NewNote {
+            value: 5500,
+            serial: Scalar::random(&mut rng),
+            coin_blinding: Scalar::random(&mut rng),
+        }];
         let payload = build_shielded_payload(&store, &inputs, &outputs, fee, 0, &mut rng).unwrap();
-        assert!(verify_shielded_payload(&store, &payload, fee).is_ok(), "control payload verifies");
+        assert!(
+            verify_shielded_payload(&store, &payload, fee).is_ok(),
+            "control payload verifies"
+        );
 
         // Collapse the second input onto the first: both now carry the same
         // nullifier. Input 0 still verifies fully; input 1 is caught by the
@@ -1376,7 +1460,10 @@ mod tests {
         let mut dup = payload.clone();
         dup.inputs[1] = dup.inputs[0].clone();
         assert!(
-            matches!(verify_shielded_payload(&store, &dup, fee), Err(Error::DuplicateNullifier)),
+            matches!(
+                verify_shielded_payload(&store, &dup, fee),
+                Err(Error::DuplicateNullifier)
+            ),
             "a payload spending the same note twice must be rejected as a duplicate nullifier",
         );
     }

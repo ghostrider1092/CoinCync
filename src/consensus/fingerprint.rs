@@ -148,7 +148,11 @@ mod tests {
 
         let mut p = base_parts();
         p.rolling_finality_enforce_height = 301;
-        assert_ne!(fingerprint_from_parts(&p), base, "finality height must matter");
+        assert_ne!(
+            fingerprint_from_parts(&p),
+            base,
+            "finality height must matter"
+        );
 
         // The shielded activation height: flipping the rollout knob from the
         // u64::MAX placeholder to a finite height must change the fingerprint, so
@@ -188,6 +192,9 @@ mod tests {
         assert_ne!(t, m, "testnet and mainnet must differ (magic + genesis)");
         // And stable across calls.
         assert_eq!(t, consensus_fingerprint(NetworkType::Testnet));
-        assert_eq!(consensus_fingerprint_bytes(NetworkType::Testnet), *t.as_bytes());
+        assert_eq!(
+            consensus_fingerprint_bytes(NetworkType::Testnet),
+            *t.as_bytes()
+        );
     }
 }

@@ -331,7 +331,9 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 }
             };
             crate::fuse::rearm(surface);
-            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "surface": format!("{surface:?}"), "rearmed": true }))
+            Ok::<_, ErrorObjectOwned>(
+                serde_json::json!({ "surface": format!("{surface:?}"), "rearmed": true }),
+            )
         })
         .map_err(|e| Error::RpcError(e.to_string()))?;
 
@@ -349,12 +351,18 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
         .register_blocking_method("chaos_generate", |params, state, _ext| {
             let (n, spend_hex, view_hex): (u64, String, String) =
                 params.parse().map_err(|e: ErrorObjectOwned| {
-                    ErrorObjectOwned::owned(-32602, format!("expected [n, spend_hex, view_hex]: {e}"), None::<()>)
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("expected [n, spend_hex, view_hex]: {e}"),
+                        None::<()>,
+                    )
                 })?;
-            let spend = crate::primitives::PublicKey::from_hex(&spend_hex)
-                .map_err(|e| ErrorObjectOwned::owned(-32602, format!("bad spend key: {e}"), None::<()>))?;
-            let view = crate::primitives::PublicKey::from_hex(&view_hex)
-                .map_err(|e| ErrorObjectOwned::owned(-32602, format!("bad view key: {e}"), None::<()>))?;
+            let spend = crate::primitives::PublicKey::from_hex(&spend_hex).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("bad spend key: {e}"), None::<()>)
+            })?;
+            let view = crate::primitives::PublicKey::from_hex(&view_hex).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("bad view key: {e}"), None::<()>)
+            })?;
             let mut made = 0u64;
             for _ in 0..n {
                 let cand = crate::mining::block_builder::build_candidate_block(
@@ -365,9 +373,21 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                     state.chain.network(),
                     crate::consensus::fork_signal::SignalBits(0),
                 )
-                .map_err(|e| ErrorObjectOwned::owned(-32000, format!("build candidate at {made}: {e}"), None::<()>))?;
-                crate::mining::block_builder::submit_mined_block(&state.chain, &state.mempool, cand.into_block(0))
-                    .map_err(|e| ErrorObjectOwned::owned(-32000, format!("submit at {made}: {e}"), None::<()>))?;
+                .map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32000,
+                        format!("build candidate at {made}: {e}"),
+                        None::<()>,
+                    )
+                })?;
+                crate::mining::block_builder::submit_mined_block(
+                    &state.chain,
+                    &state.mempool,
+                    cand.into_block(0),
+                )
+                .map_err(|e| {
+                    ErrorObjectOwned::owned(-32000, format!("submit at {made}: {e}"), None::<()>)
+                })?;
                 made += 1;
             }
             Ok::<_, ErrorObjectOwned>(serde_json::json!({ "generated": made }))
@@ -399,7 +419,10 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             let target = crate::constants::TARGET_BLOCK_TIME as f64;
             let assessment = if istats.samples < 2 {
                 "warming" // not enough blocks to assess
-            } else if tip_age_opt.map(|a| a as f64 > target * 3.0).unwrap_or(false) {
+            } else if tip_age_opt
+                .map(|a| a as f64 > target * 3.0)
+                .unwrap_or(false)
+            {
                 "stalled" // no new block in >3x target block time
             } else if istats.stddev_secs > target * 1.5 {
                 "oscillating" // high interval variance

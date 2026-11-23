@@ -44,12 +44,12 @@
 
 use coincync::chain::{BlockStatus, Blockchain};
 use coincync::config::NetworkType;
+use coincync::consensus::block::Block;
+use coincync::consensus::fork_signal::{encode_coinbase_extra, SignalBits};
 use coincync::consensus::{
     calculate_difficulty, compute_full_anchor, compute_pow_hash, BlockHeader, DifficultyBlock,
     PowAlgorithm,
 };
-use coincync::consensus::block::Block;
-use coincync::consensus::fork_signal::{encode_coinbase_extra, SignalBits};
 use coincync::constants::{block_version_at_height, BOOTSTRAP_MIN_RING_SIZE};
 use coincync::crypto::{
     coinbase_stealth_address, compute_one_time_secret, BlindingFactor, PedersenCommitment,
@@ -474,8 +474,12 @@ fn reorg_tip_double_spend_is_rejected() {
         12,
     );
     let k_key_image = spend_f12.inputs[0].key_image;
-    let (f12_coinbase, _) =
-        build_coinbase(12, &filler_spend_pk, &filler_view_pk, claimable_fees(12, fee));
+    let (f12_coinbase, _) = build_coinbase(
+        12,
+        &filler_spend_pk,
+        &filler_view_pk,
+        claimable_fees(12, fee),
+    );
 
     // F12 and B12 have equal cumulative work; the fork-choice tiebreak picks
     // the lexicographically-SMALLER tip hash. To keep the honest B12 as tip
@@ -543,8 +547,12 @@ fn reorg_tip_double_spend_is_rejected() {
         spend_f13.inputs[0].key_image, k_key_image,
         "both spends of K MUST carry the same key image (this is the double-spend)"
     );
-    let (f13_coinbase, _) =
-        build_coinbase(13, &filler_spend_pk, &filler_view_pk, claimable_fees(13, fee));
+    let (f13_coinbase, _) = build_coinbase(
+        13,
+        &filler_spend_pk,
+        &filler_view_pk,
+        claimable_fees(13, fee),
+    );
     let f13 = mine_block(
         &f12,
         13,
@@ -719,8 +727,12 @@ fn natural_fork_sharing_a_tx_can_be_stored_and_reorged() {
     let k_key_image = x.inputs[0].key_image;
 
     // Honest main block M12 = coinbase + X, off B11.
-    let (m12_coinbase, _) =
-        build_coinbase(12, &filler_spend_pk, &filler_view_pk, claimable_fees(12, fee));
+    let (m12_coinbase, _) = build_coinbase(
+        12,
+        &filler_spend_pk,
+        &filler_view_pk,
+        claimable_fees(12, fee),
+    );
     let m12 = mine_block(
         &b11,
         12,
@@ -745,8 +757,12 @@ fn natural_fork_sharing_a_tx_can_be_stored_and_reorged() {
     // Competing fork F12 = coinbase + the SAME X, off B11. Bump the timestamp so
     // F12.hash > M12.hash -> F12 loses the equal-work tiebreak and is stored as a
     // side branch (no premature reorg to F12).
-    let (f12_coinbase, _) =
-        build_coinbase(12, &filler_spend_pk, &filler_view_pk, claimable_fees(12, fee));
+    let (f12_coinbase, _) = build_coinbase(
+        12,
+        &filler_spend_pk,
+        &filler_view_pk,
+        claimable_fees(12, fee),
+    );
     let mut f12_ts = base_ts + 12 * spacing + 1;
     let f12 = loop {
         let candidate = mine_block(
@@ -902,8 +918,10 @@ fn total_difficulty_is_reorg_history_independent() {
     assert_eq!(chain.height(), 5, "tip must be C5");
 
     // ── Step 2: expected = 1 + Σ dft(C1..C5) (the canonical formula) ─────────
-    let expected: u128 =
-        1 + (1usize..=5).map(|i| dft(&chain_blocks[i].header.target)).sum::<u128>();
+    let expected: u128 = 1
+        + (1usize..=5)
+            .map(|i| dft(&chain_blocks[i].header.target))
+            .sum::<u128>();
 
     // ── Step 3: extend-only history matches the canonical formula ────────────
     let td_after_canonical = chain.stats().total_difficulty;
@@ -1102,9 +1120,14 @@ fn invalid_block_does_not_mutate_chain_state() {
         let mut hdr = good.header.clone();
         let mut bad_nonce = hdr.nonce.wrapping_add(1);
         loop {
-            let pow =
-                compute_pow_hash(PowAlgorithm::RandomX, &hdr.anchor, bad_nonce, &hdr.tx_root, 4)
-                    .expect("pow hash");
+            let pow = compute_pow_hash(
+                PowAlgorithm::RandomX,
+                &hdr.anchor,
+                bad_nonce,
+                &hdr.tx_root,
+                4,
+            )
+            .expect("pow hash");
             if !pow.meets_difficulty(&t4) {
                 break;
             }
@@ -1162,7 +1185,10 @@ fn invalid_block_does_not_mutate_chain_state() {
             spend_pub,
             magic,
         );
-        assert_unchanged("wrong-difficulty-target", is_rejected(&chain.add_block(bad)));
+        assert_unchanged(
+            "wrong-difficulty-target",
+            is_rejected(&chain.add_block(bad)),
+        );
     }
 
     // Positive control: the CORRECT B4 is accepted and advances state by exactly
@@ -1186,7 +1212,11 @@ fn invalid_block_does_not_mutate_chain_state() {
             ),
             "valid B4 must be accepted"
         );
-        assert_eq!(chain.height(), pre_height + 1, "valid B4 must advance height");
+        assert_eq!(
+            chain.height(),
+            pre_height + 1,
+            "valid B4 must advance height"
+        );
         assert_eq!(
             chain.stats().total_supply,
             pre.total_supply + calculate_block_reward(4).as_atomic() as u128,
@@ -1500,9 +1530,20 @@ fn private_fork_reorgs_onto_heavier_branch_forking_below_tip() {
     for h in 1..=10u64 {
         let target = chain.next_target();
         let (cb, _) = build_coinbase(h, &spend_public, &view_public, 0);
-        let b = mine_block(&parent, h, base_ts + h * spacing, target, vec![cb], spend_public, magic);
+        let b = mine_block(
+            &parent,
+            h,
+            base_ts + h * spacing,
+            target,
+            vec![cb],
+            spend_public,
+            magic,
+        );
         assert!(
-            matches!(chain.add_block(b.clone()).expect("add B"), BlockStatus::Accepted),
+            matches!(
+                chain.add_block(b.clone()).expect("add B"),
+                BlockStatus::Accepted
+            ),
             "B{h} must extend the common chain"
         );
         parent = b.clone();
@@ -1515,13 +1556,39 @@ fn private_fork_reorgs_onto_heavier_branch_forking_below_tip() {
     // Simulates mining while isolated at 0 peers.
     let t_priv11 = chain.next_target();
     let (pcb11, _) = build_coinbase(11, &spend_public, &view_public, 0);
-    let priv11 = mine_block(&fork_base, 11, base_ts + 11 * spacing, t_priv11, vec![pcb11], spend_public, magic);
-    assert!(matches!(chain.add_block(priv11.clone()).expect("add priv11"), BlockStatus::Accepted));
+    let priv11 = mine_block(
+        &fork_base,
+        11,
+        base_ts + 11 * spacing,
+        t_priv11,
+        vec![pcb11],
+        spend_public,
+        magic,
+    );
+    assert!(matches!(
+        chain.add_block(priv11.clone()).expect("add priv11"),
+        BlockStatus::Accepted
+    ));
     let t_priv12 = chain.next_target();
     let (pcb12, _) = build_coinbase(12, &spend_public, &view_public, 0);
-    let priv12 = mine_block(&priv11, 12, base_ts + 12 * spacing, t_priv12, vec![pcb12], spend_public, magic);
-    assert!(matches!(chain.add_block(priv12.clone()).expect("add priv12"), BlockStatus::Accepted));
-    assert_eq!(chain.tip_hash(), priv12.hash(), "node tip is its private branch");
+    let priv12 = mine_block(
+        &priv11,
+        12,
+        base_ts + 12 * spacing,
+        t_priv12,
+        vec![pcb12],
+        spend_public,
+        magic,
+    );
+    assert!(matches!(
+        chain.add_block(priv12.clone()).expect("add priv12"),
+        BlockStatus::Accepted
+    ));
+    assert_eq!(
+        chain.tip_hash(),
+        priv12.hash(),
+        "node tip is its private branch"
+    );
     assert_eq!(chain.height(), 12);
 
     // ── Network's HEAVIER branch off B10: net11 -> net12 -> net13 ────────
@@ -1529,23 +1596,49 @@ fn private_fork_reorgs_onto_heavier_branch_forking_below_tip() {
     // carries more cumulative work. Fork targets come from each block's own
     // difficulty window (as the e2e does for F13), NOT chain.next_target()
     // (which now reflects the private tip).
-    let win10: Vec<DifficultyBlock> = (0..=10u64).map(|h| diff_block(&common[h as usize])).collect();
+    let win10: Vec<DifficultyBlock> = (0..=10u64)
+        .map(|h| diff_block(&common[h as usize]))
+        .collect();
 
     let t_net11 = calculate_difficulty(&win10, 11);
     let (ncb11, _) = build_coinbase(11, &spend_public, &view_public, 0);
-    let net11 = mine_block(&fork_base, 11, base_ts + 11 * spacing + 1, t_net11, vec![ncb11], spend_public, magic);
+    let net11 = mine_block(
+        &fork_base,
+        11,
+        base_ts + 11 * spacing + 1,
+        t_net11,
+        vec![ncb11],
+        spend_public,
+        magic,
+    );
 
     let mut win11 = win10.clone();
     win11.push(diff_block(&net11));
     let t_net12 = calculate_difficulty(&win11, 12);
     let (ncb12, _) = build_coinbase(12, &spend_public, &view_public, 0);
-    let net12 = mine_block(&net11, 12, base_ts + 12 * spacing + 1, t_net12, vec![ncb12], spend_public, magic);
+    let net12 = mine_block(
+        &net11,
+        12,
+        base_ts + 12 * spacing + 1,
+        t_net12,
+        vec![ncb12],
+        spend_public,
+        magic,
+    );
 
     let mut win12 = win11.clone();
     win12.push(diff_block(&net12));
     let t_net13 = calculate_difficulty(&win12, 13);
     let (ncb13, _) = build_coinbase(13, &spend_public, &view_public, 0);
-    let net13 = mine_block(&net12, 13, base_ts + 13 * spacing + 1, t_net13, vec![ncb13], spend_public, magic);
+    let net13 = mine_block(
+        &net12,
+        13,
+        base_ts + 13 * spacing + 1,
+        t_net13,
+        vec![ncb13],
+        spend_public,
+        magic,
+    );
 
     // ── Feed the heavier branch to add_block IN ORDER ───────────────────
     let s11 = chain.add_block(net11.clone()).expect("add net11");
@@ -1555,7 +1648,10 @@ fn private_fork_reorgs_onto_heavier_branch_forking_below_tip() {
          (if rejected, add_block refuses sub-tip fork blocks — that alone wedges recovery)"
     );
     let s12 = chain.add_block(net12.clone()).expect("add net12");
-    assert!(matches!(s12, BlockStatus::AcceptedFork), "net12 extends the side branch, got {s12:?}");
+    assert!(
+        matches!(s12, BlockStatus::AcceptedFork),
+        "net12 extends the side branch, got {s12:?}"
+    );
     let s13 = chain.add_block(net13.clone()).expect("add net13");
 
     // ── The node MUST reorg onto the heavier network branch ─────────────
@@ -1568,5 +1664,9 @@ fn private_fork_reorgs_onto_heavier_branch_forking_below_tip() {
         chain.height(),
         s13,
     );
-    assert_eq!(chain.height(), 13, "height must advance to the heavier branch tip");
+    assert_eq!(
+        chain.height(),
+        13,
+        "height must advance to the heavier branch tip"
+    );
 }

@@ -398,12 +398,15 @@ mod tests {
         let mut rng = OsRng;
         let proof = random_proof(&mut rng, SchemeId::Clsag.proof_len());
         let nf = random_nullifier(&mut rng);
-        let a =
-            ManifoldEnvelope::seal(SchemeId::Clsag, &proof, nf, MANIFOLD_MIN_FEE, &mut rng).unwrap();
-        let b =
-            ManifoldEnvelope::seal(SchemeId::Clsag, &proof, nf, MANIFOLD_MIN_FEE, &mut rng).unwrap();
+        let a = ManifoldEnvelope::seal(SchemeId::Clsag, &proof, nf, MANIFOLD_MIN_FEE, &mut rng)
+            .unwrap();
+        let b = ManifoldEnvelope::seal(SchemeId::Clsag, &proof, nf, MANIFOLD_MIN_FEE, &mut rng)
+            .unwrap();
         // Same logical proof recovers identically...
-        assert_eq!(a.recover_proof(SchemeId::Clsag), b.recover_proof(SchemeId::Clsag));
+        assert_eq!(
+            a.recover_proof(SchemeId::Clsag),
+            b.recover_proof(SchemeId::Clsag)
+        );
         // ...but the full field differs, so the padded blob is not a reproducible
         // fingerprint an observer could match against.
         assert_ne!(a.proof, b.proof);
@@ -462,10 +465,8 @@ mod tests {
         )
         .unwrap();
 
-        let spark_v =
-            |p: &[u8]| p.len() == SchemeId::Spark.proof_len() && p.first() == Some(&0xAB);
-        let clsag_v =
-            |p: &[u8]| p.len() == SchemeId::Clsag.proof_len() && p.first() == Some(&0xCD);
+        let spark_v = |p: &[u8]| p.len() == SchemeId::Spark.proof_len() && p.first() == Some(&0xAB);
+        let clsag_v = |p: &[u8]| p.len() == SchemeId::Clsag.proof_len() && p.first() == Some(&0xCD);
         let verifiers: [(SchemeId, &dyn Fn(&[u8]) -> bool); 2] =
             [(SchemeId::Spark, &spark_v), (SchemeId::Clsag, &clsag_v)];
 

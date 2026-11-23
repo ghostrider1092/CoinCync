@@ -976,7 +976,10 @@ impl<'a> UtxoSecurityDetail<'a> {
     pub const DEFAULT_BLOAT_WARN: usize = 50_000_000;
 
     pub fn new(utxos: &'a UtxoSet) -> Self {
-        Self { utxos, bloat_warn: Self::DEFAULT_BLOAT_WARN }
+        Self {
+            utxos,
+            bloat_warn: Self::DEFAULT_BLOAT_WARN,
+        }
     }
 
     pub fn with_bloat_warn(utxos: &'a UtxoSet, bloat_warn: usize) -> Self {
@@ -1007,7 +1010,10 @@ impl crate::security::SecurityDetail for UtxoSecurityDetail<'_> {
                 "utxo-set",
                 Severity::Warning,
                 "utxo-bloat",
-                format!("live UTXO set {} exceeds bloat warn {}", live, self.bloat_warn),
+                format!(
+                    "live UTXO set {} exceeds bloat warn {}",
+                    live, self.bloat_warn
+                ),
             );
         }
         r
@@ -1028,7 +1034,10 @@ mod tests {
         assert!(super::utxo_count_violation(10, 5).is_some());
         assert!(super::utxo_count_violation(5, 10).is_none());
         assert!(super::utxo_count_violation(5, 5).is_none());
-        assert!(super::utxo_spend_violation(10, 5).is_some(), "spending more than ever-created is caught");
+        assert!(
+            super::utxo_spend_violation(10, 5).is_some(),
+            "spending more than ever-created is caught"
+        );
         assert!(super::utxo_spend_violation(3, 10).is_none());
 
         // A real set: add three outputs → live == ever == 3, guard clean.
@@ -1041,11 +1050,16 @@ mod tests {
 
         // Bloat threshold below the live count → operational warning (no halt).
         let report = super::UtxoSecurityDetail::with_bloat_warn(&set, 2).sweep();
-        assert!(!report.has_consensus_halt(), "no consensus halt on an honest set");
+        assert!(
+            !report.has_consensus_halt(),
+            "no consensus halt on an honest set"
+        );
         assert!(report.alerts.iter().any(|a| a.code == "utxo-bloat"));
 
         // Ample threshold → completely clean.
-        assert!(super::UtxoSecurityDetail::with_bloat_warn(&set, 1_000).sweep().is_clean());
+        assert!(super::UtxoSecurityDetail::with_bloat_warn(&set, 1_000)
+            .sweep()
+            .is_clean());
     }
 
     fn make_test_output(id: u64, lock_height: Option<u64>) -> (Hash, TxOutput) {
@@ -1099,7 +1113,10 @@ mod tests {
         let empty = set.commitment_hash();
         add_test_output(&mut set, 1, 10, None);
         let after_output = set.commitment_hash();
-        assert_ne!(after_output, empty, "adding an output must change the commitment");
+        assert_ne!(
+            after_output, empty,
+            "adding an output must change the commitment"
+        );
         // A spent key image is part of what a wallet trusts; it must move the hash.
         set.mark_key_image_spent(KeyImage::from_bytes([9u8; 32]));
         assert_ne!(
@@ -1256,8 +1273,12 @@ mod tests {
         // The raw monotonic counter DIVERGES — this is the bug surface.
         assert_ne!(a.total_outputs_ever(), b.total_outputs_ever());
         // The fixed availability metric (ever - reorg_disconnects) is invariant.
-        let avail_a = a.total_outputs_ever().saturating_sub(a.reorg_disconnects_total());
-        let avail_b = b.total_outputs_ever().saturating_sub(b.reorg_disconnects_total());
+        let avail_a = a
+            .total_outputs_ever()
+            .saturating_sub(a.reorg_disconnects_total());
+        let avail_b = b
+            .total_outputs_ever()
+            .saturating_sub(b.reorg_disconnects_total());
         assert_eq!(avail_a, 5, "node A canonical availability");
         assert_eq!(avail_b, 5, "reorg history must not change availability");
         // ...so both nodes require the SAME ring size for a block at this tip.

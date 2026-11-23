@@ -488,10 +488,7 @@ mod tests {
         // 64 bytes wide, non-zero, and distinct across draws (overwhelmingly likely).
         assert_eq!(a.as_bytes().len(), 64);
         assert!(!is_zero(a.as_bytes()), "output must not be all zeros");
-        assert!(
-            !ct_eq(a.as_bytes(), b.as_bytes()),
-            "two draws must differ"
-        );
+        assert!(!ct_eq(a.as_bytes(), b.as_bytes()), "two draws must differ");
     }
 
     #[test]

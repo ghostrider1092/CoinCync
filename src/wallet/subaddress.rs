@@ -878,7 +878,10 @@ mod tests {
         // Every returned (pubkey, index) pair is internally consistent, and the
         // expected indices are all present.
         for &(pk, idx) in &all {
-            assert_eq!(manager.get(idx).unwrap().spend_public.as_bytes(), pk.as_bytes());
+            assert_eq!(
+                manager.get(idx).unwrap().spend_public.as_bytes(),
+                pk.as_bytes()
+            );
         }
         let indices: Vec<SubaddressIndex> = all.iter().map(|(_, i)| *i).collect();
         for expected in [
@@ -887,7 +890,10 @@ mod tests {
             SubaddressIndex::new(0, 2),
             SubaddressIndex::new(3, 9),
         ] {
-            assert!(indices.contains(&expected), "missing {expected} in scan keys");
+            assert!(
+                indices.contains(&expected),
+                "missing {expected} in scan keys"
+            );
         }
     }
 
@@ -898,12 +904,20 @@ mod tests {
         let (_, spend_public, view_secret, view_public) = generate_test_keys();
         let mut manager = SubaddressManager::new(view_secret, spend_public, view_public);
 
-        assert_eq!(manager.count(), 1, "fresh manager holds only the main address");
+        assert_eq!(
+            manager.count(),
+            1,
+            "fresh manager holds only the main address"
+        );
         manager.generate_at(SubaddressIndex::MAIN);
         manager.generate_at(SubaddressIndex::new(0, 0));
         assert_eq!(manager.count(), 1, "main (0,0) must not be double-counted");
         assert_eq!(
-            manager.get(SubaddressIndex::MAIN).unwrap().spend_public.as_bytes(),
+            manager
+                .get(SubaddressIndex::MAIN)
+                .unwrap()
+                .spend_public
+                .as_bytes(),
             spend_public.as_bytes()
         );
     }
@@ -917,18 +931,33 @@ mod tests {
         manager.generate_at(SubaddressIndex::new(0, 1));
 
         let net = Network::Testnet;
-        let sub_addr = manager.get(SubaddressIndex::new(0, 1)).unwrap().address(net);
+        let sub_addr = manager
+            .get(SubaddressIndex::new(0, 1))
+            .unwrap()
+            .address(net);
         let main_addr = manager.get(SubaddressIndex::MAIN).unwrap().address(net);
 
-        assert_eq!(sub_addr.address_type, crate::primitives::AddressType::Subaddress);
-        assert_eq!(main_addr.address_type, crate::primitives::AddressType::Standard);
+        assert_eq!(
+            sub_addr.address_type,
+            crate::primitives::AddressType::Subaddress
+        );
+        assert_eq!(
+            main_addr.address_type,
+            crate::primitives::AddressType::Standard
+        );
 
         let sub_str = sub_addr.to_string();
         let main_str = main_addr.to_string();
-        assert_ne!(sub_str, main_str, "subaddress string must differ from primary");
+        assert_ne!(
+            sub_str, main_str,
+            "subaddress string must differ from primary"
+        );
 
         let parsed = Address::from_string(&sub_str).expect("testnet subaddress must round-trip");
-        assert_eq!(parsed.address_type, crate::primitives::AddressType::Subaddress);
+        assert_eq!(
+            parsed.address_type,
+            crate::primitives::AddressType::Subaddress
+        );
         assert_eq!(
             parsed.spend_public_key.as_bytes(),
             sub_addr.spend_public_key.as_bytes()

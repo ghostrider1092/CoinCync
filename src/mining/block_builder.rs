@@ -92,8 +92,8 @@ use crate::error::{Error, Result};
 use crate::mempool::SharedMempool;
 use crate::mining::template::build_template_json;
 use crate::primitives::{merkle_root, Amount, Hash, PublicKey};
-use rand::RngCore;
 use crate::transaction::{Transaction, TxOutput, TxType};
+use rand::RngCore;
 
 /// A full block awaiting only a valid nonce. The header's `nonce` is `0`;
 /// a miner searches for a nonce such that
@@ -112,7 +112,11 @@ impl CandidateBlock {
     /// The RandomX hashing inputs a miner needs: (anchor, tx_root, height).
     /// The PoW input is `hash_concat(anchor, nonce_le, tx_root)`.
     pub fn pow_inputs(&self) -> (Hash, Hash, u64) {
-        (self.header.anchor, self.header.tx_root, self.header.height.as_u64())
+        (
+            self.header.anchor,
+            self.header.tx_root,
+            self.header.height.as_u64(),
+        )
     }
 
     /// Finalize into a submittable [`Block`](crate::consensus::block::Block)
@@ -193,7 +197,9 @@ pub fn search_nonce(
             // [tid*slice + base, (tid+1)*slice + base) with no gap between them.
             // Without this the §3 no-gap invariant broke whenever nonce_base != 0
             // (and the caller advances nonce_base by 1_000_000 every round).
-            ((tid + 1) as u64).saturating_mul(slice).wrapping_add(nonce_base)
+            ((tid + 1) as u64)
+                .saturating_mul(slice)
+                .wrapping_add(nonce_base)
         };
         let stop = stop.clone();
         let tx = tx.clone();
@@ -275,7 +281,8 @@ pub fn build_block_from_template(
         .ok_or_else(|| Error::Internal("template missing 'prev_hash'".into()))?;
     let timestamp = template["timestamp"]
         .as_i64()
-        .ok_or_else(|| Error::Internal("template missing 'timestamp'".into()))? as u64;
+        .ok_or_else(|| Error::Internal("template missing 'timestamp'".into()))?
+        as u64;
 
     let prev_hash = Hash::from_hex(prev_hash_hex)
         .ok_or_else(|| Error::Internal(format!("template prev_hash {prev_hash_hex} is not hex")))?;
@@ -286,9 +293,9 @@ pub fn build_block_from_template(
         Hash::from_hex(target_hex)
             .ok_or_else(|| Error::Internal(format!("template target {target_hex} is not hex")))?
     } else {
-        let difficulty_str = template["difficulty"]
-            .as_str()
-            .ok_or_else(|| Error::Internal("template missing both 'target' and 'difficulty'".into()))?;
+        let difficulty_str = template["difficulty"].as_str().ok_or_else(|| {
+            Error::Internal("template missing both 'target' and 'difficulty'".into())
+        })?;
         let difficulty: u64 = difficulty_str
             .parse()
             .map_err(|_| Error::Internal(format!("difficulty {difficulty_str:?} is not a u64")))?;
@@ -601,7 +608,10 @@ mod tests {
 
         // Header basics.
         assert_eq!(candidate.header.height.as_u64(), height);
-        assert_eq!(candidate.header.nonce, 0, "candidate leaves nonce for the miner");
+        assert_eq!(
+            candidate.header.nonce, 0,
+            "candidate leaves nonce for the miner"
+        );
         assert_eq!(candidate.header.prev_hash, Hash::from_bytes([0x11u8; 32]));
         // #222: miner_pubkey must be zeroed, NEVER the payout spend key (`spend`,
         // passed above) — it has no consensus role and publishing it
@@ -626,7 +636,10 @@ mod tests {
 
         // tx_root must be the merkle root the validator recomputes.
         let expect_root = merkle_root(&[cb.hash()]);
-        assert_eq!(candidate.header.tx_root, expect_root, "tx_root binds the coinbase");
+        assert_eq!(
+            candidate.header.tx_root, expect_root,
+            "tx_root binds the coinbase"
+        );
 
         // Anchor must equal the validator's compute_full_anchor for this block —
         // audit §1: recompute with the header binding, proving miner==validator.
@@ -637,12 +650,18 @@ mod tests {
             &candidate.header.pow_binding(),
         )
         .expect("anchor");
-        assert_eq!(candidate.header.anchor, anchor.mixed_hash, "anchor matches consensus");
+        assert_eq!(
+            candidate.header.anchor, anchor.mixed_hash,
+            "anchor matches consensus"
+        );
 
         // Assembling with a nonce yields a block whose merkle root verifies.
         let block = candidate.into_block(42);
         assert_eq!(block.header.nonce, 42);
-        assert!(block.verify_merkle_root(), "assembled block merkle root is valid");
+        assert!(
+            block.verify_merkle_root(),
+            "assembled block merkle root is valid"
+        );
     }
 
     #[test]
@@ -678,7 +697,7 @@ mod tests {
     #[ignore]
     fn build_mine_submit_roundtrip() {
         std::env::set_var("COINCYNC_RANDOMX_LIGHT_MODE", "1");
-        use crate::chain::{Blockchain, BlockStatus};
+        use crate::chain::{BlockStatus, Blockchain};
         use crate::consensus::{compute_pow_hash, PowAlgorithm};
         use std::sync::Arc;
 
@@ -781,8 +800,13 @@ mod tests {
             "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
             "transactions": [],
         });
-        let res =
-            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        let res = build_block_from_template(
+            &template,
+            &spend,
+            &view,
+            NetworkType::Regtest,
+            SignalBits(0),
+        );
         assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
     }
 
@@ -796,8 +820,13 @@ mod tests {
             "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
             "transactions": [],
         });
-        let res =
-            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        let res = build_block_from_template(
+            &template,
+            &spend,
+            &view,
+            NetworkType::Regtest,
+            SignalBits(0),
+        );
         assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
     }
 
@@ -811,8 +840,13 @@ mod tests {
             "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
             "transactions": [],
         });
-        let res =
-            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        let res = build_block_from_template(
+            &template,
+            &spend,
+            &view,
+            NetworkType::Regtest,
+            SignalBits(0),
+        );
         assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
     }
 
@@ -827,8 +861,13 @@ mod tests {
             "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
             "transactions": [],
         });
-        let res =
-            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        let res = build_block_from_template(
+            &template,
+            &spend,
+            &view,
+            NetworkType::Regtest,
+            SignalBits(0),
+        );
         assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
     }
 
@@ -843,8 +882,13 @@ mod tests {
             "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
             "transactions": [],
         });
-        let res =
-            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        let res = build_block_from_template(
+            &template,
+            &spend,
+            &view,
+            NetworkType::Regtest,
+            SignalBits(0),
+        );
         assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
     }
 
@@ -862,9 +906,14 @@ mod tests {
             "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
             "transactions": [],
         });
-        let candidate =
-            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0))
-                .expect("difficulty fallback builds a candidate");
+        let candidate = build_block_from_template(
+            &template,
+            &spend,
+            &view,
+            NetworkType::Regtest,
+            SignalBits(0),
+        )
+        .expect("difficulty fallback builds a candidate");
         assert_eq!(
             candidate.header.target,
             Hash::from_difficulty(1000),
@@ -883,8 +932,13 @@ mod tests {
             "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
             "transactions": [],
         });
-        let res =
-            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        let res = build_block_from_template(
+            &template,
+            &spend,
+            &view,
+            NetworkType::Regtest,
+            SignalBits(0),
+        );
         assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
     }
 
@@ -898,8 +952,13 @@ mod tests {
             "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
             "transactions": [],
         });
-        let res =
-            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0));
+        let res = build_block_from_template(
+            &template,
+            &spend,
+            &view,
+            NetworkType::Regtest,
+            SignalBits(0),
+        );
         assert!(matches!(res, Err(Error::Internal(_))), "got {res:?}");
     }
 
@@ -938,9 +997,14 @@ mod tests {
             "network_magic": hex::encode(NetworkType::Regtest.magic_bytes()),
             "transactions": [tx_hex],
         });
-        let candidate =
-            build_block_from_template(&template, &spend, &view, NetworkType::Regtest, SignalBits(0))
-                .expect("build with one fee-paying tx");
+        let candidate = build_block_from_template(
+            &template,
+            &spend,
+            &view,
+            NetworkType::Regtest,
+            SignalBits(0),
+        )
+        .expect("build with one fee-paying tx");
 
         // Coinbase first, mempool tx second.
         assert_eq!(candidate.transactions.len(), 2);
@@ -1004,8 +1068,8 @@ mod tests {
     #[test]
     fn build_coinbase_with_fees_total_saturates() {
         let (spend, view) = test_keys();
-        let cb = build_coinbase_with_fees(10, &spend, &view, u64::MAX, SignalBits(0))
-            .expect("coinbase");
+        let cb =
+            build_coinbase_with_fees(10, &spend, &view, u64::MAX, SignalBits(0)).expect("coinbase");
         let paid = u64::from_le_bytes(cb.outputs[0].encrypted_amount[..8].try_into().unwrap());
         assert_eq!(paid, u64::MAX, "reward + u64::MAX fees saturates, no wrap");
     }
@@ -1045,8 +1109,7 @@ mod tests {
         let fees = 1_000_000u64;
         // A block at/above the 80% congestion threshold uses the congested split.
         let congested_size = crate::constants::MAX_BLOCK_SIZE; // 100% full
-        let got =
-            claimable_fees_for_block_size(NetworkType::Regtest, 1000, fees, congested_size);
+        let got = claimable_fees_for_block_size(NetworkType::Regtest, 1000, fees, congested_size);
         let expected = distribute_fee(Amount::from_atomic(fees), true)
             .to_miner
             .as_atomic();
@@ -1086,8 +1149,7 @@ mod tests {
     #[test]
     fn resolve_network_magic_missing_falls_back_to_network() {
         let template = serde_json::json!({});
-        let magic =
-            resolve_network_magic(&template, NetworkType::Testnet).expect("fallback magic");
+        let magic = resolve_network_magic(&template, NetworkType::Testnet).expect("fallback magic");
         assert_eq!(magic, NetworkType::Testnet.magic_bytes());
     }
 

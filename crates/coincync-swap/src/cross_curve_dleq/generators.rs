@@ -55,10 +55,9 @@ fn derive() -> Generators {
                 BtcScalar::from_be_bytes(be).expect("2^index is below the secp256k1 order");
             let mut le = be;
             le.reverse();
-            let cync_factor = Option::<RistrettoScalar>::from(RistrettoScalar::from_canonical_bytes(
-                le,
-            ))
-            .expect("2^index is below the Ristretto order");
+            let cync_factor =
+                Option::<RistrettoScalar>::from(RistrettoScalar::from_canonical_bytes(le))
+                    .expect("2^index is below the Ristretto order");
             let btc = h_btc
                 .mul_tweak(&secp, &btc_factor)
                 .expect("nonzero multiple of a prime-order generator");

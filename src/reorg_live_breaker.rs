@@ -30,7 +30,10 @@ use crate::fuse::{self, FaultReport};
 use crate::reorg_breaker::{detect, ReorgObservation};
 
 fn env_u32(name: &str, default: u32) -> u32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Competing-chain work as a percentage of the active chain's work, clamped to

@@ -109,9 +109,8 @@ pub fn verify_checkpoint_signature(
 
     let sig_bytes: [u8; 64] = decode_fixed(&sig.signature)
         .ok_or_else(|| Error::InvalidState("checkpoint signature: not 64-byte hex".into()))?;
-    let vk = VerifyingKey::from_bytes(&pubkey_bytes).map_err(|e| {
-        Error::InvalidState(format!("checkpoint signature: invalid pubkey: {}", e))
-    })?;
+    let vk = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|e| Error::InvalidState(format!("checkpoint signature: invalid pubkey: {}", e)))?;
     let signature = Signature::from_bytes(&sig_bytes);
     vk.verify(&signed_payload(cp), &signature).map_err(|_| {
         Error::InvalidState(
@@ -177,7 +176,9 @@ mod tests {
         forged.utxo_hash = Hash::from_bytes([0xEE; 32]); // swap the UTXO commitment
         let trusted = vec![pubkey_for_seed(&s)];
         let err = verify_checkpoint_signature(&forged, &sig, &trusted).unwrap_err();
-        assert!(format!("{:?}", err).to_lowercase().contains("verification failed"));
+        assert!(format!("{:?}", err)
+            .to_lowercase()
+            .contains("verification failed"));
     }
 
     #[test]

@@ -833,12 +833,16 @@ fn draw_mesh_strip(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Th
     let spans = vec![
         Span::styled(
             " MESH ",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("peers ", dim),
         Span::styled(
             format!("{peers} {mark}"),
-            Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("  {status_txt}"), Style::default().fg(status_color)),
         sep.clone(),
@@ -847,13 +851,25 @@ fn draw_mesh_strip(f: &mut Frame, area: Rect, metrics: &MetricsState, theme: &Th
         sep.clone(),
         Span::styled("tip-age ", dim),
         Span::styled(
-            if tip_age == 0 { "—".to_string() } else { format_duration(tip_age) },
-            Style::default().fg(if tip_age > 300 { theme.warn } else { theme.body }),
+            if tip_age == 0 {
+                "—".to_string()
+            } else {
+                format_duration(tip_age)
+            },
+            Style::default().fg(if tip_age > 300 {
+                theme.warn
+            } else {
+                theme.body
+            }),
         ),
         sep,
         Span::styled("ping ", dim),
         Span::styled(
-            if ping == 0 { "—".to_string() } else { format!("{ping}ms") },
+            if ping == 0 {
+                "—".to_string()
+            } else {
+                format!("{ping}ms")
+            },
             Style::default().fg(theme.body),
         ),
     ];
@@ -1193,7 +1209,11 @@ fn draw_blocks_timeline_and_ticker(
     } else {
         "(•ω•)╱"
     };
-    let mole_color = if just_found { theme.success } else { theme.accent };
+    let mole_color = if just_found {
+        theme.success
+    } else {
+        theme.accent
+    };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!(" {mole}"),

@@ -50,14 +50,10 @@ pub enum DecoySelectionError {
     #[error("decoy distribution contains an empty bucket at height {height}")]
     EmptyHeightBucket { height: u64 },
 
-    #[error(
-        "decoy distribution heights are not strictly increasing: {previous} then {current}"
-    )]
+    #[error("decoy distribution heights are not strictly increasing: {previous} then {current}")]
     NonIncreasingHeight { previous: u64, current: u64 },
 
-    #[error(
-        "decoy distribution height {height} is above snapshot height {snapshot_height}"
-    )]
+    #[error("decoy distribution height {height} is above snapshot height {snapshot_height}")]
     HeightAboveSnapshot { height: u64, snapshot_height: u64 },
 
     #[error("decoy distribution output count exceeds this platform's addressable size")]
@@ -75,9 +71,7 @@ pub enum DecoySelectionError {
     #[error("invalid ring size {got}; minimum is 2")]
     InvalidRingSize { got: usize },
 
-    #[error(
-        "covered lookup size overflow for {input_count} inputs at ring size {ring_size}"
-    )]
+    #[error("covered lookup size overflow for {input_count} inputs at ring size {ring_size}")]
     CoveredLookupSizeOverflow {
         input_count: usize,
         ring_size: usize,
@@ -159,19 +153,18 @@ impl From<DecoySelectionError> for WalletError {
     fn from(error: DecoySelectionError) -> Self {
         let message = error.to_string();
         match error {
-            DecoySelectionError::InvalidRingSize { got } => WalletError::InvalidRingSize {
-                expected: 2,
-                got,
-            },
+            DecoySelectionError::InvalidRingSize { got } => {
+                WalletError::InvalidRingSize { expected: 2, got }
+            }
             DecoySelectionError::InsufficientDecoys { available, needed } => {
                 WalletError::InsufficientDecoys { available, needed }
-            },
+            }
             DecoySelectionError::MissingRealOutputs
             | DecoySelectionError::DuplicateRealLocator(_)
             | DecoySelectionError::CoveredLookupSizeOverflow { .. }
             | DecoySelectionError::CoveredLookupCapacityExceeded { .. } => {
                 WalletError::InvalidParams(message)
-            },
+            }
             _ => WalletError::InvalidState(format!("decoy selection failed: {message}")),
         }
     }

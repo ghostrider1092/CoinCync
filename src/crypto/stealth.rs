@@ -1086,8 +1086,7 @@ pub fn generate_stealth_address_for<R: RngCore + CryptoRng>(
     // A typed Address carries its kind, so we can select the correct tx-pubkey
     // form: subaddresses (view key C_i = a*D_i) require R = r*D_i so the
     // recipient can detect/spend the output.
-    let is_subaddress =
-        recipient.address_type == crate::primitives::AddressType::Subaddress;
+    let is_subaddress = recipient.address_type == crate::primitives::AddressType::Subaddress;
     generate_stealth_address_checked_ext(
         &recipient.spend_public_key,
         &recipient.view_public_key,
@@ -1980,7 +1979,10 @@ mod tests {
         let bytes = stealth.to_bytes();
         let restored = StealthAddress::from_bytes(&bytes).expect("valid points round-trip");
 
-        assert_eq!(stealth.public_key.as_bytes(), restored.public_key.as_bytes());
+        assert_eq!(
+            stealth.public_key.as_bytes(),
+            restored.public_key.as_bytes()
+        );
         assert_eq!(
             stealth.tx_public_key.as_bytes(),
             restored.tx_public_key.as_bytes()

@@ -106,7 +106,10 @@ mod tests {
             timeout_blocks: 1000,
         }]);
 
-        for (a, b) in [(pid_entry.clone(), rec.clone()), (rec.clone(), pid_entry.clone())] {
+        for (a, b) in [
+            (pid_entry.clone(), rec.clone()),
+            (rec.clone(), pid_entry.clone()),
+        ] {
             let mut extra = a;
             extra.extend_from_slice(&b);
             // Payment id recovered intact...

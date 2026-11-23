@@ -773,7 +773,7 @@ impl WalletScanner {
                         shared_secret: [0u8; 32],
                         key_epoch: keys.epoch,
                         subaddress_index: None, // Coinbase always to primary address
-                        payment_id: None, // coinbase carries no payment id
+                        payment_id: None,       // coinbase carries no payment id
                     });
                 }
 
@@ -821,7 +821,7 @@ impl WalletScanner {
                         shared_secret: [0u8; 32],
                         key_epoch: keys.epoch,
                         subaddress_index: None, // Coinbase always to primary address
-                        payment_id: None, // coinbase carries no payment id
+                        payment_id: None,       // coinbase carries no payment id
                     });
                 }
 
@@ -3017,7 +3017,11 @@ mod tests {
         assert!(scanner.record_spend_for_last_block(spent_ki));
 
         // An equal-height sibling at 2 orphans block2.
-        let sibling2 = mk_block(2, Hash::from_bytes([0x77; 32]), vec![mk_transfer_tx(vec![])]);
+        let sibling2 = mk_block(
+            2,
+            Hash::from_bytes([0x77; 32]),
+            vec![mk_transfer_tx(vec![])],
+        );
         assert!(matches!(
             scanner.scan_block_with_result(&sibling2),
             ScanResult::ReorgDetected { .. }
@@ -3054,7 +3058,11 @@ mod tests {
         let spent_ki = KeyImage::from_bytes([0x33; 32]);
         assert!(scanner.record_spend_for_last_block(spent_ki));
 
-        let sibling2 = mk_block(2, Hash::from_bytes([0x99; 32]), vec![mk_transfer_tx(vec![])]);
+        let sibling2 = mk_block(
+            2,
+            Hash::from_bytes([0x99; 32]),
+            vec![mk_transfer_tx(vec![])],
+        );
         assert!(matches!(
             scanner.scan_block_with_result(&sibling2),
             ScanResult::ReorgDetected { .. }
@@ -3084,7 +3092,11 @@ mod tests {
         let h1 = block1.hash();
         scanner.scan_block_with_result(&block1).outputs_or_panic();
 
-        let sibling = mk_block(1, Hash::from_bytes([0xEE; 32]), vec![mk_transfer_tx(vec![])]);
+        let sibling = mk_block(
+            1,
+            Hash::from_bytes([0xEE; 32]),
+            vec![mk_transfer_tx(vec![])],
+        );
         match scanner.scan_block_with_result(&sibling) {
             ScanResult::ReorgDetected {
                 at_height,
@@ -3110,7 +3122,11 @@ mod tests {
         let block1 = mk_block(1, Hash::zero(), vec![mk_transfer_tx(vec![])]);
         scanner.scan_block_with_result(&block1).outputs_or_panic();
 
-        let ahead = mk_block(5, Hash::from_bytes([0xAB; 32]), vec![mk_transfer_tx(vec![])]);
+        let ahead = mk_block(
+            5,
+            Hash::from_bytes([0xAB; 32]),
+            vec![mk_transfer_tx(vec![])],
+        );
         match scanner.scan_block_with_result(&ahead) {
             ScanResult::Scanned { height, .. } => assert_eq!(height, 5),
             other => panic!(
@@ -3130,7 +3146,11 @@ mod tests {
         for h in 100u64..=102 {
             push_diff(&mut scanner, h, h as u8);
         }
-        let sibling = mk_block(102, Hash::from_bytes([0xCD; 32]), vec![mk_transfer_tx(vec![])]);
+        let sibling = mk_block(
+            102,
+            Hash::from_bytes([0xCD; 32]),
+            vec![mk_transfer_tx(vec![])],
+        );
         assert!(matches!(
             scanner.scan_block_with_result(&sibling),
             ScanResult::ReorgDetected { .. }
@@ -3229,7 +3249,10 @@ mod tests {
         let got = scanner
             .scan_output(&output, 0, Hash::zero(), true)
             .expect("detected");
-        assert_eq!(got.amount, 0, "short encrypted_amount decodes to 0, not panic");
+        assert_eq!(
+            got.amount, 0,
+            "short encrypted_amount decodes to 0, not panic"
+        );
     }
 
     /// Coinbase mined to a subaddress: the coinbase path only checks the PRIMARY
@@ -3271,7 +3294,9 @@ mod tests {
         scanner.add_keys(view, spub, 0);
         scanner.add_subaddress_keys(vec![(0, 1, sub_spend)]);
         assert!(
-            scanner.scan_output(&output, 0, Hash::zero(), true).is_none(),
+            scanner
+                .scan_output(&output, 0, Hash::zero(), true)
+                .is_none(),
             "coinbase-to-subaddress is not detected by the coinbase path (attribution gap)"
         );
     }
@@ -3398,7 +3423,9 @@ mod tests {
         let mut scanner = WalletScanner::new();
         scanner.add_keys(view, spub, 0);
         assert!(
-            scanner.scan_output(&output, 0, Hash::zero(), false).is_none(),
+            scanner
+                .scan_output(&output, 0, Hash::zero(), false)
+                .is_none(),
             "serial path must drop a stealth-owned output with a forged commitment"
         );
     }
@@ -3445,7 +3472,9 @@ mod tests {
 
         let mut scanner = WalletScanner::new();
         scanner.add_keys(view, spub, 0);
-        assert!(scanner.scan_output(&output, 0, Hash::zero(), false).is_none());
+        assert!(scanner
+            .scan_output(&output, 0, Hash::zero(), false)
+            .is_none());
     }
 
     /// `decrypted_to_utxo` derives the key image via the CLSAG formula and carries
@@ -3453,8 +3482,7 @@ mod tests {
     #[test]
     fn decrypted_to_utxo_derives_key_image_and_carries_lock_height() {
         use crate::crypto::{
-            compute_one_time_secret, generate_stealth_address_checked,
-            KeyImage as CurveKeyImage,
+            compute_one_time_secret, generate_stealth_address_checked, KeyImage as CurveKeyImage,
         };
         use rand::rngs::OsRng;
         let view = SecretKey::generate(&mut OsRng);
@@ -3487,7 +3515,11 @@ mod tests {
         };
 
         let utxo = decrypted_to_utxo(&decrypted, &view, &spend, 7).unwrap();
-        assert_eq!(utxo.lock_height, Some(500), "lock_height carried from TxOutput");
+        assert_eq!(
+            utxo.lock_height,
+            Some(500),
+            "lock_height carried from TxOutput"
+        );
 
         let recipient_stealth = StealthAddress {
             public_key: decrypted.output.stealth_address,
@@ -3605,7 +3637,9 @@ mod tests {
         let block = mk_block(
             1,
             Hash::zero(),
-            vec![mk_transfer_tx(vec![mk_owned_output(&vpub, &spub, 1_234_567, 0)])],
+            vec![mk_transfer_tx(vec![mk_owned_output(
+                &vpub, &spub, 1_234_567, 0,
+            )])],
         );
 
         let mut s1 = WalletScanner::new();
@@ -3667,7 +3701,9 @@ mod tests {
         let block = mk_block(
             1,
             Hash::zero(),
-            vec![mk_transfer_tx(vec![mk_owned_output(&vpub, &spub, 5_000, 0)])],
+            vec![mk_transfer_tx(vec![mk_owned_output(
+                &vpub, &spub, 5_000, 0,
+            )])],
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -3683,7 +3719,11 @@ mod tests {
         let mut bg2 = BackgroundScanner::new(wallet_db.clone());
         bg2.add_keys(view, spub, 0);
         bg2.load_state().unwrap();
-        assert_eq!(bg2.position(), saved, "scan position restored after restart");
+        assert_eq!(
+            bg2.position(),
+            saved,
+            "scan position restored after restart"
+        );
     }
 
     /// `WalletSyncService::run` drains the block channel, persists outputs, and

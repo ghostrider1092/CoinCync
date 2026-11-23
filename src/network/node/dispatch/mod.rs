@@ -321,8 +321,10 @@ pub(super) async fn process_message(
         }
 
         MessageType::GetOutputDigests => {
-            query::handle_get_output_digests(peer_id, payload, magic, peers, scorer, chain, senders)
-                .await?;
+            query::handle_get_output_digests(
+                peer_id, payload, magic, peers, scorer, chain, senders,
+            )
+            .await?;
         }
 
         MessageType::GetFilterCheckpoints => {

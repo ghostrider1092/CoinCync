@@ -43,11 +43,7 @@ impl NetStream {
     /// `b` writes and vice-versa; each end is tagged with the address of the
     /// peer it is talking to, so `peer_addr()` is meaningful on both. `buf` is
     /// the per-direction pipe capacity in bytes.
-    pub fn mem_pair(
-        a_addr: SocketAddr,
-        b_addr: SocketAddr,
-        buf: usize,
-    ) -> (NetStream, NetStream) {
+    pub fn mem_pair(a_addr: SocketAddr, b_addr: SocketAddr, buf: usize) -> (NetStream, NetStream) {
         let (a, b) = tokio::io::duplex(buf);
         // `a`'s peer lives at `b_addr`; `b`'s peer lives at `a_addr`.
         (NetStream::Mem(a, b_addr), NetStream::Mem(b, a_addr))

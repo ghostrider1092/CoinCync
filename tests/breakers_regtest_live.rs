@@ -59,22 +59,34 @@ fn breakers_on_live_regtest_chain() {
     // Carriage: embed the real root in coinbase extra, then recover it.
     let extra = sr::embed_in_extra(Vec::new(), &real_root);
     let recovered = sr::extract_from_extra(&extra);
-    assert_eq!(recovered, Some(real_root), "state root round-trips through coinbase extra");
+    assert_eq!(
+        recovered,
+        Some(real_root),
+        "state root round-trips through coinbase extra"
+    );
 
     // Enforce at this height against the real root → Match (no false trip on a
     // healthy live chain).
     let ok = sr::check(
-        sr::StateRootPolicy::Enforce { activation_height: height },
+        sr::StateRootPolicy::Enforce {
+            activation_height: height,
+        },
         height,
         recovered,
         real_root,
     );
-    assert_eq!(ok, sr::StateRootCheck::Match, "committed real root matches the live UTXO commitment");
+    assert_eq!(
+        ok,
+        sr::StateRootCheck::Match,
+        "committed real root matches the live UTXO commitment"
+    );
     assert!(!ok.rejects());
 
     // Tamper: a different actual root (node computed something else) → Mismatch.
     let tampered = sr::check(
-        sr::StateRootPolicy::Enforce { activation_height: height },
+        sr::StateRootPolicy::Enforce {
+            activation_height: height,
+        },
         height,
         recovered,
         Hash::from_bytes([0xEE; 32]),
@@ -104,8 +116,14 @@ fn breakers_on_live_regtest_chain() {
         max_supply: i128::MAX,
         committed_supply: Some(circulating),
     };
-    assert!(sb::detect(&healthy).is_empty(), "live supply reads as healthy");
-    assert_eq!(sb::evaluate(sb::BreakerPolicy::Armed, &healthy), sb::BreakerAction::AllowBlock);
+    assert!(
+        sb::detect(&healthy).is_empty(),
+        "live supply reads as healthy"
+    );
+    assert_eq!(
+        sb::evaluate(sb::BreakerPolicy::Armed, &healthy),
+        sb::BreakerAction::AllowBlock
+    );
 
     // Inject over-emission on top of the real supply → trip.
     let mut inflating = healthy;

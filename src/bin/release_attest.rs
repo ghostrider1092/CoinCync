@@ -21,7 +21,10 @@ use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use coincync::release::{sha256_hex, verify_signatures, ArtifactHash, ReleaseManifest};
 
 #[derive(Parser)]
-#[command(name = "coincync-release-attest", about = "Reproducible-build release attestation")]
+#[command(
+    name = "coincync-release-attest",
+    about = "Reproducible-build release attestation"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -76,13 +79,19 @@ fn main() -> ExitCode {
 
 fn parse_pubkey(hex_str: &str) -> Result<VerifyingKey, String> {
     let bytes = hex::decode(hex_str.trim()).map_err(|e| format!("bad pubkey hex: {e}"))?;
-    let arr: [u8; 32] = bytes.try_into().map_err(|_| "pubkey must be 32 bytes".to_string())?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "pubkey must be 32 bytes".to_string())?;
     VerifyingKey::from_bytes(&arr).map_err(|e| format!("invalid ed25519 pubkey: {e}"))
 }
 
 fn run() -> Result<(), String> {
     match Cli::parse().cmd {
-        Cmd::Manifest { version, commit, dir } => {
+        Cmd::Manifest {
+            version,
+            commit,
+            dir,
+        } => {
             let mut artifacts = Vec::new();
             let entries = std::fs::read_dir(&dir).map_err(|e| format!("read_dir {dir:?}: {e}"))?;
             for entry in entries {
@@ -116,9 +125,12 @@ fn run() -> Result<(), String> {
                 &std::fs::read(&manifest).map_err(|e| format!("read manifest: {e}"))?,
             )
             .map_err(|e| format!("parse manifest: {e}"))?;
-            let seed_hex = std::fs::read_to_string(&key_file).map_err(|e| format!("read key: {e}"))?;
+            let seed_hex =
+                std::fs::read_to_string(&key_file).map_err(|e| format!("read key: {e}"))?;
             let seed = hex::decode(seed_hex.trim()).map_err(|e| format!("bad seed hex: {e}"))?;
-            let seed: [u8; 32] = seed.try_into().map_err(|_| "seed must be 32 bytes".to_string())?;
+            let seed: [u8; 32] = seed
+                .try_into()
+                .map_err(|_| "seed must be 32 bytes".to_string())?;
             let key = SigningKey::from_bytes(&seed);
             let sig = manifest.sign(&key);
             println!(
@@ -148,14 +160,20 @@ fn run() -> Result<(), String> {
             }
 
             // 2. Parse maintainers + signatures, then enforce the N-of-M threshold.
-            let maintainer_keys: Vec<VerifyingKey> =
-                maintainers.iter().map(|m| parse_pubkey(m)).collect::<Result<_, _>>()?;
+            let maintainer_keys: Vec<VerifyingKey> = maintainers
+                .iter()
+                .map(|m| parse_pubkey(m))
+                .collect::<Result<_, _>>()?;
             let mut sig_pairs: Vec<(VerifyingKey, Signature)> = Vec::new();
             for s in &sigs {
-                let (pk, sg) = s.split_once(':').ok_or("sig must be <pubkey_hex>:<sig_hex>")?;
+                let (pk, sg) = s
+                    .split_once(':')
+                    .ok_or("sig must be <pubkey_hex>:<sig_hex>")?;
                 let vk = parse_pubkey(pk)?;
                 let sg = hex::decode(sg.trim()).map_err(|e| format!("bad sig hex: {e}"))?;
-                let sg: [u8; 64] = sg.try_into().map_err(|_| "signature must be 64 bytes".to_string())?;
+                let sg: [u8; 64] = sg
+                    .try_into()
+                    .map_err(|_| "signature must be 64 bytes".to_string())?;
                 sig_pairs.push((vk, Signature::from_bytes(&sg)));
             }
             let n = verify_signatures(&manifest, &sig_pairs, &maintainer_keys, threshold)?;

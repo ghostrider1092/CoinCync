@@ -32,9 +32,7 @@
 //!   THREAT: mixing rings from another snapshot → unprovable ring signature.
 //!   TESTS: `build_prepared_uniform_standard_change_below_min_adds_dummy_and_folds_to_fee`.
 
-use super::super::decoy_selection::{
-    AllocatedRings, DecoySelectionError, RealOutputIdentity,
-};
+use super::super::decoy_selection::{AllocatedRings, DecoySelectionError, RealOutputIdentity};
 use super::super::{KeyEpoch, UTXO};
 use super::types::PreparedInput;
 use crate::crypto::{compute_one_time_secret, BlindingFactor, PedersenCommitment, StealthAddress};

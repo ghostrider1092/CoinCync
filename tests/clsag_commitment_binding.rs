@@ -15,9 +15,7 @@
 //! for the challenge-binding property only; the soundness question stays open
 //! in the briefing (item #5) pending expert review + the hf-gated D-binding fix.
 
-use coincync::crypto::testbed::{
-    clsag_sign, clsag_verify, Commitment, SecretScalar,
-};
+use coincync::crypto::testbed::{clsag_sign, clsag_verify, Commitment, SecretScalar};
 // RingMember is re-exported from the same testbed module.
 use coincync::crypto::testbed::RingMember;
 use rand::rngs::OsRng;

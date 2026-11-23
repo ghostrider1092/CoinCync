@@ -161,8 +161,14 @@ mod tests {
     #[test]
     fn healthy_peerset_keeps_peers_in_both_modes() {
         assert!(detect(&healthy()).is_empty());
-        assert_eq!(evaluate(BreakerPolicy::Observe, &healthy()), BreakerAction::KeepPeers);
-        assert_eq!(evaluate(BreakerPolicy::Armed, &healthy()), BreakerAction::KeepPeers);
+        assert_eq!(
+            evaluate(BreakerPolicy::Observe, &healthy()),
+            BreakerAction::KeepPeers
+        );
+        assert_eq!(
+            evaluate(BreakerPolicy::Armed, &healthy()),
+            BreakerAction::KeepPeers
+        );
     }
 
     #[test]

@@ -243,7 +243,8 @@ pub fn apply_spark_payload(
     for tag in tags {
         if !store.mark_tag_spent(tag, height) {
             return Err(Error::CryptoError(
-                "spark v2 apply: linking tag already spent (validation should have rejected)".into(),
+                "spark v2 apply: linking tag already spent (validation should have rejected)"
+                    .into(),
             ));
         }
     }
@@ -692,13 +693,10 @@ mod tests {
         )
         .is_err());
         // Identity pseudo-output is rejected (balance-collapse guard).
-        assert!(verify_transparent_shielded_balance(
-            &[[0u8; 32]],
-            &[commit_bytes(50, r)],
-            0,
-            -100,
-        )
-        .is_err());
+        assert!(
+            verify_transparent_shielded_balance(&[[0u8; 32]], &[commit_bytes(50, r)], 0, -100,)
+                .is_err()
+        );
     }
 
     #[test]
@@ -732,7 +730,11 @@ mod tests {
         let o1 = derive_outpoint(&[a.clone(), b.clone()], 0);
         let o2 = derive_outpoint(&[b.clone(), a.clone()], 0); // reversed order
         assert_eq!(o1, o2, "input order must not change the outpoint");
-        assert_ne!(o1, derive_outpoint(&[a.clone(), b.clone()], 1), "vout distinguishes");
+        assert_ne!(
+            o1,
+            derive_outpoint(&[a.clone(), b.clone()], 1),
+            "vout distinguishes"
+        );
         assert_eq!(o1.len(), 32);
     }
 
@@ -795,9 +797,7 @@ mod tests {
         };
         match verify_spark_payload(&store, &StubBackend, &p, 0) {
             Err(Error::SparkVerifyFailed) => {} // guard fired before the backend ✓
-            other => panic!(
-                "expected SparkVerifyFailed from the empty-cover guard, got {other:?}"
-            ),
+            other => panic!("expected SparkVerifyFailed from the empty-cover guard, got {other:?}"),
         }
     }
 
@@ -818,7 +818,10 @@ mod tests {
         let tags = vec![Nullifier(vec![0x55u8; 34])];
         apply_spark_payload(&store, &payload, &inputs, &ctxs, &tags, 10).unwrap();
         assert_eq!(store.coin_count(), 2, "both mints added");
-        assert!(store.is_tag_spent(&Nullifier(vec![0x55u8; 34])), "tag marked spent");
+        assert!(
+            store.is_tag_spent(&Nullifier(vec![0x55u8; 34])),
+            "tag marked spent"
+        );
 
         // Re-applying the same tag → double-spend error.
         let empty = SparkPayload {
@@ -844,7 +847,7 @@ mod tests {
         let store = SparkPoolStore::new();
         let seed = b"v2-payload-seed";
         let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
-        // Seed the pool with N coins at height 1 (each keyed by a synthetic outpoint).
+                        // Seed the pool with N coins at height 1 (each keyed by a synthetic outpoint).
         for i in 0..n {
             let outpoint = format!("v2:seed:{i}").into_bytes();
             let ctx = serial_context(&outpoint).unwrap();
@@ -904,7 +907,9 @@ mod tests {
         let (_total, coins) = spark_connector::ffi::verify_mint_bundle(mint).unwrap();
         for (i, coin) in coins.iter().enumerate() {
             let op = derive_outpoint(&inputs, i as u32);
-            store.add_coin(op, coin.clone(), contexts[0].clone(), 1).unwrap();
+            store
+                .add_coin(op, coin.clone(), contexts[0].clone(), 1)
+                .unwrap();
         }
         let owned_op = derive_outpoint(&inputs, 2);
         let spend = build_spend_payload(seed, &store, &owned_op, 3_000, 0, 1).unwrap();
@@ -965,13 +970,18 @@ mod tests {
         // `outputs`), fed with the shared tx-level serial context — exactly as
         // the chain's apply hook does (the FFI extraction lives at the edge;
         // `apply_spark_payload` stays pure). `contexts` holds that shared ctx.
-        let mint = mint_payload.mint.as_ref().expect("authenticated mint bundle");
+        let mint = mint_payload
+            .mint
+            .as_ref()
+            .expect("authenticated mint bundle");
         let (_total, coins) =
             spark_connector::ffi::verify_mint_bundle(mint).expect("verify mint bundle");
         let shared_ctx = contexts[0].clone();
         for (i, coin) in coins.iter().enumerate() {
             let op = derive_outpoint(&mint_inputs, i as u32);
-            assert!(store.add_coin(op, coin.clone(), shared_ctx.clone(), 1).is_some());
+            assert!(store
+                .add_coin(op, coin.clone(), shared_ctx.clone(), 1)
+                .is_some());
         }
         assert_eq!(store.coin_count(), n);
 

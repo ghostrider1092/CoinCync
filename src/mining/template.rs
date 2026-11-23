@@ -288,7 +288,11 @@ mod congestion_packing_tests {
                         v.checked_mul(crate::consensus::fee_market::congestion_multiplier(cong))
                     })
                     .map(|v| v / 100);
-                assert_eq!(dynamic_min_fee(tx_size, cong), expected, "cong={cong} size={tx_size}");
+                assert_eq!(
+                    dynamic_min_fee(tx_size, cong),
+                    expected,
+                    "cong={cong} size={tx_size}"
+                );
             }
         }
     }
@@ -343,8 +347,12 @@ mod congestion_packing_tests {
     #[test]
     fn block_template_new_copies_header_sub_fields() {
         let header = make_header();
-        let template =
-            BlockTemplate::new(header, Vec::new(), Amount::from_atomic(11), Amount::from_atomic(22));
+        let template = BlockTemplate::new(
+            header,
+            Vec::new(),
+            Amount::from_atomic(11),
+            Amount::from_atomic(22),
+        );
 
         assert_eq!(template.supply_commitment, [7u8; 32]);
         assert_eq!(template.spark_set_root, [8u8; 32]);
@@ -369,7 +377,8 @@ mod congestion_packing_tests {
 
     #[test]
     fn block_template_update_nonce_and_timestamp_mutate_header() {
-        let mut template = BlockTemplate::new(make_header(), Vec::new(), Amount::ZERO, Amount::ZERO);
+        let mut template =
+            BlockTemplate::new(make_header(), Vec::new(), Amount::ZERO, Amount::ZERO);
         assert_eq!(template.header.nonce, 0);
 
         template.update_nonce(99);

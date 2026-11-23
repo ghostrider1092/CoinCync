@@ -82,14 +82,44 @@ fn print_live_status(
     use std::sync::atomic::Ordering::Relaxed;
 
     let term = std::io::stdout().is_terminal();
-    let teal_dim = Color::Rgb { r: 58, g: 130, b: 122 };
-    let green = Color::Rgb { r: 127, g: 184, b: 121 };
-    let amber = Color::Rgb { r: 218, g: 183, b: 94 };
-    let red = Color::Rgb { r: 209, g: 108, b: 108 };
-    let cyan = Color::Rgb { r: 122, g: 200, b: 214 };
-    let muted = Color::Rgb { r: 138, g: 148, b: 146 };
+    let teal_dim = Color::Rgb {
+        r: 58,
+        g: 130,
+        b: 122,
+    };
+    let green = Color::Rgb {
+        r: 127,
+        g: 184,
+        b: 121,
+    };
+    let amber = Color::Rgb {
+        r: 218,
+        g: 183,
+        b: 94,
+    };
+    let red = Color::Rgb {
+        r: 209,
+        g: 108,
+        b: 108,
+    };
+    let cyan = Color::Rgb {
+        r: 122,
+        g: 200,
+        b: 214,
+    };
+    let muted = Color::Rgb {
+        r: 138,
+        g: 148,
+        b: 146,
+    };
     let p = |s: String, col: Color| if term { s.with(col).to_string() } else { s };
-    let pb = |s: String, col: Color| if term { s.with(col).bold().to_string() } else { s };
+    let pb = |s: String, col: Color| {
+        if term {
+            s.with(col).bold().to_string()
+        } else {
+            s
+        }
+    };
     // Human-readable hashrate via the same auto-scaling formatter the TUI + bench
     // use, so "2300" reads as "2.3 KH/s" instead of a bare count a tired operator
     // misreads by 1000x.
@@ -184,19 +214,38 @@ fn print_live_status(
         segs.push(p(format!("peak {}", fmt_hr(peak_hps)), muted));
     }
     if let Some(h) = height {
-        segs.push(format!("{} {}", p("height".into(), muted), pb(format!("{h}"), cyan)));
+        segs.push(format!(
+            "{} {}",
+            p("height".into(), muted),
+            pb(format!("{h}"), cyan)
+        ));
     }
     segs.push(sync_seg);
-    segs.push(format!("{} {}", pb(format!("{peers}"), peer_col), p("peers".into(), muted)));
+    segs.push(format!(
+        "{} {}",
+        pb(format!("{peers}"), peer_col),
+        p("peers".into(), muted)
+    ));
     if light {
         segs.push(p("LIGHT".into(), amber));
     }
     if let Some(d) = difficulty {
-        segs.push(format!("{} {}", p("diff".into(), muted), pb(d.to_string(), cyan)));
+        segs.push(format!(
+            "{} {}",
+            p("diff".into(), muted),
+            pb(d.to_string(), cyan)
+        ));
     }
-    segs.push(p(format!("tip {tip_age}s"), if tip_age > 120 { amber } else { muted }));
+    segs.push(p(
+        format!("tip {tip_age}s"),
+        if tip_age > 120 { amber } else { muted },
+    ));
     if blocks_found > 0 {
-        segs.push(format!("{} {}", pb(format!("{blocks_found}"), green), p("blocks".into(), muted)));
+        segs.push(format!(
+            "{} {}",
+            pb(format!("{blocks_found}"), green),
+            p("blocks".into(), muted)
+        ));
     }
 
     println!("   {dot} {tag}  {}", segs.join(&sep));
@@ -316,7 +365,11 @@ pub async fn run_solo(
     // Dataset mode (full-mem vs light) is fixed for this process — compute once
     // and share it between the build spinner and the one-shot ready line.
     let full_mem = mining_active && !light_forced;
-    let dataset_mode = if full_mem { "full-mem 2048 MB" } else { "light 256 MB" };
+    let dataset_mode = if full_mem {
+        "full-mem 2048 MB"
+    } else {
+        "light 256 MB"
+    };
 
     // Indeterminate ELAPSED spinner for the FIRST RandomX dataset build. That
     // build is one blocking FFI call (~30-60s full-mem, minutes single-threaded)
@@ -340,8 +393,16 @@ pub async fn run_solo(
                 use crossterm::style::{Color, Stylize};
                 use std::io::Write as _;
                 use std::sync::atomic::Ordering::Relaxed;
-                let teal = Color::Rgb { r: 86, g: 194, b: 180 };
-                let body = Color::Rgb { r: 224, g: 230, b: 228 };
+                let teal = Color::Rgb {
+                    r: 86,
+                    g: 194,
+                    b: 180,
+                };
+                let body = Color::Rgb {
+                    r: 224,
+                    g: 230,
+                    b: 228,
+                };
                 let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
                 let mut i = 0usize;
                 while !stop.load(Relaxed) {
@@ -451,7 +512,11 @@ pub async fn run_solo(
                     if live_status {
                         use crossterm::style::{Color, Stylize};
                         use std::io::IsTerminal;
-                        let green = Color::Rgb { r: 127, g: 184, b: 121 };
+                        let green = Color::Rgb {
+                            r: 127,
+                            g: 184,
+                            b: 121,
+                        };
                         let dot = if std::io::stdout().is_terminal() {
                             "●".with(green).to_string()
                         } else {
@@ -468,10 +533,8 @@ pub async fn run_solo(
                         peak_hps = cur;
                     }
                     let degraded = peak_hps > 0 && cur.saturating_mul(2) < peak_hps;
-                    m.hashrate_degraded.store(
-                        u64::from(degraded),
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                    m.hashrate_degraded
+                        .store(u64::from(degraded), std::sync::atomic::Ordering::Relaxed);
                     if degraded {
                         let warn_due = last_health_warn
                             .map(|t| t.elapsed() > Duration::from_secs(300))
@@ -642,7 +705,8 @@ pub async fn run_solo(
                         last_sync_check = Some(Instant::now());
                         // Surface the gate decision + mesh size to the TUI.
                         if let Some(m) = metrics.as_ref() {
-                            m.mining_ready.store(ok, std::sync::atomic::Ordering::Relaxed);
+                            m.mining_ready
+                                .store(ok, std::sync::atomic::Ordering::Relaxed);
                             m.peers.store(peers, std::sync::atomic::Ordering::Relaxed);
                         }
                         (ok, reason)
@@ -1400,16 +1464,13 @@ async fn pool_session(
                     };
                     // First job arrives in login's result.job; later jobs are
                     // pushed as {"method":"job","params":{...}}.
-                    let job_val = v
-                        .get("result")
-                        .and_then(|r| r.get("job"))
-                        .or_else(|| {
-                            if v.get("method").and_then(|m| m.as_str()) == Some("job") {
-                                v.get("params")
-                            } else {
-                                None
-                            }
-                        });
+                    let job_val = v.get("result").and_then(|r| r.get("job")).or_else(|| {
+                        if v.get("method").and_then(|m| m.as_str()) == Some("job") {
+                            v.get("params")
+                        } else {
+                            None
+                        }
+                    });
                     if let Some(jv) = job_val {
                         if let Some(job) = parse_pool_job(jv) {
                             // Reject jobs whose advertised seed doesn't match the
@@ -1564,8 +1625,8 @@ use PowAlgorithm as _PowAlgorithmStillUsedTransitively;
 
 #[cfg(test)]
 mod tests {
-    use coincync::mining::{fork_diverged, FORK_DIVERGENCE_MARGIN};
     use super::slice_start_nonce;
+    use coincync::mining::{fork_diverged, FORK_DIVERGENCE_MARGIN};
 
     #[test]
     fn slice_start_nonce_keeps_any_base_inside_the_slice() {
@@ -1643,7 +1704,10 @@ mod tests {
             .get("peer_target_height")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        assert_eq!(peer_target, 10_042, "rig must read peer_target_height from get_info");
+        assert_eq!(
+            peer_target, 10_042,
+            "rig must read peer_target_height from get_info"
+        );
         assert!(
             fork_diverged(local, peer_target, FORK_DIVERGENCE_MARGIN),
             "with the field present, a runaway private fork trips the gate that #131 left disabled"
@@ -1668,8 +1732,8 @@ mod tests {
 
     #[test]
     fn claimable_fees_track_activation_and_congestion_by_block_size() {
-        use coincync::constants::{CONGESTION_THRESHOLD, FEE_DISTRIBUTION_HEIGHT, MAX_BLOCK_SIZE};
         use coincync::consensus::fee_market::distribute_fee;
+        use coincync::constants::{CONGESTION_THRESHOLD, FEE_DISTRIBUTION_HEIGHT, MAX_BLOCK_SIZE};
         use coincync::mining::block_builder::claimable_fees_for_block_size;
         use coincync::primitives::Amount;
 
@@ -1729,7 +1793,12 @@ mod tests {
         // Before activation the miner claims the WHOLE fee regardless of size.
         if FEE_DISTRIBUTION_HEIGHT > 0 {
             assert_eq!(
-                claimable_fees_for_block_size(net, FEE_DISTRIBUTION_HEIGHT - 1, fee, MAX_BLOCK_SIZE),
+                claimable_fees_for_block_size(
+                    net,
+                    FEE_DISTRIBUTION_HEIGHT - 1,
+                    fee,
+                    MAX_BLOCK_SIZE
+                ),
                 fee,
                 "below activation the miner claims the full fee, no burn"
             );

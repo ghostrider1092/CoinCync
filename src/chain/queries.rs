@@ -555,8 +555,8 @@ impl Blockchain {
         }
         let last = self.last_block_received_at.load(Relaxed);
         let now = crate::clock::unix_now(); // E1: single-source clock
-        // If `last` is 0 we have never accepted a peer block since startup;
-        // treat that as "long ago" so a phantom detected at boot still fires.
+                                            // If `last` is 0 we have never accepted a peer block since startup;
+                                            // treat that as "long ago" so a phantom detected at boot still fires.
         now.saturating_sub(last) >= stall_secs
     }
 

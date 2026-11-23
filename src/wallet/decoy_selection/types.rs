@@ -152,10 +152,7 @@ pub(super) struct RingPolicy {
 }
 
 impl RingPolicy {
-    pub(super) fn try_new(
-        ring_size: usize,
-        min_output_age: u64,
-    ) -> DecoySelectionResult<Self> {
+    pub(super) fn try_new(ring_size: usize, min_output_age: u64) -> DecoySelectionResult<Self> {
         if ring_size < 2 {
             return Err(DecoySelectionError::InvalidRingSize { got: ring_size });
         }
@@ -296,11 +293,7 @@ pub struct RealOutputIdentity {
 }
 
 impl RealOutputIdentity {
-    pub fn new(
-        locator: OutputLocator,
-        public_key: PublicKey,
-        commitment: [u8; 32],
-    ) -> Self {
+    pub fn new(locator: OutputLocator, public_key: PublicKey, commitment: [u8; 32]) -> Self {
         Self {
             locator,
             public_key,

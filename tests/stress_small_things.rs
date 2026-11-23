@@ -108,8 +108,9 @@ async fn hammer_rpc(rpc_port: u16, label: &str) {
     let errs = errors.load(Ordering::Relaxed);
     let mut lat = latencies.lock().unwrap().clone();
     lat.sort_unstable();
-    let pct =
-        |p: f64| -> f64 { lat[((lat.len() as f64 * p) as usize).min(lat.len() - 1)] as f64 / 1000.0 };
+    let pct = |p: f64| -> f64 {
+        lat[((lat.len() as f64 * p) as usize).min(lat.len() - 1)] as f64 / 1000.0
+    };
     let rps = TOTAL as f64 / elapsed.as_secs_f64();
 
     println!("\n=== rpc_concurrent_load [{label}] ===");
@@ -127,7 +128,10 @@ async fn hammer_rpc(rpc_port: u16, label: &str) {
     println!("errors     : {errs}");
 
     assert_eq!(errs, 0, "all requests should succeed under load [{label}]");
-    assert!(rps > 200.0, "throughput {rps:.0} req/s unexpectedly low [{label}]");
+    assert!(
+        rps > 200.0,
+        "throughput {rps:.0} req/s unexpectedly low [{label}]"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -151,7 +155,9 @@ async fn rpc_concurrent_load_mature_chain() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "load test; run with --ignored"]
 async fn empirical_decoy_sampler_throughput() {
-    use coincync::decoy::{DecoyDistributionSnapshot, HeightOutputCount, DECOY_LOCATOR_POLICY_VERSION};
+    use coincync::decoy::{
+        DecoyDistributionSnapshot, HeightOutputCount, DECOY_LOCATOR_POLICY_VERSION,
+    };
     use coincync::primitives::Hash;
     use coincync::wallet::decoy_selection::{
         sample_candidate_locators_empirical, ValidatedDecoySnapshot,
@@ -187,8 +193,9 @@ async fn empirical_decoy_sampler_throughput() {
     let mut total_decoys = 0usize;
     let mut non_unique_rings = 0usize;
     for _ in 0..RINGS {
-        let picked = sample_candidate_locators_empirical(&snap, 10, RING_DECOYS, &excluded, &mut rng)
-            .expect("sufficient decoys");
+        let picked =
+            sample_candidate_locators_empirical(&snap, 10, RING_DECOYS, &excluded, &mut rng)
+                .expect("sufficient decoys");
         assert_eq!(picked.len(), RING_DECOYS);
         let uniq: HashSet<_> = picked.iter().collect();
         if uniq.len() != RING_DECOYS {
@@ -203,9 +210,15 @@ async fn empirical_decoy_sampler_throughput() {
     println!("histogram  : {} heights", n_heights + 1);
     println!("rings       : {RINGS} x {RING_DECOYS} decoys = {total_decoys} draws");
     println!("wall time  : {:.2}s", elapsed.as_secs_f64());
-    println!("throughput : {rings_per_sec:.0} rings/s ({:.0} decoys/s)", total_decoys as f64 / elapsed.as_secs_f64());
+    println!(
+        "throughput : {rings_per_sec:.0} rings/s ({:.0} decoys/s)",
+        total_decoys as f64 / elapsed.as_secs_f64()
+    );
     println!("non-unique rings: {non_unique_rings}");
 
     assert_eq!(non_unique_rings, 0, "every ring must have unique decoys");
-    assert!(rings_per_sec > 100.0, "sampler throughput {rings_per_sec:.0} rings/s unexpectedly low");
+    assert!(
+        rings_per_sec > 100.0,
+        "sampler throughput {rings_per_sec:.0} rings/s unexpectedly low"
+    );
 }

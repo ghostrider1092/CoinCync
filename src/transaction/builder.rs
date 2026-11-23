@@ -1257,7 +1257,8 @@ mod tests {
         let mut b = TransactionBuilder::transfer();
         b.add_input_at_position(make_spendable_input(10_000_000), make_decoys(2), 0)
             .unwrap();
-        b.add_output(&make_recipient(5_000_000), 0, &mut OsRng).unwrap();
+        b.add_output(&make_recipient(5_000_000), 0, &mut OsRng)
+            .unwrap();
         b.set_fee(Amount::ZERO); // 10_000_000 != 5_000_000 + 0
         let err = b.build(&mut OsRng).err().unwrap();
         assert!(
@@ -1286,8 +1287,10 @@ mod tests {
     fn build_output_sum_overflow_rejected() {
         // Two u64::MAX outputs overflow the checked output-sum.
         let mut b = TransactionBuilder::new(TxType::Coinbase);
-        b.add_output(&make_recipient(u64::MAX), 0, &mut OsRng).unwrap();
-        b.add_output(&make_recipient(u64::MAX), 1, &mut OsRng).unwrap();
+        b.add_output(&make_recipient(u64::MAX), 0, &mut OsRng)
+            .unwrap();
+        b.add_output(&make_recipient(u64::MAX), 1, &mut OsRng)
+            .unwrap();
         let err = b.build(&mut OsRng).err().unwrap();
         assert!(
             matches!(err, Error::AmountOverflow),
@@ -1299,7 +1302,8 @@ mod tests {
     fn build_output_plus_fee_overflow_rejected() {
         // output_sum (u64::MAX) + fee (1) overflows outputs_plus_fee.
         let mut b = TransactionBuilder::new(TxType::Coinbase);
-        b.add_output(&make_recipient(u64::MAX), 0, &mut OsRng).unwrap();
+        b.add_output(&make_recipient(u64::MAX), 0, &mut OsRng)
+            .unwrap();
         b.set_fee(Amount::from_atomic(1));
         let err = b.build(&mut OsRng).err().unwrap();
         assert!(
@@ -1342,7 +1346,8 @@ mod tests {
         let mut b = TransactionBuilder::transfer();
         let err = b
             .add_input_at_position(make_spendable_input(1_000_000), vec![], 0)
-            .err().unwrap();
+            .err()
+            .unwrap();
         assert!(
             matches!(err, Error::InvalidRingSize { .. }),
             "ring_size < 2 must be InvalidRingSize, got {err:?}"
@@ -1355,7 +1360,8 @@ mod tests {
         // ring_size = 2, real_position 5 is out of range.
         let err = b
             .add_input_at_position(make_spendable_input(1_000_000), make_decoys(1), 5)
-            .err().unwrap();
+            .err()
+            .unwrap();
         assert!(
             matches!(err, Error::InvalidRingSize { .. }),
             "real_position >= ring_size must be InvalidRingSize, got {err:?}"
@@ -1392,7 +1398,8 @@ mod tests {
         // real at position 0 → the invalid decoy is parsed at position 1.
         let err = b
             .add_input_at_position(make_spendable_input(1_000_000), vec![bad_decoy], 0)
-            .err().unwrap();
+            .err()
+            .unwrap();
         assert!(
             matches!(err, Error::CryptoError(_)),
             "invalid decoy public key must be CryptoError, got {err:?}"
@@ -1412,7 +1419,10 @@ mod tests {
             )
             .unwrap();
             let idx = b.inputs[0].real_index;
-            assert!(idx < ring_size, "real_index {idx} must be in 0..{ring_size}");
+            assert!(
+                idx < ring_size,
+                "real_index {idx} must be in 0..{ring_size}"
+            );
             seen.insert(idx);
         }
         assert!(
@@ -1434,7 +1444,8 @@ mod tests {
         assert_eq!(b.outputs.len(), MAX_TX_OUTPUTS);
         let err = b
             .add_output(&make_recipient(2_000_000), 0, &mut OsRng)
-            .err().unwrap();
+            .err()
+            .unwrap();
         assert!(
             matches!(err, Error::InvalidOutputCount { .. }),
             "adding past MAX_TX_OUTPUTS must be InvalidOutputCount, got {err:?}"
@@ -1446,7 +1457,8 @@ mod tests {
         let mut b = TransactionBuilder::transfer();
         let err = b
             .add_output(&make_recipient(MIN_OUTPUT_AMOUNT - 1), 0, &mut OsRng)
-            .err().unwrap();
+            .err()
+            .unwrap();
         assert!(
             matches!(err, Error::OutputTooSmall { .. }),
             "amount < MIN_OUTPUT_AMOUNT must be OutputTooSmall, got {err:?}"

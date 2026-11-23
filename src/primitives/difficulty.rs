@@ -110,9 +110,13 @@ mod tests {
 
     #[test]
     fn cumulative_work_sums_and_saturates() {
-        let work: Difficulty = [Difficulty::new(10), Difficulty::new(20), Difficulty::new(30)]
-            .into_iter()
-            .sum();
+        let work: Difficulty = [
+            Difficulty::new(10),
+            Difficulty::new(20),
+            Difficulty::new(30),
+        ]
+        .into_iter()
+        .sum();
         assert_eq!(work, Difficulty::new(60));
         assert_eq!(Difficulty::new(5) + Difficulty::new(7), Difficulty::new(12));
         // Saturates instead of wrapping — a cumulative-work total can never roll

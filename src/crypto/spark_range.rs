@@ -69,7 +69,8 @@ pub struct ShieldedRangeProof {
 impl ShieldedRangeProof {
     /// Encode to opaque payload bytes.
     pub fn encode(&self) -> Vec<u8> {
-        borsh::to_vec(self).expect("ShieldedRangeProof borsh serialization is infallible into a Vec")
+        borsh::to_vec(self)
+            .expect("ShieldedRangeProof borsh serialization is infallible into a Vec")
     }
     /// Decode from payload bytes, rejecting trailing/garbage bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
@@ -78,7 +79,12 @@ impl ShieldedRangeProof {
     }
 }
 
-fn eq_challenge(v: &RistrettoPoint, c: &RistrettoPoint, r1: &RistrettoPoint, r2: &RistrettoPoint) -> Scalar {
+fn eq_challenge(
+    v: &RistrettoPoint,
+    c: &RistrettoPoint,
+    r1: &RistrettoPoint,
+    r2: &RistrettoPoint,
+) -> Scalar {
     let mut h = Sha3_512::new();
     h.update(b"COINCYNC_SPARK_VALUE_EQ_FS_v1");
     h.update(v.compress().as_bytes());
@@ -160,9 +166,15 @@ fn verify_value_equality(
     let r2 = PeerPoint::decode_non_identity(proof.r2)
         .map_err(|_| Error::SparkVerifyFailed)?
         .into_point();
-    let zv = *PeerScalar::decode(proof.zv).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
-    let zb = *PeerScalar::decode(proof.zb).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
-    let zr = *PeerScalar::decode(proof.zr).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
+    let zv = *PeerScalar::decode(proof.zv)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
+    let zb = *PeerScalar::decode(proof.zb)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
+    let zr = *PeerScalar::decode(proof.zr)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
     let c = eq_challenge(v_point, c_point, &r1, &r2);
     // Same z_v in both equations ⇒ same v across the two bases.
     if gv * zv + k * zb != r1 + v_point * c {
@@ -346,13 +358,29 @@ mod tests {
         // rejects a value mismatch.
         let t = TransparentBridge;
         let pt = t.prove(value, &r_m, &b, &mut rng);
-        assert!(t.verify(&monero_c, &spark_v, &pt).is_ok(), "{}", t.boundary());
-        assert!(t.verify(&monero_c, &spark_wrong, &pt).is_err(), "{}", t.boundary());
+        assert!(
+            t.verify(&monero_c, &spark_v, &pt).is_ok(),
+            "{}",
+            t.boundary()
+        );
+        assert!(
+            t.verify(&monero_c, &spark_wrong, &pt).is_err(),
+            "{}",
+            t.boundary()
+        );
 
         let k = KernelBridge;
         let pk = k.prove(value, &r_m, &b, &mut rng);
-        assert!(k.verify(&monero_c, &spark_v, &pk).is_ok(), "{}", k.boundary());
-        assert!(k.verify(&monero_c, &spark_wrong, &pk).is_err(), "{}", k.boundary());
+        assert!(
+            k.verify(&monero_c, &spark_v, &pk).is_ok(),
+            "{}",
+            k.boundary()
+        );
+        assert!(
+            k.verify(&monero_c, &spark_wrong, &pk).is_err(),
+            "{}",
+            k.boundary()
+        );
     }
 
     #[test]
@@ -368,10 +396,15 @@ mod tests {
         // Wire round-trip of the translated binding (rides in the payload).
         let bytes = translated.encode();
         assert!(bridge
-            .verify(&v_commit(value, &b), &ShieldedRangeProof::from_bytes(&bytes).unwrap())
+            .verify(
+                &v_commit(value, &b),
+                &ShieldedRangeProof::from_bytes(&bytes).unwrap()
+            )
             .is_ok());
         // Mismatched Spark value → translation does not hold.
-        assert!(bridge.verify(&v_commit(value + 1, &b), &translated).is_err());
+        assert!(bridge
+            .verify(&v_commit(value + 1, &b), &translated)
+            .is_err());
     }
 
     #[test]

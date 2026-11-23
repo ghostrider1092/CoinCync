@@ -109,11 +109,7 @@ pub(super) fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
         .as_atomic()
         .saturating_add(utxos[indices[1]].amount.as_atomic());
     if largest_pair_sum < target_value {
-        return Err(no_pair_covers_error(
-            utxos,
-            target_value,
-            largest_pair_sum,
-        ));
+        return Err(no_pair_covers_error(utxos, target_value, largest_pair_sum));
     }
 
     let mut candidates: Vec<(usize, usize, u64)> = Vec::new();
@@ -133,11 +129,7 @@ pub(super) fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
     }
 
     if candidates.is_empty() {
-        return Err(no_pair_covers_error(
-            utxos,
-            target_value,
-            largest_pair_sum,
-        ));
+        return Err(no_pair_covers_error(utxos, target_value, largest_pair_sum));
     }
 
     let threshold = best_excess
@@ -147,17 +139,11 @@ pub(super) fn select_utxos_uniform<'a, R: RngCore + CryptoRng>(
         .iter()
         .filter(|(_, _, excess)| *excess <= threshold)
         .collect();
-    let &&(left, right, _) = good_candidates
-        .choose(rng)
-        .unwrap_or(&&candidates[0]);
+    let &&(left, right, _) = good_candidates.choose(rng).unwrap_or(&&candidates[0]);
     Ok(vec![utxos[left], utxos[right]])
 }
 
-fn no_pair_covers_error(
-    utxos: &[&UTXO],
-    target_atomic: u64,
-    largest_pair_atomic: u64,
-) -> Error {
+fn no_pair_covers_error(utxos: &[&UTXO], target_atomic: u64, largest_pair_atomic: u64) -> Error {
     Error::NoUtxoPairCovers {
         target_atomic,
         utxo_count: utxos.len(),

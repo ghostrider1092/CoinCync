@@ -495,7 +495,13 @@ fn ring_challenge(
     let lpc = lp.compress();
     fs_challenge(
         b"spark_ring_v3",
-        &[set_digest, message, t.as_bytes(), lc.as_bytes(), lpc.as_bytes()],
+        &[
+            set_digest,
+            message,
+            t.as_bytes(),
+            lc.as_bytes(),
+            lpc.as_bytes(),
+        ],
     )
 }
 
@@ -622,7 +628,8 @@ pub fn prove_spark_spend<R: CryptoRng + RngCore>(
     let lp_real = g_gen * b; // serial equation nonce: same s-nonce b
 
     // Seed the NEXT position's challenge from the real opener.
-    c[(real_index + 1) % n] = ring_challenge(&set_digest, message, &serial_tag_point, &l_real, &lp_real);
+    c[(real_index + 1) % n] =
+        ring_challenge(&set_digest, message, &serial_tag_point, &l_real, &lp_real);
 
     // Walk the ring forward over the non-real positions, choosing uniform responses
     // and recovering each simulated nonce commitment. The final iteration
@@ -920,8 +927,7 @@ mod tests {
         let s = note.serial_scalar();
 
         // Positive control: the honest spend verifies and its tag is s*G.
-        let honest =
-            prove_spark_spend(&note, &anon_set, &indices, 0, &message, &mut rng).unwrap();
+        let honest = prove_spark_spend(&note, &anon_set, &indices, 0, &message, &mut rng).unwrap();
         verify_spark_spend(&honest, &anon_set).expect("honest n=1 must verify");
         assert_eq!(
             honest.serial_tag,
@@ -983,9 +989,8 @@ mod tests {
             let (note, anon_set) = ring_independent(&mut rng, 500, n, real_idx);
             let indices: Vec<u64> = (0..n as u64).collect();
             let message = [0x33u8; 32];
-            let proof =
-                prove_spark_spend(&note, &anon_set, &indices, real_idx, &message, &mut rng)
-                    .expect("prove");
+            let proof = prove_spark_spend(&note, &anon_set, &indices, real_idx, &message, &mut rng)
+                .expect("prove");
             verify_spark_spend(&proof, &anon_set).expect("verify");
 
             let decode = |b: &[u8; 32]| *crate::crypto::PeerScalar::decode(*b).unwrap().as_scalar();
@@ -1114,8 +1119,12 @@ mod tests {
         verify_spark_spend(&p0, &k0).expect("single p0");
         verify_spark_spend(&p1, &k1).expect("single p1");
         verify_spark_spend(&p2, &k2).expect("single p2");
-        batch_verify_sparks(&[(&p0, k0.as_slice()), (&p1, k1.as_slice()), (&p2, k2.as_slice())])
-            .expect("all-valid batch must pass");
+        batch_verify_sparks(&[
+            (&p0, k0.as_slice()),
+            (&p1, k1.as_slice()),
+            (&p2, k2.as_slice()),
+        ])
+        .expect("all-valid batch must pass");
 
         // Empty batch is vacuously valid.
         batch_verify_sparks(&[]).expect("empty batch must be Ok");
@@ -1129,8 +1138,12 @@ mod tests {
             "tampered proof must fail the single verifier"
         );
         assert!(
-            batch_verify_sparks(&[(&p0, k0.as_slice()), (&bad, k1.as_slice()), (&p2, k2.as_slice())])
-                .is_err(),
+            batch_verify_sparks(&[
+                (&p0, k0.as_slice()),
+                (&bad, k1.as_slice()),
+                (&p2, k2.as_slice())
+            ])
+            .is_err(),
             "a batch containing one invalid proof must be rejected"
         );
     }
@@ -1260,7 +1273,13 @@ mod tests {
 
         // Independent commitments whose openings the forger does not know.
         let commitments: Vec<RistrettoPoint> = (0..n)
-            .map(|i| spark_commit(7 * i as u64 + 1, &random_scalar(&mut rng), &random_scalar(&mut rng)))
+            .map(|i| {
+                spark_commit(
+                    7 * i as u64 + 1,
+                    &random_scalar(&mut rng),
+                    &random_scalar(&mut rng),
+                )
+            })
             .collect();
         let serial_tag = gen_g() * random_scalar(&mut rng); // arbitrary tag
         let message = [0x55u8; 32];

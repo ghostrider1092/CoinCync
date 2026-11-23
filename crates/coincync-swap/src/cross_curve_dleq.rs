@@ -77,8 +77,8 @@ mod transcript;
 
 use generators::generators;
 use joint_bit::{
-    btc_add, btc_generator, btc_mul, btc_mul_add, btc_mul_secret, btc_sub, commit_bit,
-    respond_bit, Challenge, JointBitResponse, JointBitStatement, PointPair, Responses,
+    btc_add, btc_generator, btc_mul, btc_mul_add, btc_mul_secret, btc_sub, commit_bit, respond_bit,
+    Challenge, JointBitResponse, JointBitStatement, PointPair, Responses,
 };
 use transcript::{derive_challenge, TranscriptInput};
 
@@ -221,7 +221,9 @@ impl CrossCurveProof {
         let blinding_sum_cync = Option::<RistrettoScalar>::from(
             RistrettoScalar::from_canonical_bytes(reader.take::<32>()?),
         )
-        .ok_or(Error::Verification("cross-curve blinding sum is not canonical"))?;
+        .ok_or(Error::Verification(
+            "cross-curve blinding sum is not canonical",
+        ))?;
 
         let mut bits = Vec::with_capacity(BIT_COUNT);
         for _ in 0..BIT_COUNT {
@@ -229,7 +231,9 @@ impl CrossCurveProof {
                 .map_err(|_| Error::Verification("cross-curve BTC commitment is invalid"))?;
             let commitment_cync = CompressedRistretto(reader.take::<32>()?)
                 .decompress()
-                .ok_or(Error::Verification("cross-curve CYNC commitment is invalid"))?;
+                .ok_or(Error::Verification(
+                    "cross-curve CYNC commitment is invalid",
+                ))?;
             if commitment_cync.is_identity() {
                 return Err(Error::Verification(
                     "cross-curve CYNC commitment is identity",
@@ -418,7 +422,9 @@ pub fn verify(proof: &CrossCurveProof, statement: &CrossCurveStatement) -> Resul
         sum_btc,
         btc_mul(&secp, Some(g_btc), &proof.blinding_sum_btc)?,
     )?
-    .ok_or(Error::Verification("cross-curve BTC unblinded sum is identity"))?;
+    .ok_or(Error::Verification(
+        "cross-curve BTC unblinded sum is identity",
+    ))?;
     let unblinded_cync = sum_cync - &proof.blinding_sum_cync * RISTRETTO_BASEPOINT_TABLE;
     if unblinded_cync.is_identity() {
         return Err(Error::Verification(
@@ -478,7 +484,9 @@ fn parse_public_keys(
         .map_err(|_| Error::Verification("cross-curve BTC public key is invalid"))?;
     let cync_point = CompressedRistretto(*cync_pub)
         .decompress()
-        .ok_or(Error::Verification("cross-curve CYNC public key is invalid"))?;
+        .ok_or(Error::Verification(
+            "cross-curve CYNC public key is invalid",
+        ))?;
     if cync_point.is_identity() {
         return Err(Error::Verification(
             "cross-curve CYNC public key must not be identity",

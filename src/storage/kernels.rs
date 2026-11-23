@@ -586,7 +586,13 @@ mod tests {
             .count();
         assert_eq!((ops.len(), inserts), (2, 2));
         let writes = KernelStore::staged_ops_to_writes(&ops);
-        assert_eq!(writes.iter().filter(|(t, _, v)| *t == 0 && v.is_some()).count(), 2);
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|(t, _, v)| *t == 0 && v.is_some())
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -646,7 +652,10 @@ mod tests {
             let empty_root = store.current_root();
             apply_block(&store, 1, &[kernel(0xA1, 1)]);
             apply_block(&store, 2, &[kernel(0xB1, 2)]);
-            assert!(store.len() > 0 && store.checkpoint_count() > 0, "non-empty before clear");
+            assert!(
+                store.len() > 0 && store.checkpoint_count() > 0,
+                "non-empty before clear"
+            );
             store.clear().unwrap();
             assert_eq!(store.len(), 0, "in-memory kernels wiped");
             assert_eq!(store.checkpoint_count(), 0, "checkpoint stack wiped");

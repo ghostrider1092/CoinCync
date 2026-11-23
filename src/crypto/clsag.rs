@@ -205,7 +205,6 @@ fn clsag_hash_round(base: &Sha3_512, l: &RistrettoPoint, r: &RistrettoPoint) -> 
     Scalar::from_bytes_mod_order_wide(&hasher.finalize().into())
 }
 
-
 /// Aggregation-coefficient hash for CLSAG.
 ///
 /// SECURITY (C-1 fix, key-image malleability): both aggregation coefficients
@@ -810,8 +809,7 @@ mod tests {
         let real_commitment = Commitment::commit(value, &z_real);
         let z_pseudo = SecretScalar::from_bytes([0x44u8; 32]);
         let pseudo_output = Commitment::commit(value, &z_pseudo);
-        let blinding_diff =
-            SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
+        let blinding_diff = SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
         let d1 = SecretScalar::from_bytes([0x55u8; 32]);
         let d2 = SecretScalar::from_bytes([0x66u8; 32]);
         let ring = vec![
@@ -828,8 +826,16 @@ mod tests {
         let message = b"coincync-clsag-kat".to_vec();
         let sign = || {
             let mut rng = ChaCha20Rng::seed_from_u64(42);
-            clsag_sign(&message, &ring, 0, &secret, &blinding_diff, &pseudo_output, &mut rng)
-                .unwrap()
+            clsag_sign(
+                &message,
+                &ring,
+                0,
+                &secret,
+                &blinding_diff,
+                &pseudo_output,
+                &mut rng,
+            )
+            .unwrap()
         };
 
         let sig = sign();
@@ -849,7 +855,10 @@ mod tests {
             "8807b998b83a0ef9a9710b21cc7fd89a9a9b6ea9a1bd8a2bdede7b570d630973"
         );
         // Full-signature wire-format golden (SHA-256 of the borsh encoding).
-        assert_eq!(hex::encode(Sha256::digest(&bytes)), "67fcc3936e6f6621dd9ed3fe9684552666e173785e769a2920b34a7031bd99c3");
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            "67fcc3936e6f6621dd9ed3fe9684552666e173785e769a2920b34a7031bd99c3"
+        );
     }
 
     /// AUDIT (crypto M4): CLSAG was only ever exercised at ring size 2–3, so
@@ -1011,8 +1020,7 @@ mod tests {
                 mu_p * p + mu_c * c_diff.as_point().as_point()
             })
             .collect();
-        let aggregate_key_image =
-            mu_p * forged_ki.as_point().as_point() + mu_c * forged_d_point;
+        let aggregate_key_image = mu_p * forged_ki.as_point().as_point() + mu_c * forged_d_point;
 
         let alpha = *SecretScalar::random(&mut OsRng).as_scalar();
         let mut responses: Vec<Scalar> = (0..n)
@@ -1449,7 +1457,10 @@ mod tests {
             &pseudo_output,
             &mut OsRng,
         );
-        assert!(result.is_err(), "real_index >= ring length must be rejected");
+        assert!(
+            result.is_err(),
+            "real_index >= ring length must be rejected"
+        );
     }
 
     #[test]
@@ -1563,6 +1574,9 @@ mod tests {
         let ring = vec![public, decoy];
         // real_index == ring.len() is out of range.
         let result = simple_ring_sign(b"bad index", &ring, ring.len(), &secret, &mut OsRng);
-        assert!(result.is_err(), "real_index >= ring length must be rejected");
+        assert!(
+            result.is_err(),
+            "real_index >= ring length must be rejected"
+        );
     }
 }
