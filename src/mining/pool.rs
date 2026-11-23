@@ -71,6 +71,16 @@
 //!   ships silently. TESTS: `test_pool_config_default`, `test_pool_creation`,
 //!   `test_miner_connection_new`.
 
+// Cast-lint hard gate for this module (clippy cast grind, roadmap Tier-1c): every
+// narrowing/lossy cast below is either a `From`/`try_from` conversion or a
+// documented, guarded exception. A single file module, so this covers the in-file
+// `#[cfg(test)]` module too (verified cast-clean).
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -508,7 +518,7 @@ impl MiningPool {
         let window_shares: Vec<_> = shares
             .iter()
             .rev()
-            .take(self.config.pplns_window as usize)
+            .take(usize::try_from(self.config.pplns_window).unwrap_or(usize::MAX))
             .collect();
 
         if window_shares.is_empty() {
@@ -523,6 +533,9 @@ impl MiningPool {
 
         // Calculate net reward after pool fee (safe float-to-u64 cast)
         let fee_f64 = reward.as_atomic() as f64 * self.config.pool_fee / 100.0;
+        // Guarded f64->u64: the value is checked finite and non-negative and clamped
+        // to u64::MAX before the truncating cast, so it cannot wrap or lose magnitude.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let fee_u64 = if fee_f64.is_finite() && fee_f64 >= 0.0 {
             (fee_f64.min(u64::MAX as f64)) as u64
         } else {
@@ -541,6 +554,9 @@ impl MiningPool {
         for (address, diff) in address_diff {
             let share_ratio = diff as f64 / total_diff as f64;
             let payout_f64 = net_reward.as_atomic() as f64 * share_ratio;
+            // Guarded f64->u64: checked finite, non-negative, and clamped to u64::MAX
+            // before the truncating cast.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let payout = Amount::from_atomic(if payout_f64.is_finite() && payout_f64 >= 0.0 {
                 (payout_f64.min(u64::MAX as f64)) as u64
             } else {
@@ -552,7 +568,9 @@ impl MiningPool {
 
         // Prune old shares to prevent unbounded memory growth.
         // Keep 2x PPLNS window to allow for minor timing variations.
-        let max_shares = self.config.pplns_window as usize * 2;
+        let max_shares = usize::try_from(self.config.pplns_window)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(2);
         if shares.len() > max_shares {
             let drain_count = shares.len() - max_shares;
             shares.drain(..drain_count);
@@ -634,7 +652,7 @@ async fn handle_miner(
 
     loop {
         line.clear();
-        let mut limited = (&mut reader).take(MAX_LINE_LENGTH as u64);
+        let mut limited = (&mut reader).take(u64::try_from(MAX_LINE_LENGTH).unwrap_or(u64::MAX));
         match limited.read_line(&mut line).await {
             Ok(0) => break, // EOF
             Ok(_) => {
@@ -1035,8 +1053,9 @@ async fn process_stratum_request(
                     });
 
                     // Prune old shares beyond PPLNS window
-                    if shares.len() > config.pplns_window as usize * 2 {
-                        shares.drain(0..config.pplns_window as usize);
+                    let window = usize::try_from(config.pplns_window).unwrap_or(usize::MAX);
+                    if shares.len() > window.saturating_mul(2) {
+                        shares.drain(0..window);
                     }
                 }
 
@@ -1044,13 +1063,13 @@ async fn process_stratum_request(
                 let elapsed = miner.vardiff_window_start.elapsed();
                 if elapsed >= Duration::from_secs(60) {
                     let shares_per_minute =
-                        miner.vardiff_shares as f64 / elapsed.as_secs_f64() * 60.0;
+                        f64::from(miner.vardiff_shares) / elapsed.as_secs_f64() * 60.0;
 
-                    if shares_per_minute > config.target_shares_per_minute as f64 * 1.5 {
+                    if shares_per_minute > f64::from(config.target_shares_per_minute) * 1.5 {
                         // Too many shares, increase difficulty
                         miner.difficulty = miner.difficulty.saturating_mul(3) / 2; // *1.5 without float
                         miner.difficulty = miner.difficulty.min(config.max_difficulty);
-                    } else if shares_per_minute < config.target_shares_per_minute as f64 * 0.5 {
+                    } else if shares_per_minute < f64::from(config.target_shares_per_minute) * 0.5 {
                         // Too few shares, decrease difficulty.
                         // SAFETY: saturating_mul protects against u64 overflow when difficulty
                         // > u64::MAX/7 (~2.6e18). Plain `* 7` would panic in debug / wrap in
@@ -1136,13 +1155,16 @@ fn difficulty_to_target(difficulty: u64) -> Hash {
     let mut bytes = [0xFFu8; 32];
 
     if difficulty > 0 {
+        // log2 of a positive u64 is in [0, 64): finite and non-negative, so the
+        // f64->usize cast neither truncates meaningfully nor loses a sign.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let shift = (difficulty as f64).log2() as usize;
         if shift < 256 {
             for i in 0..(shift / 8).min(32) {
                 bytes[i] = 0;
             }
             if shift / 8 < 32 {
-                bytes[shift / 8] = (0xFF >> (shift % 8)) as u8;
+                bytes[shift / 8] = 0xFFu8 >> (shift % 8);
             }
         }
     }
