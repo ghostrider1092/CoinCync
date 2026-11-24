@@ -16,6 +16,16 @@
 //! A proof for an anonymity set of `N = 2^m` coins has all vectors of length
 //! `m = log2(N)`, so its size is O(log N).
 
+// Cast-lint discipline: this proof serialises scalars/points, never raw integer
+// widths, so every remaining integer cast is either a provably-bounded bit
+// extraction (0/1) or a platform-lossless widening. Deny the truncating/lossy
+// casts so new ones can't slip in; the test+bench module opts out below.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::crypto::peer_scalars::{PeerPoint, PeerScalar};
 use crate::error::{Error, Result};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -237,7 +247,7 @@ pub fn prove_one_of_many_gen_ctx<R: CryptoRng + RngCore>(
     }
 
     let k_gen = blind_gen;
-    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+    let bit = |j: usize| -> u8 { u8::from((l >> j) & 1 != 0) };
 
     // Round 1: per-bit commitments + saved randomness (in the (value_gen,
     // blind_gen) basis).
@@ -248,7 +258,7 @@ pub fn prove_one_of_many_gen_ctx<R: CryptoRng + RngCore>(
     let mut tj = Vec::with_capacity(m);
     let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..m {
-        let l_j = Scalar::from(bit(j) as u64);
+        let l_j = Scalar::from(bit(j));
         let a_j = Scalar::random(&mut *rng);
         let r_j = Scalar::random(&mut *rng);
         let s_j = Scalar::random(&mut *rng);
@@ -534,7 +544,7 @@ pub fn prove_one_of_many_ki_gen_ctx<R: CryptoRng + RngCore>(
         ));
     }
 
-    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+    let bit = |j: usize| -> u8 { u8::from((l >> j) & 1 != 0) };
 
     // Round 1: per-bit commitments (identical to the base proof).
     let mut lj = Vec::with_capacity(m);
@@ -544,7 +554,7 @@ pub fn prove_one_of_many_ki_gen_ctx<R: CryptoRng + RngCore>(
     let mut tj = Vec::with_capacity(m);
     let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..m {
-        let l_j = Scalar::from(bit(j) as u64);
+        let l_j = Scalar::from(bit(j));
         let a_j = Scalar::random(&mut *rng);
         let r_j = Scalar::random(&mut *rng);
         let s_j = Scalar::random(&mut *rng);
@@ -1277,7 +1287,7 @@ pub fn prove_one_of_many_hk_ctx<R: CryptoRng + RngCore>(
     if l >= n {
         return Err(Error::CryptoError("GK-HK: index out of range".into()));
     }
-    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+    let bit = |j: usize| -> u8 { u8::from((l >> j) & 1 != 0) };
 
     // Round 1: per-bit commitments (identical to the base one-of-many).
     let (mut lj, mut aj, mut rj, mut sj, mut tj) = (
@@ -1289,7 +1299,7 @@ pub fn prove_one_of_many_hk_ctx<R: CryptoRng + RngCore>(
     );
     let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..m {
-        let l_j = Scalar::from(bit(j) as u64);
+        let l_j = Scalar::from(bit(j));
         let a_j = Scalar::random(&mut *rng);
         let r_j = Scalar::random(&mut *rng);
         let s_j = Scalar::random(&mut *rng);
@@ -1616,7 +1626,7 @@ pub fn prove_spend_full<R: CryptoRng + RngCore>(
     let shifted: Vec<RistrettoPoint> = coins.iter().map(|c| c - v_point).collect();
     let k_coef = blinding - value_blinding;
     let tag = (ki_gen * x_l).compress().to_bytes();
-    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+    let bit = |j: usize| -> u8 { u8::from((l >> j) & 1 != 0) };
 
     // Round 1: per-bit commitments (G,K basis), identical to the base/HK proofs.
     let (mut lj, mut aj, mut rj, mut sj, mut tj) = (
@@ -1628,7 +1638,7 @@ pub fn prove_spend_full<R: CryptoRng + RngCore>(
     );
     let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..m {
-        let l_j = Scalar::from(bit(j) as u64);
+        let l_j = Scalar::from(bit(j));
         let a_j = Scalar::random(&mut *rng);
         let r_j = Scalar::random(&mut *rng);
         let s_j = Scalar::random(&mut *rng);
@@ -1981,7 +1991,7 @@ pub fn prove_spend_spark<R: CryptoRng + RngCore>(
     let shifted: Vec<RistrettoPoint> = coins.iter().map(|c| c - v_point).collect();
     let k_coef = blinding - value_blinding;
     let nullifier = (u * serial).compress().to_bytes();
-    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+    let bit = |j: usize| -> u8 { u8::from((l >> j) & 1 != 0) };
 
     let (mut lj, mut aj, mut rj, mut sj, mut tj) = (
         Vec::with_capacity(m),
@@ -1992,7 +2002,7 @@ pub fn prove_spend_spark<R: CryptoRng + RngCore>(
     );
     let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..m {
-        let l_j = Scalar::from(bit(j) as u64);
+        let l_j = Scalar::from(bit(j));
         let a_j = Scalar::random(&mut *rng);
         let r_j = Scalar::random(&mut *rng);
         let s_j = Scalar::random(&mut *rng);
@@ -2346,6 +2356,15 @@ impl SparkSpendProofV3 {
 
 #[cfg(test)]
 mod tests {
+    // Tests and benches freely cast loop indices / sample counts / timings for
+    // fixture generation and throughput math; none of it is proof data, so opt
+    // this module out of the file-level cast denies.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless,
+        clippy::cast_precision_loss
+    )]
     use super::*;
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
     use curve25519_dalek::scalar::Scalar;
