@@ -136,7 +136,7 @@ impl Blockchain {
                     out.push(d);
                 }
             } else {
-                let off = (h - fork_point - 1) as usize;
+                let off = usize::try_from(h - fork_point - 1).unwrap_or(usize::MAX);
                 if let Some(&(fh, ts, tgt)) = fork.get(off) {
                     out.push(DifficultyBlock {
                         height: fh,

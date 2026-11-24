@@ -151,6 +151,18 @@
 //!   TESTS: `phase2_stores_rewind_together_through_helpers` (rewind-past-restart
 //!   loud-error branch is a gap).
 
+// Cast-lint hard gate (clippy cast grind, roadmap Tier-1c). Block application /
+// reorg is consensus: every cast here is either a value-identical `From`/`try_from`
+// conversion or a documented, guarded exception. CONSENSUS-OUTPUT and
+// OUTPOINT-DERIVATION (preimage) truncations keep their exact `as` form under a
+// documented `#[allow]` — a clamp-vs-wrap change there would itself be a consensus
+// change. The in-file `#[cfg(test)]` module carries its own scoped allow.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -788,6 +800,9 @@ impl Blockchain {
                         idx, height, e
                     )
                 });
+            // `idx as u32`: tx index within a block, bounded by MAX_TXS_PER_BLOCK ≪
+            // u32::MAX. Consensus apply — kept exact (no clamp/wrap divergence).
+            #[allow(clippy::cast_possible_truncation)]
             crate::consensus::shielded::apply_shielded_payload(store, &payload, height, idx as u32)
                 .unwrap_or_else(|e| {
                     panic!(
@@ -1250,7 +1265,7 @@ impl Blockchain {
                 .map_err(|e| format!("spark v2 tx {idx}: {e}"))?;
             // Cumulative pool-value check (prevention): reject before apply if
             // this tx would unshield more than the pool holds.
-            simulated_pool -= payload.value_balance as i128;
+            simulated_pool -= i128::from(payload.value_balance);
             if simulated_pool < 0 {
                 return Err(format!(
                     "spark v2 tx {idx}: pool underflow — unshields more than the shielded pool holds"
@@ -1304,6 +1319,9 @@ impl Blockchain {
                 let (_total, coins) = spark_connector::ffi::verify_mint_bundle(mint)
                     .ok_or_else(|| format!("spark v2 tx {idx}: mint bundle unparseable"))?;
                 for (i, coin) in coins.iter().enumerate() {
+                    // `i as u32`: mint-coin index, bounded by the bundle's coin count
+                    // ≪ u32::MAX. Feeds outpoint derivation (preimage) — kept exact.
+                    #[allow(clippy::cast_possible_truncation)]
                     let op = crate::consensus::spark_payload::derive_outpoint(
                         &input_outpoints,
                         i as u32,
@@ -1416,7 +1434,7 @@ impl Blockchain {
                 if let Some(sb) = &payload.spend {
                     let bundle_fee = spark_connector::ffi::spend_fee(&sb.bundle)
                         .ok_or_else(|| format!("spark v2 tx {idx}: unreadable spend bundle fee"))?;
-                    if payload.value_balance as i128 != bundle_fee as i128 {
+                    if i128::from(payload.value_balance) != i128::from(bundle_fee) {
                         return Err(format!(
                             "spark v2 tx {idx}: value_balance {} != spend bundle fee {} \
                              (cross-veil inflation guard)",
@@ -1509,6 +1527,9 @@ impl Blockchain {
                 .collect();
             let output_contexts: Vec<Vec<u8>> = (0..payload.outputs.len())
                 .map(|vout| {
+                    // `vout as u32`: output index, bounded by the payload's output
+                    // count ≪ u32::MAX. Feeds outpoint derivation (preimage) — exact.
+                    #[allow(clippy::cast_possible_truncation)]
                     let op = crate::consensus::spark_payload::derive_outpoint(
                         &input_outpoints,
                         vout as u32,
@@ -1549,6 +1570,9 @@ impl Blockchain {
                 )
                 .expect("serial_context derivation is infallible");
                 for (i, coin) in coins.iter().enumerate() {
+                    // `i as u32`: mint-coin index, bounded by the bundle's coin count
+                    // ≪ u32::MAX. Feeds outpoint derivation (preimage) — kept exact.
+                    #[allow(clippy::cast_possible_truncation)]
                     let op = crate::consensus::spark_payload::derive_outpoint(
                         &input_outpoints,
                         i as u32,
@@ -2016,7 +2040,7 @@ impl Blockchain {
                         inner.stats.total_supply = inner
                             .stats
                             .total_supply
-                            .checked_sub(emission.as_atomic() as u128)
+                            .checked_sub(u128::from(emission.as_atomic()))
                             .unwrap_or_else(|| {
                                 panic!(
                                     "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
@@ -2068,7 +2092,7 @@ impl Blockchain {
                         inner.stats.total_transactions = inner
                             .stats
                             .total_transactions
-                            .saturating_sub(txs.len() as u64);
+                            .saturating_sub(u64::try_from(txs.len()).unwrap_or(u64::MAX));
                     }
                 }
                 inner.height_to_hash.remove(&h);
@@ -2167,6 +2191,9 @@ impl Blockchain {
                 .flatten()
                 .map(|s| s.last_checkpoint)
                 .unwrap_or(0);
+            // `total_burned as u64`: persisted-state snapshot; total_burned (u128)
+            // ≤ total_supply ≪ u64::MAX in practice. Kept exact (persistence output).
+            #[allow(clippy::cast_possible_truncation)]
             let state = ChainStateData {
                 height: inner.stats.height,
                 tip_hash: inner.stats.tip_hash,
@@ -2230,7 +2257,7 @@ impl Blockchain {
                 let _ = crate::block_integrity_live_breaker::on_block_connected(
                     self.total_outputs_ever(),
                     self.reorg_disconnects_total(),
-                    self.utxo_count() as u64,
+                    u64::try_from(self.utxo_count()).unwrap_or(u64::MAX),
                 );
                 // ARM SWITCH (default OFF — arm height u64::MAX): once the
                 // BlockIntegrity breaker is armed at a height AND it has latched
@@ -2623,9 +2650,9 @@ impl Blockchain {
             // validated at the reorg apply site where the rewound stats equal its
             // parent's cumulative supply.
             if is_main_chain {
-                let post_emitted = inner.stats.total_supply.saturating_add(
-                    calculate_block_reward(block.header.height.as_u64()).as_atomic() as u128,
-                );
+                let post_emitted = inner.stats.total_supply.saturating_add(u128::from(
+                    calculate_block_reward(block.header.height.as_u64()).as_atomic(),
+                ));
                 let post_burned = inner
                     .stats
                     .total_burned
@@ -2738,7 +2765,8 @@ impl Blockchain {
                     };
                     inner.stats.height = block.header.height.as_u64();
                     inner.stats.total_blocks += 1;
-                    inner.stats.total_transactions += block.transactions.len() as u64;
+                    inner.stats.total_transactions +=
+                        u64::try_from(block.transactions.len()).unwrap_or(u64::MAX);
                     inner.stats.difficulty = difficulty;
                     inner.stats.tip_hash = hash;
                     inner.stats.total_difficulty += difficulty;
@@ -2760,7 +2788,7 @@ impl Blockchain {
                     inner.stats.total_supply = inner
                         .stats
                         .total_supply
-                        .checked_add(emission.as_atomic() as u128)
+                        .checked_add(u128::from(emission.as_atomic()))
                         .unwrap_or_else(|| {
                             panic!(
                                 "CONSENSUS CORRUPTION: supply overflow on block connect — \
@@ -2884,6 +2912,9 @@ impl Blockchain {
                         })?;
                         output_additions.push((*output.stealth_address.as_bytes(), bytes));
                     }
+                    // `tx_idx as u32`: tx index within a block, bounded by
+                    // MAX_TXS_PER_BLOCK ≪ u32::MAX — kept exact (DB tx-index key).
+                    #[allow(clippy::cast_possible_truncation)]
                     tx_index_adds.push((
                         *tx.hash().as_bytes(),
                         block.header.height.as_u64(),
@@ -2975,6 +3006,9 @@ impl Blockchain {
                     }
 
                     let stats = self.stats();
+                    // `total_burned as u64`: persisted-state snapshot; u128 value
+                    // ≤ total_supply ≪ u64::MAX. Kept exact (persistence output).
+                    #[allow(clippy::cast_possible_truncation)]
                     let state = ChainStateData {
                         tip_hash: hash,
                         height: block.header.height.as_u64(),
@@ -3421,7 +3455,7 @@ impl Blockchain {
                             let orphan_txs = inner.blocks.get(&oh).map(|b| b.transactions.clone());
                             if let Some(txs) = orphan_txs {
                                 disconnected_blocks += 1;
-                                disconnected_txs += txs.len() as u64;
+                                disconnected_txs += u64::try_from(txs.len()).unwrap_or(u64::MAX);
                                 // SECURITY (BUG-1): Remove outputs added by the orphaned
                                 // block AND un-mark key images spent by its inputs.
                                 // batch_disconnect_block now includes key_image_removals.
@@ -3481,7 +3515,7 @@ impl Blockchain {
                                 inner.stats.total_supply = inner
                                     .stats
                                     .total_supply
-                                    .checked_sub(emission.as_atomic() as u128)
+                                    .checked_sub(u128::from(emission.as_atomic()))
                                     .unwrap_or_else(|| {
                                         panic!(
         "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
@@ -3602,7 +3636,7 @@ impl Blockchain {
                                     }
                                 } else {
                                     // Above fork point: use already-validated fork blocks
-                                    let offset = (h - fork_point - 1) as usize;
+                                    let offset = usize::try_from(h - fork_point - 1).unwrap_or(usize::MAX);
                                     if offset < fork_idx {
                                         let fb = &fork_blocks[offset];
                                         diff_blocks.push(DifficultyBlock {
@@ -3691,10 +3725,10 @@ impl Blockchain {
                         // break path any invalid fork block uses — no partial
                         // mutation for this block. Gated OFF today.
                         {
-                            let post_emitted = inner.stats.total_supply.saturating_add(
+                            let post_emitted = inner.stats.total_supply.saturating_add(u128::from(
                                 calculate_block_reward(fork_block.header.height.as_u64())
-                                    .as_atomic() as u128,
-                            );
+                                    .as_atomic(),
+                            ));
                             let post_burned = inner
                                 .stats
                                 .total_burned
@@ -3769,7 +3803,7 @@ impl Blockchain {
                         inner.stats.total_supply = inner
                             .stats
                             .total_supply
-                            .checked_add(emission.as_atomic() as u128)
+                            .checked_add(u128::from(emission.as_atomic()))
                             .unwrap_or_else(|| {
                                 panic!(
                                     "CONSENSUS CORRUPTION: supply overflow on block connect — \
@@ -3898,10 +3932,9 @@ impl Blockchain {
                     // tip-validation failures use. Gated OFF today. Guarded on
                     // `reorg_error.is_none()` so a prior failure's message wins.
                     if reorg_error.is_none() {
-                        let post_emitted = inner.stats.total_supply.saturating_add(
-                            calculate_block_reward(block.header.height.as_u64()).as_atomic()
-                                as u128,
-                        );
+                        let post_emitted = inner.stats.total_supply.saturating_add(u128::from(
+                            calculate_block_reward(block.header.height.as_u64()).as_atomic(),
+                        ));
                         let post_burned = inner
                             .stats
                             .total_burned
@@ -3989,7 +4022,7 @@ impl Blockchain {
                                 inner.stats.total_supply = inner
                                     .stats
                                     .total_supply
-                                    .checked_sub(emission.as_atomic() as u128)
+                                    .checked_sub(u128::from(emission.as_atomic()))
                                     .unwrap_or_else(|| {
                                         panic!(
         "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
@@ -4108,7 +4141,7 @@ impl Blockchain {
                                         }
                                     }
                                 } else {
-                                    let offset = (h - fork_point - 1) as usize;
+                                    let offset = usize::try_from(h - fork_point - 1).unwrap_or(usize::MAX);
                                     if offset < fork_blocks.len() {
                                         let fb = &fork_blocks[offset];
                                         diff_blocks.push(DifficultyBlock {
@@ -4190,7 +4223,7 @@ impl Blockchain {
                             inner.stats.total_supply = inner
                                 .stats
                                 .total_supply
-                                .checked_sub(emission.as_atomic() as u128)
+                                .checked_sub(u128::from(emission.as_atomic()))
                                 .unwrap_or_else(|| {
                                     panic!(
         "CONSENSUS CORRUPTION: supply underflow on reorg rollback — \
@@ -4297,7 +4330,7 @@ impl Blockchain {
                         inner.stats.total_supply = inner
                             .stats
                             .total_supply
-                            .checked_add(tip_emission.as_atomic() as u128)
+                            .checked_add(u128::from(tip_emission.as_atomic()))
                             .unwrap_or_else(|| {
                                 panic!(
                                     "CONSENSUS CORRUPTION: supply overflow on reorg tip apply — \
@@ -4376,12 +4409,14 @@ impl Blockchain {
                         //     the "stats-only counters saturate rather
                         //     than halt" pattern below is retained on its
                         //     own reasoning.
-                        let reconnected_blocks = fork_blocks.len() as u64 + 1; // +1 for triggering block
+                        // +1 for triggering block
+                        let reconnected_blocks =
+                            u64::try_from(fork_blocks.len()).unwrap_or(u64::MAX) + 1;
                         let reconnected_txs: u64 = fork_blocks
                             .iter()
-                            .map(|b| b.transactions.len() as u64)
+                            .map(|b| u64::try_from(b.transactions.len()).unwrap_or(u64::MAX))
                             .sum::<u64>()
-                            + block.transactions.len() as u64;
+                            + u64::try_from(block.transactions.len()).unwrap_or(u64::MAX);
                         inner.stats.total_blocks =
                             match inner.stats.total_blocks.checked_sub(disconnected_blocks) {
                                 Some(v) => v.saturating_add(reconnected_blocks),
@@ -4500,6 +4535,9 @@ impl Blockchain {
                                     })?;
                                     oi.push((*output.stealth_address.as_bytes(), data));
                                 }
+                                // `idx as u32`: tx index within a block, bounded by
+                                // MAX_TXS_PER_BLOCK ≪ u32::MAX — kept exact.
+                                #[allow(clippy::cast_possible_truncation)]
                                 ti.push((*tx.hash().as_bytes(), h, idx as u32));
                             }
                             Ok(())
@@ -4534,6 +4572,9 @@ impl Blockchain {
                             .get_state()?
                             .map(|s| s.last_checkpoint)
                             .unwrap_or(0);
+                        // `total_burned as u64`: persisted-state snapshot; u128 value
+                        // ≤ total_supply ≪ u64::MAX. Kept exact (persistence output).
+                        #[allow(clippy::cast_possible_truncation)]
                         let new_state = ChainStateData {
                             tip_hash: hash,
                             height: new_tip_height,
@@ -4935,12 +4976,17 @@ pub(crate) fn block_fee_burn(network: crate::config::NetworkType, block: &Block)
 
     // Integer congestion, mirroring validation.rs `max_coinbase` exactly.
     let size = block.size();
+    // `... as u64`: size·100/MAX_BLOCK_SIZE is a small percentage (0..~100), so the
+    // u128->u64 cast is exact. Kept byte-for-byte to mirror validation.rs.
+    #[allow(clippy::cast_possible_truncation)]
     let congestion_pct = ((size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128) as u64;
     let congested = congestion_pct >= crate::constants::CONGESTION_THRESHOLD;
 
-    crate::consensus::fee_market::distribute_fee(total_fees, congested)
-        .burned
-        .as_atomic() as u128
+    u128::from(
+        crate::consensus::fee_market::distribute_fee(total_fees, congested)
+            .burned
+            .as_atomic(),
+    )
 }
 
 impl Default for Blockchain {
@@ -5004,6 +5050,13 @@ pub fn create_genesis_block() -> Block {
 
 #[cfg(test)]
 mod tests {
+    // Test-only casts (throwaway fixture values, supply-headroom math, f64/enum
+    // conversions): the file-level cast deny reaches this module, so scope an allow.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     // Runtime-network hardening: `block_fee_burn` now resolves the activation

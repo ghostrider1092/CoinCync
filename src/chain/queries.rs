@@ -201,7 +201,9 @@ impl Blockchain {
                 return parent;
             }
             // next_diff <= parent_diff <= genesis difficulty, so it always fits u64.
-            let next_diff = (parent_diff / 3).max(floor).min(u64::MAX as u128) as u64;
+            // `... as u64`: clamped to u64::MAX by the preceding `.min(..)`, so exact.
+            #[allow(clippy::cast_possible_truncation)]
+            let next_diff = (parent_diff / 3).max(floor).min(u128::from(u64::MAX)) as u64;
             return Hash::from_difficulty(next_diff);
         }
         if blocks.len() >= 2 {
