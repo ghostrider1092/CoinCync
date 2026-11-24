@@ -13,6 +13,17 @@
 //! whatever `SparkBackend` the caller passes (the fail-closed `StubBackend`
 //! without `libspark-ffi`, the real libspark backend with it).
 
+// Cast-lint discipline: length prefixes hashed into preimages stay
+// `len() as u64` (usize->u64, platform-lossless and byte-exact — clippy does
+// not lint them); the `vout as u32` that feeds the outpoint preimage is a
+// bounded, documented-exact truncation; pool-index lookups use `try_from`.
+// Deny the lossy casts so new ones can't slip in; the test module opts out.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use spark_connector::{CoinBytes, Nullifier, SparkBackend, SpendBytes};
 
@@ -250,6 +261,11 @@ pub fn apply_spark_payload(
     }
     // Then mints: each coin keyed by its deterministic outpoint.
     for (vout, coin) in payload.outputs.iter().enumerate() {
+        // `vout` is the output index within this tx (≤ outputs.len(), itself
+        // far below u32::MAX) and feeds the outpoint PREIMAGE via
+        // derive_outpoint — the width must stay exact (clamp-vs-wrap would
+        // change the derived outpoint), so keep the cast, don't try_from.
+        #[allow(clippy::cast_possible_truncation)]
         let outpoint = derive_outpoint(input_outpoints, vout as u32);
         if store
             .add_coin(
@@ -389,8 +405,8 @@ pub fn verify_mint_shield_in(mint_bundle: &[u8], value_balance: i64) -> Result<(
     }
     let (total, _coins) = spark_connector::ffi::verify_mint_bundle(mint_bundle)
         .ok_or_else(|| Error::CryptoError("mint bundle failed value-proof verification".into()))?;
-    let shield_in = (value_balance as i128).unsigned_abs();
-    if (total as u128) != shield_in {
+    let shield_in = i128::from(value_balance).unsigned_abs();
+    if u128::from(total) != shield_in {
         return Err(Error::CryptoError(format!(
             "mint total {total} != shield-in amount {shield_in} (value_balance {value_balance})"
         )));
@@ -517,7 +533,7 @@ pub mod build {
     ) -> Option<SparkPayload> {
         let cover = store.cover_set_at(cover_set_id, anchor_height);
         let ctx = store.context_for(owned_outpoint)?;
-        let idx = store.index_of(owned_outpoint)? as usize;
+        let idx = usize::try_from(store.index_of(owned_outpoint)?).unwrap_or(usize::MAX);
         if idx >= cover.len() {
             return None; // owned coin not inside the anchored cover set
         }
@@ -541,6 +557,14 @@ pub mod build {
 
 #[cfg(test)]
 mod tests {
+    // Proptests cast perturbation/seed values (i128/usize) freely to build
+    // balance-check fixtures; not consensus data, so opt out of the file-level
+    // cast denies.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     /// Shielded-engine FUZZ coverage (closes the "shielded-specific fuzz coverage

@@ -43,6 +43,18 @@
 //! the LIVE consensus path until the external audit clears — but it IS exercised
 //! end-to-end in gated regtest and the 24h in-block soak.
 
+// Cast-lint discipline: cover-set / coin indices are `u64` on the wire but index
+// in-memory `Vec`s, so every `u64 -> usize` lookup is a bounds-checked
+// `try_from` (identical on 64-bit, safe-clamps on 32-bit). Coin/op length
+// prefixes stay `len() as u64` (usize->u64, a platform-lossless widening clippy
+// does not lint, and a hash preimage that must stay byte-exact). Deny the lossy
+// casts so new ones can't slip in; the test module opts out below.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::HashMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -487,7 +499,9 @@ impl SparkPoolStore {
     /// (it rejects an oversized cover set on both prove and verify). Group 0 is
     /// the whole pool until it first exceeds N.
     pub fn cover_set_at(&self, cover_set_id: u64, anchor_height: u64) -> Vec<CoinBytes> {
-        let start = (cover_set_id as usize).saturating_mul(SPARK_COVER_SET_GROUP);
+        let start = usize::try_from(cover_set_id)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(SPARK_COVER_SET_GROUP);
         let end = start.saturating_add(SPARK_COVER_SET_GROUP);
         self.coins
             .read()
@@ -518,7 +532,9 @@ impl SparkPoolStore {
         cover_set_id: u64,
         anchor_height: u64,
     ) -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>, u64)> {
-        let start = (cover_set_id as usize).saturating_mul(SPARK_COVER_SET_GROUP);
+        let start = usize::try_from(cover_set_id)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(SPARK_COVER_SET_GROUP);
         let end = start.saturating_add(SPARK_COVER_SET_GROUP);
         self.coins
             .read()
@@ -571,7 +587,10 @@ impl SparkPoolStore {
 
     /// The coin at a cover-set index, if present.
     pub fn coin_at(&self, cover_index: u64) -> Option<SparkPoolCoin> {
-        self.coins.read().get(cover_index as usize).cloned()
+        self.coins
+            .read()
+            .get(usize::try_from(cover_index).unwrap_or(usize::MAX))
+            .cloned()
     }
 
     /// The deterministic serial context stored for the coin at `outpoint`.
@@ -579,7 +598,7 @@ impl SparkPoolStore {
         let idx = *self.by_outpoint.read().get(outpoint)?;
         self.coins
             .read()
-            .get(idx as usize)
+            .get(usize::try_from(idx).unwrap_or(usize::MAX))
             .map(|c| c.serial_context.clone())
     }
 
@@ -687,7 +706,7 @@ impl SparkPoolStore {
     pub fn apply_value_balance(&self, value_balance: i64) -> Result<()> {
         let mut pv = self.pool_value.write();
         // total_after = total − value_balance (value_balance > 0 removes value).
-        let after = *pv - value_balance as i128;
+        let after = *pv - i128::from(value_balance);
         if after < 0 {
             return Err(Error::InvalidTransaction(format!(
                 "shielded pool underflow: pool {} − value_balance {} = {} < 0 \
@@ -883,6 +902,13 @@ impl crate::storage::phase2::Phase2Store for SparkPoolStore {
 
 #[cfg(test)]
 mod tests {
+    // Tests cast loop counters / seed indices for fixture generation; not pool
+    // data, so opt out of the file-level cast denies.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     /// Phase-2 reorg-durability invariant (CYNC-STOR-001): MAX_CHECKPOINTS must
