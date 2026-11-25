@@ -86,6 +86,15 @@ MSYS_NO_PATHCONV=1 docker run --rm \
   -v "$OUT_DIR:/out" \
   "$IMAGE_TAG"
 
+# Ensure the extracted binaries are executable. Depending on the Docker storage
+# driver / bind-mount, the host-side copies can land 0644, which then propagates
+# into a packaged release tarball — a user running ./coincync-node after
+# `tar xzf` hits "Permission denied". chmod is content-neutral, so it never
+# affects out/SHA256SUMS or reproducibility.
+for b in coincync-node coincync-wallet coincync-rig cyncswap coord coord-cli; do
+  [ -f "$OUT_DIR/$b" ] && chmod +x "$OUT_DIR/$b"
+done
+
 echo ""
 echo "==> Done"
 echo ""
