@@ -71,6 +71,12 @@
 //!   nothing panics or corrupts. THREAT: a deadlock edge that would hang block
 //!   processing under RPC read load. TESTS: `stress_concurrent_read_write_load`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -665,7 +671,9 @@ impl SparkStore {
         let coins = self.coins.read();
         let mut out = Vec::with_capacity(indices.len());
         for &idx in indices {
-            let entry = coins.get(idx as usize).ok_or(Error::SparkVerifyFailed)?;
+            let entry = coins
+                .get(usize::try_from(idx).unwrap_or(usize::MAX))
+                .ok_or(Error::SparkVerifyFailed)?;
             if entry.coin_id != idx {
                 return Err(Error::SparkVerifyFailed);
             }
@@ -707,6 +715,11 @@ impl Default for SparkStore {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     fn coin(coin_id: u64, height: u64, commitment_byte: u8) -> SparkCoinEntry {

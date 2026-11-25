@@ -58,6 +58,12 @@
 //!   cycle; concurrent readers + writer(s) never deadlock or panic. THREAT: a
 //!   lock-order cycle hanging block processing. TESTS: `stress_concurrent_read_write_load`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use parking_lot::RwLock;
 
 use crate::crypto::mw_cutthrough::MwKernel;
@@ -535,6 +541,11 @@ impl Default for KernelStore {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     fn kernel(excess_byte: u8, height: u64) -> MwKernel {

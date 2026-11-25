@@ -125,6 +125,12 @@
 //!   `aggressive_random_op_sequences_keep_tree_and_entries_consistent`,
 //!   `stress_high_volume_checkpoint_append_rewind`, `stress_concurrent_read_write_load`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::HashMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -195,7 +201,7 @@ impl Hashable for ShieldedHash {
     fn combine(level: Level, a: &Self, b: &Self) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"COINCYNC_SHIELDED_NODE_v1");
-        hasher.update(&(u8::from(level) as u64).to_le_bytes());
+        hasher.update(&u64::from(u8::from(level)).to_le_bytes());
         hasher.update(&a.0);
         hasher.update(&b.0);
         let digest = hasher.finalize();
@@ -891,6 +897,11 @@ impl Default for ShieldedStore {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     /// Phase-2 reorg-durability invariant (CYNC-STOR-001): the checkpoint stack
