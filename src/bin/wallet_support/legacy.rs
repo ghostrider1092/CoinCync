@@ -4821,7 +4821,7 @@ async fn fetch_chain_anchor(
         .get("outputs")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "rpc response missing 'outputs' array".to_string())?;
-    let out = outputs.get(output_index as usize).ok_or_else(|| {
+    let out = outputs.get(usize::from(output_index)).ok_or_else(|| {
         format!(
             "output_index {} out of range (tx has {} outputs)",
             output_index,
@@ -5730,7 +5730,7 @@ async fn cmd_show_memo(
         .get("outputs")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "rpc response missing 'outputs' array".to_string())?;
-    let output = outputs.get(utxo.output_index as usize).ok_or_else(|| {
+    let output = outputs.get(usize::from(utxo.output_index)).ok_or_else(|| {
         format!(
             "output_index {} out of range (tx has {} outputs)",
             utxo.output_index,
