@@ -2,6 +2,12 @@
 //!
 //! P2P protocol message definitions and serialization.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::consensus::Block;
 use crate::constants::{
     is_protocol_version_supported, MAX_SUPPORTED_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION,
@@ -83,10 +89,17 @@ impl MessageHeader {
 
     pub fn new(magic: [u8; 4], msg_type: MessageType, payload: &[u8]) -> Self {
         let checksum = compute_checksum(payload);
+        // `payload.len()` is bounded by MAX_MESSAGE_SIZE (16 MiB), enforced by
+        // the framer (network/framing.rs) before any payload reaches a handler,
+        // so it always fits in u32 and the cast is byte-exact for every real
+        // message. `length` is the wire-format payload-length field and must
+        // stay a plain u32, so truncation is intentional (and unreachable).
+        #[allow(clippy::cast_possible_truncation)]
+        let length = payload.len() as u32;
         MessageHeader {
             magic,
             msg_type: msg_type as u8,
-            length: payload.len() as u32,
+            length,
             checksum,
         }
     }
@@ -919,6 +932,11 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use crate::constants::MAINNET_MAGIC;
 
