@@ -473,6 +473,11 @@ impl BlockDb {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use crate::chain::create_genesis_block;
     use tempfile::tempdir;

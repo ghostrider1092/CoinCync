@@ -100,6 +100,12 @@
 //!   TESTS: (gap — exercised transitively by the schema suite; no direct
 //!   stats/serialize unit test).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 mod blocks;
 pub mod filters;
 mod keys;
@@ -300,13 +306,14 @@ fn get_available_memory_mb() -> usize {
         }
 
         let mut status: MemoryStatusEx = unsafe { std::mem::zeroed() };
-        status.dw_length = std::mem::size_of::<MemoryStatusEx>() as u32;
+        status.dw_length =
+            u32::try_from(std::mem::size_of::<MemoryStatusEx>()).unwrap_or(u32::MAX);
         // Safety: pointer is to a stack-owned struct with matching
         // dw_length. GlobalMemoryStatusEx is documented as thread-safe
         // and does not retain the pointer past the call.
         let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
         if ok != 0 {
-            let mb = (status.ull_total_phys / (1024 * 1024)) as usize;
+            let mb = usize::try_from(status.ull_total_phys / (1024 * 1024)).unwrap_or(usize::MAX);
             if mb >= 512 {
                 return mb;
             }
@@ -1581,6 +1588,11 @@ mod reorg_output_index_tests {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use tempfile::tempdir;
 

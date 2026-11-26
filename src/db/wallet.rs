@@ -138,9 +138,12 @@ impl WalletTx {
     /// With 10^12 atomic units per CYNC, values above ~9,223 CYNC would produce
     /// incorrect signs when cast directly to i64, showing wrong balance changes.
     pub fn net_change(&self) -> i64 {
-        let received = self.amount_received as i128;
-        let spent = (self.amount_sent as i128) + (self.fee as i128);
-        (received - spent).clamp(i64::MIN as i128, i64::MAX as i128) as i64
+        let received = i128::from(self.amount_received);
+        let spent = i128::from(self.amount_sent) + i128::from(self.fee);
+        // Clamped to [i64::MIN, i64::MAX], so the i128->i64 narrowing is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        let net = (received - spent).clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+        net
     }
 
     /// Is this transaction confirmed?
