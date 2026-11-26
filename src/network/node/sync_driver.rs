@@ -88,6 +88,12 @@
 //!   TESTS: `should_retrigger_sync_covers_height_and_work_126` (the predicate;
 //!   the async tick loop itself remains unit-test-gapped).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::VecDeque;
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
@@ -671,7 +677,7 @@ pub(super) fn spawn_sync_driver(
             // We pass elapsed seconds since sync start — this is compared against
             // request timestamps that also use wall-clock time, but the monotonic
             // elapsed acts as a safety floor to avoid false stalls on clock skew.
-            let now = chrono::Utc::now().timestamp() as u64;
+            let now = crate::clock::real_unix_now();
             let monotonic_now = driver.elapsed_secs();
 
             // #137 false-stall fix: sample the monotonic count of blocks
@@ -902,7 +908,7 @@ pub(super) fn spawn_sync_driver(
                 // a stuck sync (coincync-lon, 2026-06-02); Tier 3 below
                 // catches that case.
                 if driver.stall_count >= 24 {
-                    let now = chrono::Utc::now().timestamp() as u64;
+                    let now = crate::clock::real_unix_now();
                     let current_height = sync_chain.height();
                     let advanced_since_last_tier2 = current_height > driver.tier2_last_height;
 
@@ -1068,7 +1074,7 @@ pub(super) fn spawn_sync_driver(
                     // 3. Send GetBlocks directly, try next peer on failure
                     // 4. If all peers fail, fall back to Headers to rediscover
                     // ============================================================
-                    let now = chrono::Utc::now().timestamp() as u64;
+                    let now = crate::clock::real_unix_now();
                     let our_h = sync_chain.height();
 
                     recover_block_requests(&sync_sync, now).await;
@@ -1208,7 +1214,7 @@ async fn run_headers_tick(
     scorer: &Arc<RwLock<PeerScorer>>,
     magic: [u8; 4],
 ) {
-    let now = chrono::Utc::now().timestamp() as u64;
+    let now = crate::clock::real_unix_now();
     if sync.read().await.headers_timed_out(now) {
         warn!("Headers request timed out, retrying with different peer");
         sync.write().await.reset_headers_timeout();
@@ -1434,6 +1440,11 @@ async fn run_synced_tick(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     /// §2: the headers tick waits only while the pool is draining (tip moving
