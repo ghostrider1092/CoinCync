@@ -4,6 +4,12 @@
 // loads / initializes chain state, starts the P2P listener and the
 // JSON-RPC server, then blocks until ctrl-C.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -2191,13 +2197,13 @@ async fn start_node(
                     is_synced: snap_chain.is_synced(),
                     blocks_behind: target.saturating_sub(height) as i64,
                     sync_progress_percent: sync_pct,
-                    peers: snap_p2p.peer_count() as i64,
+                    peers: i64::try_from(snap_p2p.peer_count()).unwrap_or(i64::MAX),
                     // No inbound/outbound split accessor yet — reported as 0.
                     peers_inbound: 0,
                     peers_outbound: 0,
-                    mempool_size: mp.tx_count as i64,
+                    mempool_size: i64::try_from(mp.tx_count).unwrap_or(i64::MAX),
                     mempool_bytes: mp.size_bytes as i64,
-                    utxo_set_size: snap_chain.utxo_count() as i64,
+                    utxo_set_size: i64::try_from(snap_chain.utxo_count()).unwrap_or(i64::MAX),
                     db_size_bytes: db_size_cached,
                 };
                 coincync::metrics::record_chain_snapshot(&snapshot);
