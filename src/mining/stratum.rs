@@ -134,6 +134,12 @@
 //!   `vardiff_sizes_difficulty_to_the_measured_rate_within_bounds`,
 //!   `share_work_is_the_power_of_two_target_difficulty`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -489,7 +495,7 @@ impl Share {
         let pow_hash = match compute_pow_hash(
             PowAlgorithm::RandomX,
             &job.anchor,
-            self.nonce as u64,
+            u64::from(self.nonce),
             &job.tx_root,
             job.height,
         ) {
@@ -518,7 +524,9 @@ impl Share {
 /// Convert compact `nbits` into a full 256-bit target (big-endian).
 // Retained for the legacy Bitcoin-style wire (format_mining_notify sends nbits)
 // and its unit tests; the CoinCync PoW path uses the job's full `target`.
-#[allow(dead_code)]
+// The compact-target mantissa bytes are masked to 0xff before each u8 cast, so
+// the narrowings are exact (Bitcoin-style nBits encoding — must stay byte-exact).
+#[allow(dead_code, clippy::cast_possible_truncation)]
 fn nbits_to_target(nbits: u32) -> Hash {
     let exponent = ((nbits >> 24) & 0xff) as usize;
     let mantissa = nbits & 0x007f_ffff;
@@ -1000,7 +1008,7 @@ impl StratumServer {
                     let height = chain.height() + 1;
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as u32)
+                        .map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX))
                         .unwrap_or(0);
 
                     // Build the real candidate block if payout keys are set. The
@@ -1132,7 +1140,7 @@ impl StratumServer {
                 invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new(
                     "stratum_worker",
                     "CYNC-GUARD-STRATUM",
-                    MAX_INVALID_STREAK as u64,
+                    u64::from(MAX_INVALID_STREAK),
                 ),
                 last_activity: timestamp_now(),
                 connected_at: timestamp_now(),
@@ -1934,7 +1942,7 @@ async fn handle_stratum_message(
             // connections before verify() recomputes the PoW. Dedup is on the
             // PoW nonce — the extranonce fields are not part of the CoinCync PoW.
             let (claim, canonical_job) =
-                claim_canonical_nonce(current_job, nonce_dedup, job_id, nonce as u64).await;
+                claim_canonical_nonce(current_job, nonce_dedup, job_id, u64::from(nonce)).await;
 
             // Build share struct
             let share = Share {
@@ -2036,7 +2044,7 @@ async fn handle_stratum_message(
                         mempool,
                         p2p,
                         job_id,
-                        share.nonce as u64,
+                        u64::from(share.nonce),
                         worker_id,
                     )
                     .await;
@@ -2190,6 +2198,8 @@ fn difficulty_to_nbits(difficulty: u64) -> u32 {
     // Calculate target from difficulty
     // target = max_target / difficulty
     let leading_zeros = (64 - difficulty.leading_zeros()) / 8;
+    // exponent is 0..=32 here, so the u8 narrowing is exact (compact-bits encode).
+    #[allow(clippy::cast_possible_truncation)]
     let exponent = (32 - leading_zeros) as u8;
     // SECURITY (A6-SHIFT): Guard against shift >= 24 on the mantissa mask,
     // which causes UB/panic for difficulty >= 2^32.
@@ -2200,7 +2210,7 @@ fn difficulty_to_nbits(difficulty: u64) -> u32 {
         0xFFFFFF >> shift_amount
     };
 
-    ((exponent as u32) << 24) | mantissa
+    (u32::from(exponent) << 24) | mantissa
 }
 
 /// Get current timestamp
@@ -2214,7 +2224,7 @@ fn timestamp_now() -> u64 {
 fn timestamp_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }
 
@@ -2359,6 +2369,11 @@ async fn register_stratum_strike(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     #[test]
@@ -2589,7 +2604,7 @@ mod tests {
             invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::preloaded(
                 "stratum_worker",
                 "CYNC-GUARD-STRATUM",
-                MAX_INVALID_STREAK as u64,
+                u64::from(MAX_INVALID_STREAK),
                 (MAX_INVALID_STREAK - 1) as u64,
             ),
             last_activity: timestamp_now(),
@@ -2756,7 +2771,7 @@ mod tests {
             invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new(
                 "stratum_worker",
                 "CYNC-GUARD-STRATUM",
-                MAX_INVALID_STREAK as u64,
+                u64::from(MAX_INVALID_STREAK),
             ),
             last_activity: timestamp_now(),
             connected_at: timestamp_now(),
@@ -2882,7 +2897,7 @@ mod tests {
             invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new(
                 "stratum_worker",
                 "CYNC-GUARD-STRATUM",
-                MAX_INVALID_STREAK as u64,
+                u64::from(MAX_INVALID_STREAK),
             ),
             last_activity: timestamp_now(),
             connected_at: timestamp_now(),
@@ -3092,7 +3107,7 @@ mod tests {
             invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new(
                 "stratum_worker",
                 "CYNC-GUARD-STRATUM",
-                MAX_INVALID_STREAK as u64,
+                u64::from(MAX_INVALID_STREAK),
             ),
             last_activity: timestamp_now(),
             connected_at: timestamp_now(),
