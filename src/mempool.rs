@@ -2,6 +2,12 @@
 //!
 //! Manages pending transactions waiting to be included in blocks.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::consensus::{
     validate_transaction_basic, verify_balance_proof, verify_output_range_proofs,
     verify_ring_signature,
@@ -339,12 +345,12 @@ impl MempoolEntry {
         // With scaling: (50 * 1_000_000) / 100 = 500_000 micro-syncs per byte
         let fee_per_byte = if size > 0 {
             // Use u128 intermediate to prevent overflow for large fees
-            let scaled_fee = fee.as_atomic() as u128 * 1_000_000;
+            let scaled_fee = u128::from(fee.as_atomic()) * 1_000_000;
             let result = scaled_fee / size as u128;
             // SECURITY (A5-MEM-01): Clamp to u64::MAX instead of silent truncation.
             // Without this, extreme fee values wrap around to near-zero, causing
             // the transaction to be evicted first despite paying a high fee.
-            result.min(u64::MAX as u128) as u64
+            u64::try_from(result.min(u128::from(u64::MAX))).unwrap_or(u64::MAX)
         } else {
             0
         };
@@ -368,8 +374,8 @@ const RBF_FEE_BUMP_DENOMINATOR: u64 = 100;
 /// Compute scaled fee-per-byte (matches MempoolEntry calculation)
 fn scaled_fee_per_byte(fee_atomic: u64, size: usize) -> u64 {
     let size = size.max(1);
-    let scaled = fee_atomic as u128 * 1_000_000;
-    (scaled / size as u128).min(u64::MAX as u128) as u64
+    let scaled = u128::from(fee_atomic) * 1_000_000;
+    u64::try_from((scaled / size as u128).min(u128::from(u64::MAX))).unwrap_or(u64::MAX)
 }
 
 /// Transaction mempool
@@ -851,8 +857,8 @@ impl Mempool {
                     //
                     // Accept iff: new_rate * DEN >= old_rate * NUM AND new_rate > old_rate
                     let lhs =
-                        (new_fee_rate as u128).saturating_mul(RBF_FEE_BUMP_DENOMINATOR as u128);
-                    let rhs = (old_fee_rate as u128).saturating_mul(RBF_FEE_BUMP_NUMERATOR as u128);
+                        u128::from(new_fee_rate).saturating_mul(u128::from(RBF_FEE_BUMP_DENOMINATOR));
+                    let rhs = u128::from(old_fee_rate).saturating_mul(u128::from(RBF_FEE_BUMP_NUMERATOR));
                     if lhs >= rhs && new_fee_rate > old_fee_rate {
                         if !to_replace.contains(&old_hash) {
                             to_replace.push(old_hash);
@@ -2088,7 +2094,8 @@ fn mempool_pressure(
     if max_bytes == 0 {
         return None;
     }
-    let pct = (current_bytes as u128 * 100 / max_bytes as u128) as u64;
+    let pct =
+        u64::try_from(current_bytes as u128 * 100 / max_bytes as u128).unwrap_or(u64::MAX);
     if pct >= warn_pct {
         Some((
             pct,
@@ -2188,6 +2195,11 @@ mod security_detail_tests {
 
 #[cfg(test)]
 mod generation_tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::{
         retry_stable_admission, AdmissionAttempt, GenerationSource, MAX_CHAIN_GENERATION_ATTEMPTS,
     };
@@ -2274,6 +2286,11 @@ mod generation_tests {
 // (the default build is unchanged), so there is nothing to admit.
 #[cfg(all(test, feature = "sketch-gk-proof", feature = "libspark-ffi"))]
 mod shielded_mempool_admission_172 {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use crate::consensus::spark_payload::build::{build_mint_payload, build_spend_payload};
     use crate::consensus::spark_payload::derive_outpoint;
@@ -2591,6 +2608,11 @@ mod tests {
 // tests only need `Mempool::new()` + tempfile, no asset machinery.
 #[cfg(test)]
 mod load_from_disk_tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     /// Startup DoS defense: a mempool.dat larger than MAX_MEMPOOL_BYTES
