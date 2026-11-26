@@ -79,6 +79,12 @@
 //!   `resolve_network_magic_missing_falls_back_to_network`,
 //!   `parse_template_transactions_skips_non_hex_and_non_borsh_entries`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use serde_json::Value;
 
 use crate::chain::SharedBlockchain;
@@ -279,6 +285,11 @@ pub fn build_block_from_template(
     let prev_hash_hex = template["prev_hash"]
         .as_str()
         .ok_or_else(|| Error::Internal("template missing 'prev_hash'".into()))?;
+    // A block-header timestamp is a non-negative unix time, which the node's
+    // template always supplies. This is a faithful rig port (the header field is
+    // built byte-for-byte as the validator re-derives it), so the sign-
+    // reinterpreting cast is intentional and byte-exact for every real template.
+    #[allow(clippy::cast_sign_loss)]
     let timestamp = template["timestamp"]
         .as_i64()
         .ok_or_else(|| Error::Internal("template missing 'timestamp'".into()))?
@@ -388,7 +399,7 @@ pub fn build_block_from_template(
             template[k]
                 .as_str()
                 .and_then(|s| s.parse::<u128>().ok())
-                .or_else(|| template[k].as_u64().map(|v| v as u128))
+                .or_else(|| template[k].as_u64().map(u128::from))
                 .ok_or_else(|| {
                     Error::Internal(format!(
                         "supply_commitment enforced at height {height} but template lacks \
@@ -403,7 +414,7 @@ pub fn build_block_from_template(
             transactions: all_txs.clone(),
         };
         let burn = crate::chain::block_fee_burn(fallback_network, &tmp_block);
-        let emission = crate::emission::calculate_block_reward(height).as_atomic() as u128;
+        let emission = u128::from(crate::emission::calculate_block_reward(height).as_atomic());
         let post_emitted = parent_emitted.saturating_add(emission);
         let post_burned = parent_burned.saturating_add(burn);
         header.supply_commitment = crate::emission::supply::supply_commitment_consensus(
@@ -469,7 +480,7 @@ pub fn claimable_fees_for_block_size(
         return total_fees;
     }
     let congestion_pct = (block_size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128;
-    let congested = congestion_pct >= crate::constants::CONGESTION_THRESHOLD as u128;
+    let congested = congestion_pct >= u128::from(crate::constants::CONGESTION_THRESHOLD);
     distribute_fee(Amount::from_atomic(total_fees), congested)
         .to_miner
         .as_atomic()
@@ -571,6 +582,11 @@ fn resolve_network_magic(template: &Value, fallback_network: NetworkType) -> Res
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     fn test_keys() -> (PublicKey, PublicKey) {
