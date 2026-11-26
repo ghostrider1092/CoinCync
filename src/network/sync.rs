@@ -111,6 +111,12 @@
 //!   `arm_near_tip_catchup_rearms_stuck_but_not_synced_or_active`,
 //!   `has_pooled_blocks_tracks_the_orphan_pool`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::consensus::Block;
 use crate::error::Result;
 use crate::network::peer::PeerId;
@@ -2164,6 +2170,11 @@ impl ChainSync {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     #[test]

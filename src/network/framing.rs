@@ -90,6 +90,12 @@
 //!   unbounded wait. THREAT: Slowloris-style connection-slot exhaustion.
 //!   TESTS: `header_claims_large_payload_but_none_sent_times_out`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::error::{Error, Result};
 use crate::network::connection_tracker::{ConnectionTracker, MemoryReservation};
 use crate::network::protocol::{MessageHeader, MessageType, MAX_MESSAGE_SIZE};
@@ -649,6 +655,9 @@ impl RateLimiter {
     fn refill(&mut self) {
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(self.last_refill);
+        // Token-bucket refill: elapsed * rate is non-negative; the f64->u64 token
+        // count is clamped to capacity just below, so the narrowing is harmless.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let new_tokens = (elapsed.as_secs_f64() * self.bytes_per_sec as f64) as u64;
 
         if new_tokens > 0 {
@@ -723,6 +732,11 @@ impl Default for ExponentialBackoff {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use crate::network::protocol::{Message, MessageType};
 

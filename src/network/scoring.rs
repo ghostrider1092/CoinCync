@@ -113,6 +113,12 @@
 //!   `pong_with_wrong_nonce_is_ignored`,
 //!   `latency_averages_after_the_first_sample`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::clock::{mono_now, MonoInstant};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -757,10 +763,10 @@ impl PeerScore {
     /// - Block speed (15%): Higher is better
     pub fn composite_score(&self) -> f64 {
         // Normalize reputation to 0-1
-        let rep_normalized = (self.reputation + 100) as f64 / 200.0;
+        let rep_normalized = f64::from(self.reputation + 100) / 200.0;
 
         // Normalize latency (lower is better, cap at 5000ms)
-        let latency_capped = self.latency_ms.min(5000) as f64;
+        let latency_capped = f64::from(self.latency_ms.min(5000));
         let latency_normalized = 1.0 - (latency_capped / 5000.0);
 
         // Validity rate already 0-1
@@ -926,12 +932,19 @@ impl PeerScore {
     /// measurement replaces the 1000 ms placeholder outright; averaging with
     /// it would take about ten pings (20 minutes) to get near the real value.
     fn update_latency(&mut self, latency: Duration) {
-        let new_latency = latency.as_millis().min(u32::MAX as u128) as u32;
+        let new_latency =
+            u32::try_from(latency.as_millis().min(u128::from(u32::MAX))).unwrap_or(u32::MAX);
         if self.latency_samples == 0 {
             self.latency_ms = new_latency;
         } else {
             // EMA with alpha = 0.3 (more weight on recent)
-            self.latency_ms = ((self.latency_ms as f64 * 0.7) + (new_latency as f64 * 0.3)) as u32;
+            // EWMA of latency_ms: both terms are non-negative and bounded by the
+            // u32 inputs, so the f64->u32 result fits (documented, not a preimage).
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                self.latency_ms =
+                    ((f64::from(self.latency_ms) * 0.7) + (f64::from(new_latency) * 0.3)) as u32;
+            }
         }
         self.latency_samples = self.latency_samples.saturating_add(1);
     }
@@ -1218,7 +1231,7 @@ impl PeerScorer {
         let avg_latency = if total > 0 {
             self.scores
                 .values()
-                .map(|s| s.latency_ms as u64)
+                .map(|s| u64::from(s.latency_ms))
                 .sum::<u64>()
                 / total as u64
         } else {
@@ -1334,6 +1347,11 @@ pub struct ScorerStats {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -1368,7 +1386,7 @@ mod tests {
             .expect("matching nonce is accepted");
         assert_eq!(
             score.latency_ms,
-            rtt.as_millis() as u32,
+            u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX),
             "first sample replaces the placeholder"
         );
         assert!(
