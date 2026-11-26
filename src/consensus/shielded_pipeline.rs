@@ -29,6 +29,12 @@
 //! the audit-critical crypto stays gated off. See
 //! docs/design/cip-shielded-txtype.md.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::error::{Error, Result};
 use crate::storage::shielded::ShieldedStore;
 
@@ -81,7 +87,7 @@ impl<'a> StoreAnonSetResolver<'a> {
 impl AnonSetResolver for StoreAnonSetResolver<'_> {
     fn resolve(&self) -> Result<AnonSet> {
         let size = self.store.tree_size() as u64;
-        let mut commitments = Vec::with_capacity(size as usize);
+        let mut commitments = Vec::with_capacity(usize::try_from(size).unwrap_or(usize::MAX));
         for pos in 0..size {
             // Entries are dense over `0..tree_size` (see ShieldedStore §6), so
             // every position resolves; a gap would be a store-invariant break.
@@ -143,7 +149,9 @@ pub fn anon_pad(bucket: u64, offset: usize) -> [u8; 32] {
 /// [`anon_pad`]. Pure and deterministic — the shared rail both prover and
 /// verifier call so their one-of-many sets cannot diverge.
 pub fn bucket_window(ordered_full: &[[u8; 32]], bucket_index: u64) -> Vec<[u8; 32]> {
-    let start = bucket_index as usize * GK_ANON_SET_SIZE;
+    let start = usize::try_from(bucket_index)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(GK_ANON_SET_SIZE);
     (0..GK_ANON_SET_SIZE)
         .map(|i| {
             ordered_full
@@ -552,9 +560,9 @@ pub mod gk {
         rng: &mut R,
     ) -> Result<ShieldedPayload> {
         // Conservation must hold before we spend effort proving anything.
-        let sin: i128 = inputs.iter().map(|n| n.value as i128).sum();
-        let sout: i128 = outputs.iter().map(|n| n.value as i128).sum();
-        if sin - sout - fee as i128 - value_balance as i128 != 0 {
+        let sin: i128 = inputs.iter().map(|n| i128::from(n.value)).sum();
+        let sout: i128 = outputs.iter().map(|n| i128::from(n.value)).sum();
+        if sin - sout - i128::from(fee) - i128::from(value_balance) != 0 {
             return Err(Error::CryptoError(
                 "build: Σ in must equal Σ out + fee + value_balance".into(),
             ));
@@ -718,6 +726,11 @@ pub mod gk {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use crate::storage::shielded::{NoteCommitmentEntry, ShieldedStore};
 
