@@ -40,6 +40,12 @@
 //!   constant-time `ct_eq`, never `==`. THREAT: a timing-variable tag compare enables a byte-by-byte
 //!   MAC forgery. TESTS: `test_verify_hash`, `test_verify_mac`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::cmp::Ordering;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -214,12 +220,16 @@ pub fn ct_cmp(a: &[u8], b: &[u8]) -> Ordering {
         // Detect comparison using wrapping subtraction in u16:
         // - If x - y underflows (result >= 256), then x < y
         // - If y - x underflows (result >= 256), then x > y
-        let x_minus_y = (*x as u16).wrapping_sub(*y as u16);
-        let y_minus_x = (*y as u16).wrapping_sub(*x as u16);
+        let x_minus_y = u16::from(*x).wrapping_sub(u16::from(*y));
+        let y_minus_x = u16::from(*y).wrapping_sub(u16::from(*x));
 
         // High bit (bit 8+) set means the subtraction wrapped (underflowed)
         // x < y when x_minus_y underflows, x > y when y_minus_x underflows
+        // The `>> 8 as u8` extracts the underflow (borrow) bit — the constant-time
+        // comparison trick; it must stay byte-exact (try_from would inject a branch).
+        #[allow(clippy::cast_possible_truncation)]
         let x_lt_y_bit = Choice::from((x_minus_y >> 8) as u8 & 1);
+        #[allow(clippy::cast_possible_truncation)]
         let x_gt_y_bit = Choice::from((y_minus_x >> 8) as u8 & 1);
 
         // Only update if we haven't found a difference yet
@@ -248,8 +258,8 @@ pub fn ct_cmp(a: &[u8], b: &[u8]) -> Ordering {
     //   (0,1) → 0 → Less
     //   (1,0) → 2 → Greater
     let orderings = [Ordering::Less, Ordering::Equal, Ordering::Greater];
-    let gt_val = gt.unwrap_u8() as usize;
-    let lt_val = lt.unwrap_u8() as usize;
+    let gt_val = usize::from(gt.unwrap_u8());
+    let lt_val = usize::from(lt.unwrap_u8());
     let idx = 1 + gt_val - lt_val;
     orderings[idx]
 }
@@ -262,6 +272,9 @@ pub fn ct_cmp(a: &[u8], b: &[u8]) -> Ordering {
 #[inline(never)]
 pub fn ct_select_u8(condition: bool, a: u8, b: u8) -> u8 {
     // Convert bool to mask: true -> 0xFF, false -> 0x00
+    // SECURITY: the bool->i8->neg->u8 sign-reinterpret IS the constant-time mask
+    // (-1i8 -> 0xFF, 0 -> 0x00); keep it byte-exact (try_from would branch).
+    #[allow(clippy::cast_sign_loss, clippy::cast_lossless)]
     let mask = (-(condition as i8)) as u8;
     // Select: (a & mask) | (b & !mask)
     (a & mask) | (b & !mask)
@@ -271,6 +284,8 @@ pub fn ct_select_u8(condition: bool, a: u8, b: u8) -> u8 {
 /// Returns `a` if condition is true, `b` otherwise
 #[inline(never)]
 pub fn ct_select_u64(condition: bool, a: u64, b: u64) -> u64 {
+    // SECURITY: same constant-time mask trick at u64 width (-1i64 -> 0xFFFF..FF).
+    #[allow(clippy::cast_sign_loss, clippy::cast_lossless)]
     let mask = (-(condition as i64)) as u64;
     (a & mask) | (b & !mask)
 }
@@ -282,6 +297,9 @@ pub fn ct_select_slice(condition: bool, dst: &mut [u8], a: &[u8], b: &[u8]) {
     assert_eq!(dst.len(), a.len());
     assert_eq!(dst.len(), b.len());
 
+    // SECURITY: the bool->i8->neg->u8 sign-reinterpret IS the constant-time mask
+    // (-1i8 -> 0xFF, 0 -> 0x00); keep it byte-exact (try_from would branch).
+    #[allow(clippy::cast_sign_loss, clippy::cast_lossless)]
     let mask = (-(condition as i8)) as u8;
     for i in 0..dst.len() {
         dst[i] = (a[i] & mask) | (b[i] & !mask);
@@ -300,6 +318,9 @@ pub fn ct_copy_if(condition: bool, dst: &mut [u8], src: &[u8]) {
 
     // SECURITY: Derive mask via arithmetic, not a branch.
     // -(true as i8) = -1 = 0xFF, -(false as i8) = 0 = 0x00
+    // SECURITY: the bool->i8->neg->u8 sign-reinterpret IS the constant-time mask
+    // (-1i8 -> 0xFF, 0 -> 0x00); keep it byte-exact (try_from would branch).
+    #[allow(clippy::cast_sign_loss, clippy::cast_lossless)]
     let mask = (-(condition as i8)) as u8;
 
     for (d, s) in dst.iter_mut().zip(src.iter()) {
