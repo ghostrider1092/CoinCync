@@ -143,6 +143,12 @@
 //!   TESTS: `build_anon_set_refuses_small_pool_instead_of_panicking`,
 //!   `build_anon_set_contains_real_idx_when_pool_sufficient`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use curve25519_dalek::{
     ristretto::{CompressedRistretto, RistrettoPoint},
     scalar::Scalar,
@@ -802,6 +808,11 @@ pub fn batch_verify_sparks(proofs: &[(&SparkSpendProof, &[RistrettoPoint])]) -> 
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use rand::rngs::OsRng;
 

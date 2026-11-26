@@ -30,6 +30,12 @@
 //! Every entry point returns `Result` and fails closed — any error, missing
 //! gate, or verification failure rejects.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::config::NetworkType;
 use crate::error::{Error, Result};
 
@@ -475,6 +481,11 @@ pub fn privacy_feature_registry(gate: &ConnectorGate) -> Vec<PrivacyFeature> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     fn regtest_active() -> ConnectorGate {
