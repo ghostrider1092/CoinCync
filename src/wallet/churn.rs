@@ -40,6 +40,12 @@
 //!   a stats counter overflow. TESTS: (gap — long-running async loop is not
 //!   unit-tested).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use super::send::Payment;
 use super::spend::{SpendCoordinator, SpendIntent, SpendSubmission};
 use super::{KeyEpoch, Wallet};
@@ -165,6 +171,10 @@ impl ChurnEngine {
         // SEC (2026-09-07): OsRng (not thread_rng) for privacy-affecting churn
         // timing — aligns with the project's stated discipline of reading the OS
         // CSPRNG directly for privacy-critical randomness.
+        // Exp-distributed churn delay: non-negative and finite; it is clamped to
+        // [min,max] on the next line, so truncating to whole seconds is
+        // intentional and loses no meaningful sign.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let sample = distribution.sample(&mut rand::rngs::OsRng) as u64;
 
         sample.clamp(self.config.min_interval_secs, self.config.max_interval_secs)
@@ -179,10 +189,11 @@ impl ChurnEngine {
 
         // SEC (2026-09-07): OsRng for the privacy-affecting churn amount (see
         // `next_interval_secs`).
-        let percentage = rand::rngs::OsRng
-            .gen_range(self.config.min_amount_pct..=self.config.max_amount_pct)
-            as u64;
-        let amount = ((spendable_balance as u128) * (percentage as u128) / 100) as u64;
+        let percentage = u64::from(
+            rand::rngs::OsRng.gen_range(self.config.min_amount_pct..=self.config.max_amount_pct),
+        );
+        let amount = u64::try_from(u128::from(spendable_balance) * u128::from(percentage) / 100)
+            .unwrap_or(u64::MAX);
 
         const TYPICAL_PRIVACY_TX_BYTES: u64 = 2_500;
         let fee_reserve = TYPICAL_PRIVACY_TX_BYTES

@@ -43,6 +43,12 @@
 //!   banner. THREAT: a silent balance change with no user notification.
 //!   TESTS: `test_record_reorg_stats_surfaces_via_progress`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::consensus::Block;
 use crate::error::Result;
 #[allow(unused_imports)]
@@ -399,7 +405,11 @@ impl BackgroundSyncManager {
         let remaining = self.target_height.saturating_sub(self.current_height);
         let bps = self.stats.blocks_per_second();
         let eta = if bps > 0.0 {
-            Some((remaining as f64 / bps) as u64)
+            // remaining >= 0 and bps > 0.0 (guarded), so the quotient is finite
+            // and non-negative; truncating ETA to whole seconds is intentional.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let secs = (remaining as f64 / bps) as u64;
+            Some(secs)
         } else {
             None
         };
@@ -942,7 +952,8 @@ pub fn spawn_background_sync(
 
             if batch_count > 0 {
                 // Update elapsed time
-                manager.stats.scan_time_ms = scan_start.elapsed().as_millis() as u64;
+                manager.stats.scan_time_ms =
+                    u64::try_from(scan_start.elapsed().as_millis()).unwrap_or(u64::MAX);
                 manager.update_progress(batch_count, batch_outputs, batch_txs);
                 persist_counter += batch_count;
 

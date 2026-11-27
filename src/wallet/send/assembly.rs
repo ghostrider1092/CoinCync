@@ -34,6 +34,12 @@
 //!   TESTS: `small_excess_flows_to_fee`, `excess_equal_to_send_is_allowed_boundary`,
 //!   `large_excess_is_rejected_not_silently_burned`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use super::super::decoy_selection::AllocatedRings;
 use super::inputs::add_prepared_inputs;
 use super::types::{PreparedPrivacyTransaction, TransferShape};
@@ -43,6 +49,10 @@ use crate::primitives::Amount;
 use crate::transaction::{Recipient, Transaction, TransactionBuilder};
 use rand::{CryptoRng, Rng, RngCore};
 
+// The `index as u8` / `payments.len() as u8` casts below are output-slot
+// indices, bounded by MAX_TX_OUTPUTS (<= 16): they fit u8 exactly and feed
+// one-time-address derivation, so they stay byte-exact.
+#[allow(clippy::cast_possible_truncation)]
 pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
     prepared: PreparedPrivacyTransaction,
     rings: AllocatedRings,

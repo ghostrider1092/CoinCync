@@ -42,6 +42,12 @@
 //!   reuse protection and missing an untagged incoming address.
 //!   TESTS: `test_set_memo`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::primitives::{Amount, Hash};
 use crate::wallet::SubaddressIndex;
 use serde::{Deserialize, Serialize};
@@ -557,6 +563,14 @@ impl TransactionHistory {
 
 #[cfg(test)]
 mod tests {
+    // Test-only numeric casts: small loop-index counts widened for synthetic
+    // record timestamps/heights. Intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
 
     fn test_hash() -> Hash {

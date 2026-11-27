@@ -30,6 +30,12 @@
 //!   TESTS: `fee_multiplier_nan_falls_back_to_neutral_one`,
 //!   `fee_multiplier_negative_zero_and_huge_are_clamped`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::constants::{ring_size_at_height, MIN_FEE_PER_BYTE};
 use crate::primitives::Amount;
 
@@ -58,6 +64,10 @@ impl FeeMultiplier {
         } else {
             value
         };
+        // value is finite (NaN mapped to MIN above), >= MIN_FEE_MULTIPLIER
+        // (positive) after .max, and clamped to MAX_FEE_MULTIPLIER_HUNDREDTHS;
+        // truncating to the hundredths integer is intentional and sign-safe.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let hundredths = (value.max(MIN_FEE_MULTIPLIER) * FEE_MULTIPLIER_SCALE as f64)
             .min(MAX_FEE_MULTIPLIER_HUNDREDTHS as f64) as u64;
         Self(hundredths)
