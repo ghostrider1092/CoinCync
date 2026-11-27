@@ -964,6 +964,8 @@ fn secret_to_scalar(sk: &SecretKey) -> Scalar {
 
 #[cfg(test)]
 mod tests {
+    // Intentional hex puns in the test fixtures (0x0DD_17 reads "ODD-IT").
+    #![allow(clippy::unusual_byte_groupings)]
     use super::*;
     use rand::rngs::StdRng;
     use rand::{RngCore, SeedableRng};

@@ -437,7 +437,7 @@ fn group_num(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     let first = bytes.len() % 3;
     for (i, &b) in bytes.iter().enumerate() {
-        if i != 0 && (i - first) % 3 == 0 && !(i == 0) {
+        if i != 0 && (i - first) % 3 == 0 {
             out.push(',');
         }
         out.push(b as char);

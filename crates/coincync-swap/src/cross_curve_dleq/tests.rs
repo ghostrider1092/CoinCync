@@ -1,6 +1,9 @@
 //! Full-proof tests. Adversarial cases build proofs without the honest
 //! prover; passing them is evidence, not a proof, of soundness or privacy.
 
+// Intentional hex pun in a test fixture (0x0dd5_eed reads "ODD-SEED").
+#![allow(clippy::unusual_byte_groupings)]
+
 use super::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
