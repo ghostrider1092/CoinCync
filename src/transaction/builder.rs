@@ -8,6 +8,12 @@
 //! - Amount encryption
 //! - Fee calculation and change handling
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use super::signer::{ClsagSignRequest, OneTimeKeyRef, SoftwareSigner, TxSigner};
 use super::{RingMemberRef, Transaction, TxInput, TxOutput, TxType};
 use crate::constants::{MAX_TX_INPUTS, MAX_TX_OUTPUTS, MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT};
@@ -476,7 +482,8 @@ impl TransactionBuilder {
         let dummy_spend = dummy_secret.public_key();
         let dummy_view_secret = crate::primitives::SecretKey::generate(rng);
         let dummy_view = dummy_view_secret.public_key();
-        let output_index = self.outputs.len() as u8;
+        // Output count is consensus-bounded by MAX_TX_OUTPUTS (well under 256).
+        let output_index = u8::try_from(self.outputs.len()).unwrap_or(u8::MAX);
 
         let (stealth, tx_secret) =
             generate_stealth_address_checked(&dummy_spend, &dummy_view, output_index, rng)?;
@@ -602,10 +609,10 @@ impl TransactionBuilder {
         // bridge the node checks (verify_transparent_shielded_balance) is
         // satisfied because the builder forces Σ pseudo_blinding == Σ
         // output_blinding below.
-        let input_plus_bridge = (input_sum as i128)
-            .checked_add(self.value_balance as i128)
+        let input_plus_bridge = i128::from(input_sum)
+            .checked_add(i128::from(self.value_balance))
             .ok_or(Error::AmountOverflow)?;
-        if input_plus_bridge != outputs_plus_fee as i128 {
+        if input_plus_bridge != i128::from(outputs_plus_fee) {
             return Err(Error::TransactionUnbalanced {
                 inputs: input_sum,
                 outputs: outputs_plus_fee,

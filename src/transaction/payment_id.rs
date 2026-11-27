@@ -23,6 +23,12 @@
 //! `0xDE` byte inside encrypted payment-id data is never misread as a recovery
 //! entry (and vice-versa).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::transaction::recovery::{RECOVERY_ENTRY_SIZE, RECOVERY_TAG};
 
 /// tx.extra entry tag for an encrypted payment ID. Distinct from
@@ -39,7 +45,7 @@ pub fn encode_extra(encrypted_pid: &[u8]) -> Vec<u8> {
     debug_assert!(encrypted_pid.len() <= u8::MAX as usize);
     let mut out = Vec::with_capacity(2 + encrypted_pid.len());
     out.push(PAYMENT_ID_TAG);
-    out.push(encrypted_pid.len() as u8);
+    out.push(u8::try_from(encrypted_pid.len()).unwrap_or(u8::MAX));
     out.extend_from_slice(encrypted_pid);
     out
 }
