@@ -36,6 +36,12 @@
 //!   rolling silently no-ops → miner cannot search the space. TESTS:
 //!   `block_template_update_nonce_and_timestamp_mutate_header`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::consensus::BlockHeader;
 use crate::primitives::{Amount, Hash};
 use crate::transaction::Transaction;
@@ -89,7 +95,8 @@ impl BlockTemplate {
 /// u128 math). Kept here so the builder and validator agree by construction.
 #[inline]
 fn congestion_pct_for_size(block_size: usize) -> u64 {
-    ((block_size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128) as u64
+    u64::try_from((block_size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128)
+        .unwrap_or(u64::MAX)
 }
 
 /// The validator's per-tx minimum fee at a given congestion percentage —
@@ -269,6 +276,8 @@ pub fn build_template_json(
 
 #[cfg(test)]
 mod congestion_packing_tests {
+    // Test mirrors the validator's u128 percent formula, narrowed to u64.
+    #![allow(clippy::cast_possible_truncation)]
     use super::{build_template_json, congestion_pct_for_size, dynamic_min_fee, BlockTemplate};
     use crate::config::NetworkType;
     use crate::consensus::BlockHeader;

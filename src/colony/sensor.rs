@@ -9,6 +9,12 @@
 //! **no transaction data**: `AggregateFleetHealth` carries per-host counts
 //! and difficulty only, never anything transaction-derived.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use tick::AggregateFleetHealth;
 
 /// Coarse network-state read from the aggregate fleet health.
@@ -38,7 +44,7 @@ pub fn classify(agg: &AggregateFleetHealth) -> NetSignal {
     }
     let pct = |n: u16| -> u16 {
         // n, total_hosts are small u16 counts; the product fits u32.
-        (u32::from(n) * 100 / u32::from(agg.total_hosts)) as u16
+        u16::try_from(u32::from(n) * 100 / u32::from(agg.total_hosts)).unwrap_or(u16::MAX)
     };
 
     let divergent = pct(agg.divergent_count);

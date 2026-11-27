@@ -873,7 +873,7 @@ fn prepare_vesting_fee_growth_loop_reselects_until_inputs_cover_fee() {
             0xC0 + i,
             i,
             10,
-            100 + i as u64,
+            100 + u64::from(i),
         ));
     }
     let request = VestingRequest::new(

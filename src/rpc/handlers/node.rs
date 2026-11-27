@@ -1,5 +1,11 @@
 //! Node status, peer metadata, and operational health RPCs.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use jsonrpsee::types::ErrorObjectOwned;
 use jsonrpsee::RpcModule;
 use serde_json::{json, Value};
@@ -632,7 +638,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             let peers = state
                 .p2p
                 .as_ref()
-                .map(|p| p.network_stats().peer_count as u32)
+                .map(|p| u32::try_from(p.network_stats().peer_count).unwrap_or(u32::MAX))
                 .unwrap_or(0);
             let progress = if target > 0 {
                 (height as f64 / target as f64).min(1.0)

@@ -19,6 +19,12 @@
 //!   spend). A full sync that cross-checks the pool's spent-tag set needs each
 //!   note's linking tag (seed-derivable) — a follow-up.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use spark_connector::ffi::{identify_view_only, IncomingViewKeyBytes, LibsparkBackend};
 use spark_connector::{CoinBytes, SparkBackend};
 
@@ -274,6 +280,8 @@ impl ShieldedNoteStore {
 
 #[cfg(test)]
 mod tests {
+    // Test enumerate() index (usize) narrowed to a u32 outpoint ordinal.
+    #![allow(clippy::cast_possible_truncation)]
     use super::*;
     use crate::consensus::spark_payload::derive_outpoint;
     use spark_connector::ffi::{build_mint_bundle, serial_context, verify_mint_bundle};

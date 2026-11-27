@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn aggregate_supply_decimal_preserves_values_above_u64() {
         assert_eq!(
-            supply_atomic_decimal((u64::MAX as u128) + 1),
+            supply_atomic_decimal(u128::from(u64::MAX) + 1),
             "18446744073709551616"
         );
         assert_eq!(
