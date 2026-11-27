@@ -408,6 +408,22 @@ pub fn validate_block_ctx(
         return Ok(result);
     }
 
+    // L8 (#446): mw_kernel_root must LIKEWISE be zero. Mimblewimble cut-through is
+    // NOT activated (there is no MW activation height), so no honest block commits
+    // a non-zero kernel root. The field is hashed into header.hash()/pow_binding()
+    // — a miner commits to its value under PoW, so this is not malleability — but
+    // nothing read or constrained it, an asymmetric gap vs the spark_set_root gate
+    // above. Every current producer (genesis included) writes zero, so this
+    // rejects no existing block; it closes the gap before any future MW activation.
+    if block.header.mw_kernel_root != [0u8; 32] {
+        result.add_error(format!(
+            "mw_kernel_root must be zero — Mimblewimble cut-through is not activated \
+             (non-zero at height {})",
+            block.height()
+        ));
+        return Ok(result);
+    }
+
     // §3  CRITICAL SECURITY: Validate Proof of Work
     // Skip PoW verification for genesis block (height 0)
     if block.height() > 0 {
