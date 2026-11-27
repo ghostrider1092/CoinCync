@@ -71,6 +71,12 @@
 //!   corrupts reconstruction bookkeeping.
 //!   TESTS: (gap — no test exercises `CompactBlockState`).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::consensus::Block;
 use crate::primitives::Hash;
 use crate::transaction::Transaction;
@@ -145,7 +151,7 @@ impl CompactBlock {
             if tx.is_coinbase() || i == 0 {
                 // Always prefill coinbase
                 prefilled_txs.push(PrefilledTx {
-                    index: i as u16,
+                    index: u16::try_from(i).unwrap_or(u16::MAX),
                     tx: tx.clone(),
                 });
             } else {

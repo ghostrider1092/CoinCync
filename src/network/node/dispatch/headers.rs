@@ -79,6 +79,12 @@
 //!   `chunked_validation_reports_absolute_index`,
 //!   `handle_headers_streams_verified_prefix_and_consumes_nonce`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -102,7 +108,7 @@ fn header_history(
     accepted: &HashMap<Hash, BlockHeader>,
     parent_hash: Hash,
 ) -> std::result::Result<Vec<DifficultyBlock>, String> {
-    let difficulty_window = crate::constants::DIFFICULTY_LONG_WINDOW as usize;
+    let difficulty_window = usize::try_from(crate::constants::DIFFICULTY_LONG_WINDOW).unwrap_or(usize::MAX);
     let mut history = Vec::with_capacity(difficulty_window);
     let mut cursor = parent_hash;
 

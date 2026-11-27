@@ -52,6 +52,12 @@
 //!   TESTS: (gap — no dedicated `handle_block_data` test in this file's
 //!   `#[cfg(test)] mod tests` or the listed integration suites).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, warn};
@@ -233,7 +239,7 @@ pub(super) async fn handle_inv_block(
                 };
                 let locator = build_locator(our_height, |h| chain.get_block_hash(h));
                 if !locator.is_empty() && !queue_busy {
-                    let now = chrono::Utc::now().timestamp() as u64;
+                    let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
                     if let Some(nonce) = sync.write().await.begin_headers_request(peer_id, now) {
                         let sent = match Message::get_headers_with_nonce(
                             magic,

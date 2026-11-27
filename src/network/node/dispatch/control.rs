@@ -61,6 +61,12 @@
 //!   accidental ban.
 //!   TESTS: `handle_reject_adjusts_reputation_only`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, trace, warn};
@@ -547,7 +553,7 @@ pub(super) async fn handle_verack(
     if peer_height > our_height {
         let locator = build_locator(our_height, |h| chain.get_block_hash(h));
         if !locator.is_empty() {
-            let now = chrono::Utc::now().timestamp() as u64;
+            let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
             if let Some(nonce) = sync.write().await.begin_headers_request(peer_id, now) {
                 let sent =
                     match Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) {

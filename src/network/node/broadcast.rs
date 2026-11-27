@@ -54,6 +54,12 @@
 //!   TESTS: `local_tx_enters_stempool` (network_security.rs; exercises the
 //!   same `DandelionRouter::add_local_tx` this function calls).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::sync::atomic::Ordering;
 
 use dashmap::DashMap;
@@ -129,7 +135,7 @@ pub(super) async fn queue_transaction(
     dandelion: &RwLock<DandelionRouter>,
     tx: Transaction,
 ) -> Hash {
-    let now = chrono::Utc::now().timestamp() as u64;
+    let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
     dandelion.write().await.add_local_tx(tx, now)
 }
 
