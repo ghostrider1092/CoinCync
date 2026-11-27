@@ -18,7 +18,7 @@
 
 env:
   RELEASE_TAG: v1.1.3-testnet
-  EXPECTED_FPR: fc428e8673379f07cc213b9a7aceb4c05d5433387113a02b818ba3e0ab3664ca
+  EXPECTED_FPR: 3d3b4c338aeb7c07c2a5a30ec6878010d10dfc8ab16a183f373b837a64158c26
 
 macos_release_task:
   only_if: $CIRRUS_TAG =~ '.*-testnet'
