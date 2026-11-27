@@ -486,5 +486,7 @@ cast_lossless            = "warn"
 # documented #[allow(clippy::unwrap_in_result)] at function scope. The plain-clippy
 # cast-ratchet gate (scripts/clippy-ratchet.sh) now enforces this too.
 unwrap_in_result         = "deny"
-dbg_macro                = "warn"
+# dbg_macro: 0 occurrences (census 2026-11-27) — promoted to deny so a stray
+# dbg!() leftover can never ship. Enforced by the plain-clippy cast-ratchet gate.
+dbg_macro                = "deny"
 print_stdout             = "warn"
