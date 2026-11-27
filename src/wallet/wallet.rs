@@ -1906,11 +1906,19 @@ mod tests {
         let orig_view_pub = *ek.view_public.as_bytes();
         let orig_spend_sec = *ek.spend_secret.as_bytes();
 
-        let restored =
-            Wallet::restore(dir.path().join("restored.wallet"), &mnemonic, Some("pw"), "testnet")
-                .unwrap();
+        let restored = Wallet::restore(
+            dir.path().join("restored.wallet"),
+            &mnemonic,
+            Some("pw"),
+            "testnet",
+        )
+        .unwrap();
 
-        assert_eq!(restored.address().unwrap(), orig_addr, "restored address must match");
+        assert_eq!(
+            restored.address().unwrap(),
+            orig_addr,
+            "restored address must match"
+        );
         let rk = restored.current_keys().unwrap();
         assert_eq!(*rk.spend_public.as_bytes(), orig_spend_pub);
         assert_eq!(*rk.view_public.as_bytes(), orig_view_pub);
@@ -1928,8 +1936,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let (_orig, mnemonic) =
             Wallet::create(dir.path().join("o.wallet"), Some("pw"), "testnet").unwrap();
-        let restored =
-            Wallet::restore(dir.path().join("r.wallet"), &mnemonic, Some("pw"), "testnet").unwrap();
+        let restored = Wallet::restore(
+            dir.path().join("r.wallet"),
+            &mnemonic,
+            Some("pw"),
+            "testnet",
+        )
+        .unwrap();
 
         let ek = restored.current_keys().unwrap();
         let amount = 7_000_000_000u64;
@@ -1938,7 +1951,11 @@ mod tests {
         let mut scanner = crate::wallet::scanner::WalletScanner::new();
         scanner.add_keys(ek.view_secret.clone(), ek.spend_public, 0);
         let found = scanner.scan_transaction(&tx);
-        assert_eq!(found.len(), 1, "restored wallet must rescan and find its primary funds");
+        assert_eq!(
+            found.len(),
+            1,
+            "restored wallet must rescan and find its primary funds"
+        );
         assert_eq!(found[0].amount, amount);
     }
 
@@ -1950,8 +1967,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let (_o, mnemonic) =
             Wallet::create(dir.path().join("o.wallet"), Some("pw"), "testnet").unwrap();
-        let restored =
-            Wallet::restore(dir.path().join("r.wallet"), &mnemonic, Some("pw"), "testnet").unwrap();
+        let restored = Wallet::restore(
+            dir.path().join("r.wallet"),
+            &mnemonic,
+            Some("pw"),
+            "testnet",
+        )
+        .unwrap();
         let ek = restored.current_keys().unwrap();
 
         let gap = 20u32;
@@ -1960,7 +1982,9 @@ mod tests {
 
         // The index at the gap boundary is pregenerated on a fresh account.
         let idx = SubaddressIndex::new(0, gap);
-        let sub = mgr.get(idx).expect("within-gap subaddress must be pregenerated");
+        let sub = mgr
+            .get(idx)
+            .expect("within-gap subaddress must be pregenerated");
         let d_i = sub.spend_public;
         let c_i = sub.view_public;
 
@@ -1989,8 +2013,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let (_o, mnemonic) =
             Wallet::create(dir.path().join("o.wallet"), Some("pw"), "testnet").unwrap();
-        let restored =
-            Wallet::restore(dir.path().join("r.wallet"), &mnemonic, Some("pw"), "testnet").unwrap();
+        let restored = Wallet::restore(
+            dir.path().join("r.wallet"),
+            &mnemonic,
+            Some("pw"),
+            "testnet",
+        )
+        .unwrap();
         let ek = restored.current_keys().unwrap();
 
         let gap = 20u32;
@@ -2035,8 +2064,7 @@ mod tests {
         let (_o, mnemonic) =
             Wallet::create(dir.path().join("o.wallet"), Some("pw"), "testnet").unwrap();
         let path = dir.path().join("r.wallet");
-        let mut restored =
-            Wallet::restore(path.clone(), &mnemonic, Some("pw"), "testnet").unwrap();
+        let mut restored = Wallet::restore(path.clone(), &mnemonic, Some("pw"), "testnet").unwrap();
 
         restored.set_scanned_height(1000);
         restored.save(Some("pw")).unwrap();
@@ -2087,7 +2115,11 @@ mod tests {
         let mut scanner = crate::wallet::scanner::WalletScanner::new();
         scanner.add_keys(wk.view_secret.clone(), wk.spend_public, 0);
         let found = scanner.scan_transaction(&tx);
-        assert_eq!(found.len(), 1, "watch-only view key must detect the incoming output");
+        assert_eq!(
+            found.len(),
+            1,
+            "watch-only view key must detect the incoming output"
+        );
         assert_eq!(found[0].amount, 9_000_000);
     }
 
@@ -2160,7 +2192,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let (w, _m) = Wallet::create(dir.path().join("w.wallet"), Some("pw"), "testnet").unwrap();
 
-        assert!(w.export_view_key(None).is_err(), "unconfirmed export must be refused");
+        assert!(
+            w.export_view_key(None).is_err(),
+            "unconfirmed export must be refused"
+        );
         assert!(
             w.export_view_key_confirmed("wrong", None).is_err(),
             "wrong password must be refused"
@@ -2168,7 +2203,10 @@ mod tests {
 
         let got = w.export_view_key_confirmed("pw", None).unwrap();
         let expected = hex::encode(w.current_keys().unwrap().view_secret.as_bytes());
-        assert_eq!(got, expected, "confirmed export returns the current epoch view key");
+        assert_eq!(
+            got, expected,
+            "confirmed export returns the current epoch view key"
+        );
     }
 
     /// derive_next_epoch advances the current epoch while keeping prior-epoch
@@ -2187,7 +2225,11 @@ mod tests {
 
         let e0 = w.keys_for_epoch(0).unwrap();
         let e1 = w.keys_for_epoch(1).unwrap();
-        assert_eq!(*e0.spend_public.as_bytes(), e0_spend, "old epoch keys must remain");
+        assert_eq!(
+            *e0.spend_public.as_bytes(),
+            e0_spend,
+            "old epoch keys must remain"
+        );
         assert_ne!(
             e0.spend_public.as_bytes(),
             e1.spend_public.as_bytes(),
@@ -2212,7 +2254,10 @@ mod tests {
 
         // Rotate to epoch 1.
         assert_eq!(w.derive_next_epoch().unwrap(), 1);
-        assert!(w.keys_for_epoch(0).is_some(), "prior epoch keys must survive rotation");
+        assert!(
+            w.keys_for_epoch(0).is_some(),
+            "prior epoch keys must survive rotation"
+        );
 
         // A rotated wallet scans with both epochs; epoch-0 funds are still found.
         let mut scanner = crate::wallet::scanner::WalletScanner::new();
@@ -2221,7 +2266,11 @@ mod tests {
         scanner.add_keys(e1.view_secret.clone(), e1.spend_public, 1);
 
         let found = scanner.scan_transaction(&tx);
-        assert_eq!(found.len(), 1, "prior-epoch funds must remain detected after rotation");
+        assert_eq!(
+            found.len(),
+            1,
+            "prior-epoch funds must remain detected after rotation"
+        );
         assert_eq!(found[0].amount, 8_000_000);
     }
 
@@ -2254,10 +2303,18 @@ mod tests {
         assert_eq!(w.total_balance().as_atomic(), 6_000_000);
 
         w.mark_spent_by_key_image(&ki);
-        assert_eq!(w.total_balance().as_atomic(), 0, "marking spent removes it from balance");
+        assert_eq!(
+            w.total_balance().as_atomic(),
+            0,
+            "marking spent removes it from balance"
+        );
 
         w.unmark_spent_by_key_image(&ki);
-        assert_eq!(w.total_balance().as_atomic(), 6_000_000, "unmark restores the UTXO");
+        assert_eq!(
+            w.total_balance().as_atomic(),
+            6_000_000,
+            "unmark restores the UTXO"
+        );
     }
 
     /// save persists utxos/history sidecars together; a reopen+unlock
@@ -2285,12 +2342,25 @@ mod tests {
             subaddress_index: None,
             payment_id: None,
         });
-        w.record_incoming(Hash::from_bytes([3u8; 32]), Amount::from_atomic(4_200_000), 7, 0, 1, None);
+        w.record_incoming(
+            Hash::from_bytes([3u8; 32]),
+            Amount::from_atomic(4_200_000),
+            7,
+            0,
+            1,
+            None,
+        );
         w.set_scanned_height(77);
         w.save(Some("pw")).unwrap();
 
-        assert!(path.with_extension("utxos").exists(), "utxos sidecar written");
-        assert!(path.with_extension("history").exists(), "history sidecar written");
+        assert!(
+            path.with_extension("utxos").exists(),
+            "utxos sidecar written"
+        );
+        assert!(
+            path.with_extension("history").exists(),
+            "history sidecar written"
+        );
 
         let mut reopened = Wallet::open(path).unwrap();
         reopened.unlock("pw").unwrap();
@@ -2300,7 +2370,11 @@ mod tests {
             "UTXO sidecar reconstructs balance"
         );
         assert_eq!(reopened.scanned_height(), 77);
-        assert_eq!(reopened.history().count(), 1, "history sidecar reconstructs records");
+        assert_eq!(
+            reopened.history().count(),
+            1,
+            "history sidecar reconstructs records"
+        );
     }
 
     /// scanned_height is persisted and restored across a lock/unlock cycle.
@@ -2316,7 +2390,11 @@ mod tests {
         w.lock();
         assert!(!w.is_unlocked());
         w.unlock("pw").unwrap();
-        assert_eq!(w.scanned_height(), 500, "scanned height must survive lock/unlock");
+        assert_eq!(
+            w.scanned_height(),
+            500,
+            "scanned height must survive lock/unlock"
+        );
     }
 
     /// Primary addresses carry the network prefix; a subaddress renders a
@@ -2332,7 +2410,11 @@ mod tests {
 
         let ta = wt.address().unwrap();
         let ma = wm.address().unwrap();
-        assert!(ta.starts_with("tCYNC"), "testnet primary prefix, got {}", ta);
+        assert!(
+            ta.starts_with("tCYNC"),
+            "testnet primary prefix, got {}",
+            ta
+        );
         assert!(ma.starts_with("CYNC"), "mainnet primary prefix, got {}", ma);
         assert_ne!(ta, ma);
 
@@ -2344,8 +2426,15 @@ mod tests {
         );
         let sub = mgr.generate_at(SubaddressIndex::new(0, 1)).unwrap();
         let sub_full = sub.address(Network::Testnet);
-        assert_eq!(sub_full.address_type, crate::primitives::AddressType::Subaddress);
-        assert_ne!(sub_full.to_string(), ta, "subaddress must differ from the primary address");
+        assert_eq!(
+            sub_full.address_type,
+            crate::primitives::AddressType::Subaddress
+        );
+        assert_ne!(
+            sub_full.to_string(),
+            ta,
+            "subaddress must differ from the primary address"
+        );
     }
 
     /// Opening a saved wallet yields Locked state; balance queries are safe and
@@ -2360,8 +2449,15 @@ mod tests {
         let opened = Wallet::open(path).unwrap();
         assert_eq!(opened.state(), WalletState::Locked);
         assert!(!opened.is_unlocked());
-        assert_eq!(opened.total_balance().as_atomic(), 0, "locked balance query is safe");
-        assert!(opened.address().is_err(), "address on a locked wallet must err, not panic");
+        assert_eq!(
+            opened.total_balance().as_atomic(),
+            0,
+            "locked balance query is safe"
+        );
+        assert!(
+            opened.address().is_err(),
+            "address on a locked wallet must err, not panic"
+        );
         let _ = opened.spendable_balance(1000); // must not panic
     }
 }

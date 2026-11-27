@@ -22,6 +22,16 @@
 //! caller needs cryptographic collision resistance, migrate to
 //! `blake3::keyed_hash` per-instance.
 
+// Cast hygiene (modernization Tier-1c): this module is clean of unjustified
+// numeric casts — bloom math uses `From` where the conversion is infallible and
+// documents each intentional lossy cast inline — so it enforces the cast lints.
+// Any new intentional cast must carry a justified `#[allow]`.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::hash::{Hash, Hasher};
 
 /// Stable FNV-1a hasher with per-instance random seed.
@@ -49,7 +59,7 @@ impl Hasher for StableHasher {
     fn write(&mut self, bytes: &[u8]) {
         const FNV_PRIME: u64 = 0x100000001b3;
         for &byte in bytes {
-            self.state ^= byte as u64;
+            self.state ^= u64::from(byte);
             self.state = self.state.wrapping_mul(FNV_PRIME);
         }
     }
@@ -80,7 +90,7 @@ impl BloomFilter {
         let fpr = false_positive_rate.clamp(0.0001, 0.001);
 
         let inner = bloomfilter::Bloom::new_for_fp_rate(expected_items, fpr);
-        let num_bits = inner.number_of_bits() as usize;
+        let num_bits = usize::try_from(inner.number_of_bits()).unwrap_or(usize::MAX);
         let num_hashes = inner.number_of_hash_functions() as u32;
 
         BloomFilter {
@@ -101,8 +111,11 @@ impl BloomFilter {
         // bloomfilter::Bloom::new takes (bitmap_size_bytes, items_count).
         // We approximate items_count from the desired bits and hash count.
         let bitmap_bytes = (num_bits + 7) / 8;
+        // num_bits / num_hashes * ln2 is a positive, bounded item estimate; the
+        // `as usize` floor can neither overflow usize nor go negative.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let estimated_items =
-            (num_bits as f64 / num_hashes as f64 * std::f64::consts::LN_2) as usize;
+            (num_bits as f64 / f64::from(num_hashes) * std::f64::consts::LN_2) as usize;
         let estimated_items = estimated_items.max(1);
         let inner = bloomfilter::Bloom::new(bitmap_bytes, estimated_items);
 
@@ -150,7 +163,7 @@ impl BloomFilter {
             return 0.0;
         }
 
-        let k = self.num_hashes as f64;
+        let k = f64::from(self.num_hashes);
         let n = self.count as f64;
         let m = self.num_bits as f64;
 
@@ -190,9 +203,15 @@ impl CountingBloomFilter {
         let ln2 = std::f64::consts::LN_2;
         let ln2_sq = ln2 * ln2;
 
+        // fpr < 1 ⇒ ln(fpr) < 0 ⇒ the product is positive and bounded; the
+        // `.ceil() as usize` can neither overflow usize nor go negative.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let num_counters = (-(expected_items as f64) * fpr.ln() / ln2_sq).ceil() as usize;
         let num_counters = num_counters.max(1024);
 
+        // A small positive hash count, clamped to 1..=16 immediately below; the
+        // `.ceil() as u32` can neither overflow u32 nor go negative.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let num_hashes = ((num_counters as f64 / expected_items as f64) * ln2).ceil() as u32;
         let num_hashes = num_hashes.clamp(1, 16);
 
@@ -242,6 +261,9 @@ impl CountingBloomFilter {
         self.count
     }
 
+    // The FNV output is a bucket selector; truncating it to usize on 32-bit
+    // targets is harmless (any bits give a valid, uniform-enough index).
+    #[allow(clippy::cast_possible_truncation)]
     fn hash_index<T: Hash>(&self, item: &T, seed: u32) -> usize {
         let mut hasher = StableHasher::with_seed(self.hasher_seed);
         seed.hash(&mut hasher);

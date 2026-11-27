@@ -1,5 +1,14 @@
 //! Transaction types for CoinCync 1.0 (single-asset — asset layer stripped).
 
+// Cast hygiene (modernization Tier-1c): this module is clean of unjustified
+// numeric casts. The signing-preimage length prefixes carry an inline `#[allow]`
+// with a consensus warning; any NEW cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::primitives::{hash_concat, Amount, Hash, KeyImage, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -141,6 +150,13 @@ impl Transaction {
     /// Both [`Transaction::signing_hash`] (verifier path) and
     /// `TransactionBuilder::build_with_proofs` (signer path) funnel through
     /// here so the preimage bytes are identical.
+    //
+    // Each `.len() as u32` below is a length prefix in the CONSENSUS signing
+    // preimage; the cast is intentional and truncation cannot occur for valid tx
+    // data (every length is far below u32::MAX). Do NOT change these to try_from
+    // or anything else — the preimage bytes must stay byte-for-byte identical, or
+    // every existing signature fails to verify.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn compute_signing_hash<'a, I>(
         version: u8,
         tx_type: TxType,
@@ -553,7 +569,7 @@ mod tests {
         bytes.extend_from_slice(&[2u8; 32]); // tx_public_key
         bytes.extend_from_slice(&[3u8; 32]); // commitment
         bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // encrypted_amount len (huge)
-        // No payload follows.
+                                                          // No payload follows.
         let decoded = borsh::from_slice::<Transaction>(&bytes);
         assert!(
             decoded.is_err(),

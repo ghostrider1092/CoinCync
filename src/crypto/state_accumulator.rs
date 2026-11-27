@@ -139,7 +139,10 @@ mod tests {
 
     #[test]
     fn empty_root_is_deterministic() {
-        assert_eq!(StateAccumulator::new().root(), StateAccumulator::new().root());
+        assert_eq!(
+            StateAccumulator::new().root(),
+            StateAccumulator::new().root()
+        );
         assert_eq!(StateAccumulator::new().output_count(), 0);
         assert_eq!(StateAccumulator::new().spent_count(), 0);
     }
@@ -172,7 +175,11 @@ mod tests {
         // Disconnect the block: exactly invert the two changes.
         a.unspend(&m(8));
         a.remove_output(&m(7));
-        assert_eq!(a.root(), base, "removing must exactly invert adding (reorg-safe)");
+        assert_eq!(
+            a.root(),
+            base,
+            "removing must exactly invert adding (reorg-safe)"
+        );
         assert_eq!(a.output_count(), 0);
         assert_eq!(a.spent_count(), 0);
     }

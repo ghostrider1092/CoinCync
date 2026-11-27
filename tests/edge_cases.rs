@@ -3,6 +3,14 @@
 //! These tests verify behavior under adversarial or unusual conditions.
 //! All tests should pass before mainnet launch.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::crypto::SecretScalar;
 use coincync::primitives::{hash_data, Amount, PublicKey, SecretKey};
 use coincync::wallet::{SubaddressIndex, SubaddressManager, Wallet};

@@ -34,7 +34,10 @@ use crate::security::{SecurityDetail, SecurityReport, Severity};
 pub fn supply_violations(
     total_supply: u128,
     total_burned: u128,
-) -> (Option<(&'static str, String)>, Option<(&'static str, String)>) {
+) -> (
+    Option<(&'static str, String)>,
+    Option<(&'static str, String)>,
+) {
     let consensus = if total_burned > total_supply {
         Some((
             "burned-exceeds-supply",
@@ -105,13 +108,21 @@ pub struct SupplySecurityDetail {
 impl SupplySecurityDetail {
     /// Snapshot with the burn-inflation guard + over-cap warning only.
     pub fn new(total_supply: u128, total_burned: u128) -> Self {
-        Self { total_supply, total_burned, tip_height: None }
+        Self {
+            total_supply,
+            total_burned,
+            tip_height: None,
+        }
     }
 
     /// Snapshot that also reconciles `total_supply` against the emission
     /// schedule recomputed at `tip_height`.
     pub fn with_tip(total_supply: u128, total_burned: u128, tip_height: u64) -> Self {
-        Self { total_supply, total_burned, tip_height: Some(tip_height) }
+        Self {
+            total_supply,
+            total_burned,
+            tip_height: Some(tip_height),
+        }
     }
 }
 
@@ -169,7 +180,11 @@ mod tests {
 
     #[test]
     fn healthy_supply_is_clean() {
-        assert!(SupplySecurityDetail::new(crate::constants::MAX_SUPPLY / 2, 100).sweep().is_clean());
+        assert!(
+            SupplySecurityDetail::new(crate::constants::MAX_SUPPLY / 2, 100)
+                .sweep()
+                .is_clean()
+        );
     }
 
     #[test]
@@ -207,7 +222,9 @@ mod tests {
 
         // Honest chain with a tip: reconciliation is clean.
         assert!(
-            SupplySecurityDetail::with_tip(honest, 0, tip).sweep().is_clean(),
+            SupplySecurityDetail::with_tip(honest, 0, tip)
+                .sweep()
+                .is_clean(),
             "honest chain must sweep clean including the reconciliation"
         );
 
@@ -215,7 +232,10 @@ mod tests {
         // disposition must not be a consensus halt (a false wedge is worse).
         let report = SupplySecurityDetail::with_tip(honest + 1_000, 0, tip).sweep();
         assert!(
-            report.alerts.iter().any(|a| a.code == "supply-schedule-mismatch"),
+            report
+                .alerts
+                .iter()
+                .any(|a| a.code == "supply-schedule-mismatch"),
             "inflated supply must raise the schedule-mismatch alert"
         );
         // It IS Critical severity (page now), but it is class Operational, so it
@@ -233,7 +253,10 @@ mod tests {
         // checks only — an arbitrary supply must not trip the schedule check.
         let report = SupplySecurityDetail::new(12_345, 0).sweep();
         assert!(
-            !report.alerts.iter().any(|a| a.code == "supply-schedule-mismatch"),
+            !report
+                .alerts
+                .iter()
+                .any(|a| a.code == "supply-schedule-mismatch"),
             "no tip => no schedule reconciliation"
         );
     }

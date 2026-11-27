@@ -91,6 +91,12 @@
 //!   THREAT: a strict parser breaks fetch, or an unverified payload reaches the caller.
 //!   TESTS: `registry_pointer_round_trips_through_json`, `registry_pointer_accepts_missing_optional_fields`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::time::Duration;
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -398,7 +404,7 @@ async fn fetch_bounded(
     }
 
     if let Some(len) = resp.content_length() {
-        if (len as usize) > max_bytes {
+        if len > max_bytes as u64 {
             return Err(format!("content-length {} exceeds cap {}", len, max_bytes));
         }
     }

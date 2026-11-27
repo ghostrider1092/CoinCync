@@ -1,6 +1,9 @@
 //! Full-proof tests. Adversarial cases build proofs without the honest
 //! prover; passing them is evidence, not a proof, of soundness or privacy.
 
+// Intentional hex pun in a test fixture (0x0dd5_eed reads "ODD-SEED").
+#![allow(clippy::unusual_byte_groupings)]
+
 use super::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -119,7 +122,9 @@ fn statement_rejects_invalid_encodings_and_identity() {
     ));
     assert!(matches!(
         CrossCurveStatement::new(&btc, &[0xff; 32], b"swap"),
-        Err(Error::Verification("cross-curve CYNC public key is invalid"))
+        Err(Error::Verification(
+            "cross-curve CYNC public key is invalid"
+        ))
     ));
     // Ristretto's identity has a valid encoding, but is not a valid swap key.
     assert!(matches!(
@@ -135,7 +140,9 @@ fn statement_commitment_binds_both_keys_and_exact_context_bytes() {
     let (_, btc, cync) = fixture(RistrettoScalar::from(7u64).to_bytes());
     let (_, other_btc, other_cync) = fixture(RistrettoScalar::from(11u64).to_bytes());
     let digest = |b: &[u8; 33], c: &[u8; 32], context: &[u8]| {
-        CrossCurveStatement::new(b, c, context).unwrap().commitment()
+        CrossCurveStatement::new(b, c, context)
+            .unwrap()
+            .commitment()
     };
     let original = digest(&btc, &cync, b"swap\0a");
     assert_eq!(original, digest(&btc, &cync, b"swap\0a"));
@@ -226,18 +233,18 @@ fn every_tampered_region_fails_decode_or_verification() {
     let link = CrossCurveProof::ENCODED_LEN - 64;
     // Low bytes keep scalars canonical, so verification itself must reject.
     for offset in [
-        1,                               // challenge
-        1 + CHALLENGE_LEN + 31,          // R_btc (big-endian low byte)
-        1 + CHALLENGE_LEN + 32,          // R_cync (little-endian low byte)
-        first_bit + 32,                  // C_btc
-        last_bit + 33,                   // C_cync of bit 251
-        first_bit + 33 + 32 + 30,        // e0
-        first_bit + 96 + 31,             // s0_btc
-        last_bit + 96 + 32,              // s0_cync
-        last_bit + 96 + 64 + 31,         // s1_btc
-        first_bit + 96 + 96,             // s1_cync
-        link + 31,                       // z_btc
-        link + 32,                       // z_cync
+        1,                        // challenge
+        1 + CHALLENGE_LEN + 31,   // R_btc (big-endian low byte)
+        1 + CHALLENGE_LEN + 32,   // R_cync (little-endian low byte)
+        first_bit + 32,           // C_btc
+        last_bit + 33,            // C_cync of bit 251
+        first_bit + 33 + 32 + 30, // e0
+        first_bit + 96 + 31,      // s0_btc
+        last_bit + 96 + 32,       // s0_cync
+        last_bit + 96 + 64 + 31,  // s1_btc
+        first_bit + 96 + 96,      // s1_cync
+        link + 31,                // z_btc
+        link + 32,                // z_cync
     ] {
         let mut tampered = bytes.clone();
         tampered[offset] ^= 0x01;
@@ -384,15 +391,17 @@ fn forge_with_per_curve_secrets(
     let bits = commitments
         .iter()
         .zip(honest.iter().zip(forged))
-        .map(|(&(commitment_btc, commitment_cync), (witness, response))| BitProof {
-            commitment_btc,
-            commitment_cync,
-            response: match (witness, response) {
-                (Some(witness), None) => respond_bit(witness, challenge).unwrap(),
-                (None, Some(response)) => response,
-                _ => unreachable!(),
+        .map(
+            |(&(commitment_btc, commitment_cync), (witness, response))| BitProof {
+                commitment_btc,
+                commitment_cync,
+                response: match (witness, response) {
+                    (Some(witness), None) => respond_bit(witness, challenge).unwrap(),
+                    (None, Some(response)) => response,
+                    _ => unreachable!(),
+                },
             },
-        })
+        )
         .collect();
     CrossCurveProof {
         challenge,
@@ -420,7 +429,11 @@ fn different_secrets_on_the_two_curves_are_rejected() {
     // T_btc = t1*G_btc and T_cync = t2*G_cync. The v1 strict proof accepted
     // exactly this statement, because its per-curve bit proofs were never
     // tied together.
-    for (t1, t2) in [(7u64, 11u64), (1, 2), (0x8000_0000_0000_0000, 0x8000_0000_0000_0001)] {
+    for (t1, t2) in [
+        (7u64, 11u64),
+        (1, 2),
+        (0x8000_0000_0000_0000, 0x8000_0000_0000_0001),
+    ] {
         let (s1, btc, _) = fixture(RistrettoScalar::from(t1).to_bytes());
         let (s2, _, cync) = fixture(RistrettoScalar::from(t2).to_bytes());
         let statement = CrossCurveStatement::new(&btc, &cync, b"two-secrets").unwrap();
@@ -473,8 +486,13 @@ fn link_and_bit_nonces_are_independent_across_curves() {
     let mut t_be = t.to_bytes();
     t_be.reverse();
     let t_btc = SecretKey::from_slice(&t_be).unwrap();
-    let (k_btc, k_cync) =
-        recovered_nonces(&proof.link.btc, &proof.link.cync, proof.challenge, &t_btc, &t);
+    let (k_btc, k_cync) = recovered_nonces(
+        &proof.link.btc,
+        &proof.link.cync,
+        proof.challenge,
+        &t_btc,
+        &t,
+    );
     assert_ne!(k_btc, k_cync);
 
     // Per bit: the real-branch nonce on each curve, from the prover's state.

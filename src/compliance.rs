@@ -18,6 +18,12 @@
 //!   set + spent-key-image index): Balance/Ownership/Sum resolve on-chain
 //!   anchors, Source checks key-image spentness. Covers all four proof types.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::crypto::{
     create_balance_proof, create_ownership_proof, create_source_proof, create_sum_proof,
     verify_balance_proof_anchored, verify_ownership_proof_anchored, verify_source_proof_anchored,
@@ -247,7 +253,10 @@ impl AuditPackage {
 
     /// Attach a multi-output unlinkable solvency proof (sum of hidden outputs).
     #[cfg(feature = "sketch-gk-proof")]
-    pub fn attach_multi_unlinkable_solvency(&mut self, item: MultiUnlinkableSolvencyItem) -> &mut Self {
+    pub fn attach_multi_unlinkable_solvency(
+        &mut self,
+        item: MultiUnlinkableSolvencyItem,
+    ) -> &mut Self {
         self.multi_unlinkable_solvency = Some(item);
         self
     }
@@ -368,7 +377,11 @@ impl AuditPackage {
     /// Attach a proof whose on-chain reference is carried by the proof (Ownership,
     /// Source) or which references many outputs (Sum).
     pub fn add(&mut self, statement: impl Into<String>, proof: DisclosureProof) -> &mut Self {
-        self.items.push(AuditItem { statement: statement.into(), proof, output_ref: None });
+        self.items.push(AuditItem {
+            statement: statement.into(),
+            proof,
+            output_ref: None,
+        });
         self
     }
 
@@ -862,7 +875,7 @@ impl CustodyAttestation {
         signers: &[KeyShare],
     ) -> Result<Self> {
         let org = org.into();
-        if (signers.len() as u16) < config.threshold {
+        if signers.len() < usize::from(config.threshold) {
             return Err(Error::InvalidState(format!(
                 "custody attestation needs >= {} signers, got {}",
                 config.threshold,
@@ -1214,7 +1227,13 @@ pub fn recipient_receipt(
     memo: &[u8],
     expires_at: Option<u64>,
 ) -> Result<DisclosureProof> {
-    let op = create_ownership_proof(tx_hash, output_index, stealth_address, one_time_secret, memo)?;
+    let op = create_ownership_proof(
+        tx_hash,
+        output_index,
+        stealth_address,
+        one_time_secret,
+        memo,
+    )?;
     DisclosureProof::from_ownership(&op, "payment receipt", expires_at)
 }
 
@@ -1246,7 +1265,9 @@ impl PayrollRun {
         created_at: u64,
         expires_at: Option<u64>,
     ) -> Self {
-        Self { package: AuditPackage::new(org, period, created_at, expires_at) }
+        Self {
+            package: AuditPackage::new(org, period, created_at, expires_at),
+        }
     }
 
     pub fn treasury_solvency(
@@ -1276,8 +1297,13 @@ impl PayrollRun {
         Ok(self)
     }
 
-    pub fn add_recipient_receipt(&mut self, recipient: &str, receipt: DisclosureProof) -> &mut Self {
-        self.package.add(format!("receipt for {recipient}"), receipt);
+    pub fn add_recipient_receipt(
+        &mut self,
+        recipient: &str,
+        receipt: DisclosureProof,
+    ) -> &mut Self {
+        self.package
+            .add(format!("receipt for {recipient}"), receipt);
         self
     }
 
@@ -1288,6 +1314,14 @@ impl PayrollRun {
 
 #[cfg(test)]
 mod tests {
+    // Test vectors mint small output refs via `i as u8` over tiny ranges; the
+    // truncation/sign casts are legitimate in-test fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
     use crate::crypto::{
         create_balance_proof, BlindingFactor, KeyImage, PedersenCommitment, SecretScalar,
@@ -1296,7 +1330,10 @@ mod tests {
     use rand::rngs::OsRng;
 
     fn oref(tag: u8, idx: u8) -> DisclosureOutputRef {
-        DisclosureOutputRef { tx_hash: Hash::from_bytes([tag; 32]), output_index: idx }
+        DisclosureOutputRef {
+            tx_hash: Hash::from_bytes([tag; 32]),
+            output_index: idx,
+        }
     }
 
     /// A fresh (secret, public) keypair in the crate's key types.
@@ -1312,7 +1349,8 @@ mod tests {
         let blinding = BlindingFactor::random(&mut OsRng);
         let commitment = PedersenCommitment::commit(value, &blinding);
         let bp = create_balance_proof(value, &blinding, &commitment, threshold).unwrap();
-        let dp = DisclosureProof::from_balance(&bp, "treasury solvency", Some(2_000_000_000)).unwrap();
+        let dp =
+            DisclosureProof::from_balance(&bp, "treasury solvency", Some(2_000_000_000)).unwrap();
         (dp, commitment.to_bytes())
     }
 
@@ -1334,15 +1372,21 @@ mod tests {
         let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
         pkg.add_anchored("treasury solvency >= 1,000,000", dp, t_ref.clone());
 
-        let good = InMemoryChainView::new()
-            .with_anchor(ChainAnchor::new(t_ref.clone(), commitment, [0u8; 32], 10));
+        let good = InMemoryChainView::new().with_anchor(ChainAnchor::new(
+            t_ref.clone(),
+            commitment,
+            [0u8; 32],
+            10,
+        ));
         assert!(pkg.verify_anchored(1_000_000, &good).unwrap());
 
         // Wrong on-chain commitment => rejected; empty view => not trusted.
-        let wrong = InMemoryChainView::new()
-            .with_anchor(ChainAnchor::new(t_ref, [9u8; 32], [0u8; 32], 10));
+        let wrong =
+            InMemoryChainView::new().with_anchor(ChainAnchor::new(t_ref, [9u8; 32], [0u8; 32], 10));
         assert!(!pkg.verify_anchored(1_000_000, &wrong).unwrap());
-        assert!(!pkg.verify_anchored(1_000_000, &InMemoryChainView::new()).unwrap());
+        assert!(!pkg
+            .verify_anchored(1_000_000, &InMemoryChainView::new())
+            .unwrap());
     }
 
     /// Without `sketch-gk-proof`, a package carrying gk-only solvency fields
@@ -1362,8 +1406,14 @@ mod tests {
         });
         let reason = unsupported_audit_fields(Some(&with_gk))
             .expect("gk-only field must be reported as uninterpretable");
-        assert!(reason.contains("unlinkable_solvency"), "reason names the field: {reason}");
-        assert!(reason.contains("sketch-gk-proof"), "reason names the feature: {reason}");
+        assert!(
+            reason.contains("unlinkable_solvency"),
+            "reason names the field: {reason}"
+        );
+        assert!(
+            reason.contains("sketch-gk-proof"),
+            "reason names the feature: {reason}"
+        );
 
         // The multi-output variant is flagged the same way.
         let with_multi = json!({ "org": "Acme DAO", "multi_unlinkable_solvency": { "x": 1 } });
@@ -1373,8 +1423,7 @@ mod tests {
         // attached no proof): interpretable here, so verification proceeds.
         let plain = json!({ "org": "Acme DAO", "period": "2026-Q3", "items": [] });
         assert!(unsupported_audit_fields(Some(&plain)).is_none());
-        let null_fields =
-            json!({ "org": "Acme DAO", "unlinkable_solvency": null, "multi_unlinkable_solvency": null });
+        let null_fields = json!({ "org": "Acme DAO", "unlinkable_solvency": null, "multi_unlinkable_solvency": null });
         assert!(unsupported_audit_fields(Some(&null_fields)).is_none());
 
         // A missing or non-object package is not this guard's concern; typed
@@ -1402,29 +1451,45 @@ mod tests {
         let idx = 0u8;
 
         // Recipient builds their own receipt.
-        let receipt = recipient_receipt(&tx_hash, idx, &pk, &sk, b"alice pay", Some(2_000_000_000)).unwrap();
+        let receipt =
+            recipient_receipt(&tx_hash, idx, &pk, &sk, b"alice pay", Some(2_000_000_000)).unwrap();
 
         let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
         pkg.add("receipt for alice", receipt);
 
         // Auditor's chain view: the output exists with alice's stealth address.
         let chain = InMemoryChainView::new().with_anchor(ChainAnchor::new(
-            DisclosureOutputRef { tx_hash, output_index: idx },
+            DisclosureOutputRef {
+                tx_hash,
+                output_index: idx,
+            },
             [0u8; 32],
             *pk.as_bytes(),
             5,
         ));
-        assert!(pkg.verify_anchored(1_000_000, &chain).unwrap(), "recipient receipt must verify");
+        assert!(
+            pkg.verify_anchored(1_000_000, &chain).unwrap(),
+            "recipient receipt must verify"
+        );
 
         // A view that doesn't know the output => not trusted.
-        assert!(!pkg.verify_anchored(1_000_000, &InMemoryChainView::new()).unwrap());
+        assert!(!pkg
+            .verify_anchored(1_000_000, &InMemoryChainView::new())
+            .unwrap());
     }
 
     #[test]
     fn source_disclosure_verifies_only_when_key_image_is_spent() {
         let (sk, pk, secret) = keypair();
         let key_image = KeyImage::from_secret(&secret);
-        let dp = source_disclosure(&sk, &pk, &key_image, b"payroll funding", Some(2_000_000_000)).unwrap();
+        let dp = source_disclosure(
+            &sk,
+            &pk,
+            &key_image,
+            b"payroll funding",
+            Some(2_000_000_000),
+        )
+        .unwrap();
 
         let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
         pkg.add("funds source", dp);
@@ -1434,7 +1499,9 @@ mod tests {
         assert!(pkg.verify_anchored(1_000_000, &spent).unwrap());
 
         // Not spent in the trusted view => rejected.
-        assert!(!pkg.verify_anchored(1_000_000, &InMemoryChainView::new()).unwrap());
+        assert!(!pkg
+            .verify_anchored(1_000_000, &InMemoryChainView::new())
+            .unwrap());
     }
 
     #[test]
@@ -1445,7 +1512,10 @@ mod tests {
         let c1 = PedersenCommitment::commit(a1, &b1).to_bytes();
         let c2 = PedersenCommitment::commit(a2, &b2).to_bytes();
         let (r1, r2) = (oref(1, 0), oref(2, 1));
-        let outputs = vec![(a1, b1, r1.tx_hash, r1.output_index), (a2, b2, r2.tx_hash, r2.output_index)];
+        let outputs = vec![
+            (a1, b1, r1.tx_hash, r1.output_index),
+            (a2, b2, r2.tx_hash, r2.output_index),
+        ];
 
         let tv = 10_000_000u64;
         let tb = BlindingFactor::random(&mut OsRng);
@@ -1453,7 +1523,8 @@ mod tests {
         let t_ref = oref(9, 0);
 
         let mut run = PayrollRun::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
-        run.treasury_solvency(tv, &tb, &tc, 1_000_000, t_ref.clone()).unwrap();
+        run.treasury_solvency(tv, &tb, &tc, 1_000_000, t_ref.clone())
+            .unwrap();
         run.total_disbursed(&outputs, (0, 100)).unwrap();
         let pkg = run.finish();
         assert!(pkg.items[1].statement.contains("500000"));
@@ -1462,7 +1533,10 @@ mod tests {
             .with_anchor(ChainAnchor::new(t_ref, tc.to_bytes(), [0u8; 32], 50))
             .with_anchor(ChainAnchor::new(r1, c1, [0u8; 32], 50))
             .with_anchor(ChainAnchor::new(r2, c2, [0u8; 32], 50));
-        assert!(pkg.verify_anchored(1_000_000, &chain).unwrap(), "whole payroll package anchors");
+        assert!(
+            pkg.verify_anchored(1_000_000, &chain).unwrap(),
+            "whole payroll package anchors"
+        );
     }
 
     /// Build a payroll package: total-disbursed over `outputs`, plus a receipt
@@ -1476,18 +1550,39 @@ mod tests {
         run.total_disbursed(outputs, (0, 100)).unwrap();
         let (sk, pk, _s) = keypair();
         for r in receipt_refs {
-            let rc = recipient_receipt(&r.tx_hash, r.output_index, &pk, &sk, b"pay", Some(2_000_000_000))
-                .unwrap();
+            let rc = recipient_receipt(
+                &r.tx_hash,
+                r.output_index,
+                &pk,
+                &sk,
+                b"pay",
+                Some(2_000_000_000),
+            )
+            .unwrap();
             run.add_recipient_receipt("recipient", rc);
         }
         run.finish()
     }
 
-    fn sum_outputs() -> (Vec<(u64, BlindingFactor, Hash, u8)>, DisclosureOutputRef, DisclosureOutputRef) {
+    fn sum_outputs() -> (
+        Vec<(u64, BlindingFactor, Hash, u8)>,
+        DisclosureOutputRef,
+        DisclosureOutputRef,
+    ) {
         let (r1, r2) = (oref(1, 0), oref(2, 1));
         let outputs = vec![
-            (300_000u64, BlindingFactor::random(&mut OsRng), r1.tx_hash, r1.output_index),
-            (200_000u64, BlindingFactor::random(&mut OsRng), r2.tx_hash, r2.output_index),
+            (
+                300_000u64,
+                BlindingFactor::random(&mut OsRng),
+                r1.tx_hash,
+                r1.output_index,
+            ),
+            (
+                200_000u64,
+                BlindingFactor::random(&mut OsRng),
+                r2.tx_hash,
+                r2.output_index,
+            ),
         ];
         (outputs, r1, r2)
     }
@@ -1524,8 +1619,15 @@ mod tests {
     fn reconcile_without_total_reconciles_nothing() {
         // Package with only a receipt and no total-disbursed proof.
         let (sk, pk, _s) = keypair();
-        let rc = recipient_receipt(&Hash::from_bytes([4u8; 32]), 0, &pk, &sk, b"x", Some(2_000_000_000))
-            .unwrap();
+        let rc = recipient_receipt(
+            &Hash::from_bytes([4u8; 32]),
+            0,
+            &pk,
+            &sk,
+            b"x",
+            Some(2_000_000_000),
+        )
+        .unwrap();
         let mut pkg = AuditPackage::new("Acme DAO", "2026-Q3", 1_000, Some(2_000_000_000));
         pkg.add("receipt", rc);
         let rec = pkg.reconcile().unwrap();
@@ -1591,9 +1693,18 @@ mod tests {
         // empty chain => rejected, and the id stays available.
         let mut fresh = HashSet::new();
         assert!(!signed
-            .accept(&vk, "Auditor One", &mut fresh, 1_000_000, &InMemoryChainView::new())
+            .accept(
+                &vk,
+                "Auditor One",
+                &mut fresh,
+                1_000_000,
+                &InMemoryChainView::new()
+            )
             .unwrap());
-        assert!(!fresh.contains(&signed.audit_id), "id must not be consumed on failure");
+        assert!(
+            !fresh.contains(&signed.audit_id),
+            "id must not be consumed on failure"
+        );
     }
 
     #[test]
@@ -1648,7 +1759,10 @@ mod tests {
         pkg.add_anchored("treasury solvency >= 1,000,000", dp, t_ref.clone());
         pkg.attach_custody(att);
         assert!(pkg.verify_custody(&kg.config.group_public_key).unwrap());
-        assert!(pkg.custody_governs_solvency(), "custody governs the solvency output");
+        assert!(
+            pkg.custody_governs_solvency(),
+            "custody governs the solvency output"
+        );
         assert!(pkg.to_report(1_000_000).contains("2-of-3 multisig"));
 
         // Custody rides inside the signed package: tampering breaks the signature.
@@ -1675,7 +1789,10 @@ mod tests {
 
         // The sealed envelope leaks nothing in the clear.
         let j = sealed.to_json().unwrap();
-        assert!(!j.contains("Acme DAO"), "org name must not appear in the sealed blob");
+        assert!(
+            !j.contains("Acme DAO"),
+            "org name must not appear in the sealed blob"
+        );
         assert!(!j.contains("Auditor One"));
         assert!(!j.contains("solvency"));
 
@@ -1691,7 +1808,10 @@ mod tests {
 
         // A different key cannot open it.
         let (other_sk, _o, _) = keypair();
-        assert!(sealed.open(&other_sk).is_err(), "wrong auditor key must fail");
+        assert!(
+            sealed.open(&other_sk).is_err(),
+            "wrong auditor key must fail"
+        );
 
         // Tampering with the ciphertext fails the AEAD tag.
         let mut tampered = sealed.clone();
@@ -1699,7 +1819,10 @@ mod tests {
         let n = b.len();
         b[n - 1] ^= 0x01;
         tampered.blob = hex::encode(b);
-        assert!(tampered.open(&aud_sk).is_err(), "tampered ciphertext must fail");
+        assert!(
+            tampered.open(&aud_sk).is_err(),
+            "tampered ciphertext must fail"
+        );
     }
 
     #[cfg(feature = "sketch-gk-proof")]
@@ -1795,19 +1918,35 @@ mod tests {
             v
         };
         // Correct pin at a recent height verifies.
-        let good = base().with_block_hash(as_of, pin).with_tip_height(as_of + 5);
-        assert!(pkg.verify_anchored(1_000_000, &good).unwrap(), "pinned + fresh verifies");
+        let good = base()
+            .with_block_hash(as_of, pin)
+            .with_tip_height(as_of + 5);
+        assert!(
+            pkg.verify_anchored(1_000_000, &good).unwrap(),
+            "pinned + fresh verifies"
+        );
         // Different block at that height (a fork) is rejected.
-        let fork = base().with_block_hash(as_of, [9u8; 32]).with_tip_height(as_of + 5);
-        assert!(!pkg.verify_anchored(1_000_000, &fork).unwrap(), "wrong-fork pin rejected");
+        let fork = base()
+            .with_block_hash(as_of, [9u8; 32])
+            .with_tip_height(as_of + 5);
+        assert!(
+            !pkg.verify_anchored(1_000_000, &fork).unwrap(),
+            "wrong-fork pin rejected"
+        );
         // Too stale (tip far past as_of) is rejected.
         let stale = base()
             .with_block_hash(as_of, pin)
             .with_tip_height(as_of + MAX_SOLVENCY_STALENESS_BLOCKS + 1);
-        assert!(!pkg.verify_anchored(1_000_000, &stale).unwrap(), "stale proof rejected");
+        assert!(
+            !pkg.verify_anchored(1_000_000, &stale).unwrap(),
+            "stale proof rejected"
+        );
         // Node has no block at that height (pin unverifiable) is rejected.
         let missing = base().with_tip_height(as_of + 5);
-        assert!(!pkg.verify_anchored(1_000_000, &missing).unwrap(), "unverifiable pin rejected");
+        assert!(
+            !pkg.verify_anchored(1_000_000, &missing).unwrap(),
+            "unverifiable pin rejected"
+        );
     }
 
     #[cfg(feature = "sketch-gk-proof")]
@@ -1819,7 +1958,8 @@ mod tests {
             let vals: Vec<u64> = (0..n)
                 .map(|i| if i == tl { tv } else { base + i as u64 })
                 .collect();
-            let bs: Vec<BlindingFactor> = (0..n).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+            let bs: Vec<BlindingFactor> =
+                (0..n).map(|_| BlindingFactor::random(&mut OsRng)).collect();
             let commits: Vec<[u8; 32]> = vals
                 .iter()
                 .zip(&bs)
@@ -1856,7 +1996,10 @@ mod tests {
                 good = good.with_anchor(ChainAnchor::new(r.clone(), commits[i], [0u8; 32], 10));
             }
         }
-        assert!(pkg.verify_anchored(1_000_000, &good).unwrap(), "multi-output anchors + verifies");
+        assert!(
+            pkg.verify_anchored(1_000_000, &good).unwrap(),
+            "multi-output anchors + verifies"
+        );
         assert!(pkg.to_report(1_000_000).contains("multi-output"));
 
         // A member whose set isn't fully anchored on-chain => rejected.
@@ -1864,6 +2007,9 @@ mod tests {
         for (i, r) in r0.iter().enumerate() {
             partial = partial.with_anchor(ChainAnchor::new(r.clone(), c0[i], [0u8; 32], 10));
         }
-        assert!(!pkg.verify_anchored(1_000_000, &partial).unwrap(), "unanchored member rejected");
+        assert!(
+            !pkg.verify_anchored(1_000_000, &partial).unwrap(),
+            "unanchored member rejected"
+        );
     }
 }

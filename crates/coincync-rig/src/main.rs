@@ -398,7 +398,11 @@ fn print_banner() {
         println!("CoinCync Rig v{ver}  (RandomX, CPU-only)");
         println!("the mole goes underground - no donation, no telemetry, no surprises");
         println!("POW RandomX (rx/cync)");
-        println!("CPU {cpu_desc} ({cores} cores, {arch}, AES {}, AVX2 {})", yn(aes), yn(avx2));
+        println!(
+            "CPU {cpu_desc} ({cores} cores, {arch}, AES {}, AVX2 {})",
+            yn(aes),
+            yn(avx2)
+        );
         println!("MEMORY {used_gb:.1} / {total_gb:.1} GB ({mem_pct}% used)");
         println!("SYSTEM {os}");
         println!();
@@ -407,11 +411,31 @@ fn print_banner() {
 
     // Palette (no gold): teal accent for the frame + labels, green for "on",
     // soft off-white body, muted gray for secondary text.
-    let teal = Color::Rgb { r: 86, g: 194, b: 180 };
-    let teal_dim = Color::Rgb { r: 58, g: 130, b: 122 };
-    let green = Color::Rgb { r: 127, g: 184, b: 121 };
-    let body = Color::Rgb { r: 224, g: 230, b: 228 };
-    let muted = Color::Rgb { r: 138, g: 148, b: 146 };
+    let teal = Color::Rgb {
+        r: 86,
+        g: 194,
+        b: 180,
+    };
+    let teal_dim = Color::Rgb {
+        r: 58,
+        g: 130,
+        b: 122,
+    };
+    let green = Color::Rgb {
+        r: 127,
+        g: 184,
+        b: 121,
+    };
+    let body = Color::Rgb {
+        r: 224,
+        g: 230,
+        b: 228,
+    };
+    let muted = Color::Rgb {
+        r: 138,
+        g: 148,
+        b: 146,
+    };
 
     // Framed title. Width derives from the longest content line so the box always
     // closes flush. ANSI codes are zero-width, so padding is computed on the plain
@@ -433,7 +457,12 @@ fn print_banner() {
     };
 
     println!();
-    println!("  {}{}{}", "┌".with(teal), bar.clone().with(teal), "┐".with(teal));
+    println!(
+        "  {}{}{}",
+        "┌".with(teal),
+        bar.clone().with(teal),
+        "┐".with(teal)
+    );
     println!("{}", framed(&title));
     println!("{}", framed(&sub));
     println!("  {}{}{}", "└".with(teal), bar.with(teal), "┘".with(teal));
@@ -458,8 +487,23 @@ fn print_banner() {
     // Continuation line, aligned under a row's value column (3 + "* " + 9 + 2).
     let cont = |value: String| println!("{}{}", " ".repeat(16), value);
 
-    row("ABOUT", format!("{} {}", format!("CoinCync Rig v{ver}").with(body), "(RandomX, CPU-only)".with(muted)));
-    row("POW", format!("{}  {}  {}", "RandomX".with(body), "·".with(muted), "rx/cync".with(muted)));
+    row(
+        "ABOUT",
+        format!(
+            "{} {}",
+            format!("CoinCync Rig v{ver}").with(body),
+            "(RandomX, CPU-only)".with(muted)
+        ),
+    );
+    row(
+        "POW",
+        format!(
+            "{}  {}  {}",
+            "RandomX".with(body),
+            "·".with(muted),
+            "rx/cync".with(muted)
+        ),
+    );
     row("CPU", cpu_desc.clone().with(body).to_string());
     cont(format!(
         "{} cores {} {} {} AES {} {} AVX2 {}",
@@ -532,14 +576,46 @@ fn print_runsolo_metadata(
     // Palette matches print_banner, extended with amber (warning), red (error)
     // and cyan (numeric / accent) so values are colored by MEANING — the
     // XMRig convention: green = healthy, amber = attention, red = fault.
-    let teal = Color::Rgb { r: 86, g: 194, b: 180 };
-    let teal_dim = Color::Rgb { r: 58, g: 130, b: 122 };
-    let green = Color::Rgb { r: 127, g: 184, b: 121 };
-    let amber = Color::Rgb { r: 218, g: 183, b: 94 };
-    let red = Color::Rgb { r: 209, g: 108, b: 108 };
-    let cyan = Color::Rgb { r: 122, g: 200, b: 214 };
-    let body = Color::Rgb { r: 224, g: 230, b: 228 };
-    let muted = Color::Rgb { r: 138, g: 148, b: 146 };
+    let teal = Color::Rgb {
+        r: 86,
+        g: 194,
+        b: 180,
+    };
+    let teal_dim = Color::Rgb {
+        r: 58,
+        g: 130,
+        b: 122,
+    };
+    let green = Color::Rgb {
+        r: 127,
+        g: 184,
+        b: 121,
+    };
+    let amber = Color::Rgb {
+        r: 218,
+        g: 183,
+        b: 94,
+    };
+    let red = Color::Rgb {
+        r: 209,
+        g: 108,
+        b: 108,
+    };
+    let cyan = Color::Rgb {
+        r: 122,
+        g: 200,
+        b: 214,
+    };
+    let body = Color::Rgb {
+        r: 224,
+        g: 230,
+        b: 228,
+    };
+    let muted = Color::Rgb {
+        r: 138,
+        g: 148,
+        b: 146,
+    };
 
     // Conditional color: real ANSI in a TTY, clean plain text when piped to a
     // file / log (crossterm would otherwise emit escape codes either way).
@@ -634,9 +710,7 @@ fn print_runsolo_metadata(
                 ]
                 .join(&sep),
             ),
-            (Some(fp), None) => {
-                cont(format!("{} {}", p("fingerprint", muted), pb(fp, cyan)))
-            }
+            (Some(fp), None) => cont(format!("{} {}", p("fingerprint", muted), pb(fp, cyan))),
             (None, Some(nf)) => cont(p(&format!("node reports \"{nf}\""), body)),
             (None, None) => {}
         }
@@ -671,12 +745,20 @@ fn print_runsolo_metadata(
                 p("/ target", muted),
                 pb(&t.to_string(), cyan)
             )),
-            (Some(h), None) => parts.push(format!("{} {}", p("height", muted), pb(&h.to_string(), cyan))),
+            (Some(h), None) => parts.push(format!(
+                "{} {}",
+                p("height", muted),
+                pb(&h.to_string(), cyan)
+            )),
             _ => {}
         }
         if let Some(pt) = peer_target {
             if pt > 0 {
-                parts.push(format!("{} {}", p("peer", muted), pb(&pt.to_string(), cyan)));
+                parts.push(format!(
+                    "{} {}",
+                    p("peer", muted),
+                    pb(&pt.to_string(), cyan)
+                ));
             }
         }
         if let Some(s) = synced {
@@ -710,7 +792,11 @@ fn print_runsolo_metadata(
             .or_else(|| info.get("hashrate_hps").and_then(|v| v.as_u64()));
         if let Some(hr) = net_hr {
             if hr > 0 {
-                cont(format!("{} {}", p("network", muted), pb(&format!("{hr} H/s"), cyan)));
+                cont(format!(
+                    "{} {}",
+                    p("network", muted),
+                    pb(&format!("{hr} H/s"), cyan)
+                ));
             }
         }
     } else {
@@ -738,7 +824,11 @@ fn print_runsolo_metadata(
         .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
         .unwrap_or(false);
     let full_mem = coincync::consensus::pow::node_mining_active() && !light_forced;
-    let (rx_mode, rx_col) = if full_mem { ("full-mem", green) } else { ("light", amber) };
+    let (rx_mode, rx_col) = if full_mem {
+        ("full-mem", green)
+    } else {
+        ("light", amber)
+    };
     // Trailing badge: full-mem → ✔, light → ▲.
     let mining_badge = if full_mem {
         badge("✔", "[ok]", green)
@@ -749,7 +839,11 @@ fn print_runsolo_metadata(
         "MINING",
         [
             p(&format!("addr {addr_disp}"), body),
-            format!("{} {}", pb(&n_threads.to_string(), cyan), p("threads", muted)),
+            format!(
+                "{} {}",
+                pb(&n_threads.to_string(), cyan),
+                p("threads", muted)
+            ),
             format!("{} {}", p("RandomX", muted), p(rx_mode, rx_col)),
             mining_badge,
         ]
@@ -775,7 +869,10 @@ fn print_runsolo_metadata(
         ]
         .join(&sep),
     );
-    cont(p("activation height not yet reached — see node logs", muted));
+    cont(p(
+        "activation height not yet reached — see node logs",
+        muted,
+    ));
     println!();
 }
 
@@ -969,12 +1066,12 @@ fn run_solo_cli(
     tui_log_rx: Option<std::sync::mpsc::Receiver<String>>,
 ) -> Result<()> {
     activate_full_mem_hashing(); // #145 (also covers run-config, which calls this)
-    // Build SignalBits from miner opt-in flags. Today there's only
-    // V1_0_12_BUNDLE (CIP-012); future CIPs add their own flag here
-    // and OR their bit into `signal_raw`. Passing SignalBits(0)
-    // produces a legacy 8-byte coinbase.extra (byte-identical to
-    // pre-CIP-012 miners); passing any non-zero set produces the
-    // 12-byte form. See fork_signal::encode_coinbase_extra.
+                                 // Build SignalBits from miner opt-in flags. Today there's only
+                                 // V1_0_12_BUNDLE (CIP-012); future CIPs add their own flag here
+                                 // and OR their bit into `signal_raw`. Passing SignalBits(0)
+                                 // produces a legacy 8-byte coinbase.extra (byte-identical to
+                                 // pre-CIP-012 miners); passing any non-zero set produces the
+                                 // 12-byte form. See fork_signal::encode_coinbase_extra.
     let signal_bits = {
         let mut raw = 0u32;
         if signal_v1012 {
@@ -1101,11 +1198,24 @@ fn print_shutdown_summary(m: &metrics::MetricsState, uptime: std::time::Duration
     use std::sync::atomic::Ordering::Relaxed;
 
     let term = std::io::stdout().is_terminal();
-    let teal = Color::Rgb { r: 86, g: 194, b: 180 };
-    let body = Color::Rgb { r: 224, g: 230, b: 228 };
+    let teal = Color::Rgb {
+        r: 86,
+        g: 194,
+        b: 180,
+    };
+    let body = Color::Rgb {
+        r: 224,
+        g: 230,
+        b: 228,
+    };
 
     let secs = uptime.as_secs();
-    let uptime_str = format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60);
+    let uptime_str = format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    );
 
     let hashes = m.hashes_total.load(Relaxed);
     let found = m.blocks_found_total.load(Relaxed);
@@ -1153,7 +1263,12 @@ fn print_shutdown_summary(m: &metrics::MetricsState, uptime: std::time::Duration
 
     println!();
     if term {
-        println!("  {}{}{}", "┌".with(teal), bar.clone().with(teal), "┐".with(teal));
+        println!(
+            "  {}{}{}",
+            "┌".with(teal),
+            bar.clone().with(teal),
+            "┐".with(teal)
+        );
     } else {
         println!("  +{}+", "-".repeat(inner));
     }

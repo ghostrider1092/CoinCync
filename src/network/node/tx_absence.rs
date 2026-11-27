@@ -203,6 +203,9 @@ mod tests {
         let removed = cache.prune();
         assert_eq!(removed, 1, "prune should remove exactly the expired entry");
         assert_eq!(cache.len(), 1);
-        assert!(cache.is_known_absent(&p, &fresh), "live entry must survive prune");
+        assert!(
+            cache.is_known_absent(&p, &fresh),
+            "live entry must survive prune"
+        );
     }
 }

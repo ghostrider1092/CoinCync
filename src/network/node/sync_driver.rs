@@ -88,6 +88,12 @@
 //!   TESTS: `should_retrigger_sync_covers_height_and_work_126` (the predicate;
 //!   the async tick loop itself remains unit-test-gapped).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::VecDeque;
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
@@ -341,7 +347,15 @@ impl IbdProgress {
     // Display math on bounded values: `pct` ∈ [0,100] and the product is in
     // [0, IBD_BAR_WIDTH], so the `as usize` cannot truncate or go negative.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn render_bar(&self, local: u64, target: u64, pct: f64, rate: f64, remaining: u64, peers: usize) {
+    fn render_bar(
+        &self,
+        local: u64,
+        target: u64,
+        pct: f64,
+        rate: f64,
+        remaining: u64,
+        peers: usize,
+    ) {
         let bar = make_bar(pct, bar_color(peers));
         // `\r` returns to column 0; `\x1b[2K` clears the whole line so a shorter
         // line never leaves stale characters from a longer previous one.
@@ -407,10 +421,26 @@ impl IbdProgress {
 //             it never appears mid-sync because `update()` only renders while
 //             still behind (it early-returns and finishes the moment we catch up).
 // The empty track is a dim gray.
-const BAR_GREEN: Color = Color::Rgb { r: 127, g: 184, b: 121 };
-const BAR_AMBER: Color = Color::Rgb { r: 218, g: 183, b: 94 };
-const BAR_RED: Color = Color::Rgb { r: 209, g: 108, b: 108 };
-const BAR_TRACK: Color = Color::Rgb { r: 80, g: 88, b: 86 };
+const BAR_GREEN: Color = Color::Rgb {
+    r: 127,
+    g: 184,
+    b: 121,
+};
+const BAR_AMBER: Color = Color::Rgb {
+    r: 218,
+    g: 183,
+    b: 94,
+};
+const BAR_RED: Color = Color::Rgb {
+    r: 209,
+    g: 108,
+    b: 108,
+};
+const BAR_TRACK: Color = Color::Rgb {
+    r: 80,
+    g: 88,
+    b: 86,
+};
 
 /// Color for the in-progress bar (header + block phases). Only ever called while
 /// behind the tip, so it returns RED (no peers → stuck) or AMBER (catching up);
@@ -647,7 +677,7 @@ pub(super) fn spawn_sync_driver(
             // We pass elapsed seconds since sync start — this is compared against
             // request timestamps that also use wall-clock time, but the monotonic
             // elapsed acts as a safety floor to avoid false stalls on clock skew.
-            let now = chrono::Utc::now().timestamp() as u64;
+            let now = crate::clock::real_unix_now();
             let monotonic_now = driver.elapsed_secs();
 
             // #137 false-stall fix: sample the monotonic count of blocks
@@ -770,7 +800,12 @@ pub(super) fn spawn_sync_driver(
             // orphan-fetch cascade because the engine was busy doing internal
             // work with no useful result). See note_progress_tick for the #137
             // (blocks-flowing) and #192 (idle-at-tip) ground-truth rules.
-            driver.note_progress_tick(monotonic_now, sync_chain.height(), blocks_flowing, effectively_synced);
+            driver.note_progress_tick(
+                monotonic_now,
+                sync_chain.height(),
+                blocks_flowing,
+                effectively_synced,
+            );
 
             // ── EMERGENCY TIER-3 (progress-time-based) ────────────
             // If chain hasn't advanced for EMERGENCY_T3_NO_PROGRESS_SECS
@@ -873,7 +908,7 @@ pub(super) fn spawn_sync_driver(
                 // a stuck sync (coincync-lon, 2026-06-02); Tier 3 below
                 // catches that case.
                 if driver.stall_count >= 24 {
-                    let now = chrono::Utc::now().timestamp() as u64;
+                    let now = crate::clock::real_unix_now();
                     let current_height = sync_chain.height();
                     let advanced_since_last_tier2 = current_height > driver.tier2_last_height;
 
@@ -1039,7 +1074,7 @@ pub(super) fn spawn_sync_driver(
                     // 3. Send GetBlocks directly, try next peer on failure
                     // 4. If all peers fail, fall back to Headers to rediscover
                     // ============================================================
-                    let now = chrono::Utc::now().timestamp() as u64;
+                    let now = crate::clock::real_unix_now();
                     let our_h = sync_chain.height();
 
                     recover_block_requests(&sync_sync, now).await;
@@ -1179,7 +1214,7 @@ async fn run_headers_tick(
     scorer: &Arc<RwLock<PeerScorer>>,
     magic: [u8; 4],
 ) {
-    let now = chrono::Utc::now().timestamp() as u64;
+    let now = crate::clock::real_unix_now();
     if sync.read().await.headers_timed_out(now) {
         warn!("Headers request timed out, retrying with different peer");
         sync.write().await.reset_headers_timeout();
@@ -1405,6 +1440,11 @@ async fn run_synced_tick(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     /// §2: the headers tick waits only while the pool is draining (tip moving
@@ -1446,10 +1486,10 @@ mod tests {
         // keeps it current because effectively_synced is true.
         for t in (0..=1000).step_by(5) {
             state.note_progress_tick(
-                t,          // monotonic_now
-                100,        // current_height — unchanged, still at the tip
-                false,      // blocks_flowing — nothing downloading
-                true,       // effectively_synced — caught up to all peers
+                t,     // monotonic_now
+                100,   // current_height — unchanged, still at the tip
+                false, // blocks_flowing — nothing downloading
+                true,  // effectively_synced — caught up to all peers
             );
         }
         assert_eq!(
@@ -1483,15 +1523,24 @@ mod tests {
         state.no_progress_ticks = 59; // one short of the Forcing-Headers net
         state.emergency_t3_fires = 3;
         state.note_progress_tick(500, 100, false, true);
-        assert_eq!(state.no_progress_ticks, 0, "synced tick must reset the 60-tick net");
-        assert_eq!(state.emergency_t3_fires, 0, "synced tick must reset the emergency re-fire count");
+        assert_eq!(
+            state.no_progress_ticks, 0,
+            "synced tick must reset the 60-tick net"
+        );
+        assert_eq!(
+            state.emergency_t3_fires, 0,
+            "synced tick must reset the emergency re-fire count"
+        );
 
         // But a genuine behind-and-stalled tick (not synced, no delivery, no tip
         // advance) must NOT reset — otherwise the stall could never be detected.
         let mut behind = SyncDriverState::new(100);
         behind.no_progress_ticks = 59;
         behind.note_progress_tick(500, 100, false, false);
-        assert_eq!(behind.no_progress_ticks, 59, "a real stalled tick must not reset the counter");
+        assert_eq!(
+            behind.no_progress_ticks, 59,
+            "a real stalled tick must not reset the counter"
+        );
     }
 
     fn sync_at(height: u64, local_work: u128) -> ChainSync {
@@ -1527,9 +1576,16 @@ mod tests {
         // peer height (100) == local height (100): NOT taller. Only work admits it.
         let peers = [(peer, 100u64)];
 
-        let sent =
-            send_block_spans(&hashes, &peers, &senders, &sync, [0xC0, 0x15, 0x11, 0x00], 1_000, 100)
-                .await;
+        let sent = send_block_spans(
+            &hashes,
+            &peers,
+            &senders,
+            &sync,
+            [0xC0, 0x15, 0x11, 0x00],
+            1_000,
+            100,
+        )
+        .await;
 
         assert_eq!(
             sent,
@@ -1559,11 +1615,21 @@ mod tests {
         let hashes = vec![Hash::from_bytes([1u8; 32])];
         let peers = [(peer, 100u64)]; // same height, no work claim
 
-        let sent =
-            send_block_spans(&hashes, &peers, &senders, &sync, [0xC0, 0x15, 0x11, 0x00], 1_000, 100)
-                .await;
+        let sent = send_block_spans(
+            &hashes,
+            &peers,
+            &senders,
+            &sync,
+            [0xC0, 0x15, 0x11, 0x00],
+            1_000,
+            100,
+        )
+        .await;
 
-        assert_eq!(sent, 0, "an equal-height, equal-work peer must not be sent a span");
+        assert_eq!(
+            sent, 0,
+            "an equal-height, equal-work peer must not be sent a span"
+        );
         assert!(rx.try_recv().is_err(), "no GetBlocks should be emitted");
     }
 
@@ -1697,7 +1763,11 @@ mod tests {
         let t0 = Instant::now();
         p.push_sample(t0, 500);
         p.push_sample(t0 + Duration::from_secs(1), 450); // tip went backwards
-        assert_eq!(p.rate(), 0.0, "a height regression must not produce a negative rate");
+        assert_eq!(
+            p.rate(),
+            0.0,
+            "a height regression must not produce a negative rate"
+        );
     }
 
     #[test]

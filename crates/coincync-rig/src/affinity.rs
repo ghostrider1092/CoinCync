@@ -45,9 +45,7 @@ fn ordered_core_ids() -> &'static Vec<core_affinity::CoreId> {
 /// emit a physical-first ordering. Returns `None` on any missing/unparseable
 /// file so the caller falls back to the raw order.
 #[cfg(target_os = "linux")]
-fn linux_physical_first(
-    raw: &[core_affinity::CoreId],
-) -> Option<Vec<core_affinity::CoreId>> {
+fn linux_physical_first(raw: &[core_affinity::CoreId]) -> Option<Vec<core_affinity::CoreId>> {
     use std::collections::BTreeMap;
     // Key each logical cpu by its (package, physical core) so SMT siblings
     // share a group. BTreeMap keeps the group order stable + deterministic.
@@ -104,7 +102,11 @@ pub fn pin_current_thread(worker_index: usize) {
     }
     let core = ids[worker_index % ids.len()];
     if core_affinity::set_for_current(core) {
-        tracing::debug!(worker_index, core_id = core.id, "pinned mining thread to core");
+        tracing::debug!(
+            worker_index,
+            core_id = core.id,
+            "pinned mining thread to core"
+        );
     } else {
         tracing::debug!(
             worker_index,

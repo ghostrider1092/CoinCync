@@ -521,7 +521,11 @@ mod tests {
     #[test]
     fn hash_to_point_kat_matches_spec_and_golden() {
         use sha3::{Digest, Sha3_512};
-        for input in [b"".as_slice(), b"coincync-kat".as_slice(), &[0xFFu8; 40][..]] {
+        for input in [
+            b"".as_slice(),
+            b"coincync-kat".as_slice(),
+            &[0xFFu8; 40][..],
+        ] {
             let mut h = Sha3_512::new();
             h.update(b"CoinCync_hash_to_point_v1");
             h.update(input);
@@ -553,7 +557,10 @@ mod tests {
                 "hash_to_scalar must be from_bytes_mod_order_wide(Sha3-512(\"CoinCync_hash_to_scalar_v1\"||data))"
             );
         }
-        assert_eq!(hex::encode(hash_to_scalar(b"").to_bytes()), "cb3465a369bed0c953d7585c3a6eef35bd405c3bc57730808921fa957a229f0d");
+        assert_eq!(
+            hex::encode(hash_to_scalar(b"").to_bytes()),
+            "cb3465a369bed0c953d7585c3a6eef35bd405c3bc57730808921fa957a229f0d"
+        );
     }
 
     #[test]
@@ -569,7 +576,10 @@ mod tests {
             expected.compress().to_bytes(),
             "key image must equal x·Hp(x·G)"
         );
-        assert_eq!(hex::encode(ki.to_bytes()), "147a351de17f404f9e7f382c538622dcb7b844fac3dd607cef25d1873b515616");
+        assert_eq!(
+            hex::encode(ki.to_bytes()),
+            "147a351de17f404f9e7f382c538622dcb7b844fac3dd607cef25d1873b515616"
+        );
     }
 
     #[test]

@@ -48,12 +48,12 @@ pub mod error;
 pub mod build_info;
 pub mod config;
 pub mod helpers;
+#[cfg(kani)]
+mod kani_proofs;
 /// Boot-time self-preflight guards (compiled-network vs runtime `--network`,
 /// data-dir network marker). Fail-fast, no consensus impact. See
 /// `docs/design/self-preflight-boot-guard.md`.
 pub mod preflight;
-#[cfg(kani)]
-mod kani_proofs;
 pub mod prelude;
 
 // ── Primitives + types ──────────────────────────────────────
@@ -116,9 +116,9 @@ pub mod compliance; // auditor-facing disclosure packages (compliant-privacy use
 pub mod security; // chain-wide "security detail" pattern: guards + scan over attack surfaces
 
 // ── Network genesis definitions ─────────────────────────────
+pub mod beta;
 pub mod mainnet;
 pub mod testnet;
-pub mod beta;
 
 // ── Resilience / safety connectors ──────────────────────────
 // The circuit-breaker suite + the universal fuse box + the Rung-2 state-root
@@ -182,20 +182,20 @@ pub mod fuse;
 
 // LIVE feed adapters — one thin feed point per surface at its real source, each
 // routing through the universal fuse box. All Observe-mode, node-local, gated OFF.
+#[cfg(all(feature = "block-integrity-breaker", feature = "breaker-recovery"))]
+pub mod block_integrity_live_breaker;
 #[cfg(all(feature = "mempool-breaker", feature = "breaker-recovery"))]
 pub mod mempool_live_breaker;
 #[cfg(all(feature = "p2p-breaker", feature = "breaker-recovery"))]
 pub mod p2p_live_breaker;
-#[cfg(all(feature = "block-integrity-breaker", feature = "breaker-recovery"))]
-pub mod block_integrity_live_breaker;
 #[cfg(all(feature = "reorg-breaker", feature = "breaker-recovery"))]
 pub mod reorg_live_breaker;
 #[cfg(all(feature = "rpc-breaker", feature = "breaker-recovery"))]
 pub mod rpc_live_breaker;
-#[cfg(all(feature = "supply-breaker", feature = "breaker-recovery"))]
-pub mod supply_live_breaker;
 #[cfg(all(feature = "shielded-breaker", feature = "breaker-recovery"))]
 pub mod shielded_live_breaker;
+#[cfg(all(feature = "supply-breaker", feature = "breaker-recovery"))]
+pub mod supply_live_breaker;
 
 // ── Re-exports ──────────────────────────────────────────────
 // NB: `config::NodeConfig` (the DEAD config-file tree, see config.rs) is

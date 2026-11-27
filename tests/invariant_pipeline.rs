@@ -11,6 +11,14 @@
 //!
 //! One source of truth for "what must always be true" → test + monitor + audit.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 #[path = "common/mining.rs"]
 mod mining;
 #[path = "common/simkit.rs"]
@@ -38,7 +46,10 @@ fn chk_supply_conservation(c: &Blockchain) -> Result<(), String> {
     if s.total_supply + s.total_burned != expected {
         return Err(format!(
             "supply {} + burned {} != Σ reward(0..={}) {}",
-            s.total_supply, s.total_burned, c.height(), expected
+            s.total_supply,
+            s.total_burned,
+            c.height(),
+            expected
         ));
     }
     Ok(())
@@ -54,9 +65,15 @@ fn chk_work_positive(c: &Blockchain) -> Result<(), String> {
 fn chk_height_tip_agree(c: &Blockchain) -> Result<(), String> {
     // The reported height must match the tip block's own height (the split-state
     // bug class: stats.height and tip.height drifting apart).
-    let tip = c.get_block_by_height(c.height()).ok_or("no block at reported height")?;
+    let tip = c
+        .get_block_by_height(c.height())
+        .ok_or("no block at reported height")?;
     if tip.header.height.as_u64() != c.height() {
-        return Err(format!("stats height {} != tip block height {}", c.height(), tip.header.height.as_u64()));
+        return Err(format!(
+            "stats height {} != tip block height {}",
+            c.height(),
+            tip.header.height.as_u64()
+        ));
     }
     Ok(())
 }
@@ -96,7 +113,8 @@ fn catalog_registers_as_simkit_monitors() {
         sim = sim.with_invariant(id, *check);
     }
     // Runs every catalogued invariant against every node.
-    sim.check_invariants().expect("all catalogued invariants hold on genesis");
+    sim.check_invariants()
+        .expect("all catalogued invariants hold on genesis");
     assert_eq!(CATALOG.len(), 3);
 }
 
@@ -106,7 +124,11 @@ fn catalog_registers_as_simkit_monitors() {
 fn export_invariants_manifest() {
     let mut items = Vec::new();
     for (id, stmt, tags, _check) in CATALOG {
-        let tags_json = tags.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(",");
+        let tags_json = tags
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(",");
         items.push(format!(
             "  {{\"id\":\"{id}\",\"statement\":{},\"tags\":[{tags_json}],\"test\":\"{id}\"}}",
             serde_json_string(stmt)

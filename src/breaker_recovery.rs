@@ -64,7 +64,11 @@ pub struct RecoveryBreaker {
 impl RecoveryBreaker {
     /// A fresh breaker, Closed, with the given recovery policy.
     pub fn new(policy: RecoveryPolicy) -> Self {
-        Self { state: BreakerState::Closed, policy, heal_count: 0 }
+        Self {
+            state: BreakerState::Closed,
+            policy,
+            heal_count: 0,
+        }
     }
 
     /// Build with the recommended policy for a surface.
@@ -177,13 +181,15 @@ pub fn recommended_recovery(surface: BreakerSurface) -> RecoveryPolicy {
     match surface {
         // Crypto/money and corrupt-state surfaces latch: a clean next tick is not
         // proof the fault is gone, so they wait for an explicit human rearm.
-        BreakerSurface::Shielded
-        | BreakerSurface::Supply
-        | BreakerSurface::BlockIntegrity => RecoveryPolicy::Latch,
+        BreakerSurface::Shielded | BreakerSurface::Supply | BreakerSurface::BlockIntegrity => {
+            RecoveryPolicy::Latch
+        }
         BreakerSurface::Mempool
         | BreakerSurface::P2p
         | BreakerSurface::Rpc
-        | BreakerSurface::Reorg => RecoveryPolicy::AutoReset { heal_streak: DEFAULT_HEAL_STREAK },
+        | BreakerSurface::Reorg => RecoveryPolicy::AutoReset {
+            heal_streak: DEFAULT_HEAL_STREAK,
+        },
     }
 }
 
@@ -202,7 +208,11 @@ mod tests {
         // Many clean ticks do NOT reconnect a latched (vulnerability) surface.
         for _ in 0..100 {
             b.observe(false);
-            assert_eq!(b.state(), BreakerState::Open, "latch must stay open on clean ticks");
+            assert_eq!(
+                b.state(),
+                BreakerState::Open,
+                "latch must stay open on clean ticks"
+            );
         }
         // Only an explicit rearm reconnects.
         b.rearm();
@@ -253,12 +263,29 @@ mod tests {
 
     #[test]
     fn surface_policies_are_latch_for_money_autoreset_for_load() {
-        assert_eq!(recommended_recovery(BreakerSurface::Shielded), RecoveryPolicy::Latch);
-        assert_eq!(recommended_recovery(BreakerSurface::Supply), RecoveryPolicy::Latch);
+        assert_eq!(
+            recommended_recovery(BreakerSurface::Shielded),
+            RecoveryPolicy::Latch
+        );
+        assert_eq!(
+            recommended_recovery(BreakerSurface::Supply),
+            RecoveryPolicy::Latch
+        );
         // Block-integrity (corrupt apply) latches too — not transient.
-        assert_eq!(recommended_recovery(BreakerSurface::BlockIntegrity), RecoveryPolicy::Latch);
-        for s in [BreakerSurface::Mempool, BreakerSurface::P2p, BreakerSurface::Rpc, BreakerSurface::Reorg] {
-            assert!(matches!(recommended_recovery(s), RecoveryPolicy::AutoReset { .. }));
+        assert_eq!(
+            recommended_recovery(BreakerSurface::BlockIntegrity),
+            RecoveryPolicy::Latch
+        );
+        for s in [
+            BreakerSurface::Mempool,
+            BreakerSurface::P2p,
+            BreakerSurface::Rpc,
+            BreakerSurface::Reorg,
+        ] {
+            assert!(matches!(
+                recommended_recovery(s),
+                RecoveryPolicy::AutoReset { .. }
+            ));
         }
     }
 

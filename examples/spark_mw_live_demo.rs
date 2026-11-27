@@ -60,11 +60,19 @@ fn mw_cutthrough_demo() {
         kernel.signature.len()
     );
     let sig_ok = verify_kernel_signature(&kernel);
-    println!("   kernel excess signature verifies: {} {}", sig_ok, ok(sig_ok));
+    println!(
+        "   kernel excess signature verifies: {} {}",
+        sig_ok,
+        ok(sig_ok)
+    );
 
     // 2. Aggregate kernel-set verification (signature + balance) accepts it.
     let set_ok = CutThroughEngine::verify_kernel_set(&[kernel.clone()]).is_ok();
-    println!("2. verify_kernel_set(balanced, signed): {} {}", set_ok, ok(set_ok));
+    println!(
+        "2. verify_kernel_set(balanced, signed): {} {}",
+        set_ok,
+        ok(set_ok)
+    );
 
     // 3. Cut-through engine: register a spend whose input commitment equals the
     //    spent output commitment, then process past the confirmation depth →
@@ -99,21 +107,34 @@ fn mw_cutthrough_demo() {
     let (fee_a, fee_b) = (10u64, 20u64);
     let excess_a = h * (Scalar::from(fee_a) + hidden); // (fee_a + hidden)*H
     let excess_b = h * (Scalar::from(fee_b) - hidden); // (fee_b - hidden)*H
-    let balanced =
-        (excess_a + excess_b).compress() == (h * Scalar::from(fee_a + fee_b)).compress();
+    let balanced = (excess_a + excess_b).compress() == (h * Scalar::from(fee_a + fee_b)).compress();
     println!(
         "4. crafted inflation kernels balance in aggregate (fools old check): {} {}",
         balanced,
         ok(balanced)
     );
     let attack = [
-        MwKernel { excess: excess_a.compress().to_bytes(), signature: vec![], fee: fee_a, height: 1 },
-        MwKernel { excess: excess_b.compress().to_bytes(), signature: vec![], fee: fee_b, height: 2 },
+        MwKernel {
+            excess: excess_a.compress().to_bytes(),
+            signature: vec![],
+            fee: fee_a,
+            height: 1,
+        },
+        MwKernel {
+            excess: excess_b.compress().to_bytes(),
+            signature: vec![],
+            fee: fee_b,
+            height: 2,
+        },
     ];
     let rejected = CutThroughEngine::verify_kernel_set(&attack).is_err();
     println!(
         "   verify_kernel_set(inflation attack): {} {}",
-        if rejected { "REJECTED" } else { "ACCEPTED — BUG!" },
+        if rejected {
+            "REJECTED"
+        } else {
+            "ACCEPTED — BUG!"
+        },
         ok(rejected)
     );
 }
@@ -187,8 +208,8 @@ fn spark_demo() {
     println!("   minted {n} coins into the regtest Spark accumulator (root committed)");
 
     // 1. Honest spend, verified against the PUBLIC commitments alone (no v/r).
-    let proof = prove_spark_spend(&note, &anon, &indices, real_index, &message, &mut OsRng)
-        .expect("prove");
+    let proof =
+        prove_spark_spend(&note, &anon, &indices, real_index, &message, &mut OsRng).expect("prove");
     let accept = verify_spark_spend(&proof, &anon).is_ok();
     println!(
         "1. honest spend verifies against public commitments: {} {}   (serial tag {}…)",
@@ -229,7 +250,11 @@ fn spark_demo() {
     let forge_rejected = verify_spark_spend(&forged, &anon).is_err();
     println!(
         "4. spend with altered serial tag: {} {}",
-        if forge_rejected { "REJECTED" } else { "ACCEPTED — BUG!" },
+        if forge_rejected {
+            "REJECTED"
+        } else {
+            "ACCEPTED — BUG!"
+        },
         ok(forge_rejected)
     );
 
@@ -240,7 +265,11 @@ fn spark_demo() {
     let set_rejected = verify_spark_spend(&proof, &permuted).is_err();
     println!(
         "5. verify against a permuted commitment set: {} {}",
-        if set_rejected { "REJECTED" } else { "ACCEPTED — BUG!" },
+        if set_rejected {
+            "REJECTED"
+        } else {
+            "ACCEPTED — BUG!"
+        },
         ok(set_rejected)
     );
 }

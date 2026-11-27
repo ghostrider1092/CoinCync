@@ -77,7 +77,10 @@ mod tests {
         assert!(check(CYNC_EMIT_001, true, "height 1").is_ok());
         let err = check(CYNC_EMIT_001, false, "height 10000, block ac4e…").unwrap_err();
         let rendered = err.to_string();
-        assert!(rendered.starts_with("error[CYNC-EMIT-001]"), "got: {rendered}");
+        assert!(
+            rendered.starts_with("error[CYNC-EMIT-001]"),
+            "got: {rendered}"
+        );
         assert!(rendered.contains("height 10000, block ac4e…"));
     }
 
@@ -105,7 +108,10 @@ mod tests {
             let d = diagnostics::lookup(code)
                 .unwrap_or_else(|| panic!("critical invariant {code} missing from CATALOG"));
             assert!(is_consensus_domain(d.domain));
-            assert!(fail_closed(d.severity), "{code} must be fail-closed (Error)");
+            assert!(
+                fail_closed(d.severity),
+                "{code} must be fail-closed (Error)"
+            );
         }
     }
 
@@ -121,7 +127,10 @@ mod tests {
             CYNC_NET_001,
             CYNC_SHLD_001,
         ] {
-            assert!(diagnostics::lookup(code).is_some(), "orphan code const: {code}");
+            assert!(
+                diagnostics::lookup(code).is_some(),
+                "orphan code const: {code}"
+            );
         }
     }
 }

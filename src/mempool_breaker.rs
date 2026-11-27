@@ -156,8 +156,14 @@ mod tests {
     #[test]
     fn healthy_mempool_admits_in_both_modes() {
         assert!(detect(&healthy()).is_empty());
-        assert_eq!(evaluate(BreakerPolicy::Observe, &healthy()), BreakerAction::AdmitNormally);
-        assert_eq!(evaluate(BreakerPolicy::Armed, &healthy()), BreakerAction::AdmitNormally);
+        assert_eq!(
+            evaluate(BreakerPolicy::Observe, &healthy()),
+            BreakerAction::AdmitNormally
+        );
+        assert_eq!(
+            evaluate(BreakerPolicy::Armed, &healthy()),
+            BreakerAction::AdmitNormally
+        );
     }
 
     #[test]

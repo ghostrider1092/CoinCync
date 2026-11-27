@@ -3,6 +3,14 @@
 //! Verifies that the mempool correctly orders by fee, evicts lowest-fee
 //! transactions when full, and handles edge cases.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::constants::MIN_FEE_PER_BYTE;
 use coincync::crypto::{ClsagSignature, KeyImage as CryptoKeyImage, SecretScalar};
 use coincync::mempool::Mempool;

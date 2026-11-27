@@ -24,6 +24,12 @@
 //! only. Wiring `guard` into a block-apply assertion (halt on violation) is an
 //! operator choice left to the caller.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use spark_connector::Nullifier;
 
 use crate::storage::spark_pool::SparkPoolStore;
@@ -47,7 +53,11 @@ pub enum GuardViolation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Anomaly {
     /// An unusually large number of coins minted in the recent window.
-    HighMintVelocity { window_blocks: u64, minted: usize, threshold: usize },
+    HighMintVelocity {
+        window_blocks: u64,
+        minted: usize,
+        threshold: usize,
+    },
     /// A large fraction of the pool's coins have been spent (pool draining).
     HighSpendRatio { spent: usize, coins: usize },
 }
@@ -100,7 +110,11 @@ pub struct Thresholds {
 
 impl Default for Thresholds {
     fn default() -> Self {
-        Self { velocity_window: 100, velocity_max: 10_000, spend_ratio_pct: 90 }
+        Self {
+            velocity_window: 100,
+            velocity_max: 10_000,
+            spend_ratio_pct: 90,
+        }
     }
 }
 
@@ -111,7 +125,9 @@ pub struct SecretService {
 
 impl SecretService {
     pub fn new() -> Self {
-        Self { thresholds: Thresholds::default() }
+        Self {
+            thresholds: Thresholds::default(),
+        }
     }
 
     pub fn with_thresholds(thresholds: Thresholds) -> Self {
@@ -125,12 +141,18 @@ impl SecretService {
         let mut v = Vec::new();
         if let Some(h) = store.max_coin_height() {
             if h > tip {
-                v.push(GuardViolation::CoinFromTheFuture { tip, max_coin_height: h });
+                v.push(GuardViolation::CoinFromTheFuture {
+                    tip,
+                    max_coin_height: h,
+                });
             }
         }
         if let Some(h) = store.max_spent_tag_height() {
             if h > tip {
-                v.push(GuardViolation::TagSpentInTheFuture { tip, max_tag_height: h });
+                v.push(GuardViolation::TagSpentInTheFuture {
+                    tip,
+                    max_tag_height: h,
+                });
             }
         }
         // The store caps its reorg stack at MAX_CHECKPOINTS; exceeding it means
@@ -138,7 +160,10 @@ impl SecretService {
         const MAX: usize = 1000;
         let cps = store.checkpoint_count();
         if cps > MAX {
-            v.push(GuardViolation::CheckpointStackOverflow { count: cps, max: MAX });
+            v.push(GuardViolation::CheckpointStackOverflow {
+                count: cps,
+                max: MAX,
+            });
         }
         // No inflation across the veil: the pool value can never be negative.
         let pv = store.pool_value();
@@ -171,9 +196,13 @@ impl SecretService {
             });
         }
         if coin_count > 0 {
-            let ratio_pct = (spent_tag_count as u128 * 100 / coin_count as u128) as u64;
+            let ratio_pct =
+                u64::try_from(spent_tag_count as u128 * 100 / coin_count as u128).unwrap_or(u64::MAX);
             if ratio_pct >= self.thresholds.spend_ratio_pct {
-                anomalies.push(Anomaly::HighSpendRatio { spent: spent_tag_count, coins: coin_count });
+                anomalies.push(Anomaly::HighSpendRatio {
+                    spent: spent_tag_count,
+                    coins: coin_count,
+                });
             }
         }
 
@@ -198,7 +227,10 @@ impl SecretService {
             Subject::Outpoint(op) => match store.index_of(op) {
                 Some(cover_index) => {
                     let height = store.coin_at(cover_index).map(|c| c.height).unwrap_or(0);
-                    Finding::CoinPresent { cover_index, height }
+                    Finding::CoinPresent {
+                        cover_index,
+                        height,
+                    }
                 }
                 None => Finding::CoinAbsent,
             },
@@ -225,7 +257,11 @@ pub struct PoolSecurityDetail<'a> {
 
 impl<'a> PoolSecurityDetail<'a> {
     pub fn new(store: &'a SparkPoolStore, tip: u64) -> Self {
-        Self { store, tip, svc: SecretService::new() }
+        Self {
+            store,
+            tip,
+            svc: SecretService::new(),
+        }
     }
 }
 
@@ -240,11 +276,17 @@ impl crate::security::SecurityDetail for PoolSecurityDetail<'_> {
 
         for v in self.svc.guard(self.store, self.tip) {
             let (code, msg) = match v {
-                GuardViolation::CoinFromTheFuture { tip, max_coin_height } => (
+                GuardViolation::CoinFromTheFuture {
+                    tip,
+                    max_coin_height,
+                } => (
                     "coin-from-future",
                     format!("a coin is minted at height {max_coin_height} above tip {tip}"),
                 ),
-                GuardViolation::TagSpentInTheFuture { tip, max_tag_height } => (
+                GuardViolation::TagSpentInTheFuture {
+                    tip,
+                    max_tag_height,
+                } => (
                     "tag-from-future",
                     format!("a tag was spent at height {max_tag_height} above tip {tip}"),
                 ),
@@ -263,9 +305,15 @@ impl crate::security::SecurityDetail for PoolSecurityDetail<'_> {
 
         for a in self.svc.cia_scan(self.store, self.tip).anomalies {
             let (code, msg) = match a {
-                Anomaly::HighMintVelocity { window_blocks, minted, threshold } => (
+                Anomaly::HighMintVelocity {
+                    window_blocks,
+                    minted,
+                    threshold,
+                } => (
                     "high-mint-velocity",
-                    format!("{minted} coins minted in the last {window_blocks} blocks (> {threshold})"),
+                    format!(
+                        "{minted} coins minted in the last {window_blocks} blocks (> {threshold})"
+                    ),
                 ),
                 Anomaly::HighSpendRatio { spent, coins } => (
                     "high-spend-ratio",
@@ -305,8 +353,14 @@ mod tests {
         // Tip 30: a coin at height 50 and a tag at 40 are "from the future" →
         // two violations (an honest node can never produce this).
         let v = ss.guard(&store, 30);
-        assert!(v.contains(&GuardViolation::CoinFromTheFuture { tip: 30, max_coin_height: 50 }));
-        assert!(v.contains(&GuardViolation::TagSpentInTheFuture { tip: 30, max_tag_height: 40 }));
+        assert!(v.contains(&GuardViolation::CoinFromTheFuture {
+            tip: 30,
+            max_coin_height: 50
+        }));
+        assert!(v.contains(&GuardViolation::TagSpentInTheFuture {
+            tip: 30,
+            max_tag_height: 40
+        }));
     }
 
     #[test]
@@ -323,16 +377,23 @@ mod tests {
         assert_eq!(report.coin_count, 10);
         assert_eq!(report.spent_tag_count, 9);
         assert_eq!(report.max_coin_height, Some(5));
-        assert!(report
-            .anomalies
-            .iter()
-            .any(|a| matches!(a, Anomaly::HighSpendRatio { spent: 9, coins: 10 })));
+        assert!(report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::HighSpendRatio {
+                spent: 9,
+                coins: 10
+            }
+        )));
     }
 
     #[test]
     fn cia_scan_flags_high_mint_velocity() {
         let store = SparkPoolStore::new();
-        let th = Thresholds { velocity_window: 100, velocity_max: 3, spend_ratio_pct: 90 };
+        let th = Thresholds {
+            velocity_window: 100,
+            velocity_max: 3,
+            spend_ratio_pct: 90,
+        };
         for i in 0..5u8 {
             store.add_coin(vec![i], coin(i), b"c".to_vec(), 95); // all within the window
         }
@@ -351,12 +412,21 @@ mod tests {
         // is caught when tip is below it. No off-by-one slip.
         let store = SparkPoolStore::new();
         store.add_coin(b"op:0".to_vec(), coin(1), b"c".to_vec(), 100);
-        assert!(ss.guard(&store, 100).is_empty(), "coin at exactly tip is legal");
-        assert!(!ss.guard(&store, 99).is_empty(), "coin one above tip is caught");
+        assert!(
+            ss.guard(&store, 100).is_empty(),
+            "coin at exactly tip is legal"
+        );
+        assert!(
+            !ss.guard(&store, 99).is_empty(),
+            "coin one above tip is caught"
+        );
 
         let store_max = SparkPoolStore::new();
         store_max.add_coin(b"op:m".to_vec(), coin(2), b"c".to_vec(), u64::MAX);
-        assert!(!ss.guard(&store_max, 1000).is_empty(), "u64::MAX height is caught");
+        assert!(
+            !ss.guard(&store_max, 1000).is_empty(),
+            "u64::MAX height is caught"
+        );
 
         // Scan degenerates: empty pool must not divide-by-zero or panic.
         let empty = SparkPoolStore::new();
@@ -374,8 +444,14 @@ mod tests {
         let _ = ss.cia_scan(&weird, 1); // must not panic
 
         // FBI on garbage subjects → benign findings, never a panic.
-        assert_eq!(ss.fbi_investigate(&empty, &Subject::Tag(nf(0xEE))), Finding::TagUnspent);
-        assert_eq!(ss.fbi_investigate(&empty, &Subject::Outpoint(vec![])), Finding::CoinAbsent);
+        assert_eq!(
+            ss.fbi_investigate(&empty, &Subject::Tag(nf(0xEE))),
+            Finding::TagUnspent
+        );
+        assert_eq!(
+            ss.fbi_investigate(&empty, &Subject::Outpoint(vec![])),
+            Finding::CoinAbsent
+        );
         assert_eq!(
             ss.fbi_investigate(&empty, &Subject::Outpoint(vec![0xFF; 1024])),
             Finding::CoinAbsent
@@ -416,11 +492,17 @@ mod tests {
             Finding::TagSpent { height: 20 }
         );
         // An unknown tag → unspent.
-        assert_eq!(ss.fbi_investigate(&store, &Subject::Tag(nf(99))), Finding::TagUnspent);
+        assert_eq!(
+            ss.fbi_investigate(&store, &Subject::Tag(nf(99))),
+            Finding::TagUnspent
+        );
         // A known coin → present with its index + height.
         assert_eq!(
             ss.fbi_investigate(&store, &Subject::Outpoint(b"op:known".to_vec())),
-            Finding::CoinPresent { cover_index: 0, height: 12 }
+            Finding::CoinPresent {
+                cover_index: 0,
+                height: 12
+            }
         );
         // An unknown coin → absent.
         assert_eq!(

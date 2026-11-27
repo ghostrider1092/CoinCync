@@ -141,7 +141,10 @@ async fn get_info_status_is_a_known_health_band() {
     );
     // Normal system clock ⇒ clock_available true and tip_age_secs numeric.
     assert_eq!(r["clock_available"], true);
-    assert!(r["tip_age_secs"].is_u64(), "tip_age_secs must be numeric under a normal clock");
+    assert!(
+        r["tip_age_secs"].is_u64(),
+        "tip_age_secs must be numeric under a normal clock"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -201,7 +204,10 @@ async fn get_mempool_transactions_empty_returns_count_zero() {
     let r = &resp["result"];
     assert_eq!(r["count"], 0);
     assert!(
-        r["transactions"].as_array().expect("transactions array").is_empty(),
+        r["transactions"]
+            .as_array()
+            .expect("transactions array")
+            .is_empty(),
         "empty mempool must yield an empty transactions array"
     );
 }
@@ -222,7 +228,10 @@ async fn submit_block_already_known_returns_already_known() {
         .expect("genesis block must carry raw hex bytes");
     let resp = rpc_call(&url, "submit_block", json!([bytes_hex])).await;
     let r = &resp["result"];
-    assert_eq!(r["accepted"], true, "resubmitted genesis must be accepted: {resp}");
+    assert_eq!(
+        r["accepted"], true,
+        "resubmitted genesis must be accepted: {resp}"
+    );
     assert_eq!(r["status"], "already_known");
 }
 
@@ -263,7 +272,10 @@ async fn send_raw_transaction_hex_length_cap_rejected() {
 async fn is_nullifier_spent_hex_too_long_rejected() {
     let (url, _server) = start_test_server(19408).await;
     let resp = rpc_call(&url, "is_nullifier_spent", json!(["0".repeat(130)])).await;
-    assert_eq!(resp["error"]["code"], -32602, "hex >128 chars must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "hex >128 chars must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -271,14 +283,20 @@ async fn is_nullifier_spent_non_32_byte_rejected() {
     let (url, _server) = start_test_server(19409).await;
     // Valid hex, but decodes to 2 bytes rather than 32.
     let resp = rpc_call(&url, "is_nullifier_spent", json!(["dead"])).await;
-    assert_eq!(resp["error"]["code"], -32602, "non-32-byte value must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "non-32-byte value must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn is_nullifier_spent_non_hex_rejected() {
     let (url, _server) = start_test_server(19410).await;
     let resp = rpc_call(&url, "is_nullifier_spent", json!(["zz_not_hex"])).await;
-    assert_eq!(resp["error"]["code"], -32602, "non-hex value must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "non-hex value must reject: {resp}"
+    );
 }
 
 // =============================================================================
@@ -292,21 +310,30 @@ async fn is_spark_serial_spent_valid_returns_result() {
     let resp = rpc_call(&url, "is_spark_serial_spent", json!([serial])).await;
     let r = &resp["result"];
     assert_eq!(r["serial"], serial);
-    assert_eq!(r["spent"], false, "an unseen serial must not be spent: {resp}");
+    assert_eq!(
+        r["spent"], false,
+        "an unseen serial must not be spent: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn is_spark_serial_spent_hex_too_long_rejected() {
     let (url, _server) = start_test_server(19412).await;
     let resp = rpc_call(&url, "is_spark_serial_spent", json!(["0".repeat(130)])).await;
-    assert_eq!(resp["error"]["code"], -32602, "hex >128 chars must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "hex >128 chars must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn is_spark_serial_spent_non_32_byte_rejected() {
     let (url, _server) = start_test_server(19413).await;
     let resp = rpc_call(&url, "is_spark_serial_spent", json!(["beef"])).await;
-    assert_eq!(resp["error"]["code"], -32602, "non-32-byte value must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "non-32-byte value must reject: {resp}"
+    );
 }
 
 // =============================================================================
@@ -337,7 +364,10 @@ async fn get_block_by_valid_hash_returns_block() {
         .expect("genesis hash")
         .to_string();
     let resp = rpc_call(&url, "get_block", json!([genesis_hash.clone()])).await;
-    assert!(resp.get("result").is_some(), "valid hash must return a block: {resp}");
+    assert!(
+        resp.get("result").is_some(),
+        "valid hash must return a block: {resp}"
+    );
     assert_eq!(resp["result"]["hash"], genesis_hash);
     assert_eq!(resp["result"]["height"], 0);
 }
@@ -415,7 +445,10 @@ async fn get_output_digests_valid_range_returns_digests() {
 async fn get_output_digests_inverted_range_rejected() {
     let (url, _server) = start_test_server(19421).await;
     let resp = rpc_call(&url, "get_output_digests", json!([10, 0])).await;
-    assert_eq!(resp["error"]["code"], -32602, "end<start must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "end<start must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -424,14 +457,20 @@ async fn get_output_digests_start_above_height_yields_empty() {
     // start > chain_height (0): the end-clamp drops end below start; the loop
     // must be empty with no underflow.
     let resp = rpc_call(&url, "get_output_digests", json!([100, 100])).await;
-    assert_eq!(resp["result"]["count"], 0, "start above tip must yield empty: {resp}");
+    assert_eq!(
+        resp["result"]["count"], 0,
+        "start above tip must yield empty: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn get_output_digests_malformed_params_rejected() {
     let (url, _server) = start_test_server(19423).await;
     let resp = rpc_call(&url, "get_output_digests", json!(["not_a_number"])).await;
-    assert_eq!(resp["error"]["code"], -32602, "malformed params must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "malformed params must reject: {resp}"
+    );
 }
 
 // =============================================================================
@@ -445,7 +484,10 @@ async fn get_sync_checkpoints_default_returns_result() {
     let r = &resp["result"];
     // Default stride 10_000; genesis-only chain ⇒ no checkpoints emitted.
     assert_eq!(r["stride"], 10_000);
-    assert!(r["checkpoints"].as_array().is_some(), "checkpoints must be an array: {resp}");
+    assert!(
+        r["checkpoints"].as_array().is_some(),
+        "checkpoints must be an array: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -470,7 +512,10 @@ async fn get_blocks_batch_returns_hex_blocks() {
     let r = &resp["result"];
     assert_eq!(r["from"], 0);
     let blocks = r["blocks"].as_array().expect("blocks array");
-    assert!(!blocks.is_empty(), "genesis must appear in the batch: {resp}");
+    assert!(
+        !blocks.is_empty(),
+        "genesis must appear in the batch: {resp}"
+    );
     assert!(blocks[0]["hex"].is_string(), "each block carries hex bytes");
     assert_eq!(r["count"], blocks.len());
 }
@@ -489,7 +534,10 @@ async fn get_blocks_batch_from_near_u64_max_saturates_empty() {
 async fn get_blocks_batch_malformed_params_rejected() {
     let (url, _server) = start_test_server(19428).await;
     let resp = rpc_call(&url, "get_blocks_batch", json!(["nope"])).await;
-    assert_eq!(resp["error"]["code"], -32602, "malformed params must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "malformed params must reject: {resp}"
+    );
 }
 
 // =============================================================================
@@ -502,7 +550,10 @@ async fn get_expected_reward_returns_reward() {
     let resp = rpc_call(&url, "get_expected_reward", json!([100])).await;
     let r = &resp["result"];
     assert_eq!(r["height"], 100);
-    assert!(r["reward"].is_u64(), "reward must be a numeric atomic value: {resp}");
+    assert!(
+        r["reward"].is_u64(),
+        "reward must be a numeric atomic value: {resp}"
+    );
     assert!(r["in_cync"].is_number(), "in_cync must be a number: {resp}");
 }
 
@@ -510,7 +561,10 @@ async fn get_expected_reward_returns_reward() {
 async fn get_expected_reward_missing_param_rejected() {
     let (url, _server) = start_test_server(19430).await;
     let resp = rpc_call(&url, "get_expected_reward", json!([])).await;
-    assert_eq!(resp["error"]["code"], -32602, "missing height param must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "missing height param must reject: {resp}"
+    );
 }
 
 // =============================================================================
@@ -522,7 +576,10 @@ async fn verify_keyimage_uniqueness_valid_on_short_chain() {
     let (url, _server) = start_initialized_test_server(19431).await;
     let resp = rpc_call(&url, "verify_keyimage_uniqueness", json!([])).await;
     let r = &resp["result"];
-    assert_eq!(r["valid"], true, "genesis-only chain has no duplicate key images: {resp}");
+    assert_eq!(
+        r["valid"], true,
+        "genesis-only chain has no duplicate key images: {resp}"
+    );
     assert_eq!(r["duplicates"], 0);
 }
 
@@ -537,68 +594,98 @@ async fn verify_keyimage_uniqueness_valid_on_short_chain() {
 async fn check_zero_commitments_in_range_span_too_large_rejected() {
     let (url, _server) = start_test_server(19432).await;
     let resp = rpc_call(&url, "check_zero_commitments_in_range", json!([0, 200])).await;
-    assert_eq!(resp["error"]["code"], -32602, "span >128 must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "span >128 must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn check_zero_commitments_in_range_inverted_rejected() {
     let (url, _server) = start_test_server(19433).await;
     let resp = rpc_call(&url, "check_zero_commitments_in_range", json!([100, 0])).await;
-    assert_eq!(resp["error"]["code"], -32602, "start>end must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "start>end must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_signatures_in_range_span_too_large_rejected() {
     let (url, _server) = start_test_server(19434).await;
     let resp = rpc_call(&url, "verify_signatures_in_range", json!([0, 200])).await;
-    assert_eq!(resp["error"]["code"], -32602, "span >128 must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "span >128 must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_signatures_in_range_inverted_rejected() {
     let (url, _server) = start_test_server(19435).await;
     let resp = rpc_call(&url, "verify_signatures_in_range", json!([100, 0])).await;
-    assert_eq!(resp["error"]["code"], -32602, "start>end must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "start>end must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_range_proofs_in_range_span_too_large_rejected() {
     let (url, _server) = start_test_server(19436).await;
     let resp = rpc_call(&url, "verify_range_proofs_in_range", json!([0, 200])).await;
-    assert_eq!(resp["error"]["code"], -32602, "span >128 must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "span >128 must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_range_proofs_in_range_inverted_rejected() {
     let (url, _server) = start_test_server(19437).await;
     let resp = rpc_call(&url, "verify_range_proofs_in_range", json!([100, 0])).await;
-    assert_eq!(resp["error"]["code"], -32602, "start>end must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "start>end must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_commitment_balance_in_range_span_too_large_rejected() {
     let (url, _server) = start_test_server(19438).await;
     let resp = rpc_call(&url, "verify_commitment_balance_in_range", json!([0, 200])).await;
-    assert_eq!(resp["error"]["code"], -32602, "span >128 must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "span >128 must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_commitment_balance_in_range_inverted_rejected() {
     let (url, _server) = start_test_server(19439).await;
     let resp = rpc_call(&url, "verify_commitment_balance_in_range", json!([100, 0])).await;
-    assert_eq!(resp["error"]["code"], -32602, "start>end must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "start>end must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn full_chain_audit_span_too_large_rejected() {
     let (url, _server) = start_test_server(19440).await;
     let resp = rpc_call(&url, "full_chain_audit", json!([0, 200])).await;
-    assert_eq!(resp["error"]["code"], -32602, "span >128 must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "span >128 must reject: {resp}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn full_chain_audit_inverted_rejected() {
     let (url, _server) = start_test_server(19441).await;
     let resp = rpc_call(&url, "full_chain_audit", json!([100, 0])).await;
-    assert_eq!(resp["error"]["code"], -32602, "start>end must reject: {resp}");
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "start>end must reject: {resp}"
+    );
 }

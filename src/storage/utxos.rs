@@ -63,6 +63,15 @@
 //!   all-or-nothing. TESTS: `batch_from_block_and_disconnect_are_exact_inverses`,
 //!   `reorg_batches_replace_orphaned_outputs_in_decoy_catalog`.
 
+// Cast hygiene (modernization Tier-1c): clean of unjustified numeric casts.
+// Output-index casts carry fn-scoped `#[allow]`s (bounded by MAX_TX_OUTPUTS=16);
+// any new cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::db::{Database, OutputIndexEntry};
 use crate::decoy::{HeightOutputCount, OutputLocator, ResolvedDecoyOutput};
 use crate::error::{Error, Result};
@@ -471,7 +480,7 @@ impl UtxoSet {
             .range(..=up_to_height)
             .map(|(height, keys)| HeightOutputCount {
                 height: *height,
-                count: keys.len() as u32,
+                count: u32::try_from(keys.len()).unwrap_or(u32::MAX),
             })
             .collect()
     }
@@ -821,6 +830,9 @@ impl UtxoSet {
     /// Create a batch from a block's transactions
     ///
     /// Extracts all UTXO operations from a block for efficient batch application
+    // The `idx as u8` output index below is bounded by MAX_TX_OUTPUTS (16), so the
+    // u8 is exact (it keys the per-output storage entry).
+    #[allow(clippy::cast_possible_truncation)]
     pub fn batch_from_block(
         block_height: u64,
         transactions: &[crate::transaction::Transaction],
@@ -895,6 +907,8 @@ impl UtxoSet {
     /// `mark_key_image_spent()` only records the key image — it does NOT remove
     /// the output from the set (unlike `spend_output()` which is not used for
     /// ring-sig chains).
+    // `idx as u8` is an output index, bounded by MAX_TX_OUTPUTS (16) → exact.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn batch_disconnect_block(transactions: &[crate::transaction::Transaction]) -> UtxoBatch {
         let mut batch = UtxoBatch::with_capacity(
             0,
@@ -976,7 +990,10 @@ impl<'a> UtxoSecurityDetail<'a> {
     pub const DEFAULT_BLOAT_WARN: usize = 50_000_000;
 
     pub fn new(utxos: &'a UtxoSet) -> Self {
-        Self { utxos, bloat_warn: Self::DEFAULT_BLOAT_WARN }
+        Self {
+            utxos,
+            bloat_warn: Self::DEFAULT_BLOAT_WARN,
+        }
     }
 
     pub fn with_bloat_warn(utxos: &'a UtxoSet, bloat_warn: usize) -> Self {
@@ -1007,7 +1024,10 @@ impl crate::security::SecurityDetail for UtxoSecurityDetail<'_> {
                 "utxo-set",
                 Severity::Warning,
                 "utxo-bloat",
-                format!("live UTXO set {} exceeds bloat warn {}", live, self.bloat_warn),
+                format!(
+                    "live UTXO set {} exceeds bloat warn {}",
+                    live, self.bloat_warn
+                ),
             );
         }
         r
@@ -1016,6 +1036,13 @@ impl crate::security::SecurityDetail for UtxoSecurityDetail<'_> {
 
 #[cfg(test)]
 mod tests {
+    // Test-only casts (bounded fixtures, index values) are low-risk; the module
+    // deny still enforces production code.
+    #![allow(
+        clippy::cast_lossless,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     use super::*;
     use crate::decoy::OutputLocator;
     use crate::primitives::PublicKey;
@@ -1028,7 +1055,10 @@ mod tests {
         assert!(super::utxo_count_violation(10, 5).is_some());
         assert!(super::utxo_count_violation(5, 10).is_none());
         assert!(super::utxo_count_violation(5, 5).is_none());
-        assert!(super::utxo_spend_violation(10, 5).is_some(), "spending more than ever-created is caught");
+        assert!(
+            super::utxo_spend_violation(10, 5).is_some(),
+            "spending more than ever-created is caught"
+        );
         assert!(super::utxo_spend_violation(3, 10).is_none());
 
         // A real set: add three outputs → live == ever == 3, guard clean.
@@ -1041,11 +1071,16 @@ mod tests {
 
         // Bloat threshold below the live count → operational warning (no halt).
         let report = super::UtxoSecurityDetail::with_bloat_warn(&set, 2).sweep();
-        assert!(!report.has_consensus_halt(), "no consensus halt on an honest set");
+        assert!(
+            !report.has_consensus_halt(),
+            "no consensus halt on an honest set"
+        );
         assert!(report.alerts.iter().any(|a| a.code == "utxo-bloat"));
 
         // Ample threshold → completely clean.
-        assert!(super::UtxoSecurityDetail::with_bloat_warn(&set, 1_000).sweep().is_clean());
+        assert!(super::UtxoSecurityDetail::with_bloat_warn(&set, 1_000)
+            .sweep()
+            .is_clean());
     }
 
     fn make_test_output(id: u64, lock_height: Option<u64>) -> (Hash, TxOutput) {
@@ -1099,7 +1134,10 @@ mod tests {
         let empty = set.commitment_hash();
         add_test_output(&mut set, 1, 10, None);
         let after_output = set.commitment_hash();
-        assert_ne!(after_output, empty, "adding an output must change the commitment");
+        assert_ne!(
+            after_output, empty,
+            "adding an output must change the commitment"
+        );
         // A spent key image is part of what a wallet trusts; it must move the hash.
         set.mark_key_image_spent(KeyImage::from_bytes([9u8; 32]));
         assert_ne!(
@@ -1256,8 +1294,12 @@ mod tests {
         // The raw monotonic counter DIVERGES — this is the bug surface.
         assert_ne!(a.total_outputs_ever(), b.total_outputs_ever());
         // The fixed availability metric (ever - reorg_disconnects) is invariant.
-        let avail_a = a.total_outputs_ever().saturating_sub(a.reorg_disconnects_total());
-        let avail_b = b.total_outputs_ever().saturating_sub(b.reorg_disconnects_total());
+        let avail_a = a
+            .total_outputs_ever()
+            .saturating_sub(a.reorg_disconnects_total());
+        let avail_b = b
+            .total_outputs_ever()
+            .saturating_sub(b.reorg_disconnects_total());
         assert_eq!(avail_a, 5, "node A canonical availability");
         assert_eq!(avail_b, 5, "reorg history must not change availability");
         // ...so both nodes require the SAME ring size for a block at this tip.

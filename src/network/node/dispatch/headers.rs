@@ -79,6 +79,12 @@
 //!   `chunked_validation_reports_absolute_index`,
 //!   `handle_headers_streams_verified_prefix_and_consumes_nonce`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -102,7 +108,7 @@ fn header_history(
     accepted: &HashMap<Hash, BlockHeader>,
     parent_hash: Hash,
 ) -> std::result::Result<Vec<DifficultyBlock>, String> {
-    let difficulty_window = crate::constants::DIFFICULTY_LONG_WINDOW as usize;
+    let difficulty_window = usize::try_from(crate::constants::DIFFICULTY_LONG_WINDOW).unwrap_or(usize::MAX);
     let mut history = Vec::with_capacity(difficulty_window);
     let mut cursor = parent_hash;
 
@@ -492,7 +498,9 @@ mod tests {
     use std::sync::Arc;
 
     use crate::chain::Blockchain;
-    use crate::consensus::{calculate_difficulty, compute_full_anchor, compute_pow_hash, PowAlgorithm};
+    use crate::consensus::{
+        calculate_difficulty, compute_full_anchor, compute_pow_hash, PowAlgorithm,
+    };
 
     use super::*;
 
@@ -555,10 +563,14 @@ mod tests {
         // audit §1: bind the header fields into the anchor (binding excludes
         // anchor/nonce, so compute it before setting them).
         let binding = header.pow_binding();
-        header.anchor =
-            compute_full_anchor(&header.prev_hash, header.height.as_u64(), header.timestamp.as_secs(), &binding)
-                .expect("anchor")
-                .mixed_hash;
+        header.anchor = compute_full_anchor(
+            &header.prev_hash,
+            header.height.as_u64(),
+            header.timestamp.as_secs(),
+            &binding,
+        )
+        .expect("anchor")
+        .mixed_hash;
 
         for nonce in 0..u64::MAX {
             header.nonce = nonce;
@@ -589,7 +601,9 @@ mod tests {
         header.height = crate::primitives::Height::new(1);
         header.version = crate::constants::block_version_at_height(1);
         header.prev_hash = genesis.hash();
-        header.timestamp = crate::primitives::Timestamp::from_secs(genesis.header.timestamp.as_secs() + crate::constants::TARGET_BLOCK_TIME);
+        header.timestamp = crate::primitives::Timestamp::from_secs(
+            genesis.header.timestamp.as_secs() + crate::constants::TARGET_BLOCK_TIME,
+        );
         header.target = Hash::from_bytes([0xFE; 32]);
         mine_easy_header(header)
     }
@@ -738,7 +752,8 @@ mod tests {
         second.height = crate::primitives::Height::new(2);
         second.version = crate::constants::block_version_at_height(2);
         second.prev_hash = first.hash();
-        second.timestamp = second.timestamp + std::time::Duration::from_secs(crate::constants::TARGET_BLOCK_TIME);
+        second.timestamp =
+            second.timestamp + std::time::Duration::from_secs(crate::constants::TARGET_BLOCK_TIME);
         second.target = claimed;
 
         let error = validate_header_batch(&chain, &[first, second]).expect_err("target mismatch");

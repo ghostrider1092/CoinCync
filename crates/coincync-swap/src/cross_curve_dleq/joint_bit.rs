@@ -106,7 +106,9 @@ impl Responses {
         let btc = BtcScalar::from_be_bytes(btc_be)
             .map_err(|_| Error::Verification("joint-bit BTC response is not canonical"))?;
         let cync = Option::<RistrettoScalar>::from(RistrettoScalar::from_canonical_bytes(cync_le))
-            .ok_or(Error::Verification("joint-bit CYNC response is not canonical"))?;
+            .ok_or(Error::Verification(
+                "joint-bit CYNC response is not canonical",
+            ))?;
         Ok(Self { btc, cync })
     }
 
@@ -289,8 +291,13 @@ pub(super) fn commit_bit(
     let commitment_cync =
         RistrettoPoint::conditional_select(&blind_cync, &(blind_cync + cync_weight), bit);
 
-    let statement =
-        JointBitStatement::new(secp, commitment_btc, commitment_cync, *btc_weight, *cync_weight)?;
+    let statement = JointBitStatement::new(
+        secp,
+        commitment_btc,
+        commitment_cync,
+        *btc_weight,
+        *cync_weight,
+    )?;
     let zero_btc = statement.zero.btc.ok_or(DEGENERATE)?;
     let one_btc = statement.one.btc.ok_or(DEGENERATE)?;
 
@@ -306,10 +313,8 @@ pub(super) fn commit_bit(
     let s_g_btc = PublicKey::from_secret_key(secp, &witness.simulated_btc);
     let e_zero_btc = btc_mul_secret(&zero_btc, &e_btc)?;
     let e_one_btc = btc_mul_secret(&one_btc, &e_btc)?;
-    let simulated_zero_btc =
-        btc_sub(secp, Some(s_g_btc), Some(e_zero_btc))?.ok_or(DEGENERATE)?;
-    let simulated_one_btc =
-        btc_sub(secp, Some(s_g_btc), Some(e_one_btc))?.ok_or(DEGENERATE)?;
+    let simulated_zero_btc = btc_sub(secp, Some(s_g_btc), Some(e_zero_btc))?.ok_or(DEGENERATE)?;
+    let simulated_one_btc = btc_sub(secp, Some(s_g_btc), Some(e_one_btc))?.ok_or(DEGENERATE)?;
     let s_g_cync = &witness.simulated_cync * RISTRETTO_BASEPOINT_TABLE;
     let simulated_zero_cync = s_g_cync - e_cync * statement.zero.cync;
     let simulated_one_cync = s_g_cync - e_cync * statement.one.cync;

@@ -74,7 +74,11 @@ fn part_a_recovery_property_fuzz() {
                 b.rearm();
                 tripped = false;
                 cc = 0;
-                assert_eq!(b.state(), BreakerState::Closed, "rearm must close (step {step}, policy {pi})");
+                assert_eq!(
+                    b.state(),
+                    BreakerState::Closed,
+                    "rearm must close (step {step}, policy {pi})"
+                );
                 assert!(!b.is_isolating());
                 continue;
             }
@@ -98,7 +102,11 @@ fn part_a_recovery_property_fuzz() {
 
             // Invariant 2: a fault disconnects immediately.
             if faulty {
-                assert_eq!(state, BreakerState::Open, "fault must trip (step {step}, policy {pi})");
+                assert_eq!(
+                    state,
+                    BreakerState::Open,
+                    "fault must trip (step {step}, policy {pi})"
+                );
                 continue;
             }
 
@@ -139,7 +147,9 @@ fn part_a_recovery_property_fuzz() {
 #[test]
 fn part_b_autoreset_cycles_disconnect_and_reconnect() {
     let streak = 2u32;
-    let mut b = RecoveryBreaker::new(RecoveryPolicy::AutoReset { heal_streak: streak });
+    let mut b = RecoveryBreaker::new(RecoveryPolicy::AutoReset {
+        heal_streak: streak,
+    });
     let cycles = 50;
     let mut reconnects = 0;
     for _ in 0..cycles {
@@ -152,11 +162,18 @@ fn part_b_autoreset_cycles_disconnect_and_reconnect() {
         }
         assert_eq!(b.state(), BreakerState::HalfOpen);
         b.observe(false);
-        assert_eq!(b.state(), BreakerState::Closed, "must reconnect after a healthy streak");
+        assert_eq!(
+            b.state(),
+            BreakerState::Closed,
+            "must reconnect after a healthy streak"
+        );
         assert!(!b.is_isolating());
         reconnects += 1;
     }
-    assert_eq!(reconnects, cycles, "breaker disconnected and reconnected every cycle");
+    assert_eq!(
+        reconnects, cycles,
+        "breaker disconnected and reconnected every cycle"
+    );
 }
 
 #[test]
@@ -166,7 +183,10 @@ fn part_b_latch_stays_down_until_rearm_repeatedly() {
         b.observe(true); // trip
         for _ in 0..100 {
             b.observe(false);
-            assert!(b.is_isolating(), "latch must NOT auto-reconnect a crypto/money fault");
+            assert!(
+                b.is_isolating(),
+                "latch must NOT auto-reconnect a crypto/money fault"
+            );
         }
         b.rearm(); // only manual recovery
         assert!(!b.is_isolating());
@@ -179,7 +199,10 @@ fn part_b_latch_stays_down_until_rearm_repeatedly() {
 /// assert the right reconnect behavior for its policy.
 fn drive_end_to_end(surface: BreakerSurface, faulty_tick: bool, healthy_tick: bool) {
     // Sanity: the caller gave us a real faulty and a real healthy detect result.
-    assert!(faulty_tick, "the faulty observation must actually trip detect()");
+    assert!(
+        faulty_tick,
+        "the faulty observation must actually trip detect()"
+    );
     assert!(!healthy_tick, "the healthy observation must be clean");
 
     let mut b = RecoveryBreaker::for_surface(surface);
@@ -192,7 +215,10 @@ fn drive_end_to_end(surface: BreakerSurface, faulty_tick: bool, healthy_tick: bo
             // Crypto/money: never auto-reconnects, even over many clean ticks.
             for _ in 0..50 {
                 b.observe(healthy_tick);
-                assert!(b.is_isolating(), "{surface:?} (Latch) must stay sealed until rearm");
+                assert!(
+                    b.is_isolating(),
+                    "{surface:?} (Latch) must stay sealed until rearm"
+                );
             }
             b.rearm();
             assert!(!b.is_isolating(), "{surface:?} reconnects only via rearm");
@@ -202,9 +228,17 @@ fn drive_end_to_end(surface: BreakerSurface, faulty_tick: bool, healthy_tick: bo
             for _ in 0..heal_streak {
                 b.observe(healthy_tick);
             }
-            assert_eq!(b.state(), BreakerState::HalfOpen, "{surface:?} probes after the streak");
+            assert_eq!(
+                b.state(),
+                BreakerState::HalfOpen,
+                "{surface:?} probes after the streak"
+            );
             b.observe(healthy_tick);
-            assert_eq!(b.state(), BreakerState::Closed, "{surface:?} (AutoReset) reconnects");
+            assert_eq!(
+                b.state(),
+                BreakerState::Closed,
+                "{surface:?} (AutoReset) reconnects"
+            );
             assert!(!b.is_isolating());
         }
     }

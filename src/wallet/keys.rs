@@ -311,8 +311,12 @@ impl PaymentAddress {
         if raw.len() != 43 {
             return Err(Error::Other("bad address length".into()));
         }
-        let diversifier: [u8; 11] = raw[..11].try_into().expect("len==43");
-        let pk_bytes: [u8; 32] = raw[11..43].try_into().expect("len==43");
+        let diversifier: [u8; 11] = raw[..11]
+            .try_into()
+            .map_err(|_| Error::Other("bad address diversifier".into()))?;
+        let pk_bytes: [u8; 32] = raw[11..43]
+            .try_into()
+            .map_err(|_| Error::Other("bad address pubkey".into()))?;
         let pk_d = CompressedRistretto(pk_bytes)
             .decompress()
             .ok_or_else(|| Error::Other("bad address point".into()))?;
@@ -513,8 +517,8 @@ mod tests {
         // ACTUAL BEHAVIOR: the HRP is not validated by from_bech32, so a valid
         // encoding under a different HRP still decodes to the same point.
         let other_hrp = addr.to_bech32("zz").expect("valid HRP");
-        let decoded = PaymentAddress::from_bech32(&other_hrp)
-            .expect("from_bech32 does not bind the HRP");
+        let decoded =
+            PaymentAddress::from_bech32(&other_hrp).expect("from_bech32 does not bind the HRP");
         assert_eq!(decoded.pk_d.compress(), addr.pk_d.compress());
     }
 
@@ -648,8 +652,12 @@ impl SparkAddress {
         if raw.len() != 43 {
             return Err(Error::Other("bad Spark address length".into()));
         }
-        let diversifier: [u8; 11] = raw[..11].try_into().unwrap();
-        let pk_bytes: [u8; 32] = raw[11..43].try_into().unwrap();
+        let diversifier: [u8; 11] = raw[..11]
+            .try_into()
+            .map_err(|_| Error::Other("bad Spark address diversifier".into()))?;
+        let pk_bytes: [u8; 32] = raw[11..43]
+            .try_into()
+            .map_err(|_| Error::Other("bad Spark address pubkey".into()))?;
         let pk = CompressedRistretto(pk_bytes)
             .decompress()
             .ok_or_else(|| Error::Other("bad Spark address point".into()))?;

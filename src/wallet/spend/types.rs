@@ -307,8 +307,8 @@ mod tests {
             PublicKey::from_bytes([2; 32]),
             Amount::from_atomic(3),
         );
-        let request = SpendIntent::new(vec![payment])
-            .into_request(SpendContext::for_target_height(10));
+        let request =
+            SpendIntent::new(vec![payment]).into_request(SpendContext::for_target_height(10));
 
         assert_eq!(request.payments().len(), 1);
         assert_eq!(request.context().target_height(), 10);
@@ -321,11 +321,8 @@ mod tests {
         let first_image = KeyImage::from_bytes([11; 32]);
         let second_image = KeyImage::from_bytes([12; 32]);
 
-        let bindings = bind_transaction_inputs(
-            vec![first, second],
-            vec![first_image, second_image],
-        )
-        .unwrap();
+        let bindings =
+            bind_transaction_inputs(vec![first, second], vec![first_image, second_image]).unwrap();
 
         assert_eq!(bindings[0].output, first);
         assert_eq!(bindings[0].key_image, first_image);
@@ -335,11 +332,8 @@ mod tests {
 
     #[test]
     fn input_bindings_reject_count_mismatch() {
-        let error = bind_transaction_inputs(
-            vec![(Hash::from_bytes([1; 32]), 0)],
-            Vec::new(),
-        )
-        .unwrap_err();
+        let error =
+            bind_transaction_inputs(vec![(Hash::from_bytes([1; 32]), 0)], Vec::new()).unwrap_err();
         assert!(error.to_string().contains("selected wallet outputs"));
     }
 
@@ -348,9 +342,11 @@ mod tests {
         let output = (Hash::from_bytes([1; 32]), 0);
         let image = KeyImage::from_bytes([9; 32]);
 
-        let duplicate_output =
-            bind_transaction_inputs(vec![output, output], vec![image, KeyImage::from_bytes([10; 32])])
-                .unwrap_err();
+        let duplicate_output = bind_transaction_inputs(
+            vec![output, output],
+            vec![image, KeyImage::from_bytes([10; 32])],
+        )
+        .unwrap_err();
         assert!(duplicate_output.to_string().contains("more than once"));
 
         let duplicate_image = bind_transaction_inputs(

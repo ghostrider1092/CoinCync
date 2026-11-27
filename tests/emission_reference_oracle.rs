@@ -14,6 +14,14 @@
 //! over-emission vs the ideal curve, a broken tail floor, a formula/rounding
 //! error, or an overflow/panic at extreme heights.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::emission::calculate_block_reward;
 use coincync::emission::curve::base_reward_from_supply;
 
@@ -177,7 +185,13 @@ fn coarse_estimate_never_over_emits_and_stays_close() {
 fn tail_emission_reached_and_held() {
     // Deep in the asymptote, the formula drops below the tail and the floor
     // takes over. 50M blocks is comfortably past the ~8.8M-block tail onset.
-    for h in [50_000_000u64, 100_000_000, 500_000_000, u64::MAX / 2, u64::MAX] {
+    for h in [
+        50_000_000u64,
+        100_000_000,
+        500_000_000,
+        u64::MAX / 2,
+        u64::MAX,
+    ] {
         let r = calculate_block_reward(h).as_atomic();
         assert_eq!(
             r, TAIL_EMISSION,

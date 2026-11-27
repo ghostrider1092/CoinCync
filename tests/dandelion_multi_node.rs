@@ -32,6 +32,14 @@
 //!   reorderings are out of scope; they belong in a dedicated
 //!   adversarial-network harness.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::network::dandelion::{DandelionActions, StemAction};
 use coincync::network::peer::PeerId;
 use coincync::network::{generate_peer_id, DandelionRouter};

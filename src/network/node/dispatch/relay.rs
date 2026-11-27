@@ -113,8 +113,7 @@ pub(super) async fn handle_inv_tx(
                 for inv in &inv_msg.inventory {
                     // N-1: absence is scoped to THIS peer — a NotFound from some
                     // other peer must not stop us fetching what this peer offers.
-                    if !mempool.contains(&inv.hash)
-                        && !absence.is_known_absent(&peer_id, &inv.hash)
+                    if !mempool.contains(&inv.hash) && !absence.is_known_absent(&peer_id, &inv.hash)
                     {
                         needed.push(inv.hash);
                     }
@@ -520,16 +519,20 @@ mod tests {
         cache.write().mark_absent(peer_a, hash);
 
         let inv = InvMessage {
-            inventory: vec![crate::network::protocol::InvVector {
-                inv_type: 0,
-                hash,
-            }],
+            inventory: vec![crate::network::protocol::InvVector { inv_type: 0, hash }],
         };
         let payload = borsh::to_vec(&inv).unwrap();
 
         // Peer B advertises it — absence is scoped to A, so we DO request (GetTxs).
         handle_inv_tx(
-            peer_b, &payload, [1, 2, 3, 4], &peers, &senders, &mempool, &scorer, &cache,
+            peer_b,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &senders,
+            &mempool,
+            &scorer,
+            &cache,
         )
         .await
         .unwrap();
@@ -537,11 +540,21 @@ mod tests {
 
         // Peer A itself reported absence — we do NOT re-request from A.
         handle_inv_tx(
-            peer_a, &payload, [1, 2, 3, 4], &peers, &senders, &mempool, &scorer, &cache,
+            peer_a,
+            &payload,
+            [1, 2, 3, 4],
+            &peers,
+            &senders,
+            &mempool,
+            &scorer,
+            &cache,
         )
         .await
         .unwrap();
-        assert!(rx_a.try_recv().is_err(), "no GetTxs to the peer that said absent");
+        assert!(
+            rx_a.try_recv().is_err(),
+            "no GetTxs to the peer that said absent"
+        );
     }
 
     #[tokio::test]

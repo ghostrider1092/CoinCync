@@ -36,19 +36,40 @@ fn verge_2018_difficulty_resists_timestamp_games() {
     let chain = Blockchain::new();
     chain.init_genesis().expect("genesis");
 
-    let initial_difficulty = chain.difficulty();
-    assert!(initial_difficulty > 0, "Genesis difficulty must be nonzero");
+    // Anti-Verge invariant: a single difficulty *step* must never swing the
+    // per-block TARGET difficulty by more than a bounded factor. Verge's bug let
+    // spoofed timestamps collapse difficulty by orders of magnitude in one step;
+    // here we assert the next block's target difficulty stays within 32x of the
+    // current block's target difficulty. (Real block validation enforces a
+    // tighter ±4x/step clamp in `validate_difficulty_target`; 32x is a loose
+    // outer bound that still catches a Verge-scale collapse.)
+    //
+    // Compare TARGET difficulties on BOTH sides. `chain.difficulty()` returns
+    // the cumulative-work base (seeded to 1 at genesis) — a different quantity
+    // from a block's target difficulty, so it must not be compared against
+    // `next_difficulty()` (doing so is a scale mismatch: 1 vs the genesis target
+    // difficulty, a spurious ratio that has nothing to do with a difficulty
+    // step).
+    let current_target_difficulty = coincync::consensus::difficulty::target_to_difficulty(
+        &chain
+            .get_block_by_height(0)
+            .expect("genesis block")
+            .header
+            .target,
+    )
+    .as_u128();
+    assert!(
+        current_target_difficulty > 0,
+        "Genesis target difficulty must be nonzero"
+    );
 
-    // Even after timestamp manipulation attempts (via invalid blocks that get
-    // rejected), the difficulty must remain bounded
     let next = chain.next_difficulty();
     assert!(next > 0, "Next difficulty must never be zero");
 
-    // Difficulty should not differ by more than 32x from genesis in a single step
-    let ratio = if next > initial_difficulty {
-        next / initial_difficulty
+    let ratio = if next > current_target_difficulty {
+        next / current_target_difficulty
     } else {
-        initial_difficulty / next
+        current_target_difficulty / next
     };
     assert!(
         ratio <= 32,

@@ -164,8 +164,14 @@ mod tests {
     #[test]
     fn healthy_rpc_serves_in_both_modes() {
         assert!(detect(&healthy()).is_empty());
-        assert_eq!(evaluate(BreakerPolicy::Observe, &healthy()), BreakerAction::ServeNormally);
-        assert_eq!(evaluate(BreakerPolicy::Armed, &healthy()), BreakerAction::ServeNormally);
+        assert_eq!(
+            evaluate(BreakerPolicy::Observe, &healthy()),
+            BreakerAction::ServeNormally
+        );
+        assert_eq!(
+            evaluate(BreakerPolicy::Armed, &healthy()),
+            BreakerAction::ServeNormally
+        );
     }
 
     #[test]

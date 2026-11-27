@@ -69,7 +69,9 @@ impl Default for StateRootPolicy {
 impl StateRootPolicy {
     /// The fail-closed default: enforcement compiled but never active.
     pub fn disabled() -> Self {
-        StateRootPolicy::Enforce { activation_height: NEVER }
+        StateRootPolicy::Enforce {
+            activation_height: NEVER,
+        }
     }
 }
 
@@ -180,14 +182,21 @@ mod tests {
 
     #[test]
     fn enforce_below_activation_is_inactive() {
-        let p = StateRootPolicy::Enforce { activation_height: 5_000 };
+        let p = StateRootPolicy::Enforce {
+            activation_height: 5_000,
+        };
         assert_eq!(check(p, 4_999, None, root(1)), StateRootCheck::Inactive);
     }
 
     #[test]
     fn enforce_matches_and_mismatches() {
-        let p = StateRootPolicy::Enforce { activation_height: 5_000 };
-        assert_eq!(check(p, 5_000, Some(root(7)), root(7)), StateRootCheck::Match);
+        let p = StateRootPolicy::Enforce {
+            activation_height: 5_000,
+        };
+        assert_eq!(
+            check(p, 5_000, Some(root(7)), root(7)),
+            StateRootCheck::Match
+        );
         let bad = check(p, 6_000, Some(root(7)), root(8));
         assert_eq!(bad, StateRootCheck::Mismatch);
         assert!(bad.rejects());
@@ -195,7 +204,9 @@ mod tests {
 
     #[test]
     fn enforce_missing_commitment_is_fail_closed() {
-        let p = StateRootPolicy::Enforce { activation_height: 5_000 };
+        let p = StateRootPolicy::Enforce {
+            activation_height: 5_000,
+        };
         let m = check(p, 5_001, None, root(7));
         assert_eq!(m, StateRootCheck::Missing);
         assert!(m.rejects());
@@ -232,7 +243,9 @@ mod tests {
             StateRootCheck::Inactive
         );
         // Enforced at activation: matches.
-        let p = StateRootPolicy::Enforce { activation_height: 10_000 };
+        let p = StateRootPolicy::Enforce {
+            activation_height: 10_000,
+        };
         assert_eq!(check(p, 10_000, committed, actual), StateRootCheck::Match);
         // Tampered actual (node computed a different root) → reject.
         assert!(check(p, 10_000, committed, root(0xC1)).rejects());

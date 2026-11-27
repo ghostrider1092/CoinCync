@@ -126,7 +126,9 @@ fn main() -> anyhow::Result<()> {
         if cli.once {
             std::process::exit(fleet::run_once(&targets, timeout, cli.json));
         }
-        let theme = themes[start_idx.min(themes.len().saturating_sub(1))].1.clone();
+        let theme = themes[start_idx.min(themes.len().saturating_sub(1))]
+            .1
+            .clone();
         let mut fapp = fleet::FleetApp::new(targets, theme, timeout);
         let mut terminal = ratatui::init();
         fapp.tick();

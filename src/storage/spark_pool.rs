@@ -43,6 +43,18 @@
 //! the LIVE consensus path until the external audit clears — but it IS exercised
 //! end-to-end in gated regtest and the 24h in-block soak.
 
+// Cast-lint discipline: cover-set / coin indices are `u64` on the wire but index
+// in-memory `Vec`s, so every `u64 -> usize` lookup is a bounds-checked
+// `try_from` (identical on 64-bit, safe-clamps on 32-bit). Coin/op length
+// prefixes stay `len() as u64` (usize->u64, a platform-lossless widening clippy
+// does not lint, and a hash preimage that must stay byte-exact). Deny the lossy
+// casts so new ones can't slip in; the test module opts out below.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::HashMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -226,9 +238,10 @@ impl SparkPoolStore {
         for item in coins_tree.iter() {
             let (key, value) =
                 item.map_err(|e| Error::DatabaseError(format!("spark_pool coins iter: {}", e)))?;
-            let key_bytes: [u8; 8] = key.as_ref().try_into().map_err(|_| {
-                Error::DatabaseError("spark_pool_coins key must be 8 bytes".into())
-            })?;
+            let key_bytes: [u8; 8] = key
+                .as_ref()
+                .try_into()
+                .map_err(|_| Error::DatabaseError("spark_pool_coins key must be 8 bytes".into()))?;
             let entry: PersistedCoin = borsh::from_slice(value.as_ref())
                 .map_err(|e| Error::SerializationError(format!("spark_pool coin: {}", e)))?;
             loaded.push((u64::from_be_bytes(key_bytes), entry));
@@ -331,7 +344,9 @@ impl SparkPoolStore {
     /// `Database::commit_block_atomic_with_phase2`. `None` for an in-memory store
     /// (nothing to persist).
     pub(crate) fn staging_trees(&self) -> Option<[&shim::Tree; 3]> {
-        self.persistence.as_ref().map(|p| [&p.coins, &p.tags, &p.meta])
+        self.persistence
+            .as_ref()
+            .map(|p| [&p.coins, &p.tags, &p.meta])
     }
 
     /// Translate staged ops into `(tree_index, key, value-or-delete)` tuples keyed
@@ -344,9 +359,11 @@ impl SparkPoolStore {
     ) -> Vec<(usize, Vec<u8>, Option<Vec<u8>>)> {
         ops.iter()
             .map(|op| match op {
-                StagedPoolOp::CoinInsert { cover_index, value } => {
-                    (0usize, cover_index.to_be_bytes().to_vec(), Some(value.clone()))
-                }
+                StagedPoolOp::CoinInsert { cover_index, value } => (
+                    0usize,
+                    cover_index.to_be_bytes().to_vec(),
+                    Some(value.clone()),
+                ),
                 StagedPoolOp::CoinRemove { cover_index } => {
                     (0usize, cover_index.to_be_bytes().to_vec(), None)
                 }
@@ -443,7 +460,9 @@ impl SparkPoolStore {
                 cover_index,
             };
             let value = borsh::to_vec(&persisted).unwrap_or_else(|e| {
-                panic!("R-61: SparkPoolCoin borsh serialize failed at cover_index {cover_index}: {e}")
+                panic!(
+                    "R-61: SparkPoolCoin borsh serialize failed at cover_index {cover_index}: {e}"
+                )
             });
             self.apply_pool_write(StagedPoolOp::CoinInsert { cover_index, value });
         }
@@ -480,7 +499,9 @@ impl SparkPoolStore {
     /// (it rejects an oversized cover set on both prove and verify). Group 0 is
     /// the whole pool until it first exceeds N.
     pub fn cover_set_at(&self, cover_set_id: u64, anchor_height: u64) -> Vec<CoinBytes> {
-        let start = (cover_set_id as usize).saturating_mul(SPARK_COVER_SET_GROUP);
+        let start = usize::try_from(cover_set_id)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(SPARK_COVER_SET_GROUP);
         let end = start.saturating_add(SPARK_COVER_SET_GROUP);
         self.coins
             .read()
@@ -511,7 +532,9 @@ impl SparkPoolStore {
         cover_set_id: u64,
         anchor_height: u64,
     ) -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>, u64)> {
-        let start = (cover_set_id as usize).saturating_mul(SPARK_COVER_SET_GROUP);
+        let start = usize::try_from(cover_set_id)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(SPARK_COVER_SET_GROUP);
         let end = start.saturating_add(SPARK_COVER_SET_GROUP);
         self.coins
             .read()
@@ -537,7 +560,14 @@ impl SparkPoolStore {
         self.coins
             .read()
             .iter()
-            .map(|c| (c.outpoint.clone(), c.coin.clone(), c.serial_context.clone(), c.height))
+            .map(|c| {
+                (
+                    c.outpoint.clone(),
+                    c.coin.clone(),
+                    c.serial_context.clone(),
+                    c.height,
+                )
+            })
             .collect()
     }
 
@@ -557,7 +587,10 @@ impl SparkPoolStore {
 
     /// The coin at a cover-set index, if present.
     pub fn coin_at(&self, cover_index: u64) -> Option<SparkPoolCoin> {
-        self.coins.read().get(cover_index as usize).cloned()
+        self.coins
+            .read()
+            .get(usize::try_from(cover_index).unwrap_or(usize::MAX))
+            .cloned()
     }
 
     /// The deterministic serial context stored for the coin at `outpoint`.
@@ -565,7 +598,7 @@ impl SparkPoolStore {
         let idx = *self.by_outpoint.read().get(outpoint)?;
         self.coins
             .read()
-            .get(idx as usize)
+            .get(usize::try_from(idx).unwrap_or(usize::MAX))
             .map(|c| c.serial_context.clone())
     }
 
@@ -578,7 +611,10 @@ impl SparkPoolStore {
         }
         // Persist immediately or stage for the block's atomic batch.
         if self.persistence.is_some() {
-            self.apply_pool_write(StagedPoolOp::TagInsert { tag: tag.0.clone(), height });
+            self.apply_pool_write(StagedPoolOp::TagInsert {
+                tag: tag.0.clone(),
+                height,
+            });
         }
         tags.insert(tag.0.clone(), height);
         // O(1) guard maintenance.
@@ -654,7 +690,11 @@ impl SparkPoolStore {
     /// How many coins were minted at `height` or later — a velocity signal for
     /// the surveillance scan.
     pub fn coins_at_or_after(&self, height: u64) -> usize {
-        self.coins.read().iter().filter(|c| c.height >= height).count()
+        self.coins
+            .read()
+            .iter()
+            .filter(|c| c.height >= height)
+            .count()
     }
 
     /// Apply one shielded tx's `value_balance` to the running pool total: a
@@ -666,7 +706,7 @@ impl SparkPoolStore {
     pub fn apply_value_balance(&self, value_balance: i64) -> Result<()> {
         let mut pv = self.pool_value.write();
         // total_after = total − value_balance (value_balance > 0 removes value).
-        let after = *pv - value_balance as i128;
+        let after = *pv - i128::from(value_balance);
         if after < 0 {
             return Err(Error::InvalidTransaction(format!(
                 "shielded pool underflow: pool {} − value_balance {} = {} < 0 \
@@ -716,7 +756,11 @@ impl SparkPoolStore {
         // re-checkpoints), so this stack is not persisted at the store level —
         // the rebuild repopulates it to the committed depth, matching the siblings.
         let mut cps = self.checkpoints.write();
-        cps.push(PoolCheckpoint { height, coins_len, pool_value });
+        cps.push(PoolCheckpoint {
+            height,
+            coins_len,
+            pool_value,
+        });
         if cps.len() > MAX_CHECKPOINTS {
             cps.remove(0);
         }
@@ -858,6 +902,13 @@ impl crate::storage::phase2::Phase2Store for SparkPoolStore {
 
 #[cfg(test)]
 mod tests {
+    // Tests cast loop counters / seed indices for fixture generation; not pool
+    // data, so opt out of the file-level cast denies.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     /// Phase-2 reorg-durability invariant (CYNC-STOR-001): MAX_CHECKPOINTS must
@@ -896,8 +947,12 @@ mod tests {
     #[test]
     fn add_coins_dense_cover_set_and_lookup_round_trip() {
         let s = SparkPoolStore::new();
-        let i0 = s.add_coin(b"tx1:0".to_vec(), coin(1), b"ctx1".to_vec(), 10).unwrap();
-        let i1 = s.add_coin(b"tx1:1".to_vec(), coin(2), b"ctx2".to_vec(), 10).unwrap();
+        let i0 = s
+            .add_coin(b"tx1:0".to_vec(), coin(1), b"ctx1".to_vec(), 10)
+            .unwrap();
+        let i1 = s
+            .add_coin(b"tx1:1".to_vec(), coin(2), b"ctx2".to_vec(), 10)
+            .unwrap();
         assert_eq!((i0, i1), (0, 1));
         assert_eq!(s.coin_count(), 2);
         assert_eq!(s.cover_set(), vec![coin(1), coin(2)]);
@@ -916,29 +971,49 @@ mod tests {
         let s = SparkPoolStore::new();
         let h = |c: &CoinBytes| *blake3::hash(&c.0).as_bytes();
 
-        s.add_coin(b"op:0".to_vec(), coin(1), b"ctx".to_vec(), 5).unwrap();
+        s.add_coin(b"op:0".to_vec(), coin(1), b"ctx".to_vec(), 5)
+            .unwrap();
         // Boundary taken BEFORE the block that mints coin(2), mirroring apply.
         s.checkpoint_at_height(6);
-        s.add_coin(b"op:1".to_vec(), coin(2), b"ctx".to_vec(), 6).unwrap();
+        s.add_coin(b"op:1".to_vec(), coin(2), b"ctx".to_vec(), 6)
+            .unwrap();
 
-        assert!(s.coin_content_present(&h(&coin(1))), "coin(1) present by content");
-        assert!(s.coin_content_present(&h(&coin(2))), "coin(2) present by content");
-        assert!(!s.coin_content_present(&h(&coin(9))), "unpooled content absent");
+        assert!(
+            s.coin_content_present(&h(&coin(1))),
+            "coin(1) present by content"
+        );
+        assert!(
+            s.coin_content_present(&h(&coin(2))),
+            "coin(2) present by content"
+        );
+        assert!(
+            !s.coin_content_present(&h(&coin(9))),
+            "unpooled content absent"
+        );
 
         // Reorg out the block that minted coin(2): its content key is dropped, the
         // surviving coin(1) keeps its entry.
         assert!(s.rewind());
         assert_eq!(s.coin_count(), 1);
-        assert!(s.coin_content_present(&h(&coin(1))), "coin(1) survives rewind");
-        assert!(!s.coin_content_present(&h(&coin(2))), "coin(2) content gone after rewind");
+        assert!(
+            s.coin_content_present(&h(&coin(1))),
+            "coin(1) survives rewind"
+        );
+        assert!(
+            !s.coin_content_present(&h(&coin(2))),
+            "coin(2) content gone after rewind"
+        );
     }
 
     #[test]
     fn cover_entries_at_filters_by_height_and_preserves_cover_order() {
         let s = SparkPoolStore::new();
-        s.add_coin(b"op:0".to_vec(), coin(1), b"ctx-a".to_vec(), 5).unwrap();
-        s.add_coin(b"op:1".to_vec(), coin(2), b"ctx-b".to_vec(), 10).unwrap();
-        s.add_coin(b"op:2".to_vec(), coin(3), b"ctx-c".to_vec(), 15).unwrap();
+        s.add_coin(b"op:0".to_vec(), coin(1), b"ctx-a".to_vec(), 5)
+            .unwrap();
+        s.add_coin(b"op:1".to_vec(), coin(2), b"ctx-b".to_vec(), 10)
+            .unwrap();
+        s.add_coin(b"op:2".to_vec(), coin(3), b"ctx-c".to_vec(), 15)
+            .unwrap();
 
         // Anchor at height 10 → only the first two coins, in cover order.
         let e = s.cover_entries_at(0, 10);
@@ -951,7 +1026,10 @@ mod tests {
         // The same set + order cover_set_at resolves (what the verifier uses).
         let cs = s.cover_set_at(0, 10);
         assert_eq!(cs, vec![coin(1), coin(2)]);
-        assert_eq!(e.iter().map(|x| x.1.clone()).collect::<Vec<_>>(), vec![coin(1).0, coin(2).0]);
+        assert_eq!(
+            e.iter().map(|x| x.1.clone()).collect::<Vec<_>>(),
+            vec![coin(1).0, coin(2).0]
+        );
 
         // Anchor above every coin → the full set.
         assert_eq!(s.cover_entries_at(0, 100).len(), 3);
@@ -962,9 +1040,13 @@ mod tests {
     #[test]
     fn duplicate_outpoint_is_rejected() {
         let s = SparkPoolStore::new();
-        assert_eq!(s.add_coin(b"tx:0".to_vec(), coin(1), b"c".to_vec(), 1), Some(0));
+        assert_eq!(
+            s.add_coin(b"tx:0".to_vec(), coin(1), b"c".to_vec(), 1),
+            Some(0)
+        );
         assert!(
-            s.add_coin(b"tx:0".to_vec(), coin(9), b"c".to_vec(), 1).is_none(),
+            s.add_coin(b"tx:0".to_vec(), coin(9), b"c".to_vec(), 1)
+                .is_none(),
             "same outpoint must not be added twice"
         );
         assert_eq!(s.coin_count(), 1);
@@ -976,7 +1058,10 @@ mod tests {
         assert!(!s.is_tag_spent(&nf(7)));
         assert!(s.mark_tag_spent(&nf(7), 5));
         assert!(s.is_tag_spent(&nf(7)));
-        assert!(!s.mark_tag_spent(&nf(7), 6), "second spend of a tag is a double-spend");
+        assert!(
+            !s.mark_tag_spent(&nf(7), 6),
+            "second spend of a tag is a double-spend"
+        );
         assert_eq!(s.spent_tags(), vec![nf(7)]);
     }
 
@@ -998,7 +1083,10 @@ mod tests {
         // Disconnect block 2.
         assert!(s.rewind());
         assert_eq!(s.coin_count(), 1, "block-2 coins dropped");
-        assert!(s.index_of(b"b2:0").is_none(), "block-2 outpoint index dropped");
+        assert!(
+            s.index_of(b"b2:0").is_none(),
+            "block-2 outpoint index dropped"
+        );
         assert!(s.index_of(b"b1:0").is_some(), "block-1 coin kept");
         assert!(!s.is_tag_spent(&nf(0x22)), "block-2 tag dropped");
         assert!(s.is_tag_spent(&nf(0x11)), "block-1 tag kept");
@@ -1033,8 +1121,15 @@ mod tests {
         s.apply_value_balance(40).unwrap();
         assert_eq!(s.pool_value(), 60);
         // Unshield 100 (more than held) → rejected, pool unchanged.
-        assert!(s.apply_value_balance(100).is_err(), "cannot unshield more than the pool holds");
-        assert_eq!(s.pool_value(), 60, "rejected apply leaves the total unchanged");
+        assert!(
+            s.apply_value_balance(100).is_err(),
+            "cannot unshield more than the pool holds"
+        );
+        assert_eq!(
+            s.pool_value(),
+            60,
+            "rejected apply leaves the total unchanged"
+        );
     }
 
     #[test]
@@ -1095,7 +1190,10 @@ mod tests {
             s.checkpoint_at_height(2);
             s.add_coin(b"b2:0".to_vec(), coin(2), b"c".to_vec(), 2);
             s.apply_value_balance(-50).unwrap(); // pool 150
-            assert_eq!((s.coin_count(), s.pool_value(), s.checkpoint_count()), (2, 150, 2));
+            assert_eq!(
+                (s.coin_count(), s.pool_value(), s.checkpoint_count()),
+                (2, 150, 2)
+            );
         }
 
         // Session 2 (bare reopen, NO chain rebuild): the in-memory checkpoint stack
@@ -1103,10 +1201,21 @@ mod tests {
         // node the chain's `rebuild_phase2_stores` re-checkpoints this stack back to
         // the committed depth (2), matching the sibling stores.
         let re = SparkPoolStore::open_with_db(&db).unwrap();
-        assert_eq!(re.checkpoint_count(), 0, "store-level stack is in-memory; the chain rebuild repopulates it");
-        assert_eq!((re.coin_count(), re.pool_value()), (2, 150), "coin/pool state persisted across restart");
+        assert_eq!(
+            re.checkpoint_count(),
+            0,
+            "store-level stack is in-memory; the chain rebuild repopulates it"
+        );
+        assert_eq!(
+            (re.coin_count(), re.pool_value()),
+            (2, 150),
+            "coin/pool state persisted across restart"
+        );
         // A bare store without the chain rebuild cannot rewind past the restart.
-        assert!(!re.rewind(), "no in-memory checkpoint → store-level rewind refuses (chain rebuild provides it)");
+        assert!(
+            !re.rewind(),
+            "no in-memory checkpoint → store-level rewind refuses (chain rebuild provides it)"
+        );
     }
 
     #[test]
@@ -1131,12 +1240,24 @@ mod tests {
         assert_eq!(s2.context_for(b"op:1").as_deref(), Some(&b"ctx1"[..]));
         assert!(s2.is_tag_spent(&nf(0x55)));
         // A fresh append continues the dense index.
-        assert_eq!(s2.add_coin(b"op:2".to_vec(), coin(3), b"ctx2".to_vec(), 3), Some(2));
+        assert_eq!(
+            s2.add_coin(b"op:2".to_vec(), coin(3), b"ctx2".to_vec(), 3),
+            Some(2)
+        );
         // #380 — the content index is rebuilt from the persisted coins on reopen.
         let h = |c: &CoinBytes| *blake3::hash(&c.0).as_bytes();
-        assert!(s2.coin_content_present(&h(&coin(1))), "coin(1) content rebuilt on open");
-        assert!(s2.coin_content_present(&h(&coin(2))), "coin(2) content rebuilt on open");
-        assert!(!s2.coin_content_present(&h(&coin(8))), "unpooled content absent after open");
+        assert!(
+            s2.coin_content_present(&h(&coin(1))),
+            "coin(1) content rebuilt on open"
+        );
+        assert!(
+            s2.coin_content_present(&h(&coin(2))),
+            "coin(2) content rebuilt on open"
+        );
+        assert!(
+            !s2.coin_content_present(&h(&coin(8))),
+            "unpooled content absent after open"
+        );
     }
 
     #[test]
@@ -1153,8 +1274,10 @@ mod tests {
         let ops = {
             let s = SparkPoolStore::open_with_db(&db).unwrap();
             s.begin_staging();
-            s.add_coin(b"op:0".to_vec(), coin(1), b"ctx0".to_vec(), 1).unwrap();
-            s.add_coin(b"op:1".to_vec(), coin(2), b"ctx1".to_vec(), 1).unwrap();
+            s.add_coin(b"op:0".to_vec(), coin(1), b"ctx0".to_vec(), 1)
+                .unwrap();
+            s.add_coin(b"op:1".to_vec(), coin(2), b"ctx1".to_vec(), 1)
+                .unwrap();
             assert!(s.mark_tag_spent(&nf(0x55), 1));
             s.apply_value_balance(-100).unwrap(); // pool 0 → 100
 
@@ -1171,13 +1294,25 @@ mod tests {
         let reopened = SparkPoolStore::open_with_db(&db).unwrap();
         assert_eq!(reopened.coin_count(), 0, "staged coins were not persisted");
         assert_eq!(reopened.pool_value(), 0, "staged pool value not persisted");
-        assert!(!reopened.is_tag_spent(&nf(0x55)), "staged tag not persisted");
+        assert!(
+            !reopened.is_tag_spent(&nf(0x55)),
+            "staged tag not persisted"
+        );
 
         // The staged ops are exactly the writes the chain flushes into the block's
         // atomic batch: 2 coin inserts, 1 tag insert, 1 pool-value meta.
-        let coins = ops.iter().filter(|o| matches!(o, StagedPoolOp::CoinInsert { .. })).count();
-        let tags = ops.iter().filter(|o| matches!(o, StagedPoolOp::TagInsert { .. })).count();
-        let metas = ops.iter().filter(|o| matches!(o, StagedPoolOp::MetaInsert { .. })).count();
+        let coins = ops
+            .iter()
+            .filter(|o| matches!(o, StagedPoolOp::CoinInsert { .. }))
+            .count();
+        let tags = ops
+            .iter()
+            .filter(|o| matches!(o, StagedPoolOp::TagInsert { .. }))
+            .count();
+        let metas = ops
+            .iter()
+            .filter(|o| matches!(o, StagedPoolOp::MetaInsert { .. }))
+            .count();
         assert_eq!((ops.len(), coins, tags, metas), (4, 2, 1, 1));
     }
 
@@ -1190,9 +1325,13 @@ mod tests {
         let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
         {
             let s = SparkPoolStore::open_with_db(&db).unwrap();
-            s.add_coin(b"op:0".to_vec(), coin(1), b"ctx0".to_vec(), 1).unwrap();
+            s.add_coin(b"op:0".to_vec(), coin(1), b"ctx0".to_vec(), 1)
+                .unwrap();
             s.apply_value_balance(-50).unwrap();
-            assert!(s.take_staged_ops().is_empty(), "no staging active → nothing buffered");
+            assert!(
+                s.take_staged_ops().is_empty(),
+                "no staging active → nothing buffered"
+            );
         }
         let reopened = SparkPoolStore::open_with_db(&db).unwrap();
         assert_eq!(reopened.coin_count(), 1, "immediate-mode write persisted");
@@ -1227,8 +1366,14 @@ mod tests {
         assert_eq!(re.coin_count(), count_after_1);
         assert_eq!(re.spent_tags().len(), tags_after_1);
         assert!(re.is_tag_spent(&nf(0x11)), "block-1 tag survives");
-        assert!(!re.is_tag_spent(&nf(0x22)), "reorged block-2 tag not resurrected");
-        assert!(re.index_of(b"b2:0").is_none(), "reorged coin not resurrected");
+        assert!(
+            !re.is_tag_spent(&nf(0x22)),
+            "reorged block-2 tag not resurrected"
+        );
+        assert!(
+            re.index_of(b"b2:0").is_none(),
+            "reorged coin not resurrected"
+        );
     }
 
     #[test]
@@ -1247,12 +1392,19 @@ mod tests {
         let stores: [&dyn Phase2Store; 4] = [&shielded, &spark, &kernel, &pool];
 
         for h in 1..=5u64 {
-            assert_eq!(checkpoint_all(&stores, h).unwrap(), h as usize, "lock-step at {h}");
+            assert_eq!(
+                checkpoint_all(&stores, h).unwrap(),
+                h as usize,
+                "lock-step at {h}"
+            );
         }
         for _ in 0..5 {
             for (label, outcome) in rewind_all(&stores) {
                 assert!(
-                    matches!(outcome, RewindOutcome::RolledBack | RewindOutcome::EmptyNoop),
+                    matches!(
+                        outcome,
+                        RewindOutcome::RolledBack | RewindOutcome::EmptyNoop
+                    ),
                     "{label} failed to roll back cleanly"
                 );
             }

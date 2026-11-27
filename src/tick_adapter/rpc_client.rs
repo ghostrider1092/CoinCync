@@ -365,6 +365,9 @@ pub fn submit_block(
 
 #[cfg(test)]
 mod tests {
+    // Test-only cast (a known-small response-size constant → usize) is low-risk;
+    // the module deny in mod.rs (which propagates here) still enforces production.
+    #![allow(clippy::cast_possible_truncation)]
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;

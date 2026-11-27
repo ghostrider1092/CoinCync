@@ -13,6 +13,14 @@
 //! and the consensus-invariant-registry hook layer on in later phases
 //! (see docs/testing/L3-byzantine-simulator.md).
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 #[path = "../mining.rs"]
 mod mining;
 
@@ -189,7 +197,12 @@ impl Sim {
 
     fn link_delay(&mut self) -> u64 {
         let span = self.cfg.max_delay.saturating_sub(self.cfg.min_delay);
-        self.cfg.min_delay + if span == 0 { 0 } else { self.rng.gen_range(0..=span) }
+        self.cfg.min_delay
+            + if span == 0 {
+                0
+            } else {
+                self.rng.gen_range(0..=span)
+            }
     }
 
     fn on_mine(&mut self, miner: NodeId) {
@@ -206,7 +219,12 @@ impl Sim {
         let target = self.nodes[miner].chain.next_target();
         let base = self.base_ts + h * self.cfg.block_spacing_secs;
         let miner_pk = self.nodes[miner].spend_pub;
-        let (cb, _) = build_coinbase(h, &self.nodes[miner].spend_pub, &self.nodes[miner].view_pub, 0);
+        let (cb, _) = build_coinbase(
+            h,
+            &self.nodes[miner].spend_pub,
+            &self.nodes[miner].view_pub,
+            0,
+        );
         let peers = self.nodes[miner].peers.clone();
 
         match self.nodes[miner].behavior {
@@ -228,8 +246,15 @@ impl Sim {
                 let a = mine_block(&parent, h, base, target, vec![cb], miner_pk, self.magic);
                 let mut b_ts = base + 1;
                 let b = loop {
-                    let cand =
-                        mine_block(&parent, h, b_ts, target, vec![cb_b.clone()], miner_pk, self.magic);
+                    let cand = mine_block(
+                        &parent,
+                        h,
+                        b_ts,
+                        target,
+                        vec![cb_b.clone()],
+                        miner_pk,
+                        self.magic,
+                    );
                     if cand.hash() != a.hash() {
                         break cand;
                     }
@@ -363,6 +388,9 @@ impl Sim {
 
     /// SAFETY: no two honest nodes disagree on any block at or below the finality
     /// floor (min honest height − finality_depth).
+    // `honest.len() < 2` returns above, so .min() on the non-empty iterator is
+    // infallible.
+    #[allow(clippy::unwrap_in_result)]
     pub fn check_safety(&self) -> Result<(), String> {
         let honest = self.honest();
         if honest.len() < 2 {

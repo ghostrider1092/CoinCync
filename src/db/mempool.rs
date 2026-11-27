@@ -54,12 +54,12 @@ impl MempoolEntry {
         // With scaling: (50 * 1_000_000) / 100 = 500_000 micro-syncs per byte
         let fee_per_byte = if size > 0 {
             // Use u128 intermediate to prevent overflow for large fees
-            let scaled_fee = fee as u128 * 1_000_000;
+            let scaled_fee = u128::from(fee) * 1_000_000;
             // Clamp to u64::MAX rather than truncating/wrapping on an extreme fee,
             // matching the in-memory Mempool fee-rate clamp. (MempoolDb is not the
             // authoritative admission path today; this keeps its fee ordering
             // correct if it is ever wired as one.)
-            (scaled_fee / size as u128).min(u64::MAX as u128) as u64
+            u64::try_from((scaled_fee / size as u128).min(u128::from(u64::MAX))).unwrap_or(u64::MAX)
         } else {
             0
         };
@@ -419,6 +419,11 @@ impl MempoolDb {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use crate::crypto::{ClsagSignature, SecretScalar};
     use crate::primitives::PublicKey;

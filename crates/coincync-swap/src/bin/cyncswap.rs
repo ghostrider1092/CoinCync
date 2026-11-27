@@ -3017,8 +3017,8 @@ fn selftest_cmd() -> Result<(), String> {
             .map_err(|e| format!("statement: {e:?}"))?;
         let proof = prove(&secret, &statement, &mut rand::rngs::OsRng)
             .map_err(|e| format!("prove: {e:?}"))?;
-        let decoded = CrossCurveProof::from_bytes(&proof.to_bytes())
-            .map_err(|e| format!("decode: {e:?}"))?;
+        let decoded =
+            CrossCurveProof::from_bytes(&proof.to_bytes()).map_err(|e| format!("decode: {e:?}"))?;
         verify(&decoded, &statement).map_err(|e| format!("verify: {e:?}"))?;
         let other = CrossCurveStatement::new(&t_btc, &t_cync, b"other-session")
             .map_err(|e| format!("statement: {e:?}"))?;

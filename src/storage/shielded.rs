@@ -125,6 +125,12 @@
 //!   `aggressive_random_op_sequences_keep_tree_and_entries_consistent`,
 //!   `stress_high_volume_checkpoint_append_rewind`, `stress_concurrent_read_write_load`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::HashMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -195,7 +201,7 @@ impl Hashable for ShieldedHash {
     fn combine(level: Level, a: &Self, b: &Self) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"COINCYNC_SHIELDED_NODE_v1");
-        hasher.update(&(u8::from(level) as u64).to_le_bytes());
+        hasher.update(&u64::from(u8::from(level)).to_le_bytes());
         hasher.update(&a.0);
         hasher.update(&b.0);
         let digest = hasher.finalize();
@@ -400,9 +406,9 @@ impl ShieldedStore {
             p.entries
                 .clear()
                 .map_err(|e| Error::DatabaseError(format!("shielded store entries clear: {e}")))?;
-            p.nullifiers
-                .clear()
-                .map_err(|e| Error::DatabaseError(format!("shielded store nullifiers clear: {e}")))?;
+            p.nullifiers.clear().map_err(|e| {
+                Error::DatabaseError(format!("shielded store nullifiers clear: {e}"))
+            })?;
         }
         Ok(())
     }
@@ -459,9 +465,11 @@ impl ShieldedStore {
                 StagedShieldedOp::EntryRemove { position } => {
                     (0usize, position.to_be_bytes().to_vec(), None)
                 }
-                StagedShieldedOp::NullifierInsert { nullifier, height } => {
-                    (1usize, nullifier.to_vec(), Some(height.to_le_bytes().to_vec()))
-                }
+                StagedShieldedOp::NullifierInsert { nullifier, height } => (
+                    1usize,
+                    nullifier.to_vec(),
+                    Some(height.to_le_bytes().to_vec()),
+                ),
                 StagedShieldedOp::NullifierRemove { nullifier } => {
                     (1usize, nullifier.to_vec(), None)
                 }
@@ -791,7 +799,8 @@ impl ShieldedStore {
                 }
             }
             for nf in &removed_nullifiers {
-                if !self.apply_shielded_write(StagedShieldedOp::NullifierRemove { nullifier: *nf }) {
+                if !self.apply_shielded_write(StagedShieldedOp::NullifierRemove { nullifier: *nf })
+                {
                     remove_failures += 1;
                 }
             }
@@ -888,6 +897,11 @@ impl Default for ShieldedStore {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     /// Phase-2 reorg-durability invariant (CYNC-STOR-001): the checkpoint stack
@@ -984,11 +998,17 @@ mod tests {
         // staged_ops_to_writes maps them to the right trees: entries→0, nulls→1.
         let writes = ShieldedStore::staged_ops_to_writes(&ops);
         assert_eq!(
-            writes.iter().filter(|(t, _, v)| *t == 0 && v.is_some()).count(),
+            writes
+                .iter()
+                .filter(|(t, _, v)| *t == 0 && v.is_some())
+                .count(),
             2
         );
         assert_eq!(
-            writes.iter().filter(|(t, _, v)| *t == 1 && v.is_some()).count(),
+            writes
+                .iter()
+                .filter(|(t, _, v)| *t == 1 && v.is_some())
+                .count(),
             1
         );
     }
@@ -1110,18 +1130,32 @@ mod tests {
             let empty_root = store.current_root();
             apply_block(&store, 1, &[[0xA1; 32]], &[[0x11; 32]]);
             apply_block(&store, 2, &[[0xB1; 32], [0xB2; 32]], &[[0x22; 32]]);
-            assert!(store.tree_size() > 0 && store.checkpoint_count() > 0, "non-empty before clear");
+            assert!(
+                store.tree_size() > 0 && store.checkpoint_count() > 0,
+                "non-empty before clear"
+            );
             store.clear().unwrap();
             assert_eq!(store.tree_size(), 0, "tree wiped");
             assert_eq!(store.checkpoint_count(), 0, "checkpoint stack wiped");
             assert!(!store.is_nullifier_spent(&[0x11; 32]), "nullifiers wiped");
-            assert_eq!(store.current_root(), empty_root, "root reset to empty-tree root");
+            assert_eq!(
+                store.current_root(),
+                empty_root,
+                "root reset to empty-tree root"
+            );
             empty_root
         };
         // Persisted entries + nullifiers cleared too: a reopen sees nothing.
         let reopened = ShieldedStore::open_with_db(&db).unwrap();
-        assert_eq!(reopened.tree_size(), 0, "persisted entries cleared across reopen");
-        assert!(!reopened.is_nullifier_spent(&[0x22; 32]), "persisted nullifiers cleared");
+        assert_eq!(
+            reopened.tree_size(),
+            0,
+            "persisted entries cleared across reopen"
+        );
+        assert!(
+            !reopened.is_nullifier_spent(&[0x22; 32]),
+            "persisted nullifiers cleared"
+        );
         assert_eq!(reopened.current_root(), empty_root);
     }
 

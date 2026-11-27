@@ -201,7 +201,9 @@ mod tests {
     #[test]
     fn demo_scenario_collapses_to_floor_and_stops() {
         let mut eng = ReplayEngine::demo_floor_scenario();
-        let bp = eng.run_to_breakpoint().expect("sustained-slow must reach the floor");
+        let bp = eng
+            .run_to_breakpoint()
+            .expect("sustained-slow must reach the floor");
         assert!(bp.at_floor, "breakpoint state must be at the floor");
         assert!(
             bp.difficulty <= MIN_DIFFICULTY * 2,
@@ -209,7 +211,11 @@ mod tests {
             bp.difficulty
         );
         // It should take only a handful of 2x-clamped eases to fall from 2^18.
-        assert!(bp.index < 15, "floor reached unexpectedly late at step {}", bp.index);
+        assert!(
+            bp.index < 15,
+            "floor reached unexpectedly late at step {}",
+            bp.index
+        );
     }
 
     #[test]
@@ -217,7 +223,10 @@ mod tests {
         // A short run of ON-TARGET blocks must NOT drift to the floor.
         let mut eng = ReplayEngine::from_gaps("steady", 1 << 18, vec![TARGET_BLOCK_TIME; 10]);
         let bp = eng.run_to_breakpoint();
-        assert!(bp.is_none(), "on-target blocks must not collapse difficulty");
+        assert!(
+            bp.is_none(),
+            "on-target blocks must not collapse difficulty"
+        );
         assert_eq!(eng.last.unwrap().index, 9, "all steps executed");
     }
 

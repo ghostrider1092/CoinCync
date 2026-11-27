@@ -165,7 +165,11 @@ fn build_valid_transaction(input_amount: u64, output_amount: u64, fee: u64) -> T
 
 /// Same as [`build_valid_transaction`] but spends a caller-supplied input,
 /// so a subaddress-sourced input can be driven through the full pipeline.
-fn build_valid_transaction_from(input: SpendableInput, output_amount: u64, fee: u64) -> Transaction {
+fn build_valid_transaction_from(
+    input: SpendableInput,
+    output_amount: u64,
+    fee: u64,
+) -> Transaction {
     assert_eq!(
         input.amount.as_atomic(),
         output_amount + fee,
@@ -333,12 +337,20 @@ fn real_crypto_payment_id_encrypted_and_recoverable() {
         .outputs
         .iter()
         .find_map(|o| {
-            decrypt_memo(&enc, recipient_view_secret.as_bytes(), o.tx_public_key.as_bytes())
-                .ok()
-                .filter(|v| !v.is_empty())
+            decrypt_memo(
+                &enc,
+                recipient_view_secret.as_bytes(),
+                o.tx_public_key.as_bytes(),
+            )
+            .ok()
+            .filter(|v| !v.is_empty())
         })
         .expect("recipient must recover the payment id");
-    assert_eq!(recovered.as_slice(), &pid, "recovered payment id must match");
+    assert_eq!(
+        recovered.as_slice(),
+        &pid,
+        "recovered payment id must match"
+    );
 }
 
 // =============================================================================
@@ -390,7 +402,10 @@ fn real_crypto_payment_id_recovered_by_scanner() {
     scanner.add_keys(recipient_view_secret, recipient_spend, 0);
     let found = scanner.scan_transaction(&tx);
 
-    assert!(!found.is_empty(), "scanner must detect the recipient output");
+    assert!(
+        !found.is_empty(),
+        "scanner must detect the recipient output"
+    );
     assert!(
         found.iter().any(|d| d.payment_id == Some(pid)),
         "scanner must auto-recover the payment id on receive"

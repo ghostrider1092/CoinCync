@@ -9,9 +9,9 @@
 
 use crate::consensus::shielded::ShieldedPayload;
 use crate::error::{Error, Result};
-use spark_connector::{SparkBackend, SpendBytes};
 #[cfg(not(feature = "libspark-ffi"))]
 use spark_connector::StubBackend;
+use spark_connector::{SparkBackend, SpendBytes};
 
 /// The active Spark backend — the single swap point.
 ///
@@ -78,7 +78,10 @@ mod tests {
             balance_proof: vec![],
         };
         let err = verify_payload(&payload, 0).unwrap_err().to_string();
-        assert!(err.contains("shielded") && err.contains("verifier"), "got: {err}");
+        assert!(
+            err.contains("shielded") && err.contains("verifier"),
+            "got: {err}"
+        );
     }
 }
 
@@ -92,12 +95,18 @@ mod ffi_tests {
     #[test]
     fn node_verifies_real_libspark_bundle() {
         let bundle = spark_connector::ffi::make_verify_bundle().expect("build verify bundle");
-        assert!(verify_bundle(&bundle).is_ok(), "node must verify a real spend bundle");
+        assert!(
+            verify_bundle(&bundle).is_ok(),
+            "node must verify a real spend bundle"
+        );
 
         let mut bad = bundle;
         let n = bad.len();
         bad[n - 10] ^= 0x01; // tamper the proof region
-        assert!(verify_bundle(&bad).is_err(), "node must reject a tampered spend");
+        assert!(
+            verify_bundle(&bad).is_err(),
+            "node must reject a tampered spend"
+        );
     }
 
     /// SOAK (Stage 3e gate): drive the node's shielded verify path — build a
@@ -121,8 +130,8 @@ mod ffi_tests {
         let mut iters: u64 = 0;
         eprintln!("{{\"event\":\"soak_start\",\"secs\":{secs}}}");
         while Instant::now() < deadline {
-            let bundle = spark_connector::ffi::make_verify_bundle()
-                .expect("soak: bundle build failed");
+            let bundle =
+                spark_connector::ffi::make_verify_bundle().expect("soak: bundle build failed");
             if verify_bundle(&bundle).is_err() {
                 panic!("soak: a freshly-built valid bundle FAILED to verify (iter {iters})");
             }

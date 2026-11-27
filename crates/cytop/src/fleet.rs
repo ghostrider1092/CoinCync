@@ -40,12 +40,20 @@ impl FleetTarget {
     /// upgraded to `http://host:port` (default port 28081).
     pub fn parse_list(spec: &str) -> Vec<FleetTarget> {
         let mut out = Vec::new();
-        for (i, raw) in spec.split(',').map(str::trim).filter(|s| !s.is_empty()).enumerate() {
+        for (i, raw) in spec
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .enumerate()
+        {
             let (label, url) = match raw.split_once('=') {
                 Some((l, u)) => (l.trim().to_string(), u.trim().to_string()),
                 None => (format!("n{}", i + 1), raw.to_string()),
             };
-            out.push(FleetTarget { label, url: normalize_url(&url) });
+            out.push(FleetTarget {
+                label,
+                url: normalize_url(&url),
+            });
         }
         out
     }
@@ -118,7 +126,10 @@ impl FleetClient {
             .and_then(|r| r.json().ok());
         let rtt_ms = t0.elapsed().as_millis() as u64;
         let Some(v) = resp else {
-            return FleetNode { rtt_ms, ..Default::default() };
+            return FleetNode {
+                rtt_ms,
+                ..Default::default()
+            };
         };
         let r = v.get("result").unwrap_or(&v);
         let s = |k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -133,7 +144,11 @@ impl FleetClient {
             height: u("height"),
             target_height: {
                 let t = u("peer_target_height");
-                if t == 0 { u("target_height") } else { t }
+                if t == 0 {
+                    u("target_height")
+                } else {
+                    t
+                }
             },
             tip_hash: s("tip_hash"),
             tip_age_secs: u("tip_age_secs"),
@@ -341,7 +356,11 @@ pub fn run_once(targets: &[FleetTarget], timeout: Duration, json: bool) -> i32 {
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     } else {
-        let net = if s.network.is_empty() { "fleet".into() } else { s.network.to_uppercase() };
+        let net = if s.network.is_empty() {
+            "fleet".into()
+        } else {
+            s.network.to_uppercase()
+        };
         println!(
             "CoinCync {net}: {}/{} online · tip {} · Δ{} · {} · {} · worst tip-age {} · anon {} · mempool {}",
             s.online, s.total,
@@ -374,9 +393,20 @@ pub fn run_once(targets: &[FleetTarget], timeout: Duration, json: bool) -> i32 {
                 println!("  {:<14} OFFLINE (unreachable, {}ms)", t.label, n.rtt_ms);
             }
         }
-        println!("verdict: {}", if healthy { "HEALTHY" } else { "ATTENTION NEEDED" });
+        println!(
+            "verdict: {}",
+            if healthy {
+                "HEALTHY"
+            } else {
+                "ATTENTION NEEDED"
+            }
+        );
     }
-    if healthy { 0 } else { 1 }
+    if healthy {
+        0
+    } else {
+        1
+    }
 }
 
 // ───────────────────────────── rendering ──────────────────────────────────
@@ -397,13 +427,17 @@ fn fmt_age(secs: u64) -> String {
 /// non-numeric strings pass through).
 fn group_num(s: &str) -> String {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-        return if s.is_empty() { "?".into() } else { s.to_string() };
+        return if s.is_empty() {
+            "?".into()
+        } else {
+            s.to_string()
+        };
     }
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     let first = bytes.len() % 3;
     for (i, &b) in bytes.iter().enumerate() {
-        if i != 0 && (i - first) % 3 == 0 && !(i == 0) {
+        if i != 0 && (i - first) % 3 == 0 {
             out.push(',');
         }
         out.push(b as char);
@@ -429,10 +463,7 @@ pub fn draw_fleet(f: &mut Frame, app: &FleetApp) {
         Span::styled(" q", bold(th.c("main_fg"))),
         Span::styled(" quit  ", dim(th)),
         Span::styled("space", bold(th.c("main_fg"))),
-        Span::styled(
-            if app.paused { " resume  " } else { " pause  " },
-            dim(th),
-        ),
+        Span::styled(if app.paused { " resume  " } else { " pause  " }, dim(th)),
         Span::styled("r", bold(th.c("main_fg"))),
         Span::styled(" refresh now", dim(th)),
     ]);
@@ -467,7 +498,11 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &FleetApp) {
         Span::styled(format!("{}/{}", s.online, s.total), bold(online_c)),
         Span::styled("   tip ", dim(th)),
         Span::styled(
-            if s.online > 0 { s.max_height.to_string() } else { "—".into() },
+            if s.online > 0 {
+                s.max_height.to_string()
+            } else {
+                "—".into()
+            },
             bold(th.c("main_fg")),
         ),
         Span::styled("   paused: ", dim(th)),
@@ -505,15 +540,26 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &FleetApp) {
         Span::styled(fp_txt, bold(fp_c)),
         Span::styled("   worst tip-age ", dim(th)),
         Span::styled(fmt_age(s.worst_tip_age), {
-            let c = if s.worst_tip_age > 600 { warn } else { th.c("main_fg") };
+            let c = if s.worst_tip_age > 600 {
+                warn
+            } else {
+                th.c("main_fg")
+            };
             Style::default().fg(c)
         }),
         Span::styled("   anon-set ", dim(th)),
-        Span::styled(group_num(&s.anonymity_set.to_string()), Style::default().fg(th.c("main_fg"))),
+        Span::styled(
+            group_num(&s.anonymity_set.to_string()),
+            Style::default().fg(th.c("main_fg")),
+        ),
         Span::styled("   mempool ", dim(th)),
         Span::styled(
             s.mempool_total.to_string(),
-            Style::default().fg(if s.mempool_total > 0 { warn } else { dim_color(th) }),
+            Style::default().fg(if s.mempool_total > 0 {
+                warn
+            } else {
+                dim_color(th)
+            }),
         ),
     ]);
 
@@ -522,10 +568,7 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &FleetApp) {
         .border_style(Style::default().fg(th.c("inactive_fg")))
         .padding(Padding::horizontal(1))
         .title(Span::styled(" testnet overview ", bold(th.c("main_fg"))));
-    f.render_widget(
-        Paragraph::new(vec![l1, l2]).block(block),
-        area,
-    );
+    f.render_widget(Paragraph::new(vec![l1, l2]).block(block), area);
 }
 
 fn draw_table(f: &mut Frame, area: Rect, app: &FleetApp) {
@@ -536,8 +579,21 @@ fn draw_table(f: &mut Frame, area: Rect, app: &FleetApp) {
 
     let header = Row::new(
         [
-            "", "NODE", "HEIGHT", "Δ", "TIP-AGE", "PEERS", "MEM", "DIFF", "HEALTH", "SYNC",
-            "MESH", "FP", "VER", "RTT", "HEIGHT TREND",
+            "",
+            "NODE",
+            "HEIGHT",
+            "Δ",
+            "TIP-AGE",
+            "PEERS",
+            "MEM",
+            "DIFF",
+            "HEALTH",
+            "SYNC",
+            "MESH",
+            "FP",
+            "VER",
+            "RTT",
+            "HEIGHT TREND",
         ]
         .into_iter()
         .map(|h| Cell::from(h).style(bold(th.c("main_fg")))),
@@ -587,11 +643,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &FleetApp) {
             && n.fingerprint != app.summary.fingerprint;
         let dot_c = if fp_bad || app.summary.fork_suspected {
             bad
-        } else if !n.synced
-            || behind_own
-            || lag > AGREE_TOLERANCE
-            || n.mesh_degraded
-            || status_bad
+        } else if !n.synced || behind_own || lag > AGREE_TOLERANCE || n.mesh_degraded || status_bad
         {
             warn
         } else {
@@ -608,7 +660,11 @@ fn draw_table(f: &mut Frame, area: Rect, app: &FleetApp) {
             }))
         };
 
-        let age_c = if n.tip_age_secs > 600 { warn } else { th.c("main_fg") };
+        let age_c = if n.tip_age_secs > 600 {
+            warn
+        } else {
+            th.c("main_fg")
+        };
         let health_c = if n.health_score >= 0.99 {
             ok
         } else if n.health_score >= 0.5 {
@@ -643,15 +699,22 @@ fn draw_table(f: &mut Frame, area: Rect, app: &FleetApp) {
             lag_cell,
             Cell::from(fmt_age(n.tip_age_secs)).style(Style::default().fg(age_c)),
             Cell::from(format!("{}({})", n.peer_count, n.inbound_peers)),
-            Cell::from(n.mempool.to_string())
-                .style(Style::default().fg(if n.mempool > 0 { warn } else { dim_color(th) })),
+            Cell::from(n.mempool.to_string()).style(Style::default().fg(if n.mempool > 0 {
+                warn
+            } else {
+                dim_color(th)
+            })),
             Cell::from(group_num(&n.difficulty)),
             Cell::from(format!("{:.2}", n.health_score)).style(Style::default().fg(health_c)),
             sync_cell,
             mesh_cell,
             fp_cell,
-            Cell::from(if n.version.is_empty() { "—".into() } else { n.version.clone() })
-                .style(dim(th)),
+            Cell::from(if n.version.is_empty() {
+                "—".into()
+            } else {
+                n.version.clone()
+            })
+            .style(dim(th)),
             Cell::from(format!("{}ms", n.rtt_ms)).style(dim(th)),
             // placeholder; the sparkline is drawn as an overlay below.
             Cell::from(""),

@@ -16,6 +16,16 @@
 //! A proof for an anonymity set of `N = 2^m` coins has all vectors of length
 //! `m = log2(N)`, so its size is O(log N).
 
+// Cast-lint discipline: this proof serialises scalars/points, never raw integer
+// widths, so every remaining integer cast is either a provably-bounded bit
+// extraction (0/1) or a platform-lossless widening. Deny the truncating/lossy
+// casts so new ones can't slip in; the test+bench module opts out below.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::crypto::peer_scalars::{PeerPoint, PeerScalar};
 use crate::error::{Error, Result};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -113,7 +123,11 @@ const MSM_PARALLEL_THRESHOLD: usize = 1024;
 /// `scalars` and `points` must have equal length. `vartime_` is sound here:
 /// every scalar and point in a one-of-many statement is public.
 fn parallel_multiscalar_mul(scalars: &[Scalar], points: &[RistrettoPoint]) -> RistrettoPoint {
-    debug_assert_eq!(scalars.len(), points.len(), "MSM scalar/point length mismatch");
+    debug_assert_eq!(
+        scalars.len(),
+        points.len(),
+        "MSM scalar/point length mismatch"
+    );
     let n = scalars.len();
     if n < MSM_PARALLEL_THRESHOLD {
         return RistrettoPoint::vartime_multiscalar_mul(scalars.iter(), points.iter());
@@ -233,7 +247,7 @@ pub fn prove_one_of_many_gen_ctx<R: CryptoRng + RngCore>(
     }
 
     let k_gen = blind_gen;
-    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+    let bit = |j: usize| -> u8 { u8::from((l >> j) & 1 != 0) };
 
     // Round 1: per-bit commitments + saved randomness (in the (value_gen,
     // blind_gen) basis).
@@ -244,14 +258,26 @@ pub fn prove_one_of_many_gen_ctx<R: CryptoRng + RngCore>(
     let mut tj = Vec::with_capacity(m);
     let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..m {
-        let l_j = Scalar::from(bit(j) as u64);
+        let l_j = Scalar::from(bit(j));
         let a_j = Scalar::random(&mut *rng);
         let r_j = Scalar::random(&mut *rng);
         let s_j = Scalar::random(&mut *rng);
         let t_j = Scalar::random(&mut *rng);
-        cl.push(commit_gen(&l_j, &r_j, value_gen, blind_gen).compress().to_bytes());
-        ca.push(commit_gen(&a_j, &s_j, value_gen, blind_gen).compress().to_bytes());
-        cb.push(commit_gen(&(l_j * a_j), &t_j, value_gen, blind_gen).compress().to_bytes());
+        cl.push(
+            commit_gen(&l_j, &r_j, value_gen, blind_gen)
+                .compress()
+                .to_bytes(),
+        );
+        ca.push(
+            commit_gen(&a_j, &s_j, value_gen, blind_gen)
+                .compress()
+                .to_bytes(),
+        );
+        cb.push(
+            commit_gen(&(l_j * a_j), &t_j, value_gen, blind_gen)
+                .compress()
+                .to_bytes(),
+        );
         lj.push(l_j);
         aj.push(a_j);
         rj.push(r_j);
@@ -369,7 +395,14 @@ pub fn verify_one_of_many_gen_ctx(
 
     let g = value_gen;
     let k_gen = blind_gen;
-    let x = challenge(context, commitments, &proof.cl, &proof.ca, &proof.cb, &proof.gk);
+    let x = challenge(
+        context,
+        commitments,
+        &proof.cl,
+        &proof.ca,
+        &proof.cb,
+        &proof.gk,
+    );
 
     // Per-bit checks (bit-ness).
     for j in 0..m {
@@ -511,7 +544,7 @@ pub fn prove_one_of_many_ki_gen_ctx<R: CryptoRng + RngCore>(
         ));
     }
 
-    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+    let bit = |j: usize| -> u8 { u8::from((l >> j) & 1 != 0) };
 
     // Round 1: per-bit commitments (identical to the base proof).
     let mut lj = Vec::with_capacity(m);
@@ -521,14 +554,26 @@ pub fn prove_one_of_many_ki_gen_ctx<R: CryptoRng + RngCore>(
     let mut tj = Vec::with_capacity(m);
     let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..m {
-        let l_j = Scalar::from(bit(j) as u64);
+        let l_j = Scalar::from(bit(j));
         let a_j = Scalar::random(&mut *rng);
         let r_j = Scalar::random(&mut *rng);
         let s_j = Scalar::random(&mut *rng);
         let t_j = Scalar::random(&mut *rng);
-        cl.push(commit_gen(&l_j, &r_j, value_gen, blind_gen).compress().to_bytes());
-        ca.push(commit_gen(&a_j, &s_j, value_gen, blind_gen).compress().to_bytes());
-        cb.push(commit_gen(&(l_j * a_j), &t_j, value_gen, blind_gen).compress().to_bytes());
+        cl.push(
+            commit_gen(&l_j, &r_j, value_gen, blind_gen)
+                .compress()
+                .to_bytes(),
+        );
+        ca.push(
+            commit_gen(&a_j, &s_j, value_gen, blind_gen)
+                .compress()
+                .to_bytes(),
+        );
+        cb.push(
+            commit_gen(&(l_j * a_j), &t_j, value_gen, blind_gen)
+                .compress()
+                .to_bytes(),
+        );
         lj.push(l_j);
         aj.push(a_j);
         rj.push(r_j);
@@ -559,10 +604,12 @@ pub fn prove_one_of_many_ki_gen_ctx<R: CryptoRng + RngCore>(
             coeff_cols[k].push(poly[k]);
         }
     }
-    let coeff_c: Vec<RistrettoPoint> =
-        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &commitments[..])).collect();
-    let coeff_p: Vec<RistrettoPoint> =
-        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &pubkeys[..])).collect();
+    let coeff_c: Vec<RistrettoPoint> = (0..m)
+        .map(|k| parallel_multiscalar_mul(&coeff_cols[k], &commitments[..]))
+        .collect();
+    let coeff_p: Vec<RistrettoPoint> = (0..m)
+        .map(|k| parallel_multiscalar_mul(&coeff_cols[k], &pubkeys[..]))
+        .collect();
     let mut gk = Vec::with_capacity(m);
     let mut gkp = Vec::with_capacity(m);
     let mut gkt = Vec::with_capacity(m);
@@ -574,7 +621,17 @@ pub fn prove_one_of_many_ki_gen_ctx<R: CryptoRng + RngCore>(
     let tag = (ki_gen * x_l).compress().to_bytes();
 
     let x = challenge_ki(
-        context, commitments, pubkeys, &ki_gen, &tag, &cl, &ca, &cb, &gk, &gkp, &gkt,
+        context,
+        commitments,
+        pubkeys,
+        &ki_gen,
+        &tag,
+        &cl,
+        &ca,
+        &cb,
+        &gk,
+        &gkp,
+        &gkt,
     );
 
     // Round 2 responses.
@@ -820,7 +877,10 @@ impl GkOneOfManyProof {
         }
 
         let points = |v: &[[u8; 32]]| -> Result<Vec<PeerPoint>> {
-            v.iter().copied().map(PeerPoint::decode_non_identity).collect()
+            v.iter()
+                .copied()
+                .map(PeerPoint::decode_non_identity)
+                .collect()
         };
         let scalars = |v: &[[u8; 32]]| -> Result<Vec<PeerScalar>> {
             v.iter().copied().map(PeerScalar::decode).collect()
@@ -1168,13 +1228,23 @@ impl GkOneOfManyHkProof {
         if m == 0 || m > MAX_GK_ROUNDS {
             return Err(Error::SparkVerifyFailed);
         }
-        for len in [self.ca.len(), self.cb.len(), self.gk.len(), self.f.len(), self.za.len(), self.zb.len()] {
+        for len in [
+            self.ca.len(),
+            self.cb.len(),
+            self.gk.len(),
+            self.f.len(),
+            self.za.len(),
+            self.zb.len(),
+        ] {
             if len != m {
                 return Err(Error::SparkVerifyFailed);
             }
         }
         let points = |v: &[[u8; 32]]| -> Result<Vec<PeerPoint>> {
-            v.iter().copied().map(PeerPoint::decode_non_identity).collect()
+            v.iter()
+                .copied()
+                .map(PeerPoint::decode_non_identity)
+                .collect()
         };
         let scalars = |v: &[[u8; 32]]| -> Result<Vec<PeerScalar>> {
             v.iter().copied().map(PeerScalar::decode).collect()
@@ -1206,7 +1276,9 @@ pub fn prove_one_of_many_hk_ctx<R: CryptoRng + RngCore>(
 ) -> Result<GkOneOfManyHkProof> {
     let n = commitments.len();
     if n == 0 || !n.is_power_of_two() {
-        return Err(Error::CryptoError("GK-HK: set size must be a power of two >= 1".into()));
+        return Err(Error::CryptoError(
+            "GK-HK: set size must be a power of two >= 1".into(),
+        ));
     }
     let m = n.trailing_zeros() as usize;
     if m == 0 || m > MAX_GK_ROUNDS {
@@ -1215,14 +1287,19 @@ pub fn prove_one_of_many_hk_ctx<R: CryptoRng + RngCore>(
     if l >= n {
         return Err(Error::CryptoError("GK-HK: index out of range".into()));
     }
-    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+    let bit = |j: usize| -> u8 { u8::from((l >> j) & 1 != 0) };
 
     // Round 1: per-bit commitments (identical to the base one-of-many).
-    let (mut lj, mut aj, mut rj, mut sj, mut tj) =
-        (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
+    let (mut lj, mut aj, mut rj, mut sj, mut tj) = (
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+    );
     let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..m {
-        let l_j = Scalar::from(bit(j) as u64);
+        let l_j = Scalar::from(bit(j));
         let a_j = Scalar::random(&mut *rng);
         let r_j = Scalar::random(&mut *rng);
         let s_j = Scalar::random(&mut *rng);
@@ -1246,23 +1323,36 @@ pub fn prove_one_of_many_hk_ctx<R: CryptoRng + RngCore>(
         let mut poly = vec![Scalar::ONE];
         for j in 0..m {
             let i_j = (i >> j) & 1;
-            let (c0, c1) = if i_j == 1 { (aj[j], lj[j]) } else { (-aj[j], Scalar::ONE - lj[j]) };
+            let (c0, c1) = if i_j == 1 {
+                (aj[j], lj[j])
+            } else {
+                (-aj[j], Scalar::ONE - lj[j])
+            };
             poly = poly_mul_linear(&poly, c0, c1);
         }
         for k in 0..m {
             coeff_cols[k].push(poly[k]);
         }
     }
-    let coeff_sum: Vec<RistrettoPoint> =
-        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &commitments[..])).collect();
+    let coeff_sum: Vec<RistrettoPoint> = (0..m)
+        .map(|k| parallel_multiscalar_mul(&coeff_cols[k], &commitments[..]))
+        .collect();
     let mut gk = Vec::with_capacity(m);
     for k in 0..m {
-        gk.push((coeff_sum[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k]).compress().to_bytes());
+        gk.push(
+            (coeff_sum[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k])
+                .compress()
+                .to_bytes(),
+        );
     }
 
     let x = challenge(context, commitments, &cl, &ca, &cb, &gk);
 
-    let (mut f, mut za, mut zb) = (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
+    let (mut f, mut za, mut zb) = (
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+    );
     for j in 0..m {
         let f_j = lj[j] * x + aj[j];
         f.push(f_j.to_bytes());
@@ -1280,7 +1370,17 @@ pub fn prove_one_of_many_hk_ctx<R: CryptoRng + RngCore>(
     let zdh = (*h_coef * x_pow - sum_h).to_bytes();
     let zdk = (*k_coef * x_pow - sum_k).to_bytes();
 
-    Ok(GkOneOfManyHkProof { cl, ca, cb, gk, f, za, zb, zdh, zdk })
+    Ok(GkOneOfManyHkProof {
+        cl,
+        ca,
+        cb,
+        gk,
+        f,
+        za,
+        zb,
+        zdh,
+        zdk,
+    })
 }
 
 /// Verify an HK one-of-many: `commitments[l] ∈ ⟨H,K⟩` at some hidden `l`.
@@ -1300,7 +1400,14 @@ pub fn verify_one_of_many_hk_ctx(
     }
     let g = gen_g();
     let k_gen = gen_k();
-    let x = challenge(context, commitments, &proof.cl, &proof.ca, &proof.cb, &proof.gk);
+    let x = challenge(
+        context,
+        commitments,
+        &proof.cl,
+        &proof.ca,
+        &proof.cb,
+        &proof.gk,
+    );
 
     // Per-bit bit-ness checks (identical to the base proof).
     for j in 0..m {
@@ -1377,7 +1484,9 @@ pub fn prove_spend_value_hidden<R: CryptoRng + RngCore>(
         return Err(Error::CryptoError("v4 spend: index out of range".into()));
     }
     if coins[l] != gen_gv() * Scalar::from(value) + gen_h() * h_coef + gen_k() * blinding {
-        return Err(Error::CryptoError("v4 spend: opening does not match coins[l]".into()));
+        return Err(Error::CryptoError(
+            "v4 spend: opening does not match coins[l]".into(),
+        ));
     }
     let v_point = gen_gv() * Scalar::from(value) + gen_k() * value_blinding;
     let v_bytes = v_point.compress().to_bytes();
@@ -1386,7 +1495,11 @@ pub fn prove_spend_value_hidden<R: CryptoRng + RngCore>(
     let k_coef = blinding - value_blinding;
     let ctx = spend_context_v4(&v_bytes, message);
     let membership = prove_one_of_many_hk_ctx(&shifted, l, h_coef, &k_coef, &ctx, rng)?;
-    Ok(SparkSpendProofV4 { membership, value_commitment: v_bytes, message: *message })
+    Ok(SparkSpendProofV4 {
+        membership,
+        value_commitment: v_bytes,
+        message: *message,
+    })
 }
 
 /// Verify a serial-hiding value-bound spend. Returns the bound value commitment
@@ -1479,10 +1592,14 @@ pub fn prove_spend_full<R: CryptoRng + RngCore>(
 ) -> Result<SparkSpendProofV5> {
     let n = coins.len();
     if n == 0 || !n.is_power_of_two() {
-        return Err(Error::CryptoError("v5 spend: set size must be a power of two >= 1".into()));
+        return Err(Error::CryptoError(
+            "v5 spend: set size must be a power of two >= 1".into(),
+        ));
     }
     if pubkeys.len() != n {
-        return Err(Error::CryptoError("v5 spend: pubkey ring length must equal coin ring length".into()));
+        return Err(Error::CryptoError(
+            "v5 spend: pubkey ring length must equal coin ring length".into(),
+        ));
     }
     let m = n.trailing_zeros() as usize;
     if m == 0 || m > MAX_GK_ROUNDS {
@@ -1493,10 +1610,14 @@ pub fn prove_spend_full<R: CryptoRng + RngCore>(
     }
     // Prover guards: the opening must match the coin, and x_l must open pubkeys[l].
     if coins[l] != gen_gv() * Scalar::from(value) + gen_h() * h_coef + gen_k() * blinding {
-        return Err(Error::CryptoError("v5 spend: opening does not match coins[l]".into()));
+        return Err(Error::CryptoError(
+            "v5 spend: opening does not match coins[l]".into(),
+        ));
     }
     if pubkeys[l] != pk_gen * x_l {
-        return Err(Error::CryptoError("v5 spend: x_l does not open pubkeys[l]".into()));
+        return Err(Error::CryptoError(
+            "v5 spend: x_l does not open pubkeys[l]".into(),
+        ));
     }
 
     let v_point = gen_gv() * Scalar::from(value) + gen_k() * value_blinding;
@@ -1505,16 +1626,19 @@ pub fn prove_spend_full<R: CryptoRng + RngCore>(
     let shifted: Vec<RistrettoPoint> = coins.iter().map(|c| c - v_point).collect();
     let k_coef = blinding - value_blinding;
     let tag = (ki_gen * x_l).compress().to_bytes();
-    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+    let bit = |j: usize| -> u8 { u8::from((l >> j) & 1 != 0) };
 
     // Round 1: per-bit commitments (G,K basis), identical to the base/HK proofs.
     let (mut lj, mut aj, mut rj, mut sj, mut tj) = (
-        Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m),
-        Vec::with_capacity(m), Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
     );
     let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..m {
-        let l_j = Scalar::from(bit(j) as u64);
+        let l_j = Scalar::from(bit(j));
         let a_j = Scalar::random(&mut *rng);
         let r_j = Scalar::random(&mut *rng);
         let s_j = Scalar::random(&mut *rng);
@@ -1539,28 +1663,48 @@ pub fn prove_spend_full<R: CryptoRng + RngCore>(
         let mut poly = vec![Scalar::ONE];
         for j in 0..m {
             let i_j = (i >> j) & 1;
-            let (c0, c1) = if i_j == 1 { (aj[j], lj[j]) } else { (-aj[j], Scalar::ONE - lj[j]) };
+            let (c0, c1) = if i_j == 1 {
+                (aj[j], lj[j])
+            } else {
+                (-aj[j], Scalar::ONE - lj[j])
+            };
             poly = poly_mul_linear(&poly, c0, c1);
         }
         for k in 0..m {
             coeff_cols[k].push(poly[k]);
         }
     }
-    let coeff_w: Vec<RistrettoPoint> =
-        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &shifted[..])).collect();
-    let coeff_p: Vec<RistrettoPoint> =
-        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &pubkeys[..])).collect();
-    let (mut gk, mut gkp, mut gkt) = (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
+    let coeff_w: Vec<RistrettoPoint> = (0..m)
+        .map(|k| parallel_multiscalar_mul(&coeff_cols[k], &shifted[..]))
+        .collect();
+    let coeff_p: Vec<RistrettoPoint> = (0..m)
+        .map(|k| parallel_multiscalar_mul(&coeff_cols[k], &pubkeys[..]))
+        .collect();
+    let (mut gk, mut gkp, mut gkt) = (
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+    );
     for k in 0..m {
-        gk.push((coeff_w[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k]).compress().to_bytes());
+        gk.push(
+            (coeff_w[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k])
+                .compress()
+                .to_bytes(),
+        );
         gkp.push((coeff_p[k] + pk_gen * sigma[k]).compress().to_bytes());
         gkt.push((ki_gen * sigma[k]).compress().to_bytes());
     }
 
     let ctx = spend_context_v5(&v_bytes, message);
-    let x = challenge_ki(&ctx, &shifted, pubkeys, &ki_gen, &tag, &cl, &ca, &cb, &gk, &gkp, &gkt);
+    let x = challenge_ki(
+        &ctx, &shifted, pubkeys, &ki_gen, &tag, &cl, &ca, &cb, &gk, &gkp, &gkt,
+    );
 
-    let (mut f, mut za, mut zb) = (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
+    let (mut f, mut za, mut zb) = (
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+    );
     for j in 0..m {
         let f_j = lj[j] * x + aj[j];
         f.push(f_j.to_bytes());
@@ -1581,7 +1725,18 @@ pub fn prove_spend_full<R: CryptoRng + RngCore>(
     let zp = (*x_l * x_pow - sum_s).to_bytes();
 
     Ok(SparkSpendProofV5 {
-        cl, ca, cb, gk, gkp, gkt, f, za, zb, zdh, zdk, zp,
+        cl,
+        ca,
+        cb,
+        gk,
+        gkp,
+        gkt,
+        f,
+        za,
+        zb,
+        zdh,
+        zdk,
+        zp,
         value_commitment: v_bytes,
         tag,
         message: *message,
@@ -1610,8 +1765,15 @@ pub fn verify_spend_full(
         return Err(Error::SparkVerifyFailed);
     }
     for len in [
-        proof.cl.len(), proof.ca.len(), proof.cb.len(), proof.gk.len(), proof.gkp.len(),
-        proof.gkt.len(), proof.f.len(), proof.za.len(), proof.zb.len(),
+        proof.cl.len(),
+        proof.ca.len(),
+        proof.cb.len(),
+        proof.gk.len(),
+        proof.gkp.len(),
+        proof.gkt.len(),
+        proof.f.len(),
+        proof.za.len(),
+        proof.zb.len(),
     ] {
         if len != m {
             return Err(Error::SparkVerifyFailed);
@@ -1642,9 +1804,15 @@ pub fn verify_spend_full(
     let f = scalars(&proof.f)?;
     let za = scalars(&proof.za)?;
     let zb = scalars(&proof.zb)?;
-    let zdh = *PeerScalar::decode(proof.zdh).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
-    let zdk = *PeerScalar::decode(proof.zdk).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
-    let zp = *PeerScalar::decode(proof.zp).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
+    let zdh = *PeerScalar::decode(proof.zdh)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
+    let zdk = *PeerScalar::decode(proof.zdk)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
+    let zp = *PeerScalar::decode(proof.zp)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
     let v_point = *PeerPoint::decode_non_identity(proof.value_commitment)
         .map_err(|_| Error::SparkVerifyFailed)?
         .as_point();
@@ -1657,8 +1825,8 @@ pub fn verify_spend_full(
     let k_gen = gen_k();
     let ctx = spend_context_v5(&proof.value_commitment, message);
     let x = challenge_ki(
-        &ctx, &shifted, pubkeys, &ki_gen, &proof.tag,
-        &proof.cl, &proof.ca, &proof.cb, &proof.gk, &proof.gkp, &proof.gkt,
+        &ctx, &shifted, pubkeys, &ki_gen, &proof.tag, &proof.cl, &proof.ca, &proof.cb, &proof.gk,
+        &proof.gkp, &proof.gkt,
     );
 
     // Per-bit bit-ness.
@@ -1800,7 +1968,9 @@ pub fn prove_spend_spark<R: CryptoRng + RngCore>(
 ) -> Result<SparkSpendProofV6> {
     let n = coins.len();
     if n == 0 || !n.is_power_of_two() {
-        return Err(Error::CryptoError("v6 spend: set size must be a power of two >= 1".into()));
+        return Err(Error::CryptoError(
+            "v6 spend: set size must be a power of two >= 1".into(),
+        ));
     }
     let m = n.trailing_zeros() as usize;
     if m == 0 || m > MAX_GK_ROUNDS {
@@ -1810,7 +1980,9 @@ pub fn prove_spend_spark<R: CryptoRng + RngCore>(
         return Err(Error::CryptoError("v6 spend: index out of range".into()));
     }
     if coins[l] != gen_gv() * Scalar::from(value) + gen_h() * serial + gen_k() * blinding {
-        return Err(Error::CryptoError("v6 spend: opening does not match coins[l]".into()));
+        return Err(Error::CryptoError(
+            "v6 spend: opening does not match coins[l]".into(),
+        ));
     }
 
     let u = gen_u();
@@ -1819,15 +1991,18 @@ pub fn prove_spend_spark<R: CryptoRng + RngCore>(
     let shifted: Vec<RistrettoPoint> = coins.iter().map(|c| c - v_point).collect();
     let k_coef = blinding - value_blinding;
     let nullifier = (u * serial).compress().to_bytes();
-    let bit = |j: usize| -> u8 { ((l >> j) & 1) as u8 };
+    let bit = |j: usize| -> u8 { u8::from((l >> j) & 1 != 0) };
 
     let (mut lj, mut aj, mut rj, mut sj, mut tj) = (
-        Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m),
-        Vec::with_capacity(m), Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
     );
     let (mut cl, mut ca, mut cb) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..m {
-        let l_j = Scalar::from(bit(j) as u64);
+        let l_j = Scalar::from(bit(j));
         let a_j = Scalar::random(&mut *rng);
         let r_j = Scalar::random(&mut *rng);
         let s_j = Scalar::random(&mut *rng);
@@ -1850,25 +2025,38 @@ pub fn prove_spend_spark<R: CryptoRng + RngCore>(
         let mut poly = vec![Scalar::ONE];
         for j in 0..m {
             let i_j = (i >> j) & 1;
-            let (c0, c1) = if i_j == 1 { (aj[j], lj[j]) } else { (-aj[j], Scalar::ONE - lj[j]) };
+            let (c0, c1) = if i_j == 1 {
+                (aj[j], lj[j])
+            } else {
+                (-aj[j], Scalar::ONE - lj[j])
+            };
             poly = poly_mul_linear(&poly, c0, c1);
         }
         for k in 0..m {
             coeff_cols[k].push(poly[k]);
         }
     }
-    let coeff_w: Vec<RistrettoPoint> =
-        (0..m).map(|k| parallel_multiscalar_mul(&coeff_cols[k], &shifted[..])).collect();
+    let coeff_w: Vec<RistrettoPoint> = (0..m)
+        .map(|k| parallel_multiscalar_mul(&coeff_cols[k], &shifted[..]))
+        .collect();
     let (mut gk, mut gkt) = (Vec::with_capacity(m), Vec::with_capacity(m));
     for k in 0..m {
-        gk.push((coeff_w[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k]).compress().to_bytes());
+        gk.push(
+            (coeff_w[k] + gen_h() * rho_h[k] + gen_k() * rho_k[k])
+                .compress()
+                .to_bytes(),
+        );
         gkt.push((u * rho_h[k]).compress().to_bytes()); // SAME ρ_h as gk's H-blinding
     }
 
     let ctx = spend_context_v4(&v_bytes, message);
     let x = challenge_spark(&ctx, &shifted, &nullifier, &cl, &ca, &cb, &gk, &gkt);
 
-    let (mut f, mut za, mut zb) = (Vec::with_capacity(m), Vec::with_capacity(m), Vec::with_capacity(m));
+    let (mut f, mut za, mut zb) = (
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+        Vec::with_capacity(m),
+    );
     for j in 0..m {
         let f_j = lj[j] * x + aj[j];
         f.push(f_j.to_bytes());
@@ -1886,7 +2074,16 @@ pub fn prove_spend_spark<R: CryptoRng + RngCore>(
     let zdk = (k_coef * x_pow - sum_k).to_bytes();
 
     Ok(SparkSpendProofV6 {
-        cl, ca, cb, gk, gkt, f, za, zb, zdh, zdk,
+        cl,
+        ca,
+        cb,
+        gk,
+        gkt,
+        f,
+        za,
+        zb,
+        zdh,
+        zdk,
         value_commitment: v_bytes,
         nullifier,
         message: *message,
@@ -1913,8 +2110,14 @@ pub fn verify_spend_spark(
         return Err(Error::SparkVerifyFailed);
     }
     for len in [
-        proof.cl.len(), proof.ca.len(), proof.cb.len(), proof.gk.len(), proof.gkt.len(),
-        proof.f.len(), proof.za.len(), proof.zb.len(),
+        proof.cl.len(),
+        proof.ca.len(),
+        proof.cb.len(),
+        proof.gk.len(),
+        proof.gkt.len(),
+        proof.f.len(),
+        proof.za.len(),
+        proof.zb.len(),
     ] {
         if len != m {
             return Err(Error::SparkVerifyFailed);
@@ -1944,8 +2147,12 @@ pub fn verify_spend_spark(
     let f = scalars(&proof.f)?;
     let za = scalars(&proof.za)?;
     let zb = scalars(&proof.zb)?;
-    let zdh = *PeerScalar::decode(proof.zdh).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
-    let zdk = *PeerScalar::decode(proof.zdk).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
+    let zdh = *PeerScalar::decode(proof.zdh)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
+    let zdk = *PeerScalar::decode(proof.zdk)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
     let v_point = *PeerPoint::decode_non_identity(proof.value_commitment)
         .map_err(|_| Error::SparkVerifyFailed)?
         .as_point();
@@ -1959,7 +2166,14 @@ pub fn verify_spend_spark(
     let shifted: Vec<RistrettoPoint> = coins.iter().map(|c| c - v_point).collect();
     let ctx = spend_context_v4(&proof.value_commitment, message);
     let x = challenge_spark(
-        &ctx, &shifted, &proof.nullifier, &proof.cl, &proof.ca, &proof.cb, &proof.gk, &proof.gkt,
+        &ctx,
+        &shifted,
+        &proof.nullifier,
+        &proof.cl,
+        &proof.ca,
+        &proof.cb,
+        &proof.gk,
+        &proof.gkt,
     );
 
     // Per-bit bit-ness.
@@ -2086,10 +2300,18 @@ pub fn verify_mint_binding(
     let r2 = PeerPoint::decode_non_identity(proof.r2)
         .map_err(|_| Error::SparkVerifyFailed)?
         .into_point();
-    let zv = *PeerScalar::decode(proof.zv).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
-    let zs = *PeerScalar::decode(proof.zs).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
-    let zr = *PeerScalar::decode(proof.zr).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
-    let zb = *PeerScalar::decode(proof.zb).map_err(|_| Error::SparkVerifyFailed)?.as_scalar();
+    let zv = *PeerScalar::decode(proof.zv)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
+    let zs = *PeerScalar::decode(proof.zs)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
+    let zr = *PeerScalar::decode(proof.zr)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
+    let zb = *PeerScalar::decode(proof.zb)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .as_scalar();
     let c = mint_challenge(c_out, v_out, &r1, &r2);
     // Shared z_v across both equations ⇒ the two commitments share their value.
     if gv * zv + h_gen * zs + k * zr != r1 + c_out * c {
@@ -2134,6 +2356,15 @@ impl SparkSpendProofV3 {
 
 #[cfg(test)]
 mod tests {
+    // Tests and benches freely cast loop indices / sample counts / timings for
+    // fixture generation and throughput math; none of it is proof data, so opt
+    // this module out of the file-level cast denies.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless,
+        clippy::cast_precision_loss
+    )]
     use super::*;
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
     use curve25519_dalek::scalar::Scalar;
@@ -2171,8 +2402,9 @@ mod tests {
     fn msm_equals_naive_accumulation() {
         let mut rng = ChaCha20Rng::seed_from_u64(9001);
         for &n in &[1usize, 2, 8, 64, 1024, 4096] {
-            let pts: Vec<RistrettoPoint> =
-                (0..n).map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng)).collect();
+            let pts: Vec<RistrettoPoint> = (0..n)
+                .map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng))
+                .collect();
             let coeffs: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
             let mut naive = RistrettoPoint::default();
             for (c, p) in coeffs.iter().zip(pts.iter()) {
@@ -2228,8 +2460,9 @@ mod tests {
         //     members — naïve per-member vs the batched MSM now in production.
         let mut sigma_delta_32768 = 0.0f64;
         for &n in &[4096usize, 16384, 32768] {
-            let pts: Vec<RistrettoPoint> =
-                (0..n).map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng)).collect();
+            let pts: Vec<RistrettoPoint> = (0..n)
+                .map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng))
+                .collect();
             let coeffs: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
 
             let t0 = Instant::now();
@@ -2243,7 +2476,10 @@ mod tests {
             let batched = RistrettoPoint::vartime_multiscalar_mul(coeffs.iter(), pts.iter());
             let msm_ms = t1.elapsed().as_secs_f64() * 1e3;
 
-            assert_eq!(naive, batched, "equivalence must hold at the benchmarked size");
+            assert_eq!(
+                naive, batched,
+                "equivalence must hold at the benchmarked size"
+            );
             println!(
                 "[Σ only]     N={n:>6}  naive Σcᵢ·Cᵢ = {naive_ms:>8.1} ms   batched MSM = {msm_ms:>7.1} ms   {:.1}×",
                 naive_ms / msm_ms
@@ -2374,8 +2610,9 @@ mod tests {
     fn compress_for_transcript_parallel_equals_serial() {
         let mut rng = ChaCha20Rng::seed_from_u64(0xC0FFEE);
         for &n in &[1usize, 255, 256, 257, 1024, 4096] {
-            let pts: Vec<RistrettoPoint> =
-                (0..n).map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng)).collect();
+            let pts: Vec<RistrettoPoint> = (0..n)
+                .map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng))
+                .collect();
             let got = compress_points_for_transcript(&pts);
             let want: Vec<[u8; 32]> = pts.iter().map(|p| p.compress().to_bytes()).collect();
             assert_eq!(got, want, "parallel compression must equal serial at n={n}");
@@ -2399,12 +2636,24 @@ mod tests {
         let mut coins: Vec<RistrettoPoint> = (0..n).map(|i| filler(i as u64 + 9000)).collect();
         coins[l] = gen_gv() * Scalar::from(value) + gen_h() * serial + gen_k() * blinding;
         let msg = [7u8; 32];
-        let proof = prove_spend_spark(&coins, l, value, &serial, &blinding, &value_blinding, &msg, &mut rng)
-            .expect("honest large-set spend proves");
+        let proof = prove_spend_spark(
+            &coins,
+            l,
+            value,
+            &serial,
+            &blinding,
+            &value_blinding,
+            &msg,
+            &mut rng,
+        )
+        .expect("honest large-set spend proves");
         verify_spend_spark(&coins, &proof, &msg).expect("honest large-set spend verifies");
         let mut bad = coins.clone();
         bad[(l + 1) % n] += gen_k() * Scalar::from(1u64);
-        assert!(verify_spend_spark(&bad, &proof, &msg).is_err(), "tampered member must reject");
+        assert!(
+            verify_spend_spark(&bad, &proof, &msg).is_err(),
+            "tampered member must reject"
+        );
     }
 
     /// Lock for the recursive-doubling coefficient products: the ~2N-mult
@@ -2440,8 +2689,9 @@ mod tests {
     fn parallel_msm_equals_single() {
         let mut rng = ChaCha20Rng::seed_from_u64(0xBEEF);
         for &n in &[1usize, 100, 1023, 1024, 1025, 4096, 32768] {
-            let pts: Vec<RistrettoPoint> =
-                (0..n).map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng)).collect();
+            let pts: Vec<RistrettoPoint> = (0..n)
+                .map(|_| RISTRETTO_BASEPOINT_POINT * Scalar::random(&mut rng))
+                .collect();
             let scs: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
             let single = RistrettoPoint::vartime_multiscalar_mul(scs.iter(), pts.iter());
             let par = parallel_multiscalar_mul(&scs, &pts);
@@ -2454,8 +2704,9 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(700);
         let h = Scalar::random(&mut rng);
         let k = Scalar::random(&mut rng);
-        let mut coins: Vec<RistrettoPoint> =
-            (0..4u64).map(|s| bound(s + 2, &Scalar::from(s + 3), &Scalar::from(s + 4))).collect();
+        let mut coins: Vec<RistrettoPoint> = (0..4u64)
+            .map(|s| bound(s + 2, &Scalar::from(s + 3), &Scalar::from(s + 4)))
+            .collect();
         let l = 2;
         coins[l] = gen_h() * h + gen_k() * k; // member in ⟨H,K⟩
         let proof = prove_one_of_many_hk_ctx(&coins, l, &h, &k, b"ctx", &mut rng).unwrap();
@@ -2471,7 +2722,9 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(701);
         let h = Scalar::random(&mut rng);
         let k = Scalar::random(&mut rng);
-        let mut coins: Vec<RistrettoPoint> = (0..4u64).map(|s| gen_k() * Scalar::from(s * 5 + 2)).collect();
+        let mut coins: Vec<RistrettoPoint> = (0..4u64)
+            .map(|s| gen_k() * Scalar::from(s * 5 + 2))
+            .collect();
         let l = 1;
         coins[l] = gen_h() * h + gen_k() * k;
         let proof = prove_one_of_many_hk_ctx(&coins, l, &h, &k, b"c", &mut rng).unwrap();
@@ -2486,7 +2739,8 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(702);
         let h = Scalar::random(&mut rng);
         let k = Scalar::random(&mut rng);
-        let mut coins: Vec<RistrettoPoint> = (0..8u64).map(|s| gen_k() * Scalar::from(s + 1)).collect();
+        let mut coins: Vec<RistrettoPoint> =
+            (0..8u64).map(|s| gen_k() * Scalar::from(s + 1)).collect();
         let l = 5;
         coins[l] = gen_h() * h + gen_k() * k;
         let mut proof = prove_one_of_many_hk_ctx(&coins, l, &h, &k, b"", &mut rng).unwrap();
@@ -2501,13 +2755,15 @@ mod tests {
         let h_coef = Scalar::random(&mut rng); // s_pub + spend_secret (hidden)
         let r = Scalar::random(&mut rng);
         let vb = Scalar::random(&mut rng);
-        let mut coins: Vec<RistrettoPoint> =
-            (0..4u64).map(|s| bound(s + 5, &Scalar::from(s + 6), &Scalar::from(s + 7))).collect();
+        let mut coins: Vec<RistrettoPoint> = (0..4u64)
+            .map(|s| bound(s + 5, &Scalar::from(s + 6), &Scalar::from(s + 7)))
+            .collect();
         let l = 3;
         coins[l] = bound(value, &h_coef, &r);
 
         let msg = [7u8; 32];
-        let proof = prove_spend_value_hidden(&coins, l, value, &h_coef, &r, &vb, &msg, &mut rng).unwrap();
+        let proof =
+            prove_spend_value_hidden(&coins, l, value, &h_coef, &r, &vb, &msg, &mut rng).unwrap();
         let v = verify_spend_value_hidden(&coins, &proof, &msg).unwrap();
         // The returned V is the published value commitment v·Gv + vb·K.
         assert_eq!(v, gen_gv() * Scalar::from(value) + gen_k() * vb);
@@ -2579,7 +2835,10 @@ mod tests {
 
         // Message is bound in the challenge: verifying under a different message
         // fails, and tampering the proof's own message field fails either way.
-        assert!(verify_spend(&coins, &proof, &[0u8; 32]).is_err(), "wrong message rejected");
+        assert!(
+            verify_spend(&coins, &proof, &[0u8; 32]).is_err(),
+            "wrong message rejected"
+        );
         let mut m2 = proof.clone();
         m2.message = [0u8; 32];
         assert!(verify_spend(&coins, &m2, &message).is_err());
@@ -2589,21 +2848,38 @@ mod tests {
         // the double-spend/serial binding: the serial cannot be moved).
         let mut s2 = proof.clone();
         s2.serial = (ml + Scalar::ONE).to_bytes();
-        assert!(verify_spend(&coins, &s2, &message).is_err(), "tampered serial rejected");
+        assert!(
+            verify_spend(&coins, &s2, &message).is_err(),
+            "tampered serial rejected"
+        );
 
         // Tampered one-of-many response → rejected.
         let mut t2 = proof.clone();
         t2.one_of_many.f[0] = tweak(t2.one_of_many.f[0]);
-        assert!(verify_spend(&coins, &t2, &message).is_err(), "tampered proof rejected");
+        assert!(
+            verify_spend(&coins, &t2, &message).is_err(),
+            "tampered proof rejected"
+        );
 
         // Bound to the exact anon set: changing a non-spent member → rejected.
         let mut other = coins.clone();
         other[0] = coin(&Scalar::random(&mut rng), &Scalar::random(&mut rng));
-        assert!(verify_spend(&other, &proof, &message).is_err(), "proof is set-bound");
+        assert!(
+            verify_spend(&other, &proof, &message).is_err(),
+            "proof is set-bound"
+        );
 
         // Ownership: a prover cannot claim a wrong opening — wrong blinding,
         // wrong serial, or the opening of a different coin all fail the check.
-        assert!(prove_spend(&coins, l, &ml, &Scalar::random(&mut rng), &message, &mut rng).is_err());
+        assert!(prove_spend(
+            &coins,
+            l,
+            &ml,
+            &Scalar::random(&mut rng),
+            &message,
+            &mut rng
+        )
+        .is_err());
         assert!(prove_spend(&coins, l, &(ml + Scalar::ONE), &rl, &message, &mut rng).is_err());
         let (m0, r0) = (openings[0].0, openings[0].1);
         assert!(
@@ -2627,12 +2903,20 @@ mod tests {
         // SAME nullifier, so a double-spend is detectable regardless of message.
         let p_a = prove_spend(&coins, l, &ml, &rl, &[1u8; 32], &mut rng).unwrap();
         let p_b = prove_spend(&coins, l, &ml, &rl, &[2u8; 32], &mut rng).unwrap();
-        assert_eq!(p_a.nullifier(), p_b.nullifier(), "same coin → same nullifier");
+        assert_eq!(
+            p_a.nullifier(),
+            p_b.nullifier(),
+            "same coin → same nullifier"
+        );
 
         // A different coin → different nullifier.
         let (m0, r0) = (openings[0].0, openings[0].1);
         let p_other = prove_spend(&coins, 0, &m0, &r0, &[1u8; 32], &mut rng).unwrap();
-        assert_ne!(p_a.nullifier(), p_other.nullifier(), "distinct coins → distinct nullifiers");
+        assert_ne!(
+            p_a.nullifier(),
+            p_other.nullifier(),
+            "distinct coins → distinct nullifiers"
+        );
         assert_ne!(p_a.nullifier(), [0u8; 32]);
     }
 
@@ -2652,9 +2936,10 @@ mod tests {
                 .collect();
             for l in [0usize, n - 1] {
                 let vb = Scalar::random(&mut rng);
-                let proof =
-                    prove_spend_bound(&coins, l, vals[l], &sers[l], &blinds[l], &vb, &message, &mut rng)
-                        .unwrap();
+                let proof = prove_spend_bound(
+                    &coins, l, vals[l], &sers[l], &blinds[l], &vb, &message, &mut rng,
+                )
+                .unwrap();
                 let v = verify_spend_bound(&coins, &proof, &message).unwrap();
                 // Returned commitment is exactly V = v_l·Gv + vb·K.
                 assert_eq!(v, gen_gv() * Scalar::from(vals[l]) + gen_k() * vb);
@@ -2675,16 +2960,19 @@ mod tests {
             .collect();
         let l = 5usize;
         let vb = Scalar::random(&mut rng);
-        let proof =
-            prove_spend_bound(&coins, l, vals[l], &sers[l], &blinds[l], &vb, &message, &mut rng).unwrap();
+        let proof = prove_spend_bound(
+            &coins, l, vals[l], &sers[l], &blinds[l], &vb, &message, &mut rng,
+        )
+        .unwrap();
         assert!(verify_spend_bound(&coins, &proof, &message).is_ok());
 
         // THE BINDING: swap in a value commitment for a DIFFERENT value → the
         // shifted W_l gains a Gv term → one-of-many fails. A spender cannot feed
         // the balance a value other than the spent coin's.
         let mut wrong_value = proof.clone();
-        wrong_value.value_commitment =
-            (gen_gv() * Scalar::from(vals[l] + 1) + gen_k() * vb).compress().to_bytes();
+        wrong_value.value_commitment = (gen_gv() * Scalar::from(vals[l] + 1) + gen_k() * vb)
+            .compress()
+            .to_bytes();
         assert!(
             verify_spend_bound(&coins, &wrong_value, &message).is_err(),
             "value is bound to the spent coin"
@@ -2731,10 +3019,14 @@ mod tests {
             .collect();
 
         let (vb0, vb1) = (Scalar::random(&mut rng), Scalar::random(&mut rng));
-        let p0 =
-            prove_spend_bound(&coins, 0, vals[0], &sers[0], &blinds[0], &vb0, &message, &mut rng).unwrap();
-        let p1 =
-            prove_spend_bound(&coins, 1, vals[1], &sers[1], &blinds[1], &vb1, &message, &mut rng).unwrap();
+        let p0 = prove_spend_bound(
+            &coins, 0, vals[0], &sers[0], &blinds[0], &vb0, &message, &mut rng,
+        )
+        .unwrap();
+        let p1 = prove_spend_bound(
+            &coins, 1, vals[1], &sers[1], &blinds[1], &vb1, &message, &mut rng,
+        )
+        .unwrap();
         // Bound spends yield the value-bound input commitments.
         let vin0 = verify_spend_bound(&coins, &p0, &message).unwrap();
         let vin1 = verify_spend_bound(&coins, &p1, &message).unwrap();
@@ -2744,9 +3036,16 @@ mod tests {
         let fee = 2u64;
         let out_b = Scalar::random(&mut rng);
         let vout = vec![value_commitment(6, &out_b)];
-        let bal =
-            prove_balance(&[vals[0], vals[1]], &[vb0, vb1], &[6], &[out_b], fee, &message, &mut rng)
-                .unwrap();
+        let bal = prove_balance(
+            &[vals[0], vals[1]],
+            &[vb0, vb1],
+            &[6],
+            &[out_b],
+            fee,
+            &message,
+            &mut rng,
+        )
+        .unwrap();
         assert!(verify_balance(&[vin0, vin1], &vout, fee, &bal, &message).is_ok());
 
         // INFLATION: claim a 100 output from 8 in. The prover cannot build a
@@ -2780,7 +3079,10 @@ mod tests {
         assert!(verify_mint_binding(&c_out, &v_out, &proof).is_ok());
 
         // Wire round-trip.
-        assert_eq!(MintBindingProof::from_bytes(&proof.encode()).unwrap(), proof);
+        assert_eq!(
+            MintBindingProof::from_bytes(&proof.encode()).unwrap(),
+            proof
+        );
 
         // A V_out committing a DIFFERENT value than the tree coin → rejected.
         let v_wrong = gen_gv() * Scalar::from(value + 1) + gen_k() * value_blinding;
@@ -2804,8 +3106,7 @@ mod tests {
             let n = 1usize << m;
             for l in [0usize, n / 2, n - 1] {
                 let r = Scalar::random(&mut rng);
-                let mut commits: Vec<RistrettoPoint> =
-                    (0..n).map(|i| filler(i as u64)).collect();
+                let mut commits: Vec<RistrettoPoint> = (0..n).map(|i| filler(i as u64)).collect();
                 commits[l] = zero_commitment(&r);
                 let proof = prove_one_of_many(&commits, l, &r, &mut rng).unwrap();
                 assert!(
@@ -2832,8 +3133,8 @@ mod tests {
         let mut commits: Vec<RistrettoPoint> = (0..n).map(|i| filler(i as u64)).collect();
         commits[l] = blind_gen * r; // a commitment to zero in blind_gen
 
-        let proof =
-            prove_one_of_many_gen_ctx(&commits, l, &r, value_gen, blind_gen, &[], &mut rng).unwrap();
+        let proof = prove_one_of_many_gen_ctx(&commits, l, &r, value_gen, blind_gen, &[], &mut rng)
+            .unwrap();
         assert!(
             verify_one_of_many_gen_ctx(&commits, &proof, value_gen, blind_gen, &[]).is_ok(),
             "honest (H,G) proof must verify"
@@ -2900,7 +3201,11 @@ mod tests {
             &commits, &pubkeys, &proof, value_gen, blind_gen, pk_gen, ki_gen, b"audit",
         )
         .expect("honest fused proof verifies");
-        assert_eq!(tag, ki_gen * x_l, "verifier returns the linking tag T = x_l·U");
+        assert_eq!(
+            tag,
+            ki_gen * x_l,
+            "verifier returns the linking tag T = x_l·U"
+        );
 
         // The base sub-proof is bound to the FUSED transcript: it cannot be
         // lifted out and replayed as a standalone base one-of-many (its f_j were
@@ -2936,8 +3241,18 @@ mod tests {
         let msg = [7u8; 32];
 
         let proof = prove_spend_full(
-            &coins, &pubkeys, l, value, &h_coef, &blinding, &value_blinding, &x_l, pk_gen, ki_gen,
-            &msg, &mut rng,
+            &coins,
+            &pubkeys,
+            l,
+            value,
+            &h_coef,
+            &blinding,
+            &value_blinding,
+            &x_l,
+            pk_gen,
+            ki_gen,
+            &msg,
+            &mut rng,
         )
         .expect("honest v5 spend proves");
         let (v, tag) = verify_spend_full(&coins, &pubkeys, &proof, pk_gen, ki_gen, &msg)
@@ -2947,7 +3262,11 @@ mod tests {
             gen_gv() * Scalar::from(value) + gen_k() * value_blinding,
             "returned V = v·Gv + b·K"
         );
-        assert_eq!(tag, (ki_gen * x_l).compress().to_bytes(), "nullifier tag = x_l·ki_gen");
+        assert_eq!(
+            tag,
+            (ki_gen * x_l).compress().to_bytes(),
+            "nullifier tag = x_l·ki_gen"
+        );
 
         // (1) wrong message → reject.
         assert!(verify_spend_full(&coins, &pubkeys, &proof, pk_gen, ki_gen, &[9u8; 32]).is_err());
@@ -2959,8 +3278,9 @@ mod tests {
         //     membership was proven over W_i = C_i − V for the original V; a
         //     different V breaks the ⟨H,K⟩ membership at l).
         let mut bad = proof.clone();
-        bad.value_commitment =
-            (gen_gv() * Scalar::from(value + 1) + gen_k() * value_blinding).compress().to_bytes();
+        bad.value_commitment = (gen_gv() * Scalar::from(value + 1) + gen_k() * value_blinding)
+            .compress()
+            .to_bytes();
         assert!(verify_spend_full(&coins, &pubkeys, &bad, pk_gen, ki_gen, &msg).is_err());
         // (4) wrong ki_gen at verify → reject.
         assert!(verify_spend_full(&coins, &pubkeys, &proof, pk_gen, gen_h(), &msg).is_err());
@@ -2972,8 +3292,18 @@ mod tests {
         assert!(verify_spend_full(&coins, &pubkeys, &bad, pk_gen, ki_gen, &msg).is_err());
         // (6) prover guard: a value that does not open coins[l] cannot be proven.
         assert!(prove_spend_full(
-            &coins, &pubkeys, l, value + 1, &h_coef, &blinding, &value_blinding, &x_l, pk_gen,
-            ki_gen, &msg, &mut rng,
+            &coins,
+            &pubkeys,
+            l,
+            value + 1,
+            &h_coef,
+            &blinding,
+            &value_blinding,
+            &x_l,
+            pk_gen,
+            ki_gen,
+            &msg,
+            &mut rng,
         )
         .is_err());
     }
@@ -2993,11 +3323,28 @@ mod tests {
         coins[l] = gen_gv() * Scalar::from(value) + gen_h() * serial + gen_k() * blinding;
         let msg = [3u8; 32];
 
-        let proof = prove_spend_spark(&coins, l, value, &serial, &blinding, &value_blinding, &msg, &mut rng)
-            .expect("honest v6 spend proves");
+        let proof = prove_spend_spark(
+            &coins,
+            l,
+            value,
+            &serial,
+            &blinding,
+            &value_blinding,
+            &msg,
+            &mut rng,
+        )
+        .expect("honest v6 spend proves");
         let (v, nf) = verify_spend_spark(&coins, &proof, &msg).expect("honest v6 spend verifies");
-        assert_eq!(v, gen_gv() * Scalar::from(value) + gen_k() * value_blinding, "returned V");
-        assert_eq!(nf, (gen_u() * serial).compress().to_bytes(), "nullifier = serial·U");
+        assert_eq!(
+            v,
+            gen_gv() * Scalar::from(value) + gen_k() * value_blinding,
+            "returned V"
+        );
+        assert_eq!(
+            nf,
+            (gen_u() * serial).compress().to_bytes(),
+            "nullifier = serial·U"
+        );
 
         // DOUBLE-SPEND DETECTION: a second spend of the SAME coin — different
         // message, different value blinding, different anonymity set + position —
@@ -3007,34 +3354,73 @@ mod tests {
         let (l2, n2) = (5usize, 8usize);
         let mut coins2: Vec<RistrettoPoint> = (0..n2).map(|i| filler(i as u64 + 1500)).collect();
         coins2[l2] = gen_gv() * Scalar::from(value) + gen_h() * serial + gen_k() * blinding;
-        let proof2 = prove_spend_spark(&coins2, l2, value, &serial, &blinding, &vb2, &msg2, &mut rng).unwrap();
+        let proof2 = prove_spend_spark(
+            &coins2, l2, value, &serial, &blinding, &vb2, &msg2, &mut rng,
+        )
+        .unwrap();
         let (_, nf2) = verify_spend_spark(&coins2, &proof2, &msg2).unwrap();
-        assert_eq!(nf, nf2, "same coin serial MUST collide in the nullifier (double-spend)");
+        assert_eq!(
+            nf, nf2,
+            "same coin serial MUST collide in the nullifier (double-spend)"
+        );
 
         // A DIFFERENT serial → a DIFFERENT nullifier (no cross-coin collision).
         let serial3 = Scalar::random(&mut rng);
         let mut coins3 = coins.clone();
         coins3[l] = gen_gv() * Scalar::from(value) + gen_h() * serial3 + gen_k() * blinding;
-        let proof3 = prove_spend_spark(&coins3, l, value, &serial3, &blinding, &value_blinding, &msg, &mut rng).unwrap();
+        let proof3 = prove_spend_spark(
+            &coins3,
+            l,
+            value,
+            &serial3,
+            &blinding,
+            &value_blinding,
+            &msg,
+            &mut rng,
+        )
+        .unwrap();
         let (_, nf3) = verify_spend_spark(&coins3, &proof3, &msg).unwrap();
         assert_ne!(nf, nf3, "different serial → different nullifier");
 
         // Adversarial rejections.
-        assert!(verify_spend_spark(&coins, &proof, &[0u8; 32]).is_err(), "wrong message");
+        assert!(
+            verify_spend_spark(&coins, &proof, &[0u8; 32]).is_err(),
+            "wrong message"
+        );
         let mut bad = proof.clone();
         bad.nullifier = (gen_u() * (serial + Scalar::ONE)).compress().to_bytes();
-        assert!(verify_spend_spark(&coins, &bad, &msg).is_err(), "tampered nullifier");
+        assert!(
+            verify_spend_spark(&coins, &bad, &msg).is_err(),
+            "tampered nullifier"
+        );
         let mut bad = proof.clone();
-        bad.value_commitment =
-            (gen_gv() * Scalar::from(value + 1) + gen_k() * value_blinding).compress().to_bytes();
-        assert!(verify_spend_spark(&coins, &bad, &msg).is_err(), "value-binding (wrong V value)");
+        bad.value_commitment = (gen_gv() * Scalar::from(value + 1) + gen_k() * value_blinding)
+            .compress()
+            .to_bytes();
+        assert!(
+            verify_spend_spark(&coins, &bad, &msg).is_err(),
+            "value-binding (wrong V value)"
+        );
         let mut bad = proof.clone();
         let mut f0 = bad.f[0];
         f0[0] ^= 1;
         bad.f[0] = f0;
-        assert!(verify_spend_spark(&coins, &bad, &msg).is_err(), "tampered membership");
         assert!(
-            prove_spend_spark(&coins, l, value + 1, &serial, &blinding, &value_blinding, &msg, &mut rng).is_err(),
+            verify_spend_spark(&coins, &bad, &msg).is_err(),
+            "tampered membership"
+        );
+        assert!(
+            prove_spend_spark(
+                &coins,
+                l,
+                value + 1,
+                &serial,
+                &blinding,
+                &value_blinding,
+                &msg,
+                &mut rng
+            )
+            .is_err(),
             "prover opening guard"
         );
     }
@@ -3128,7 +3514,8 @@ mod tests {
         let mut commits: Vec<RistrettoPoint> = (0..n).map(|i| filler(i as u64 + 20)).collect();
         commits[la] = blind_gen * r_a;
         let proof_a = prove_one_of_many_ki_gen_ctx(
-            &commits, &pubkeys, la, &r_a, &x_a, value_gen, blind_gen, pk_gen, ki_gen, b"s", &mut rng,
+            &commits, &pubkeys, la, &r_a, &x_a, value_gen, blind_gen, pk_gen, ki_gen, b"s",
+            &mut rng,
         )
         .unwrap();
 
@@ -3178,12 +3565,18 @@ mod tests {
         // Tampered response scalar (f_j) → bit-ness check fails.
         let mut bad = proof.clone();
         bad.f[0] = tweak(bad.f[0]);
-        assert!(verify_one_of_many(&commits, &bad).is_err(), "tampered f rejected");
+        assert!(
+            verify_one_of_many(&commits, &bad).is_err(),
+            "tampered f rejected"
+        );
 
         // Tampered final response (z_d) → one-of-many equation fails.
         let mut bad_zd = proof.clone();
         bad_zd.zd = tweak(bad_zd.zd);
-        assert!(verify_one_of_many(&commits, &bad_zd).is_err(), "tampered zd rejected");
+        assert!(
+            verify_one_of_many(&commits, &bad_zd).is_err(),
+            "tampered zd rejected"
+        );
 
         // Wrong witness: the "hidden" commitment is NOT a commitment to zero
         // (carries a value term v·G). The prover can build a proof, but the

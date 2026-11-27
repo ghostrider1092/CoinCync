@@ -257,7 +257,12 @@ pub fn import(
     // `?` here returned with the operator's chaindata stranded under
     // .pre-snapshot-<stamp> and no restore (snapshot/mod.rs:249).
     if let Err(copy_err) = copy_dir_recursive(&db_src, chaindata_dir) {
-        rollback_failed_install(chaindata_dir, backup_path.as_deref(), &marker_path, &copy_err)?;
+        rollback_failed_install(
+            chaindata_dir,
+            backup_path.as_deref(),
+            &marker_path,
+            &copy_err,
+        )?;
         return Err(copy_err);
     }
 
@@ -338,7 +343,9 @@ fn hash_file_streaming(
     let mut buf = [0u8; 64 * 1024];
     let mut streamed: u64 = 0;
     loop {
-        let n = f.read(&mut buf).map_err(|e| io_err("read file for hash", e))?;
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| io_err("read file for hash", e))?;
         if n == 0 {
             break;
         }
@@ -429,7 +436,8 @@ fn write_install_marker(marker_path: &Path, backup: Option<&Path>) -> Result<()>
     // chaindata is touched. create_dir_all is a no-op when it already exists
     // (the existing-chaindata path).
     if let Some(parent) = marker_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| io_err("create data dir for install marker", e))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| io_err("create data dir for install marker", e))?;
     }
     let marker = InstallMarker {
         backup: backup.map(|p| p.display().to_string()),
@@ -592,7 +600,9 @@ mod snapshot_hardening_tests {
         let rel = Path::new("huge.db");
         let err = hash_file_streaming(&mut hasher, &big, rel, &mut budget).unwrap_err();
         assert!(
-            format!("{:?}", err).to_lowercase().contains("maximum allowed size"),
+            format!("{:?}", err)
+                .to_lowercase()
+                .contains("maximum allowed size"),
             "oversized file must be refused by the budget, got: {:?}",
             err
         );
@@ -615,10 +625,19 @@ mod snapshot_hardening_tests {
 
         let recovered = recover_interrupted_install(&chaindata).unwrap();
         assert!(recovered, "must report a recovery happened");
-        assert!(chaindata.join("REAL").exists(), "original chaindata must be restored");
-        assert!(!chaindata.join("HALF").exists(), "half-installed snapshot must be gone");
+        assert!(
+            chaindata.join("REAL").exists(),
+            "original chaindata must be restored"
+        );
+        assert!(
+            !chaindata.join("HALF").exists(),
+            "half-installed snapshot must be gone"
+        );
         assert!(!backup.exists(), "backup consumed by the restore");
-        assert!(!marker_path_for(&chaindata).exists(), "marker cleared after recovery");
+        assert!(
+            !marker_path_for(&chaindata).exists(),
+            "marker cleared after recovery"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -647,7 +666,10 @@ mod snapshot_hardening_tests {
         std::fs::create_dir_all(&chaindata).unwrap();
         std::fs::write(chaindata.join("REAL"), b"operators-real-chaindata").unwrap();
         write_install_marker(&marker_path_for(&chaindata), Some(&backup)).unwrap();
-        assert!(!backup.exists(), "precondition: the backup was never created");
+        assert!(
+            !backup.exists(),
+            "precondition: the backup was never created"
+        );
 
         let recovered = recover_interrupted_install(&chaindata).unwrap();
         assert!(recovered, "must report a recovery happened");
@@ -1154,7 +1176,9 @@ mod tests {
         let err = import(&out, &dest, &policy).unwrap_err();
         assert!(matches!(err, Error::InvalidState(_)));
         assert!(
-            format!("{:?}", err).to_lowercase().contains("db/ dir missing"),
+            format!("{:?}", err)
+                .to_lowercase()
+                .contains("db/ dir missing"),
             "expected a missing-db/-dir refusal, got: {:?}",
             err
         );

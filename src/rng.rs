@@ -20,6 +20,12 @@
 //! draws from a seeded ChaCha20 stream, making the non-security randomness
 //! reproducible so a failing simulation replays identically.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use std::cell::RefCell;
@@ -83,7 +89,9 @@ fn with_rng<T>(f: impl FnOnce(&mut dyn RngCore) -> T) -> T {
         SIM_RNG.with(|c| {
             let mut b = c.borrow_mut();
             let r = b.get_or_insert_with(|| {
-                ChaCha20Rng::seed_from_u64(SIM_SEED.load(Ordering::Relaxed).max(0) as u64)
+                ChaCha20Rng::seed_from_u64(
+                    u64::try_from(SIM_SEED.load(Ordering::Relaxed).max(0)).unwrap_or(0),
+                )
             });
             f(r)
         })

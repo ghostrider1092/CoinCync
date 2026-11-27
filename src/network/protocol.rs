@@ -2,6 +2,12 @@
 //!
 //! P2P protocol message definitions and serialization.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::consensus::Block;
 use crate::constants::{
     is_protocol_version_supported, MAX_SUPPORTED_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION,
@@ -83,10 +89,17 @@ impl MessageHeader {
 
     pub fn new(magic: [u8; 4], msg_type: MessageType, payload: &[u8]) -> Self {
         let checksum = compute_checksum(payload);
+        // `payload.len()` is bounded by MAX_MESSAGE_SIZE (16 MiB), enforced by
+        // the framer (network/framing.rs) before any payload reaches a handler,
+        // so it always fits in u32 and the cast is byte-exact for every real
+        // message. `length` is the wire-format payload-length field and must
+        // stay a plain u32, so truncation is intentional (and unreachable).
+        #[allow(clippy::cast_possible_truncation)]
+        let length = payload.len() as u32;
         MessageHeader {
             magic,
             msg_type: msg_type as u8,
-            length: payload.len() as u32,
+            length,
             checksum,
         }
     }
@@ -274,12 +287,12 @@ impl MessageType {
     pub fn max_size(&self) -> usize {
         match self {
             // Control messages: small
-            MessageType::Version => 4 * 1024, // 4 KB
-            MessageType::Verack => 256,       // 256 bytes
-            MessageType::Ping => 256,         // 256 bytes
-            MessageType::Pong => 256,         // 256 bytes
-            MessageType::Flare => 1024,       // 1 KB
-            MessageType::ChainWork => 256,    // u128 + u64 + Hash (~56 B)
+            MessageType::Version => 4 * 1024,        // 4 KB
+            MessageType::Verack => 256,              // 256 bytes
+            MessageType::Ping => 256,                // 256 bytes
+            MessageType::Pong => 256,                // 256 bytes
+            MessageType::Flare => 1024,              // 1 KB
+            MessageType::ChainWork => 256,           // u128 + u64 + Hash (~56 B)
             MessageType::ConsensusFingerprint => 64, // [u8; 32] + borsh overhead
 
             // Request messages: moderate
@@ -919,6 +932,11 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use crate::constants::MAINNET_MAGIC;
 
@@ -1042,11 +1060,42 @@ mod tests {
     /// authoritative list mirrored from the `TryFrom` impl; any drift between
     /// this and the impl is a wire-compatibility break the sweep tests catch.
     const VALID_DISCRIMINANTS: &[u8] = &[
-        0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 30, 31, 40, 41, 50, 51, 52,
+        0,
+        1,
+        2,
+        3,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        20,
+        21,
+        22,
+        23,
+        24,
+        30,
+        31,
+        40,
+        41,
+        50,
+        51,
+        52,
         // Bobtail proof-share message (gated); only defined in a `bobtail` build.
         #[cfg(feature = "bobtail")]
         53,
-        60, 61, 62, 63, 64, 65, 70, 71, 80, 81, 99,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        70,
+        71,
+        80,
+        81,
+        99,
     ];
 
     /// n distinct hashes (varying the first two bytes so counts up to ~65k
@@ -1249,10 +1298,7 @@ mod tests {
     fn consensus_fingerprint_message_round_trips() {
         let fp = [7u8; 32];
         let msg = Message::consensus_fingerprint([1, 2, 3, 4], fp).unwrap();
-        assert_eq!(
-            msg.header.msg_type,
-            MessageType::ConsensusFingerprint as u8
-        );
+        assert_eq!(msg.header.msg_type, MessageType::ConsensusFingerprint as u8);
         let decoded: ConsensusFingerprintMessage = borsh::from_slice(&msg.payload).unwrap();
         assert_eq!(decoded.fingerprint, fp);
     }
@@ -1277,10 +1323,7 @@ mod tests {
         assert!(ok.validate().is_ok());
 
         let too_long = version_msg(PROTOCOL_VERSION, "a".repeat(MAX_USER_AGENT_LENGTH + 1));
-        assert!(matches!(
-            too_long.validate(),
-            Err(Error::ProtocolError(_))
-        ));
+        assert!(matches!(too_long.validate(), Err(Error::ProtocolError(_))));
     }
 
     /// Protocol versions below MIN and above MAX are rejected; MIN and MAX
@@ -1364,10 +1407,7 @@ mod tests {
         let too_many = BlocksMessage {
             blocks: vec![tiny_block(); MAX_BLOCK_HASHES + 1],
         };
-        assert!(matches!(
-            too_many.validate(),
-            Err(Error::InvalidState(_))
-        ));
+        assert!(matches!(too_many.validate(), Err(Error::InvalidState(_))));
     }
 
     #[test]

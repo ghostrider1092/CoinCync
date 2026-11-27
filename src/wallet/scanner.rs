@@ -94,6 +94,15 @@
 //!   position drift double-counting or skipping blocks. TESTS:
 //!   `set_position_roundtrips_and_rescan_is_idempotent`.
 
+// Cast hygiene (modernization Tier-1c): clean of unjustified numeric casts.
+// Output-index casts carry fn-scoped `#[allow]`s (bounded by MAX_TX_OUTPUTS=16);
+// any new cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -607,6 +616,9 @@ impl WalletScanner {
     /// will wire it into the orchestrator path. Until then, callers
     /// invoke it directly when they detect a reorg via the warn-log
     /// from Task #2a.
+    // The sole expect() (journal pop_back, guarded by a back()==Some check just
+    // above) is a logic invariant, not a recoverable error.
+    #[allow(clippy::unwrap_in_result)]
     pub fn rewind_to_height(
         &mut self,
         target_height: u64,
@@ -773,7 +785,7 @@ impl WalletScanner {
                         shared_secret: [0u8; 32],
                         key_epoch: keys.epoch,
                         subaddress_index: None, // Coinbase always to primary address
-                        payment_id: None, // coinbase carries no payment id
+                        payment_id: None,       // coinbase carries no payment id
                     });
                 }
 
@@ -821,7 +833,7 @@ impl WalletScanner {
                         shared_secret: [0u8; 32],
                         key_epoch: keys.epoch,
                         subaddress_index: None, // Coinbase always to primary address
-                        payment_id: None, // coinbase carries no payment id
+                        payment_id: None,       // coinbase carries no payment id
                     });
                 }
 
@@ -945,6 +957,8 @@ impl WalletScanner {
     }
 
     /// Scan a transaction
+    // `idx as u8` below is an output index, bounded by MAX_TX_OUTPUTS (16) → exact.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn scan_transaction(&mut self, tx: &Transaction) -> Vec<DecryptedOutput> {
         let tx_hash = tx.hash();
         let mut found = Vec::new();
@@ -977,7 +991,7 @@ impl WalletScanner {
 
             if let Some(decrypted) = self.scan_output(output, idx as u8, tx_hash, is_revealed) {
                 self.stats.outputs_found += 1;
-                self.stats.total_amount += decrypted.amount as u128;
+                self.stats.total_amount += u128::from(decrypted.amount);
                 found.push(decrypted);
             }
         }
@@ -1180,12 +1194,14 @@ impl WalletScanner {
             }
         }
 
-        self.stats.scan_time_ms = start.elapsed().as_millis() as u64;
+        self.stats.scan_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         all_found
     }
 
     /// Scan blocks in parallel (for catch-up sync)
+    // `idx as u8` output indices are bounded by MAX_TX_OUTPUTS (16) → exact.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn scan_blocks_parallel(&mut self, blocks: &[Block]) -> Vec<DecryptedOutput> {
         let start = std::time::Instant::now();
 
@@ -1256,8 +1272,8 @@ impl WalletScanner {
             .map(|tx| tx.outputs.len().min(256) as u64)
             .sum::<u64>();
         self.stats.outputs_found += all_found.len() as u64;
-        self.stats.total_amount += all_found.iter().map(|o| o.amount as u128).sum::<u128>();
-        self.stats.scan_time_ms = start.elapsed().as_millis() as u64;
+        self.stats.total_amount += all_found.iter().map(|o| u128::from(o.amount)).sum::<u128>();
+        self.stats.scan_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         // Update position to last block
         if let Some(last) = blocks.last() {
@@ -1607,7 +1623,7 @@ impl BackgroundScanner {
             outputs_found: stats.outputs_found,
             outputs_spent: 0, // Updated separately
             scan_started: 0,  // Set when scan starts
-            last_scan_time: chrono::Utc::now().timestamp() as u64,
+            last_scan_time: u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0),
         };
 
         self.db.update_scan_state(&state)?;
@@ -1922,6 +1938,13 @@ pub fn decrypted_to_utxo(
 
 #[cfg(test)]
 mod tests {
+    // Test-only casts (bounded fixtures, amounts, indices) are low-risk; the
+    // module deny still enforces production code.
+    #![allow(
+        clippy::cast_lossless,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     use super::*;
     use crate::config::NetworkType;
     // Phase A1 (audit fix): test below at line 1083 builds a Transaction
@@ -3017,7 +3040,11 @@ mod tests {
         assert!(scanner.record_spend_for_last_block(spent_ki));
 
         // An equal-height sibling at 2 orphans block2.
-        let sibling2 = mk_block(2, Hash::from_bytes([0x77; 32]), vec![mk_transfer_tx(vec![])]);
+        let sibling2 = mk_block(
+            2,
+            Hash::from_bytes([0x77; 32]),
+            vec![mk_transfer_tx(vec![])],
+        );
         assert!(matches!(
             scanner.scan_block_with_result(&sibling2),
             ScanResult::ReorgDetected { .. }
@@ -3054,7 +3081,11 @@ mod tests {
         let spent_ki = KeyImage::from_bytes([0x33; 32]);
         assert!(scanner.record_spend_for_last_block(spent_ki));
 
-        let sibling2 = mk_block(2, Hash::from_bytes([0x99; 32]), vec![mk_transfer_tx(vec![])]);
+        let sibling2 = mk_block(
+            2,
+            Hash::from_bytes([0x99; 32]),
+            vec![mk_transfer_tx(vec![])],
+        );
         assert!(matches!(
             scanner.scan_block_with_result(&sibling2),
             ScanResult::ReorgDetected { .. }
@@ -3084,7 +3115,11 @@ mod tests {
         let h1 = block1.hash();
         scanner.scan_block_with_result(&block1).outputs_or_panic();
 
-        let sibling = mk_block(1, Hash::from_bytes([0xEE; 32]), vec![mk_transfer_tx(vec![])]);
+        let sibling = mk_block(
+            1,
+            Hash::from_bytes([0xEE; 32]),
+            vec![mk_transfer_tx(vec![])],
+        );
         match scanner.scan_block_with_result(&sibling) {
             ScanResult::ReorgDetected {
                 at_height,
@@ -3110,7 +3145,11 @@ mod tests {
         let block1 = mk_block(1, Hash::zero(), vec![mk_transfer_tx(vec![])]);
         scanner.scan_block_with_result(&block1).outputs_or_panic();
 
-        let ahead = mk_block(5, Hash::from_bytes([0xAB; 32]), vec![mk_transfer_tx(vec![])]);
+        let ahead = mk_block(
+            5,
+            Hash::from_bytes([0xAB; 32]),
+            vec![mk_transfer_tx(vec![])],
+        );
         match scanner.scan_block_with_result(&ahead) {
             ScanResult::Scanned { height, .. } => assert_eq!(height, 5),
             other => panic!(
@@ -3130,7 +3169,11 @@ mod tests {
         for h in 100u64..=102 {
             push_diff(&mut scanner, h, h as u8);
         }
-        let sibling = mk_block(102, Hash::from_bytes([0xCD; 32]), vec![mk_transfer_tx(vec![])]);
+        let sibling = mk_block(
+            102,
+            Hash::from_bytes([0xCD; 32]),
+            vec![mk_transfer_tx(vec![])],
+        );
         assert!(matches!(
             scanner.scan_block_with_result(&sibling),
             ScanResult::ReorgDetected { .. }
@@ -3229,7 +3272,10 @@ mod tests {
         let got = scanner
             .scan_output(&output, 0, Hash::zero(), true)
             .expect("detected");
-        assert_eq!(got.amount, 0, "short encrypted_amount decodes to 0, not panic");
+        assert_eq!(
+            got.amount, 0,
+            "short encrypted_amount decodes to 0, not panic"
+        );
     }
 
     /// Coinbase mined to a subaddress: the coinbase path only checks the PRIMARY
@@ -3271,7 +3317,9 @@ mod tests {
         scanner.add_keys(view, spub, 0);
         scanner.add_subaddress_keys(vec![(0, 1, sub_spend)]);
         assert!(
-            scanner.scan_output(&output, 0, Hash::zero(), true).is_none(),
+            scanner
+                .scan_output(&output, 0, Hash::zero(), true)
+                .is_none(),
             "coinbase-to-subaddress is not detected by the coinbase path (attribution gap)"
         );
     }
@@ -3398,7 +3446,9 @@ mod tests {
         let mut scanner = WalletScanner::new();
         scanner.add_keys(view, spub, 0);
         assert!(
-            scanner.scan_output(&output, 0, Hash::zero(), false).is_none(),
+            scanner
+                .scan_output(&output, 0, Hash::zero(), false)
+                .is_none(),
             "serial path must drop a stealth-owned output with a forged commitment"
         );
     }
@@ -3445,7 +3495,9 @@ mod tests {
 
         let mut scanner = WalletScanner::new();
         scanner.add_keys(view, spub, 0);
-        assert!(scanner.scan_output(&output, 0, Hash::zero(), false).is_none());
+        assert!(scanner
+            .scan_output(&output, 0, Hash::zero(), false)
+            .is_none());
     }
 
     /// `decrypted_to_utxo` derives the key image via the CLSAG formula and carries
@@ -3453,8 +3505,7 @@ mod tests {
     #[test]
     fn decrypted_to_utxo_derives_key_image_and_carries_lock_height() {
         use crate::crypto::{
-            compute_one_time_secret, generate_stealth_address_checked,
-            KeyImage as CurveKeyImage,
+            compute_one_time_secret, generate_stealth_address_checked, KeyImage as CurveKeyImage,
         };
         use rand::rngs::OsRng;
         let view = SecretKey::generate(&mut OsRng);
@@ -3487,7 +3538,11 @@ mod tests {
         };
 
         let utxo = decrypted_to_utxo(&decrypted, &view, &spend, 7).unwrap();
-        assert_eq!(utxo.lock_height, Some(500), "lock_height carried from TxOutput");
+        assert_eq!(
+            utxo.lock_height,
+            Some(500),
+            "lock_height carried from TxOutput"
+        );
 
         let recipient_stealth = StealthAddress {
             public_key: decrypted.output.stealth_address,
@@ -3605,7 +3660,9 @@ mod tests {
         let block = mk_block(
             1,
             Hash::zero(),
-            vec![mk_transfer_tx(vec![mk_owned_output(&vpub, &spub, 1_234_567, 0)])],
+            vec![mk_transfer_tx(vec![mk_owned_output(
+                &vpub, &spub, 1_234_567, 0,
+            )])],
         );
 
         let mut s1 = WalletScanner::new();
@@ -3667,7 +3724,9 @@ mod tests {
         let block = mk_block(
             1,
             Hash::zero(),
-            vec![mk_transfer_tx(vec![mk_owned_output(&vpub, &spub, 5_000, 0)])],
+            vec![mk_transfer_tx(vec![mk_owned_output(
+                &vpub, &spub, 5_000, 0,
+            )])],
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -3683,7 +3742,11 @@ mod tests {
         let mut bg2 = BackgroundScanner::new(wallet_db.clone());
         bg2.add_keys(view, spub, 0);
         bg2.load_state().unwrap();
-        assert_eq!(bg2.position(), saved, "scan position restored after restart");
+        assert_eq!(
+            bg2.position(),
+            saved,
+            "scan position restored after restart"
+        );
     }
 
     /// `WalletSyncService::run` drains the block channel, persists outputs, and

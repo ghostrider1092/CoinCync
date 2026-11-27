@@ -47,14 +47,29 @@ fn events<'a>(msgs: &'a [Value], event: &str) -> Vec<&'a Value> {
 fn full_session_hits_difficulty_floor_and_exposes_state() {
     // ── Script the client side ────────────────────────────────────────────
     let mut input = Vec::new();
-    req(&mut input, 1, "initialize", json!({ "adapterID": "coincync-dbg" }));
-    req(&mut input, 2, "setExceptionBreakpoints", json!({ "filters": ["difficulty-floor"] }));
+    req(
+        &mut input,
+        1,
+        "initialize",
+        json!({ "adapterID": "coincync-dbg" }),
+    );
+    req(
+        &mut input,
+        2,
+        "setExceptionBreakpoints",
+        json!({ "filters": ["difficulty-floor"] }),
+    );
     req(&mut input, 3, "configurationDone", json!({}));
     req(&mut input, 4, "launch", json!({}));
     req(&mut input, 5, "threads", json!({}));
     req(&mut input, 6, "stackTrace", json!({ "threadId": 1 }));
     req(&mut input, 7, "scopes", json!({ "frameId": 1 }));
-    req(&mut input, 8, "variables", json!({ "variablesReference": 1000 }));
+    req(
+        &mut input,
+        8,
+        "variables",
+        json!({ "variablesReference": 1000 }),
+    );
     req(&mut input, 9, "disconnect", json!({}));
 
     // ── Run the adapter ───────────────────────────────────────────────────
@@ -77,7 +92,9 @@ fn full_session_hits_difficulty_floor_and_exposes_state() {
         .and_then(Value::as_array)
         .expect("exception filters");
     assert!(
-        filters.iter().any(|f| f.get("filter").and_then(Value::as_str) == Some("difficulty-floor")),
+        filters
+            .iter()
+            .any(|f| f.get("filter").and_then(Value::as_str) == Some("difficulty-floor")),
         "must advertise the difficulty-floor breakpoint filter"
     );
     // The client is told it can configure after initialize.
@@ -86,7 +103,9 @@ fn full_session_hits_difficulty_floor_and_exposes_state() {
     // ── launch replays and the floor breakpoint fires ────────────────────
     let stops = events(&msgs, "stopped");
     assert!(
-        stops.iter().any(|e| e.pointer("/body/reason") == Some(&json!("exception"))),
+        stops
+            .iter()
+            .any(|e| e.pointer("/body/reason") == Some(&json!("exception"))),
         "a difficulty-floor exception stop must fire; got: {stops:?}"
     );
 
@@ -94,11 +113,19 @@ fn full_session_hits_difficulty_floor_and_exposes_state() {
     let threads = find_response(&msgs, "threads").expect("threads response");
     assert_eq!(threads.pointer("/body/threads/0/id"), Some(&json!(1)));
     let st = find_response(&msgs, "stackTrace").expect("stackTrace response");
-    assert!(st.pointer("/body/stackFrames/0/line").and_then(Value::as_i64).unwrap() >= 2);
+    assert!(
+        st.pointer("/body/stackFrames/0/line")
+            .and_then(Value::as_i64)
+            .unwrap()
+            >= 2
+    );
 
     // ── variables decode the REAL consensus state at the floor ───────────
     let vars = find_response(&msgs, "variables").expect("variables response");
-    let arr = vars.pointer("/body/variables").and_then(Value::as_array).expect("variables");
+    let arr = vars
+        .pointer("/body/variables")
+        .and_then(Value::as_array)
+        .expect("variables");
     let get = |name: &str| -> String {
         arr.iter()
             .find(|v| v.get("name").and_then(Value::as_str) == Some(name))
@@ -124,9 +151,18 @@ fn line_breakpoint_pauses_at_that_block() {
     let mut input = Vec::new();
     req(&mut input, 1, "initialize", json!({}));
     // Disable the floor filter so the line breakpoint is what stops us.
-    req(&mut input, 2, "setExceptionBreakpoints", json!({ "filters": [] }));
-    req(&mut input, 3, "setBreakpoints",
-        json!({ "source": { "path": "scenario.ccscenario" }, "breakpoints": [{ "line": 4 }] }));
+    req(
+        &mut input,
+        2,
+        "setExceptionBreakpoints",
+        json!({ "filters": [] }),
+    );
+    req(
+        &mut input,
+        3,
+        "setBreakpoints",
+        json!({ "source": { "path": "scenario.ccscenario" }, "breakpoints": [{ "line": 4 }] }),
+    );
     req(&mut input, 4, "configurationDone", json!({}));
     req(&mut input, 5, "launch", json!({}));
     req(&mut input, 6, "stackTrace", json!({ "threadId": 1 }));
@@ -141,10 +177,15 @@ fn line_breakpoint_pauses_at_that_block() {
 
     let stops = events(&msgs, "stopped");
     assert!(
-        stops.iter().any(|e| e.pointer("/body/reason") == Some(&json!("breakpoint"))),
+        stops
+            .iter()
+            .any(|e| e.pointer("/body/reason") == Some(&json!("breakpoint"))),
         "line breakpoint must produce a breakpoint stop; got {stops:?}"
     );
     let st = find_response(&msgs, "stackTrace").expect("stackTrace");
-    assert_eq!(st.pointer("/body/stackFrames/0/line"), Some(&json!(4)),
-        "must pause on the line the breakpoint was set");
+    assert_eq!(
+        st.pointer("/body/stackFrames/0/line"),
+        Some(&json!(4)),
+        "must pause on the line the breakpoint was set"
+    );
 }

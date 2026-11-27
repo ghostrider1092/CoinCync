@@ -135,11 +135,18 @@ mod spark_props {
         let real_serial = rnd(&mut rng);
         let anon: Vec<RistrettoPoint> = (0..n)
             .map(|i| {
-                let serial = if i == real_index { real_serial } else { rnd(&mut rng) };
+                let serial = if i == real_index {
+                    real_serial
+                } else {
+                    rnd(&mut rng)
+                };
                 spark_commit(value, &serial, &randomness)
             })
             .collect();
-        let pubkeys = anon.iter().map(|c| spark_pubkey(c, value, &randomness)).collect();
+        let pubkeys = anon
+            .iter()
+            .map(|c| spark_pubkey(c, value, &randomness))
+            .collect();
         let note = SparkNote {
             commitment: anon[real_index].compress().to_bytes(),
             value,

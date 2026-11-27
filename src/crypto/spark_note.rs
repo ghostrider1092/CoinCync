@@ -39,6 +39,12 @@
 //! spend-secret binding** (the spend rail) is deliberately NOT in this file — it
 //! is the audit-critical fill-in pinned to the Lelantus-Spark paper.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::crypto::peer_scalars::{PeerPoint, PeerScalar};
 use crate::crypto::spark_generators::{gen_gv, gen_h, gen_k};
 use crate::error::{Error, Result};
@@ -78,10 +84,18 @@ pub struct SparkAddr2 {
 impl SparkAddr2 {
     /// Build an address from raw secrets (test / wiring helper). In the wallet
     /// these come from the `SparkScanKey` / `SparkSpendKey` chain.
-    pub fn from_secrets(diversifier: [u8; 11], scan_secret: &Scalar, spend_secret: &Scalar) -> Self {
+    pub fn from_secrets(
+        diversifier: [u8; 11],
+        scan_secret: &Scalar,
+        spend_secret: &Scalar,
+    ) -> Self {
         let q_scan = (key_base() * scan_secret).compress().to_bytes();
         let q_spend = (gen_h() * spend_secret).compress().to_bytes();
-        SparkAddr2 { diversifier, q_scan, q_spend }
+        SparkAddr2 {
+            diversifier,
+            q_scan,
+            q_spend,
+        }
     }
 }
 
@@ -99,7 +113,10 @@ pub struct NoteScanKey {
 impl NoteScanKey {
     /// View-only key from the scan secret and the public spend point.
     pub fn new(scan_secret: Scalar, q_spend: [u8; 32]) -> Self {
-        NoteScanKey { scan_secret, q_spend }
+        NoteScanKey {
+            scan_secret,
+            q_spend,
+        }
     }
 }
 
@@ -109,7 +126,10 @@ impl NoteScanKey {
 
 /// The published note that travels with a transaction and pins a tree coin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "sketch-gk-proof", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
+#[cfg_attr(
+    feature = "sketch-gk-proof",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct PublishedNote {
     /// The bound coin `C` appended to the shielded tree (compressed Ristretto).
     pub coin: [u8; 32],
@@ -139,9 +159,9 @@ pub struct RecoveredNote {
 
 /// The intermediate secrets the shared rail produces from a shared secret.
 struct NoteSecrets {
-    coin_blinding: Scalar, // r
+    coin_blinding: Scalar,  // r
     value_blinding: Scalar, // b
-    serial_public: Scalar, // s_pub
+    serial_public: Scalar,  // s_pub
     amount_pad: [u8; 8],
     view_tag: u8,
 }
@@ -194,7 +214,13 @@ fn derive_note(ss: &[u8; 32], q_spend: &[u8; 32]) -> NoteSecrets {
     th.update(ss);
     let view_tag = <[u8; 32]>::from(th.finalize())[0];
 
-    NoteSecrets { coin_blinding, value_blinding, serial_public, amount_pad, view_tag }
+    NoteSecrets {
+        coin_blinding,
+        value_blinding,
+        serial_public,
+        amount_pad,
+        view_tag,
+    }
 }
 
 /// The bound coin a note pins: `C = v·Gv + s_pub·H + Q_spend + r·K`. Note the
@@ -258,7 +284,12 @@ impl NoteConnector for SparkNoteConnector {
         let coin = note_coin(value, &secrets, &q_spend).compress().to_bytes();
         let enc_value = xor8(value, &secrets.amount_pad);
 
-        Ok(PublishedNote { coin, tx_public, enc_value, view_tag: secrets.view_tag })
+        Ok(PublishedNote {
+            coin,
+            tx_public,
+            enc_value,
+            view_tag: secrets.view_tag,
+        })
     }
 
     fn scan(&self, key: &NoteScanKey, note: &PublishedNote) -> Option<RecoveredNote> {
@@ -276,7 +307,9 @@ impl NoteConnector for SparkNoteConnector {
 
         // Recover the amount, then Stage-2: recompute the coin and compare.
         let value = u64::from_le_bytes(xor8_bytes(&note.enc_value, &secrets.amount_pad));
-        let recomputed = note_coin(value, &secrets, q_spend.as_point()).compress().to_bytes();
+        let recomputed = note_coin(value, &secrets, q_spend.as_point())
+            .compress()
+            .to_bytes();
         if !bool::from(recomputed.ct_eq(&note.coin)) {
             return None;
         }
@@ -349,7 +382,10 @@ fn hash_to_point(coin: &[u8; 32]) -> RistrettoPoint {
 /// A Chaum-Pedersen proof that `Q_spend = x·H` and `T = x·Hp(coin)` share the
 /// same `x` (= `spend_secret`), without revealing `x`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "sketch-gk-proof", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
+#[cfg_attr(
+    feature = "sketch-gk-proof",
+    derive(borsh::BorshSerialize, borsh::BorshDeserialize)
+)]
 pub struct TagProof {
     a: [u8; 32], // k·H
     b: [u8; 32], // k·Hp
@@ -399,7 +435,11 @@ pub fn prove_tag<R: CryptoRng + RngCore>(
     let z = k + c * spend_secret;
     (
         tag.compress().to_bytes(),
-        TagProof { a: a.compress().to_bytes(), b: b.compress().to_bytes(), z: z.to_bytes() },
+        TagProof {
+            a: a.compress().to_bytes(),
+            b: b.compress().to_bytes(),
+            z: z.to_bytes(),
+        },
     )
 }
 
@@ -419,9 +459,15 @@ pub fn verify_tag(
     let t = PeerPoint::decode_non_identity(*tag)
         .map_err(|_| Error::SparkVerifyFailed)?
         .into_point();
-    let a = PeerPoint::decode(proof.a).map_err(|_| Error::SparkVerifyFailed)?.into_point();
-    let b = PeerPoint::decode(proof.b).map_err(|_| Error::SparkVerifyFailed)?.into_point();
-    let z = PeerScalar::decode(proof.z).map_err(|_| Error::SparkVerifyFailed)?.into_scalar();
+    let a = PeerPoint::decode(proof.a)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .into_point();
+    let b = PeerPoint::decode(proof.b)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .into_point();
+    let z = PeerScalar::decode(proof.z)
+        .map_err(|_| Error::SparkVerifyFailed)?
+        .into_scalar();
     let c = tag_challenge(coin, &q, &t, &a, &b);
     // z·H == A + c·Q_spend  and  z·Hp == B + c·T
     if gen_h() * z != a + q * c || hp * z != b + t * c {
@@ -432,6 +478,14 @@ pub fn verify_tag(
 
 #[cfg(test)]
 mod tests {
+    // Test-only numeric casts: seed byte cast to u8 for a fixture diversifier.
+    // Intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
     use crate::crypto::groth_kohlweiss::bound_coin_commitment;
     use rand::SeedableRng;
@@ -466,9 +520,13 @@ mod tests {
 
         assert_eq!(rec.value, value);
         // The recovered opening reconstructs the exact tree coin.
-        let coin = bound_coin_commitment(value, &effective_serial(&rec, &spend_secret), &rec.coin_blinding)
-            .compress()
-            .to_bytes();
+        let coin = bound_coin_commitment(
+            value,
+            &effective_serial(&rec, &spend_secret),
+            &rec.coin_blinding,
+        )
+        .compress()
+        .to_bytes();
         assert_eq!(coin, note.coin, "opening must reproduce the tree coin");
     }
 
@@ -480,7 +538,10 @@ mod tests {
         let c = SparkNoteConnector;
 
         let note = c.create(&addr, 999u64, &mut rng).unwrap();
-        assert!(c.scan(&other_key, &note).is_none(), "stranger must not detect");
+        assert!(
+            c.scan(&other_key, &note).is_none(),
+            "stranger must not detect"
+        );
     }
 
     #[test]
@@ -493,7 +554,10 @@ mod tests {
         // Flip an encrypted-amount byte: recovered value changes → recomputed
         // coin no longer matches the (untampered) tree coin → rejected.
         note.enc_value[0] ^= 0x01;
-        assert!(c.scan(&scan_key, &note).is_none(), "amount binding must hold");
+        assert!(
+            c.scan(&scan_key, &note).is_none(),
+            "amount binding must hold"
+        );
     }
 
     #[test]
@@ -525,9 +589,15 @@ mod tests {
         let coin_a = [0x11u8; 32];
         let coin_b = [0x22u8; 32];
         // Same coin+key → same nullifier (double-spend collides).
-        assert_eq!(link_tag(&coin_a, &spend_secret), link_tag(&coin_a, &spend_secret));
+        assert_eq!(
+            link_tag(&coin_a, &spend_secret),
+            link_tag(&coin_a, &spend_secret)
+        );
         // Different coin → different nullifier (no cross-coin linkage).
-        assert_ne!(link_tag(&coin_a, &spend_secret), link_tag(&coin_b, &spend_secret));
+        assert_ne!(
+            link_tag(&coin_a, &spend_secret),
+            link_tag(&coin_b, &spend_secret)
+        );
     }
 
     #[test]

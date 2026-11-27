@@ -201,7 +201,9 @@ impl Blockchain {
                 return parent;
             }
             // next_diff <= parent_diff <= genesis difficulty, so it always fits u64.
-            let next_diff = (parent_diff / 3).max(floor).min(u64::MAX as u128) as u64;
+            // `... as u64`: clamped to u64::MAX by the preceding `.min(..)`, so exact.
+            #[allow(clippy::cast_possible_truncation)]
+            let next_diff = (parent_diff / 3).max(floor).min(u128::from(u64::MAX)) as u64;
             return Hash::from_difficulty(next_diff);
         }
         if blocks.len() >= 2 {
@@ -555,8 +557,8 @@ impl Blockchain {
         }
         let last = self.last_block_received_at.load(Relaxed);
         let now = crate::clock::unix_now(); // E1: single-source clock
-        // If `last` is 0 we have never accepted a peer block since startup;
-        // treat that as "long ago" so a phantom detected at boot still fires.
+                                            // If `last` is 0 we have never accepted a peer block since startup;
+                                            // treat that as "long ago" so a phantom detected at boot still fires.
         now.saturating_sub(last) >= stall_secs
     }
 

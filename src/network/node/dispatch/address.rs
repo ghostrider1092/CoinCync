@@ -271,10 +271,10 @@ mod handler_tests {
         let now = now_secs();
         let msg = AddrMessage {
             addresses: vec![
-                net_addr([8, 8, 8, 8], now - 100),               // good: routable + fresh
-                net_addr([8, 8, 4, 4], now + 10_000),            // future-dated → rejected
-                net_addr([9, 9, 9, 9], now - 8 * 24 * 3600),     // stale (>7d) → rejected
-                net_addr([127, 0, 0, 1], now - 100),             // unroutable → rejected
+                net_addr([8, 8, 8, 8], now - 100),    // good: routable + fresh
+                net_addr([8, 8, 4, 4], now + 10_000), // future-dated → rejected
+                net_addr([9, 9, 9, 9], now - 8 * 24 * 3600), // stale (>7d) → rejected
+                net_addr([127, 0, 0, 1], now - 100),  // unroutable → rejected
             ],
         };
         let payload = borsh::to_vec(&msg).unwrap();

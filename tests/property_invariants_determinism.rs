@@ -20,6 +20,14 @@
 //! and the full real-PoW end-to-end reorg double-spend test lives in
 //! `tests/reorg_double_spend_e2e.rs` (#[ignore], slow).
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::constants::effective_ring_size;
 use coincync::primitives::{Hash, PublicKey};
 use coincync::storage::UtxoSet;

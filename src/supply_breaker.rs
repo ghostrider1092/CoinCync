@@ -157,8 +157,14 @@ mod tests {
     #[test]
     fn healthy_block_passes_both_modes() {
         assert!(detect(&healthy()).is_empty());
-        assert_eq!(evaluate(BreakerPolicy::Observe, &healthy()), BreakerAction::AllowBlock);
-        assert_eq!(evaluate(BreakerPolicy::Armed, &healthy()), BreakerAction::AllowBlock);
+        assert_eq!(
+            evaluate(BreakerPolicy::Observe, &healthy()),
+            BreakerAction::AllowBlock
+        );
+        assert_eq!(
+            evaluate(BreakerPolicy::Armed, &healthy()),
+            BreakerAction::AllowBlock
+        );
     }
 
     #[test]
@@ -167,7 +173,10 @@ mod tests {
         o.coinbase_payout = 100; // > 50 + 2
         assert!(detect(&o).contains(&SupplyFault::OverEmission));
         // Observe logs but keeps sailing (consensus-neutral default).
-        assert_eq!(evaluate(BreakerPolicy::Observe, &o), BreakerAction::AllowBlock);
+        assert_eq!(
+            evaluate(BreakerPolicy::Observe, &o),
+            BreakerAction::AllowBlock
+        );
         // Armed rejects the inflationary block.
         assert!(evaluate(BreakerPolicy::Armed, &o).rejects_block());
     }

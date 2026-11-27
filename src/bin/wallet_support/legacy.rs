@@ -4,6 +4,13 @@
 // Talks to a running cyncd node via JSON-RPC for chain status.
 // The heavy 2.0 CLI (5240 lines with multisig/swap/shell/asset) is
 // not brought over — this focused version covers P1 use cases.
+//
+// Cast hygiene (modernization Tier-1c): clean of unjustified numeric casts —
+// JSON-parsed index/output_index values are range-checked (error, not truncate),
+// amounts use From, bounded casts carry inline #[allow]. NOTE: this file is
+// `include!`d into `mod app` (wallet.rs), so it cannot carry a module-level
+// `#![deny]` of its own; enforcement would have to live on `mod app` once its
+// sibling `v2.rs` is likewise cast-clean.
 
 use std::path::PathBuf;
 
@@ -2123,7 +2130,7 @@ async fn cmd_utxos(
             None => "-".to_string(),
         };
         if !u.spent {
-            spendable_atomic += u.amount.as_atomic() as u128;
+            spendable_atomic += u128::from(u.amount.as_atomic());
         }
         println!(
             "{:>4}  {:>18.6}  {:>8}  {:>10}  {:>6}  {}:{}  {}",
@@ -2411,7 +2418,7 @@ fn shielded_send_demo(seed: &[u8], to: &str, amount: u64) -> Result<(), String> 
     let bundle = build_mint_bundle(seed, &fund, &ctx).ok_or("mint bundle build failed")?;
     let (_total, coins) = verify_mint_bundle(&bundle).ok_or("mint bundle verify failed")?;
     for (i, coin) in coins.iter().enumerate() {
-        let op = derive_outpoint(&[], i as u32);
+        let op = derive_outpoint(&[], u32::try_from(i).unwrap_or(u32::MAX));
         pool.add_coin(op, coin.clone(), ctx.clone(), 1)
             .ok_or("pool add_coin failed (duplicate outpoint)")?;
     }
@@ -2531,6 +2538,9 @@ async fn shielded_send_live(
         })?;
     let (probe_tx, _) = mk_tx(probe_index, probe_value, &probe_ctx, 0)?;
     let tx_size = borsh::to_vec(&probe_tx).map(|b| b.len()).unwrap_or(0);
+    // fee_multiplier is clamped to [1, 10000] by max(1.0)/min(10_000.0) below, so
+    // the `as u64` is exact (positive, bounded, no truncation possible).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let mult_x100: u64 = {
         let m = if fee_multiplier.is_nan() { 1.0 } else { fee_multiplier };
         ((m.max(1.0) * 100.0).min(10_000.0)) as u64
@@ -2698,10 +2708,12 @@ async fn fetch_live_cover_set(
 
     let mut entries: Vec<(usize, Vec<u8>, Vec<u8>)> = Vec::with_capacity(arr.len());
     for e in &arr {
-        let index = e
-            .get("index")
-            .and_then(|v| v.as_u64())
-            .ok_or("cover entry missing index")? as usize;
+        let index = usize::try_from(
+            e.get("index")
+                .and_then(|v| v.as_u64())
+                .ok_or("cover entry missing index")?,
+        )
+        .map_err(|_| "cover entry index out of range")?;
         let coin = hex::decode(e.get("coin").and_then(|v| v.as_str()).ok_or("cover entry missing coin")?)
             .map_err(|err| format!("bad coin hex: {err}"))?;
         let ctx = hex::decode(
@@ -2857,6 +2869,9 @@ async fn cmd_shielded_unshield(
         })?;
     let (probe_tx, _) = mk_tx(probe_index, probe_value, &probe_ctx, 0)?;
     let tx_size = borsh::to_vec(&probe_tx).map(|b| b.len()).unwrap_or(0);
+    // fee_multiplier is clamped to [1, 10000] by max(1.0)/min(10_000.0) below, so
+    // the `as u64` is exact (positive, bounded, no truncation possible).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let mult_x100: u64 = {
         let m = if fee_multiplier.is_nan() { 1.0 } else { fee_multiplier };
         ((m.max(1.0) * 100.0).min(10_000.0)) as u64
@@ -3160,7 +3175,7 @@ fn shielded_balance_demo(seed: &[u8]) -> Result<(), String> {
     let bundle = build_mint_bundle(seed, &fund, &ctx).ok_or("mint bundle build failed")?;
     let (_total, coins) = verify_mint_bundle(&bundle).ok_or("mint bundle verify failed")?;
     for (i, coin) in coins.iter().enumerate() {
-        pool.add_coin(derive_outpoint(&[], i as u32), coin.clone(), ctx.clone(), 1)
+        pool.add_coin(derive_outpoint(&[], u32::try_from(i).unwrap_or(u32::MAX)), coin.clone(), ctx.clone(), 1)
             .ok_or("pool add_coin failed (duplicate outpoint)")?;
     }
     let mut notes = ShieldedNoteStore::new();
@@ -4113,7 +4128,7 @@ async fn cmd_multisig_round2(
     // cannot reload and reuse them (a re-run now fails "read nonces", which is
     // the intended single-use behavior).
     if let Ok(len) = std::fs::metadata(nonce_file).map(|m| m.len()) {
-        let _ = std::fs::write(nonce_file, vec![0u8; len as usize]);
+        let _ = std::fs::write(nonce_file, vec![0u8; usize::try_from(len).unwrap_or(usize::MAX)]);
     }
     if let Err(e) = std::fs::remove_file(nonce_file) {
         eprintln!(
@@ -4806,7 +4821,7 @@ async fn fetch_chain_anchor(
         .get("outputs")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "rpc response missing 'outputs' array".to_string())?;
-    let out = outputs.get(output_index as usize).ok_or_else(|| {
+    let out = outputs.get(usize::from(output_index)).ok_or_else(|| {
         format!(
             "output_index {} out of range (tx has {} outputs)",
             output_index,
@@ -5258,10 +5273,12 @@ async fn cmd_disclose_build_payroll_audit(
                 break;
             }
             let tx_hex = d.get("tx_hash").and_then(|v| v.as_str()).ok_or("decoy missing tx_hash")?;
-            let oi = d
-                .get("output_index")
-                .and_then(|v| v.as_u64())
-                .ok_or("decoy missing output_index")? as u8;
+            let oi = u8::try_from(
+                d.get("output_index")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("decoy missing output_index")?,
+            )
+            .map_err(|_| "decoy output_index out of range")?;
             let ch = d
                 .get("commitment")
                 .and_then(|v| v.as_str())
@@ -5351,10 +5368,12 @@ async fn cmd_disclose_build_payroll_audit(
         let mut seen = std::collections::HashSet::new();
         for d in decoys {
             let tx_hex = d.get("tx_hash").and_then(|v| v.as_str()).ok_or("decoy missing tx_hash")?;
-            let oi = d
-                .get("output_index")
-                .and_then(|v| v.as_u64())
-                .ok_or("decoy missing output_index")? as u8;
+            let oi = u8::try_from(
+                d.get("output_index")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("decoy missing output_index")?,
+            )
+            .map_err(|_| "decoy output_index out of range")?;
             let ch = d
                 .get("commitment")
                 .and_then(|v| v.as_str())
@@ -5711,7 +5730,7 @@ async fn cmd_show_memo(
         .get("outputs")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "rpc response missing 'outputs' array".to_string())?;
-    let output = outputs.get(utxo.output_index as usize).ok_or_else(|| {
+    let output = outputs.get(usize::from(utxo.output_index)).ok_or_else(|| {
         format!(
             "output_index {} out of range (tx has {} outputs)",
             utxo.output_index,

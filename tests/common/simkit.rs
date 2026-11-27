@@ -24,6 +24,14 @@
 //! convergence + invariants.
 #![allow(dead_code)]
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::chain::{BlockStatus, Blockchain};
 use coincync::config::NetworkType;
 use coincync::consensus::block::Block;
@@ -39,7 +47,10 @@ pub struct VirtualClock {
 }
 impl VirtualClock {
     pub fn new(start: u64, step: u64) -> Self {
-        VirtualClock { now: start, step: step.max(1) }
+        VirtualClock {
+            now: start,
+            step: step.max(1),
+        }
     }
     pub fn now(&self) -> u64 {
         self.now
@@ -108,7 +119,9 @@ impl Sim {
             let chain = Blockchain::new();
             chain.init_genesis().expect("genesis");
             let genesis = chain.get_block_by_height(0).expect("genesis block");
-            chain.restore_state(0, genesis.hash(), 1).expect("seed base");
+            chain
+                .restore_state(0, genesis.hash(), 1)
+                .expect("seed base");
             base_ts = genesis.header.timestamp.as_secs();
             let (_s, spend_pub) = generate_keypair();
             let (_v, view_pub) = generate_keypair();
@@ -142,7 +155,10 @@ impl Sim {
         name: &'static str,
         check: impl Fn(&Blockchain) -> Result<(), String> + 'static,
     ) -> Self {
-        self.invariants.push(Invariant { name, check: Box::new(check) });
+        self.invariants.push(Invariant {
+            name,
+            check: Box::new(check),
+        });
         self
     }
 
@@ -163,7 +179,10 @@ impl Sim {
     pub fn mine_on(&mut self, i: usize) -> BlockStatus {
         let ts = self.clock.tick();
         let blk = self.build_on(i, ts);
-        let status = self.nodes[i].chain.add_block(blk.clone()).expect("add_block");
+        let status = self.nodes[i]
+            .chain
+            .add_block(blk.clone())
+            .expect("add_block");
         self.nodes[i].known.push(blk);
         status
     }
@@ -175,8 +194,14 @@ impl Sim {
         let ts = self.clock.tick();
         let a = self.build_on(i, ts);
         let b = self.build_on(i, ts + 1);
-        let sa = self.nodes[i].chain.add_block(a.clone()).expect("add twin a");
-        let sb = self.nodes[i].chain.add_block(b.clone()).expect("add twin b");
+        let sa = self.nodes[i]
+            .chain
+            .add_block(a.clone())
+            .expect("add twin a");
+        let sb = self.nodes[i]
+            .chain
+            .add_block(b.clone())
+            .expect("add twin b");
         self.nodes[i].known.push(a);
         self.nodes[i].known.push(b);
         (sa, sb)
@@ -184,8 +209,7 @@ impl Sim {
 
     fn build_on(&self, i: usize, ts: u64) -> Block {
         let h = self.nodes[i].chain.height() + 1;
-        let parent = self
-            .nodes[i]
+        let parent = self.nodes[i]
             .chain
             .get_block_by_height(self.nodes[i].chain.height())
             .expect("parent");
@@ -194,12 +218,27 @@ impl Sim {
         // so mine instantly (no RandomX loop); otherwise do the real work.
         #[cfg(feature = "test-fast-pow")]
         {
-            mine_block_fast(&parent, h, ts, vec![cb], self.nodes[i].spend_pub, self.magic)
+            mine_block_fast(
+                &parent,
+                h,
+                ts,
+                vec![cb],
+                self.nodes[i].spend_pub,
+                self.magic,
+            )
         }
         #[cfg(not(feature = "test-fast-pow"))]
         {
             let target = self.nodes[i].chain.next_target();
-            mine_block(&parent, h, ts, target, vec![cb], self.nodes[i].spend_pub, self.magic)
+            mine_block(
+                &parent,
+                h,
+                ts,
+                target,
+                vec![cb],
+                self.nodes[i].spend_pub,
+                self.magic,
+            )
         }
     }
 
@@ -235,7 +274,8 @@ impl Sim {
                 }
             }
         }
-        self.check_invariants().expect("invariant violated after delivery");
+        self.check_invariants()
+            .expect("invariant violated after delivery");
         delivered
     }
 
@@ -326,7 +366,10 @@ pub mod invariants {
         if s.total_supply + s.total_burned != expected {
             return Err(format!(
                 "supply {} + burned {} != Σ reward(0..={}) {}",
-                s.total_supply, s.total_burned, chain.height(), expected
+                s.total_supply,
+                s.total_burned,
+                chain.height(),
+                expected
             ));
         }
         Ok(())

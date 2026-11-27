@@ -55,12 +55,18 @@
 //!   unchecked point op panics the node from the consensus path (crash DoS).
 //!   TESTS: `commitment_from_bytes_checked_accepts_valid_rejects_noncanonical`, `checked_add_sub_return_none_on_invalid_point`, `add_operator_returns_identity_on_invalid_point`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use merlin::Transcript;
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use zeroize::Zeroize;
 
 use crate::crypto::secure::ct_eq;
@@ -497,7 +503,6 @@ pub fn verify_range_proofs(commitments: &[PedersenCommitment], proof: &RangeProo
 //
 // Activation: proofs with version=3 are required at height >= BULLETPROOFS_PLUS_HEIGHT.
 // Below that height, version=2 (standard Bulletproofs) proofs are accepted.
-
 use tari_bulletproofs_plus::{
     commitment_opening::CommitmentOpening as BpPlusOpening,
     generators::pedersen_gens::{ExtensionDegree, PedersenGens as BpPlusPedersenGens},
@@ -822,13 +827,14 @@ pub fn verify_range_proofs_batch(items: &[(&[PedersenCommitment], &RangeProof)])
             }
         }
         if padded > real {
-            let identity = match PedersenCommitment::commit(0, &BlindingFactor::from_bytes([0u8; 32]))
-                .as_point()
-                .decompress()
-            {
-                Some(p) => p,
-                None => return false,
-            };
+            let identity =
+                match PedersenCommitment::commit(0, &BlindingFactor::from_bytes([0u8; 32]))
+                    .as_point()
+                    .decompress()
+                {
+                    Some(p) => p,
+                    None => return false,
+                };
             for _ in real..padded {
                 points.push(identity);
             }
@@ -846,8 +852,13 @@ pub fn verify_range_proofs_batch(items: &[(&[PedersenCommitment], &RangeProof)])
         proofs.push(bp_proof);
     }
 
-    BpPlusProof::verify_batch(&mut transcripts, &statements, &proofs, VerifyAction::VerifyOnly)
-        .is_ok()
+    BpPlusProof::verify_batch(
+        &mut transcripts,
+        &statements,
+        &proofs,
+        VerifyAction::VerifyOnly,
+    )
+    .is_ok()
 }
 
 // ─── Height-aware dispatch ──────────────────────────────────────────────────
@@ -929,6 +940,14 @@ pub fn verify_range_proofs_dispatch(
 
 #[cfg(test)]
 mod tests {
+    // Test-only numeric casts: bench iteration counts widened to u128 for timing
+    // averages. Intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
     use rand::rngs::OsRng;
 
@@ -947,20 +966,23 @@ mod tests {
         // for every item — exactly what verify_output_range_proofs calls — and
         // every proof below is built with create_aggregated_range_proof, even the
         // single-output ones.
-        let serial = |it: &(&[PedersenCommitment], &RangeProof)| -> bool {
-            verify_range_proofs(it.0, it.1)
-        };
+        let serial =
+            |it: &(&[PedersenCommitment], &RangeProof)| -> bool { verify_range_proofs(it.0, it.1) };
 
         // Two single-output aggregated proofs + one 2-output aggregated proof.
         let b1 = [BlindingFactor::random(&mut rng)];
-        let p1 = create_aggregated_range_proof(&[Amount::from_atomic(1_000)], &b1, &mut rng).unwrap();
+        let p1 =
+            create_aggregated_range_proof(&[Amount::from_atomic(1_000)], &b1, &mut rng).unwrap();
         let c1 = [PedersenCommitment::commit(1_000, &b1[0])];
 
         let b2 = [BlindingFactor::random(&mut rng)];
         let p2 = create_aggregated_range_proof(&[Amount::from_atomic(42)], &b2, &mut rng).unwrap();
         let c2 = [PedersenCommitment::commit(42, &b2[0])];
 
-        let ab = [BlindingFactor::random(&mut rng), BlindingFactor::random(&mut rng)];
+        let ab = [
+            BlindingFactor::random(&mut rng),
+            BlindingFactor::random(&mut rng),
+        ];
         let amts = [Amount::from_atomic(7), Amount::from_atomic(9)];
         let pagg = create_aggregated_range_proof(&amts, &ab, &mut rng).unwrap();
         let cagg = [
@@ -981,7 +1003,10 @@ mod tests {
         *bad_p2.data.last_mut().unwrap() ^= 0x01;
         let bad: Vec<(&[PedersenCommitment], &RangeProof)> =
             vec![(&c1[..], &p1), (&c2[..], &bad_p2), (&cagg[..], &pagg)];
-        assert!(!bad.iter().all(serial), "a corrupt proof must fail serially");
+        assert!(
+            !bad.iter().all(serial),
+            "a corrupt proof must fail serially"
+        );
         assert!(
             !verify_range_proofs_batch(&bad),
             "batch must reject any set with a bad proof"
@@ -1222,7 +1247,10 @@ mod tests {
             borsh::to_vec(&make()).unwrap(),
             "BP+ proof must be byte-reproducible for fixed inputs + RNG seed"
         );
-        assert_eq!(hex::encode(Sha256::digest(&bytes)), "4dee4016c291c6246c381f509b70f94f94819f81e19bd212018a01bdff239ac0");
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            "4dee4016c291c6246c381f509b70f94f94819f81e19bd212018a01bdff239ac0"
+        );
     }
 
     #[test]
@@ -1323,7 +1351,10 @@ mod tests {
         let blinding = BlindingFactor::random(&mut rng);
         let commitment = PedersenCommitment::commit(amount.as_atomic(), &blinding);
         let proof = create_range_proof(amount, &blinding, &mut rng).unwrap();
-        assert!(verify_range_proof(&commitment, &proof), "the valid proof must verify");
+        assert!(
+            verify_range_proof(&commitment, &proof),
+            "the valid proof must verify"
+        );
 
         let n = proof.data.len();
         assert!(n > 0, "proof must carry bytes");
@@ -1333,7 +1364,10 @@ mod tests {
             for bit in [0u8, 4, 7] {
                 let mut data = proof.data.clone();
                 data[i] ^= 1u8 << bit;
-                let mutated = RangeProof { version: proof.version, data };
+                let mutated = RangeProof {
+                    version: proof.version,
+                    data,
+                };
                 assert!(
                     !verify_range_proof(&commitment, &mutated),
                     "a proof with byte {i} bit {bit} flipped must be rejected"
@@ -1341,7 +1375,10 @@ mod tests {
                 checked += 1;
             }
         }
-        assert!(checked >= 30, "sanity: exercised a broad sample of mutations ({checked})");
+        assert!(
+            checked >= 30,
+            "sanity: exercised a broad sample of mutations ({checked})"
+        );
     }
 
     #[test]
@@ -1359,19 +1396,37 @@ mod tests {
         let mut truncated = proof.data.clone();
         truncated.pop();
         assert!(
-            !verify_range_proof(&commitment, &RangeProof { version: proof.version, data: truncated }),
+            !verify_range_proof(
+                &commitment,
+                &RangeProof {
+                    version: proof.version,
+                    data: truncated
+                }
+            ),
             "a truncated proof must be rejected"
         );
         // Extended by a trailing byte.
         let mut extended = proof.data.clone();
         extended.push(0u8);
         assert!(
-            !verify_range_proof(&commitment, &RangeProof { version: proof.version, data: extended }),
+            !verify_range_proof(
+                &commitment,
+                &RangeProof {
+                    version: proof.version,
+                    data: extended
+                }
+            ),
             "an over-long proof must be rejected"
         );
         // Empty payload.
         assert!(
-            !verify_range_proof(&commitment, &RangeProof { version: proof.version, data: Vec::new() }),
+            !verify_range_proof(
+                &commitment,
+                &RangeProof {
+                    version: proof.version,
+                    data: Vec::new()
+                }
+            ),
             "an empty proof must be rejected"
         );
     }
@@ -1422,7 +1477,10 @@ mod tests {
             .map(|(a, b)| PedersenCommitment::commit(a.as_atomic(), b))
             .collect();
         let proof = create_aggregated_range_proof(&amounts, &blindings, &mut rng).unwrap();
-        assert!(verify_range_proofs(&commitments, &proof), "valid aggregated proof verifies");
+        assert!(
+            verify_range_proofs(&commitments, &proof),
+            "valid aggregated proof verifies"
+        );
 
         // Swap one commitment for an unrelated one ⇒ must reject.
         let mut swapped = commitments.clone();
@@ -1508,10 +1566,14 @@ mod tests {
         let one_bf = BlindingFactor::random(&mut rng);
         let one_proof = create_range_proof_bp_plus(one_amt, &one_bf, &mut rng).unwrap();
         let one_c = PedersenCommitment::commit(one_amt.as_atomic(), &one_bf);
-        assert!(verify_range_proof_bp_plus(&one_c, &one_proof), "cached size-1 proof verifies");
+        assert!(
+            verify_range_proof_bp_plus(&one_c, &one_proof),
+            "cached size-1 proof verifies"
+        );
 
         let amounts: Vec<Amount> = (0..3).map(|i| Amount::from_atomic(1_000 + i)).collect();
-        let blindings: Vec<BlindingFactor> = (0..3).map(|_| BlindingFactor::random(&mut rng)).collect();
+        let blindings: Vec<BlindingFactor> =
+            (0..3).map(|_| BlindingFactor::random(&mut rng)).collect();
         let proof = create_aggregated_range_proof_bp_plus(&amounts, &blindings, &mut rng).unwrap();
         let commitments: Vec<PedersenCommitment> = amounts
             .iter()
@@ -1725,8 +1787,9 @@ mod tests {
         let (valid, _) = commit(&mut OsRng, Amount::from_atomic(11_000));
         let invalid = PedersenCommitment::from_bytes_unchecked([0xFFu8; 32]);
         // The identity fallback the operator uses (H7-FIX).
-        let identity =
-            PedersenCommitment::from_bytes_unchecked(RistrettoPoint::identity().compress().to_bytes());
+        let identity = PedersenCommitment::from_bytes_unchecked(
+            RistrettoPoint::identity().compress().to_bytes(),
+        );
 
         // Both the by-value and by-ref Add impls fall back to identity, no panic.
         assert_eq!(invalid + valid, identity);
@@ -1754,8 +1817,9 @@ mod tests {
         let amounts: Vec<Amount> = (0..count)
             .map(|i| Amount::from_atomic((i as u64) + 1))
             .collect();
-        let blindings: Vec<BlindingFactor> =
-            (0..count).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+        let blindings: Vec<BlindingFactor> = (0..count)
+            .map(|_| BlindingFactor::random(&mut OsRng))
+            .collect();
         assert!(create_aggregated_range_proof(&amounts, &blindings, &mut OsRng).is_err());
     }
 

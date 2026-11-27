@@ -11,6 +11,14 @@
 //! T4.6 — Signature determinism: same key signs consistently
 //! T4.7 — Range proof tightness: boundary values
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::crypto::{
     create_aggregated_range_proof_for_height,
     create_range_proof_for_height,

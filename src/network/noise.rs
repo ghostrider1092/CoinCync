@@ -63,6 +63,12 @@
 //!   on the encrypted P2P channel. TESTS:
 //!   `tampered_ciphertext_yields_noise_decryption_failed`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -82,6 +88,9 @@ const ANCHOR_SIGN_DOMAIN: &[u8] = b"coincync/anchor-sign/v1";
 /// Maximum plaintext payload per Noise transport message.
 pub(crate) const NOISE_TAG_SIZE: usize = 16;
 pub(crate) const NOISE_LENGTH_PREFIX_SIZE: usize = 2;
+// `usize::from(u16::MAX)` is the lossless form, but `From` is not a `const fn`,
+// so this `const` initializer keeps the (equally lossless) `as` cast.
+#[allow(clippy::cast_lossless)]
 pub(crate) const MAX_NOISE_PAYLOAD: usize = u16::MAX as usize - NOISE_TAG_SIZE;
 
 /// Noise handshake timeout in seconds.
@@ -543,11 +552,15 @@ impl NoiseTransport {
             .write_message(plaintext, &mut buf)
             .map_err(|e| Error::NoiseDecryptionFailed(format!("encrypt: {e}")))?;
         // Write length prefix (2 bytes, unencrypted) + ciphertext
-        if len > u16::MAX as usize {
+        if len > usize::from(u16::MAX) {
             return Err(Error::NoiseDecryptionFailed(
                 "encrypted frame exceeds u16 length".into(),
             ));
         }
+        // `len` fits in u16 by the `> u16::MAX` guard directly above; this is the
+        // 2-byte big-endian wire length prefix, so the (guarded, exact) truncation
+        // is intentional and must stay a plain u16 cast.
+        #[allow(clippy::cast_possible_truncation)]
         let frame_len = (len as u16).to_be_bytes();
         writer.write_all(&frame_len).await?;
         writer.write_all(&buf[..len]).await?;
@@ -563,7 +576,7 @@ impl NoiseTransport {
         // Read 2-byte length prefix
         let mut len_buf = [0u8; NOISE_LENGTH_PREFIX_SIZE];
         reader.read_exact(&mut len_buf).await?;
-        let ct_len = u16::from_be_bytes(len_buf) as usize;
+        let ct_len = usize::from(u16::from_be_bytes(len_buf));
         if ct_len > MAX_NOISE_PAYLOAD + NOISE_TAG_SIZE {
             return Err(Error::NoiseDecryptionFailed("frame too large".into()));
         }
@@ -608,11 +621,15 @@ impl NoiseSendState {
         let len = state
             .write_message(plaintext, &mut buf)
             .map_err(|e| Error::NoiseDecryptionFailed(format!("encrypt: {e}")))?;
-        if len > u16::MAX as usize {
+        if len > usize::from(u16::MAX) {
             return Err(Error::NoiseDecryptionFailed(
                 "encrypted frame exceeds u16 length".into(),
             ));
         }
+        // `len` fits in u16 by the `> u16::MAX` guard directly above; this is the
+        // 2-byte big-endian wire length prefix, so the (guarded, exact) truncation
+        // is intentional and must stay a plain u16 cast.
+        #[allow(clippy::cast_possible_truncation)]
         let frame_len = (len as u16).to_be_bytes();
         writer.write_all(&frame_len).await?;
         writer.write_all(&buf[..len]).await?;
@@ -626,7 +643,7 @@ impl NoiseRecvState {
     pub async fn read_encrypted<R: AsyncRead + Unpin>(&self, reader: &mut R) -> Result<Vec<u8>> {
         let mut len_buf = [0u8; NOISE_LENGTH_PREFIX_SIZE];
         reader.read_exact(&mut len_buf).await?;
-        let ct_len = u16::from_be_bytes(len_buf) as usize;
+        let ct_len = usize::from(u16::from_be_bytes(len_buf));
         if ct_len > MAX_NOISE_PAYLOAD + NOISE_TAG_SIZE {
             return Err(Error::NoiseDecryptionFailed("frame too large".into()));
         }
@@ -646,11 +663,15 @@ impl NoiseRecvState {
 
 /// Write a length-prefixed frame during handshake.
 async fn write_noise_frame<W: AsyncWrite + Unpin>(writer: &mut W, data: &[u8]) -> Result<()> {
-    if data.len() > u16::MAX as usize {
+    if data.len() > usize::from(u16::MAX) {
         return Err(Error::NoiseHandshakeFailed(
             "handshake frame exceeds u16 length".into(),
         ));
     }
+    // `data.len()` fits in u16 by the `> u16::MAX` guard directly above; this is
+    // the 2-byte big-endian handshake-frame length prefix, so the (guarded, exact)
+    // truncation is intentional.
+    #[allow(clippy::cast_possible_truncation)]
     let len = (data.len() as u16).to_be_bytes();
     writer.write_all(&len).await?;
     writer.write_all(data).await?;
@@ -662,7 +683,7 @@ async fn write_noise_frame<W: AsyncWrite + Unpin>(writer: &mut W, data: &[u8]) -
 async fn read_noise_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 2];
     reader.read_exact(&mut len_buf).await?;
-    let len = u16::from_be_bytes(len_buf) as usize;
+    let len = usize::from(u16::from_be_bytes(len_buf));
     if len > NOISE_HANDSHAKE_FRAME_MAX {
         return Err(Error::NoiseHandshakeFailed(format!(
             "handshake frame too large: {} bytes (max {})",
@@ -694,6 +715,11 @@ pub async fn perform_noise_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use tokio::io::duplex;
 
@@ -841,7 +867,10 @@ mod tests {
         ct.write_encrypted(&mut framed, b"authentic payload")
             .await
             .unwrap();
-        assert!(framed.len() > 2, "framed message has a length prefix + body");
+        assert!(
+            framed.len() > 2,
+            "framed message has a length prefix + body"
+        );
         // Flip a byte in the ciphertext body (past the 2-byte length prefix).
         let last = framed.len() - 1;
         framed[last] ^= 0xFF;
@@ -877,7 +906,7 @@ mod tests {
         .await;
         match res {
             Ok(Ok(_)) => panic!("garbage handshake msg1 must not succeed"),
-            Ok(Err(_)) => {}  // rejected outright — good
+            Ok(Err(_)) => {}    // rejected outright — good
             Err(_elapsed) => {} // stalled waiting for msg3 — bounded, no false success
         }
     }
@@ -891,8 +920,8 @@ mod tests {
         client.write_all(&100u16.to_be_bytes()).await.unwrap();
         client.write_all(&[1, 2, 3]).await.unwrap();
         drop(client); // EOF before the claimed 100 bytes arrive
-        // EOF should make the read error promptly; time-box anyway so a
-        // regression can never hang the whole suite.
+                      // EOF should make the read error promptly; time-box anyway so a
+                      // regression can never hang the whole suite.
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             NoiseHandshake::responder(id).execute(&mut server),

@@ -605,7 +605,10 @@ mod tests {
         let full = addr.to_string();
         assert!(full.len() > 20);
         let short = addr.short();
-        assert_eq!(short, format!("{}...{}", &full[..12], &full[full.len() - 6..]));
+        assert_eq!(
+            short,
+            format!("{}...{}", &full[..12], &full[full.len() - 6..])
+        );
         assert!(short.starts_with("CYNC"));
     }
 }

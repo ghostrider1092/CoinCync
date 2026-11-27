@@ -69,6 +69,12 @@
 //!   not just the one being (de)serialized.
 //!   TESTS: `test_bit_writer_reader_roundtrip`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::consensus::Block;
 use crate::primitives::{hash_domain, Hash};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -130,10 +136,15 @@ impl BlockFilter {
         // Build GCS filter
         let filter_data = gcs_encode(&elements, sip_key, GCS_P);
 
+        // GCS element count: the number of filter elements in the block,
+        // bounded by the block size (<< u32::MAX). This N defines the filter's
+        // hash range (N*M) and must stay byte-exact, so keep the cast.
+        #[allow(clippy::cast_possible_truncation)]
+        let n_elements = elements.len() as u32;
         BlockFilter {
             block_hash,
             height: block.height(),
-            n_elements: elements.len() as u32,
+            n_elements,
             filter_data,
             prev_filter_hash,
         }
@@ -209,9 +220,9 @@ fn hash_element(element: &[u8; 32], sip_key: (u64, u64), n: u32) -> u64 {
     );
 
     // Map into range [0, F) where F = N * M
-    let f = n as u64 * GCS_M;
+    let f = u64::from(n) * GCS_M;
     // Fast range reduction: (hash * F) >> 64
-    ((hash as u128 * f as u128) >> 64) as u64
+    ((u128::from(hash) * u128::from(f)) >> 64) as u64
 }
 
 /// Encode a set of elements into a Golomb-coded set.
@@ -225,6 +236,9 @@ fn gcs_encode(elements: &[[u8; 32]], sip_key: (u64, u64), p: u8) -> Vec<u8> {
         return Vec::new();
     }
 
+    // Same GCS N parameter as BlockFilter::new; bounded by block size and must
+    // match the stored n_elements byte-for-byte, so keep the cast.
+    #[allow(clippy::cast_possible_truncation)]
     let n = elements.len() as u32;
 
     // Step 1-2: Hash and sort
@@ -415,7 +429,7 @@ impl<'a> BitReader<'a> {
         let mut value = 0u64;
         for _ in 0..count {
             let bit = self.read_bit()?;
-            value = (value << 1) | bit as u64;
+            value = (value << 1) | u64::from(bit);
         }
         Some(value)
     }
@@ -427,6 +441,14 @@ impl<'a> BitReader<'a> {
 
 #[cfg(test)]
 mod tests {
+    // Test-only numeric casts: element-count casts to u32 when calling the
+    // match helper with a fixture set. Intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
 
     #[test]

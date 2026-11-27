@@ -19,6 +19,12 @@
 //!   spend). A full sync that cross-checks the pool's spent-tag set needs each
 //!   note's linking tag (seed-derivable) — a follow-up.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use spark_connector::ffi::{identify_view_only, IncomingViewKeyBytes, LibsparkBackend};
 use spark_connector::{CoinBytes, SparkBackend};
 
@@ -218,8 +224,14 @@ impl ShieldedNoteStore {
             .outpoint
             .clone();
         // Build first; only mark spent if the spend actually built.
-        let payload =
-            build_spend_payload(seed, pool, &chosen, output_value, cover_set_id, anchor_height)?;
+        let payload = build_spend_payload(
+            seed,
+            pool,
+            &chosen,
+            output_value,
+            cover_set_id,
+            anchor_height,
+        )?;
         self.mark_spent(&chosen);
         Some(payload)
     }
@@ -268,6 +280,8 @@ impl ShieldedNoteStore {
 
 #[cfg(test)]
 mod tests {
+    // Test enumerate() index (usize) narrowed to a u32 outpoint ordinal.
+    #![allow(clippy::cast_possible_truncation)]
     use super::*;
     use crate::consensus::spark_payload::derive_outpoint;
     use spark_connector::ffi::{build_mint_bundle, serial_context, verify_mint_bundle};
@@ -332,9 +346,16 @@ mod tests {
         // Spend a note (locally), then a reorg drops the spend: unmark restores it.
         let op = w.select_for_spend(500).unwrap()[0].clone();
         assert!(w.mark_spent(&op));
-        assert!(w.balance() < full, "spent note leaves the spendable balance");
+        assert!(
+            w.balance() < full,
+            "spent note leaves the spendable balance"
+        );
         assert!(w.unmark_spent(&op), "a tracked spent note is restored");
-        assert_eq!(w.balance(), full, "restored note returns to the spendable balance");
+        assert_eq!(
+            w.balance(),
+            full,
+            "restored note returns to the spendable balance"
+        );
 
         // Idempotent no-ops: already-unspent, and an untracked outpoint.
         assert!(!w.unmark_spent(&op), "already unspent → no-op");
@@ -353,7 +374,11 @@ mod tests {
         // A watch-only wallet holds only A's exported view key (no seed).
         let vk_a = export_incoming_view_key(seed_a).expect("export A view key");
         let mut a = ShieldedNoteStore::new();
-        assert_eq!(a.scan_view_only(&vk_a, &pool), 2, "A's view key sees its 2 coins");
+        assert_eq!(
+            a.scan_view_only(&vk_a, &pool),
+            2,
+            "A's view key sees its 2 coins"
+        );
         assert_eq!(a.balance(), 3_000);
         // Idempotent.
         assert_eq!(a.scan_view_only(&vk_a, &pool), 0);
@@ -399,7 +424,11 @@ mod tests {
             .build_self_spend(seed, &pool, 1_500, 0, 1)
             .expect("spend builds from the 3_000 note");
         assert!(payload2.spend.is_some());
-        assert_eq!(store.balance(), 1_000, "only the 1_000 note remains unspent");
+        assert_eq!(
+            store.balance(),
+            1_000,
+            "only the 1_000 note remains unspent"
+        );
 
         // 1_000 note cannot cover a 1_500 output (needs value strictly greater).
         assert!(store.build_self_spend(seed, &pool, 1_500, 0, 1).is_none());
@@ -439,7 +468,9 @@ mod tests {
         let (out_coins, out_ctx) = spend_outputs(&sb.bundle).expect("extract outputs");
         for coin in &out_coins {
             let key = blake3::hash(&coin.0).as_bytes().to_vec();
-            assert!(pool.add_coin(key, coin.clone(), out_ctx.clone(), 2).is_some());
+            assert!(pool
+                .add_coin(key, coin.clone(), out_ctx.clone(), 2)
+                .is_some());
         }
 
         // B scans the pool and finds exactly the 1_500 coin A sent.

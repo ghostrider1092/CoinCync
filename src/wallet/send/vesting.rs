@@ -151,8 +151,7 @@ pub fn build_prepared_vesting_transaction<R: RngCore + CryptoRng>(
     } = prepared;
     let context = request.context;
 
-    let mut builder =
-        TransactionBuilder::transfer().with_target_height(context.target_height());
+    let mut builder = TransactionBuilder::transfer().with_target_height(context.target_height());
     add_prepared_inputs(&mut builder, inputs, rings, context.ring_size())?;
     // Subaddress-aware, exactly like the normal transfer path (assembly.rs): a
     // subaddress recipient needs R = r*D_i (not r*G), or the recipient's

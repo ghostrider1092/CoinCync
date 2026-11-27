@@ -130,6 +130,12 @@
 //!   `stealth_from_bytes_checked_rejects_invalid_point`,
 //!   `stealth_from_hex_rejects_wrong_length`, `stealth_to_bytes_from_bytes_roundtrip`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use super::curve::{hash_to_scalar, PublicPoint, SecretScalar};
 use super::secure::ct_eq;
 use crate::error::{Error, Result};
@@ -701,6 +707,10 @@ impl SubaddressManager {
     }
 
     /// Get or generate a specific subaddress
+    // The map is populated for `index` directly above when missing, so the
+    // get().expect() is a logic invariant, not a fallible op — propagating it
+    // would be unreachable dead code.
+    #[allow(clippy::unwrap_in_result)]
     pub fn get_or_generate(&mut self, index: u32) -> Result<&Subaddress> {
         if !self.generated.contains_key(&index) {
             // Flat legacy manager — account 0. Account-aware generation lives in
@@ -1086,8 +1096,7 @@ pub fn generate_stealth_address_for<R: RngCore + CryptoRng>(
     // A typed Address carries its kind, so we can select the correct tx-pubkey
     // form: subaddresses (view key C_i = a*D_i) require R = r*D_i so the
     // recipient can detect/spend the output.
-    let is_subaddress =
-        recipient.address_type == crate::primitives::AddressType::Subaddress;
+    let is_subaddress = recipient.address_type == crate::primitives::AddressType::Subaddress;
     generate_stealth_address_checked_ext(
         &recipient.spend_public_key,
         &recipient.view_public_key,
@@ -1260,7 +1269,14 @@ pub fn generate_stealth_outputs<R: RngCore + CryptoRng>(
     recipients
         .iter()
         .enumerate()
-        .map(|(idx, addr)| generate_stealth_address_for(addr, idx as u8, rng))
+        .map(|(idx, addr)| {
+            // idx < 256 (guarded by the recipients.len() > 255 check above), so
+            // the cast is exact; it indexes stealth-address derivation and must
+            // stay byte-exact.
+            #[allow(clippy::cast_possible_truncation)]
+            let idx = idx as u8;
+            generate_stealth_address_for(addr, idx, rng)
+        })
         .collect()
 }
 
@@ -1980,7 +1996,10 @@ mod tests {
         let bytes = stealth.to_bytes();
         let restored = StealthAddress::from_bytes(&bytes).expect("valid points round-trip");
 
-        assert_eq!(stealth.public_key.as_bytes(), restored.public_key.as_bytes());
+        assert_eq!(
+            stealth.public_key.as_bytes(),
+            restored.public_key.as_bytes()
+        );
         assert_eq!(
             stealth.tx_public_key.as_bytes(),
             restored.tx_public_key.as_bytes()

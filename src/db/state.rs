@@ -102,7 +102,7 @@ impl From<ChainStateDataLegacyV1> for ChainStateData {
             tip_hash: v.tip_hash,
             height: v.height,
             total_difficulty: v.total_difficulty,
-            total_supply: v.total_supply as u128,
+            total_supply: u128::from(v.total_supply),
             total_burned: v.total_burned,
             last_checkpoint: v.last_checkpoint,
         }
@@ -395,6 +395,11 @@ impl StateDb {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use tempfile::tempdir;
 

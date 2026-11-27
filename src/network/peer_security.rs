@@ -65,7 +65,9 @@ pub fn peer_diversity(addrs: &[SocketAddr]) -> Option<(Severity, &'static str, S
     }
     let mut counts: HashMap<u64, usize> = HashMap::new();
     for a in addrs {
-        *counts.entry(crate::network::eviction::netgroup(*a)).or_default() += 1;
+        *counts
+            .entry(crate::network::eviction::netgroup(*a))
+            .or_default() += 1;
     }
     let distinct = counts.len();
     let max_size = counts.values().copied().max().unwrap_or(0);
@@ -111,11 +113,19 @@ impl PeerSecurityDetail {
     pub const DEFAULT_MIN_HEALTHY: usize = 3;
 
     pub fn new(peer_count: usize) -> Self {
-        Self { peer_count, min_healthy: Self::DEFAULT_MIN_HEALTHY, peers: None }
+        Self {
+            peer_count,
+            min_healthy: Self::DEFAULT_MIN_HEALTHY,
+            peers: None,
+        }
     }
 
     pub fn with_min_healthy(peer_count: usize, min_healthy: usize) -> Self {
-        Self { peer_count, min_healthy, peers: None }
+        Self {
+            peer_count,
+            min_healthy,
+            peers: None,
+        }
     }
 
     /// Build from the connected peer addresses: count is derived from the slice
@@ -159,8 +169,14 @@ mod tests {
 
     #[test]
     fn peer_health_pure_signal() {
-        assert!(matches!(peer_health(0, 3), Some((Severity::Critical, "no-peers", _))));
-        assert!(matches!(peer_health(2, 3), Some((Severity::Warning, "low-peers", _))));
+        assert!(matches!(
+            peer_health(0, 3),
+            Some((Severity::Critical, "no-peers", _))
+        ));
+        assert!(matches!(
+            peer_health(2, 3),
+            Some((Severity::Warning, "low-peers", _))
+        ));
         assert!(peer_health(3, 3).is_none(), "at the minimum is healthy");
         assert!(peer_health(50, 3).is_none());
     }
@@ -170,7 +186,10 @@ mod tests {
         // Even full isolation (0 peers, a Critical) must not be a consensus halt.
         let report = PeerSecurityDetail::new(0).sweep();
         assert!(report.has_critical(), "isolation is visible");
-        assert!(!report.has_consensus_halt(), "but P2P alerts never halt consensus");
+        assert!(
+            !report.has_consensus_halt(),
+            "but P2P alerts never halt consensus"
+        );
         // A well-connected node is clean.
         assert!(PeerSecurityDetail::new(8).sweep().is_clean());
     }
@@ -186,33 +205,50 @@ mod tests {
             .map(|i| addr(&format!("203.0.{i}.10:28080")))
             .collect();
         let sig = peer_diversity(&peers).expect("single-netgroup must flag");
-        assert!(matches!(sig, (Severity::Critical, "single-netgroup", _)), "got {sig:?}");
+        assert!(
+            matches!(sig, (Severity::Critical, "single-netgroup", _)),
+            "got {sig:?}"
+        );
     }
 
     #[test]
     fn diversity_clean_when_spread_across_netgroups() {
         // 6 peers across 6 distinct /16s — well diversified.
         let peers: Vec<SocketAddr> = [
-            "203.0.1.1", "198.51.2.2", "192.0.3.3", "10.20.4.4", "172.16.5.5", "8.8.6.6",
+            "203.0.1.1",
+            "198.51.2.2",
+            "192.0.3.3",
+            "10.20.4.4",
+            "172.16.5.5",
+            "8.8.6.6",
         ]
         .iter()
         .map(|ip| addr(&format!("{ip}:28080")))
         .collect();
-        assert!(peer_diversity(&peers).is_none(), "diverse peer set must be clean");
+        assert!(
+            peer_diversity(&peers).is_none(),
+            "diverse peer set must be clean"
+        );
     }
 
     #[test]
     fn diversity_warns_on_majority_concentration() {
         // 5 peers: 3 in one /16 (majority), 2 elsewhere → Warning, not Critical.
         let peers: Vec<SocketAddr> = [
-            "45.66.1.1", "45.66.2.2", "45.66.3.3", // 45.66.0.0/16 (majority)
-            "8.8.8.8", "1.1.1.1",
+            "45.66.1.1",
+            "45.66.2.2",
+            "45.66.3.3", // 45.66.0.0/16 (majority)
+            "8.8.8.8",
+            "1.1.1.1",
         ]
         .iter()
         .map(|ip| addr(&format!("{ip}:28080")))
         .collect();
         let sig = peer_diversity(&peers).expect("majority concentration must flag");
-        assert!(matches!(sig, (Severity::Warning, "netgroup-concentration", _)), "got {sig:?}");
+        assert!(
+            matches!(sig, (Severity::Warning, "netgroup-concentration", _)),
+            "got {sig:?}"
+        );
     }
 
     #[test]
@@ -224,7 +260,10 @@ mod tests {
             .iter()
             .map(|ip| addr(&format!("{ip}:28080")))
             .collect();
-        assert!(peer_diversity(&even).is_none(), "even 2/2 split is not a majority");
+        assert!(
+            peer_diversity(&even).is_none(),
+            "even 2/2 split is not a majority"
+        );
     }
 
     #[test]
@@ -238,7 +277,10 @@ mod tests {
             report.alerts.iter().any(|a| a.code == "single-netgroup"),
             "single-netgroup must be raised"
         );
-        assert!(!report.has_consensus_halt(), "peer diversity never halts consensus");
+        assert!(
+            !report.has_consensus_halt(),
+            "peer diversity never halts consensus"
+        );
         // A diverse, well-connected set sweeps clean.
         let diverse: Vec<SocketAddr> = ["1.2.3.4", "5.6.7.8", "9.10.11.12", "13.14.15.16"]
             .iter()

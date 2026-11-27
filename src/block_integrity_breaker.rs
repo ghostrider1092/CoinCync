@@ -144,8 +144,14 @@ mod tests {
     #[test]
     fn sound_apply_passes_both_modes() {
         assert!(detect(&sound()).is_empty());
-        assert_eq!(evaluate(BreakerPolicy::Observe, &sound()), BreakerAction::AllowBlock);
-        assert_eq!(evaluate(BreakerPolicy::Armed, &sound()), BreakerAction::AllowBlock);
+        assert_eq!(
+            evaluate(BreakerPolicy::Observe, &sound()),
+            BreakerAction::AllowBlock
+        );
+        assert_eq!(
+            evaluate(BreakerPolicy::Armed, &sound()),
+            BreakerAction::AllowBlock
+        );
     }
 
     #[test]

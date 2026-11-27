@@ -43,6 +43,14 @@
 //! Run (real PoW, slow):
 //!   cargo test --features testnet --test chain_statemachine -- --ignored --nocapture
 
+// Test-only numeric casts: loop-index heights used as slice indices and
+// test-ledger arithmetic over a bounded fixture chain. Not consensus-output.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::chain::{BlockStatus, Blockchain};
 use coincync::config::NetworkType;
 use coincync::consensus::block::Block;
@@ -340,7 +348,10 @@ fn accepted_reorg_reapplies_real_txs_and_conserves_state() {
         }
         let block = mine_block(&parent, h, ts, target, vec![coinbase], spend_public, magic);
         assert!(
-            matches!(chain.add_block(block.clone()).expect("add B*"), BlockStatus::Accepted),
+            matches!(
+                chain.add_block(block.clone()).expect("add B*"),
+                BlockStatus::Accepted
+            ),
             "B{h} must extend the honest chain"
         );
         parent = block.clone();
@@ -350,12 +361,28 @@ fn accepted_reorg_reapplies_real_txs_and_conserves_state() {
     assert_eq!(chain.height(), 13);
 
     let fork_targets = [
-        SpendTarget { stealth: stealths[1].clone().unwrap(), amount: calculate_block_reward(1).as_atomic(), height: 1 },
-        SpendTarget { stealth: stealths[2].clone().unwrap(), amount: calculate_block_reward(2).as_atomic(), height: 2 },
+        SpendTarget {
+            stealth: stealths[1].clone().unwrap(),
+            amount: calculate_block_reward(1).as_atomic(),
+            height: 1,
+        },
+        SpendTarget {
+            stealth: stealths[2].clone().unwrap(),
+            amount: calculate_block_reward(2).as_atomic(),
+            height: 2,
+        },
     ];
     let honest_targets = [
-        SpendTarget { stealth: stealths[3].clone().unwrap(), amount: calculate_block_reward(3).as_atomic(), height: 3 },
-        SpendTarget { stealth: stealths[4].clone().unwrap(), amount: calculate_block_reward(4).as_atomic(), height: 4 },
+        SpendTarget {
+            stealth: stealths[3].clone().unwrap(),
+            amount: calculate_block_reward(3).as_atomic(),
+            height: 3,
+        },
+        SpendTarget {
+            stealth: stealths[4].clone().unwrap(),
+            amount: calculate_block_reward(4).as_atomic(),
+            height: 4,
+        },
     ];
 
     // Transfers sit at height 14 (not 12): they spend coinbase outputs K1..K4
@@ -368,26 +395,51 @@ fn accepted_reorg_reapplies_real_txs_and_conserves_state() {
 
     // ── Honest tip B14: coinbase(+fees) + REAL transfer spending K3,K4 ───────
     let spend_b14 = build_uniform_transfer(
-        &honest_targets, &view_secret, &spend_secret, &r_spend_pk, &r_view_pk, fee, 14,
+        &honest_targets,
+        &view_secret,
+        &spend_secret,
+        &r_spend_pk,
+        &r_view_pk,
+        fee,
+        14,
     );
     let b14_transfer_hash = spend_b14.hash();
     let k3_ki = spend_b14.inputs[0].key_image;
     let k4_ki = spend_b14.inputs[1].key_image;
-    let (b14_coinbase, _) =
-        build_coinbase(14, &filler_spend_pk, &filler_view_pk, claimable_fees(14, fee));
+    let (b14_coinbase, _) = build_coinbase(
+        14,
+        &filler_spend_pk,
+        &filler_view_pk,
+        claimable_fees(14, fee),
+    );
     let b14 = mine_block(
-        &b13, 14, base_ts + 14 * spacing, t14,
-        vec![b14_coinbase, spend_b14.clone()], spend_public, magic,
+        &b13,
+        14,
+        base_ts + 14 * spacing,
+        t14,
+        vec![b14_coinbase, spend_b14.clone()],
+        spend_public,
+        magic,
     );
 
     // ── Fork F14: coinbase(+fees) + REAL transfer spending K1,K2 ─────────────
     let spend_f14 = build_uniform_transfer(
-        &fork_targets, &view_secret, &spend_secret, &r_spend_pk, &r_view_pk, fee, 14,
+        &fork_targets,
+        &view_secret,
+        &spend_secret,
+        &r_spend_pk,
+        &r_view_pk,
+        fee,
+        14,
     );
     let k1_ki = spend_f14.inputs[0].key_image;
     let k2_ki = spend_f14.inputs[1].key_image;
-    let (f14_coinbase, _) =
-        build_coinbase(14, &filler_spend_pk, &filler_view_pk, claimable_fees(14, fee));
+    let (f14_coinbase, _) = build_coinbase(
+        14,
+        &filler_spend_pk,
+        &filler_view_pk,
+        claimable_fees(14, fee),
+    );
 
     // Keep the honest B14 as tip when F14 arrives (equal work): re-mine F14 with
     // bumped timestamps until F14.hash > B14.hash so B14 wins the tiebreak. F14's
@@ -395,8 +447,13 @@ fn accepted_reorg_reapplies_real_txs_and_conserves_state() {
     let mut f14_ts = base_ts + 14 * spacing + 1;
     let f14 = loop {
         let candidate = mine_block(
-            &b13, 14, f14_ts, t14,
-            vec![f14_coinbase.clone(), spend_f14.clone()], spend_public, magic,
+            &b13,
+            14,
+            f14_ts,
+            t14,
+            vec![f14_coinbase.clone(), spend_f14.clone()],
+            spend_public,
+            magic,
         );
         if candidate.hash().as_bytes() > b14.hash().as_bytes() {
             break candidate;
@@ -404,24 +461,39 @@ fn accepted_reorg_reapplies_real_txs_and_conserves_state() {
         f14_ts += 1;
     };
 
-    assert!(matches!(chain.add_block(b14.clone()).expect("add B14"), BlockStatus::Accepted));
+    assert!(matches!(
+        chain.add_block(b14.clone()).expect("add B14"),
+        BlockStatus::Accepted
+    ));
     assert_eq!(chain.tip_hash(), b14.hash(), "B14 is the honest tip");
     assert!(chain.is_spent(&k3_ki), "K3 spent on the honest chain");
     assert!(chain.is_spent(&k4_ki), "K4 spent on the honest chain");
 
     assert!(
-        matches!(chain.add_block(f14.clone()).expect("add F14"), BlockStatus::AcceptedFork),
+        matches!(
+            chain.add_block(f14.clone()).expect("add F14"),
+            BlockStatus::AcceptedFork
+        ),
         "F14 is stored as a non-winning side branch"
     );
     assert_eq!(chain.tip_hash(), b14.hash(), "tip still B14 after F14");
 
     // ── Fork tip F15 (coinbase-only) off F14 — makes the fork heavier ────────
-    let mut dblocks: Vec<DifficultyBlock> =
-        (0..=13u64).map(|h| diff_block(&chain_blocks[h as usize])).collect();
+    let mut dblocks: Vec<DifficultyBlock> = (0..=13u64)
+        .map(|h| diff_block(&chain_blocks[h as usize]))
+        .collect();
     dblocks.push(diff_block(&f14));
     let t15 = calculate_difficulty(&dblocks, 15);
     let (f15_coinbase, _) = build_coinbase(15, &filler_spend_pk, &filler_view_pk, 0);
-    let f15 = mine_block(&f14, 15, f14_ts + spacing, t15, vec![f15_coinbase], spend_public, magic);
+    let f15 = mine_block(
+        &f14,
+        15,
+        f14_ts + spacing,
+        t15,
+        vec![f15_coinbase],
+        spend_public,
+        magic,
+    );
 
     // ── Adding F15 triggers an ACCEPTED reorg ────────────────────────────────
     let status = chain.add_block(f15.clone()).expect("add_block F15");
@@ -430,7 +502,11 @@ fn accepted_reorg_reapplies_real_txs_and_conserves_state() {
         other => panic!("F15 must be AcceptedReorg, got {other:?}"),
     };
 
-    assert_eq!(chain.tip_hash(), f15.hash(), "tip switched to the heavier fork");
+    assert_eq!(
+        chain.tip_hash(),
+        f15.hash(),
+        "tip switched to the heavier fork"
+    );
     assert_eq!(chain.height(), 15);
 
     // Orphaned B14 transfer is returned for mempool restoration; no coinbase is.
@@ -438,19 +514,36 @@ fn accepted_reorg_reapplies_real_txs_and_conserves_state() {
         orphaned.iter().any(|t| t.hash() == b14_transfer_hash),
         "B14's non-coinbase transfer must be returned as orphaned"
     );
-    assert!(orphaned.iter().all(|t| !t.is_coinbase()), "no coinbase orphaned");
+    assert!(
+        orphaned.iter().all(|t| !t.is_coinbase()),
+        "no coinbase orphaned"
+    );
 
     // Key-image state after the reorg:
-    assert!(chain.is_spent(&k1_ki), "K1 spent by the re-applied fork tx F14");
-    assert!(chain.is_spent(&k2_ki), "K2 spent by the re-applied fork tx F14");
-    assert!(!chain.is_spent(&k3_ki), "K3 un-marked — B14 was disconnected");
-    assert!(!chain.is_spent(&k4_ki), "K4 un-marked — B14 was disconnected");
+    assert!(
+        chain.is_spent(&k1_ki),
+        "K1 spent by the re-applied fork tx F14"
+    );
+    assert!(
+        chain.is_spent(&k2_ki),
+        "K2 spent by the re-applied fork tx F14"
+    );
+    assert!(
+        !chain.is_spent(&k3_ki),
+        "K3 un-marked — B14 was disconnected"
+    );
+    assert!(
+        !chain.is_spent(&k4_ki),
+        "K4 un-marked — B14 was disconnected"
+    );
 
     // Supply is the gross emission schedule over the NEW canonical chain.
-    let expected_supply: u128 =
-        (0..=15u64).map(|h| calculate_block_reward(h).as_atomic() as u128).sum();
+    let expected_supply: u128 = (0..=15u64)
+        .map(|h| calculate_block_reward(h).as_atomic() as u128)
+        .sum();
     assert_eq!(
-        chain.stats().total_supply, expected_supply,
+        chain.stats().total_supply,
+        expected_supply,
         "supply == Σ reward(0..=15) over the reorged canonical chain"
     );
 
@@ -462,22 +555,32 @@ fn accepted_reorg_reapplies_real_txs_and_conserves_state() {
     let linear = Blockchain::new();
     linear.init_genesis().expect("linear genesis");
     let lg = linear.get_block_by_height(0).expect("linear genesis block");
-    linear.restore_state(0, lg.hash(), 1).expect("linear seed base");
+    linear
+        .restore_state(0, lg.hash(), 1)
+        .expect("linear seed base");
     for h in 1..=13u64 {
         assert!(
             matches!(
-                linear.add_block(chain_blocks[h as usize].clone()).expect("linear add B*"),
+                linear
+                    .add_block(chain_blocks[h as usize].clone())
+                    .expect("linear add B*"),
                 BlockStatus::Accepted
             ),
             "linear replay B{h}"
         );
     }
     assert!(
-        matches!(linear.add_block(f14.clone()).expect("linear add F14"), BlockStatus::Accepted),
+        matches!(
+            linear.add_block(f14.clone()).expect("linear add F14"),
+            BlockStatus::Accepted
+        ),
         "F14 extends B13 as a plain main-chain block in the linear build"
     );
     assert!(
-        matches!(linear.add_block(f15.clone()).expect("linear add F15"), BlockStatus::Accepted),
+        matches!(
+            linear.add_block(f15.clone()).expect("linear add F15"),
+            BlockStatus::Accepted
+        ),
         "F15 extends F14 in the linear build"
     );
 
@@ -493,7 +596,8 @@ fn accepted_reorg_reapplies_real_txs_and_conserves_state() {
         )
     };
     assert_eq!(
-        fp(&chain), fp(&linear),
+        fp(&chain),
+        fp(&linear),
         "reorged node must be byte-identical to a linearly-built node on the \
          same canonical chain (supply, burn, total_difficulty, UTXO set all conserved)"
     );
@@ -691,7 +795,9 @@ fn failed_reorg_rollback_leaves_no_stale_height_mapping_above_old_tip_h3() {
         let target = chain.expected_next_target(&fork_diff, h);
         let (cb, _) = build_coinbase(h, &filler_spend_pk, &filler_view_pk, 0);
         let blk = mine_block(&fork_parent, h, ts, target, vec![cb], spend_public, magic);
-        let st = chain.add_block(blk.clone()).expect("add fork filler ≤ old tip");
+        let st = chain
+            .add_block(blk.clone())
+            .expect("add fork filler ≤ old tip");
         assert!(
             matches!(st, BlockStatus::AcceptedFork),
             "fork filler F{h} (≤ old tip) must be a stored side branch, got {st:?}"
@@ -704,17 +810,33 @@ fn failed_reorg_rollback_leaves_no_stale_height_mapping_above_old_tip_h3() {
     //    tip. This is the block whose height→hash mapping the bug leaves stale.
     let g_height = N + 1;
     let g_transfer = build_uniform_transfer(
-        &targets, &view_secret, &spend_secret, &r_spend_pk, &r_view_pk, fee, g_height,
+        &targets,
+        &view_secret,
+        &spend_secret,
+        &r_spend_pk,
+        &r_view_pk,
+        fee,
+        g_height,
     );
     let k1_ki = g_transfer.inputs[0].key_image;
     let k2_ki = g_transfer.inputs[1].key_image;
-    let (g_cb, _) = build_coinbase(g_height, &filler_spend_pk, &filler_view_pk, claimable_fees(g_height, fee));
+    let (g_cb, _) = build_coinbase(
+        g_height,
+        &filler_spend_pk,
+        &filler_view_pk,
+        claimable_fees(g_height, fee),
+    );
     let g_target = chain.expected_next_target(&fork_diff, g_height);
     let g_ts = fork_base_ts + fork_step * fork_spacing;
     fork_step += 1;
     let g = mine_block(
-        &fork_parent, g_height, g_ts, g_target,
-        vec![g_cb, g_transfer.clone()], spend_public, magic,
+        &fork_parent,
+        g_height,
+        g_ts,
+        g_target,
+        vec![g_cb, g_transfer.clone()],
+        spend_public,
+        magic,
     );
     let g_status = chain.add_block(g.clone()).expect("add G");
     assert!(
@@ -732,20 +854,36 @@ fn failed_reorg_rollback_leaves_no_stale_height_mapping_above_old_tip_h3() {
     //    loop (G marks K1,K2 spent first), which is what fails the reorg.
     let h_height = N + 2;
     let h_transfer = build_uniform_transfer(
-        &targets, &view_secret, &spend_secret, &r_spend_pk, &r_view_pk, fee, h_height,
+        &targets,
+        &view_secret,
+        &spend_secret,
+        &r_spend_pk,
+        &r_view_pk,
+        fee,
+        h_height,
     );
     assert_eq!(
         h_transfer.inputs[0].key_image, k1_ki,
         "H must carry the SAME key image as G for K1 (this is the double-spend that fails the reorg)"
     );
     assert_eq!(h_transfer.inputs[1].key_image, k2_ki, "same for K2");
-    let (h_cb, _) = build_coinbase(h_height, &filler_spend_pk, &filler_view_pk, claimable_fees(h_height, fee));
+    let (h_cb, _) = build_coinbase(
+        h_height,
+        &filler_spend_pk,
+        &filler_view_pk,
+        claimable_fees(h_height, fee),
+    );
     let h_target = chain.expected_next_target(&fork_diff, h_height);
     let h_ts = fork_base_ts + fork_step * fork_spacing;
     fork_step += 1;
     let hblk = mine_block(
-        &fork_parent, h_height, h_ts, h_target,
-        vec![h_cb, h_transfer], spend_public, magic,
+        &fork_parent,
+        h_height,
+        h_ts,
+        h_target,
+        vec![h_cb, h_transfer],
+        spend_public,
+        magic,
     );
     let h_status = chain.add_block(hblk.clone()).expect("add H");
     assert!(
@@ -757,8 +895,15 @@ fn failed_reorg_rollback_leaves_no_stale_height_mapping_above_old_tip_h3() {
 
     // Sanity: the failed reorg has NOT happened yet — tip is still heavy main,
     // and G/H's spends have NOT touched the (main) UTXO.
-    assert_eq!(chain.tip_hash(), main_tip_hash, "tip still on heavy main before the reorg");
-    assert!(!chain.is_spent(&k1_ki), "K1 unspent on main (G/H are only side branches)");
+    assert_eq!(
+        chain.tip_hash(),
+        main_tip_hash,
+        "tip still on heavy main before the reorg"
+    );
+    assert!(
+        !chain.is_spent(&k1_ki),
+        "K1 unspent on main (G/H are only side branches)"
+    );
 
     // ── Floor fillers above H until the fork finally out-works heavy main. The
     //    first block that tips the balance triggers the reorg; its
@@ -776,8 +921,18 @@ fn failed_reorg_rollback_leaves_no_stale_height_mapping_above_old_tip_h3() {
         fork_step += 1;
         let target = chain.expected_next_target(&fork_diff, next_h);
         let (cb, _) = build_coinbase(next_h, &filler_spend_pk, &filler_view_pk, 0);
-        let blk = mine_block(&fork_parent, next_h, ts, target, vec![cb], spend_public, magic);
-        let st = chain.add_block(blk.clone()).expect("add fork filler / trigger T");
+        let blk = mine_block(
+            &fork_parent,
+            next_h,
+            ts,
+            target,
+            vec![cb],
+            spend_public,
+            magic,
+        );
+        let st = chain
+            .add_block(blk.clone())
+            .expect("add fork filler / trigger T");
         match st {
             BlockStatus::AcceptedFork => {
                 // Still lighter than heavy main — another stored side branch.
@@ -811,8 +966,16 @@ fn failed_reorg_rollback_leaves_no_stale_height_mapping_above_old_tip_h3() {
     // ── Post-rollback assertions ─────────────────────────────────────────────
 
     // (1) The chain is back on the original heavy main tip M@N.
-    assert_eq!(chain.height(), N, "height restored to the old main tip after rollback");
-    assert_eq!(chain.tip_hash(), main_tip_hash, "tip restored to the old main tip M@N");
+    assert_eq!(
+        chain.height(),
+        N,
+        "height restored to the old main tip after rollback"
+    );
+    assert_eq!(
+        chain.tip_hash(),
+        main_tip_hash,
+        "tip restored to the old main tip M@N"
+    );
 
     // (2) H3 PROPERTY: no stale height→hash mapping survives ABOVE the restored
     //     tip. G was connected in the reorg loop at height N+1 (> old tip) and
@@ -849,8 +1012,14 @@ fn failed_reorg_rollback_leaves_no_stale_height_mapping_above_old_tip_h3() {
 
     // (4) The fork's spends were rolled back: K1,K2 remain unspent (they were
     //     never spent on main; G's in-loop marking was undone by path A).
-    assert!(!chain.is_spent(&k1_ki), "K1 unspent after the failed reorg rolled back");
-    assert!(!chain.is_spent(&k2_ki), "K2 unspent after the failed reorg rolled back");
+    assert!(
+        !chain.is_spent(&k1_ki),
+        "K1 unspent after the failed reorg rolled back"
+    );
+    assert!(
+        !chain.is_spent(&k2_ki),
+        "K2 unspent after the failed reorg rolled back"
+    );
 
     println!(
         "PASS failed_reorg_rollback_leaves_no_stale_height_mapping_above_old_tip_h3 \

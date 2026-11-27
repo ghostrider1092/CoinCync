@@ -26,6 +26,12 @@
 //! book) are sampled — inbound connections are attacker-chosen, so their clocks
 //! are not trusted for consensus-relevant time.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
@@ -64,7 +70,11 @@ struct State {
 
 fn state() -> &'static Mutex<State> {
     static S: OnceLock<Mutex<State>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(State { samples: HashMap::new() }))
+    S.get_or_init(|| {
+        Mutex::new(State {
+            samples: HashMap::new(),
+        })
+    })
 }
 
 /// Anti-eclipse netgroup key: /16 for IPv4, /32 for IPv6, in disjoint v4/v6
@@ -74,11 +84,11 @@ pub fn netgroup_key(addr: &SocketAddr) -> u64 {
     match addr.ip() {
         std::net::IpAddr::V4(v4) => {
             let o = v4.octets();
-            ((o[0] as u64) << 8) | (o[1] as u64)
+            (u64::from(o[0]) << 8) | u64::from(o[1])
         }
         std::net::IpAddr::V6(v6) => {
             let s = v6.segments();
-            0x1_0000_0000 | ((s[0] as u64) << 16) | (s[1] as u64)
+            0x1_0000_0000 | (u64::from(s[0]) << 16) | u64::from(s[1])
         }
     }
 }
@@ -147,11 +157,23 @@ pub fn sample_count() -> usize {
 /// Test-only: clear all samples so tests don't leak global state into each other.
 #[cfg(test)]
 pub fn reset_for_test() {
-    state().lock().unwrap_or_else(|e| e.into_inner()).samples.clear();
+    state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .samples
+        .clear();
 }
 
 #[cfg(test)]
 mod tests {
+    // Test-only numeric casts: small loop-index counts cast to u8 for synthetic
+    // peer addresses. Bounded by MIN_TIME_PEERS; intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
 
     // These tests mutate the process-global sample map, so they must not run
@@ -188,7 +210,11 @@ mod tests {
             record_offset(&addr(203, 0), -86400 + k); // all 203.0.0.0/16
         }
         assert_eq!(sample_count(), 1, "one /16 is one sample, not many");
-        assert_eq!(offset_secs(), 0, "a single netgroup cannot poison the clock");
+        assert_eq!(
+            offset_secs(),
+            0,
+            "a single netgroup cannot poison the clock"
+        );
     }
 
     #[test]
@@ -239,6 +265,10 @@ mod tests {
             record_offset_at(&addr(10, i), 600, old);
         }
         assert_eq!(sample_count(), 0, "stale samples must be pruned");
-        assert_eq!(offset_secs(), 0, "an expired offset must not shift the future-block cap");
+        assert_eq!(
+            offset_secs(),
+            0,
+            "an expired offset must not shift the future-block cap"
+        );
     }
 }

@@ -38,12 +38,11 @@
 //!   `prepare_vesting_stamps_unlock_height_onto_output_lock_height`.
 
 use super::super::decoy_selection::RealOutputIdentity;
+use super::super::{KeyEpoch, WalletKeys, UTXO};
 use crate::constants::{
-    min_output_age_at_height, ring_size_at_height, STANDARD_OUTPUT_COUNT,
-    UNIFORM_TX_SHAPE_HEIGHT,
+    min_output_age_at_height, ring_size_at_height, STANDARD_OUTPUT_COUNT, UNIFORM_TX_SHAPE_HEIGHT,
 };
 use crate::error::{Error, Result};
-use super::super::{KeyEpoch, WalletKeys, UTXO};
 
 /// Which key material a spend derives its inputs and change under.
 ///
@@ -112,11 +111,7 @@ impl Payment {
     }
 
     /// Construct a payment to a SUBADDRESS destination (uses R = r*D_i).
-    pub fn new_subaddress(
-        spend_public: PublicKey,
-        view_public: PublicKey,
-        amount: Amount,
-    ) -> Self {
+    pub fn new_subaddress(spend_public: PublicKey, view_public: PublicKey, amount: Amount) -> Self {
         Self {
             spend_public,
             view_public,
@@ -412,8 +407,14 @@ mod ring_size_parity_tests {
                         consensus <= wallet,
                         "consensus never demands MORE than the wallet requests (h={h}, available={available})"
                     );
-                    assert!(consensus >= 2, "consensus keeps a 2-min ring for any privacy");
-                    assert!(available < wallet, "wallet cannot build this ring — it fails safe");
+                    assert!(
+                        consensus >= 2,
+                        "consensus keeps a 2-min ring for any privacy"
+                    );
+                    assert!(
+                        available < wallet,
+                        "wallet cannot build this ring — it fails safe"
+                    );
                 }
             }
         }

@@ -113,10 +113,16 @@
 //!   `pong_with_wrong_nonce_is_ignored`,
 //!   `latency_averages_after_the_first_sample`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
+use crate::clock::{mono_now, MonoInstant};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
-use crate::clock::{mono_now, MonoInstant};
 
 /// SECURITY (H17-FIX): Per-behavior misbehavior types with specific penalties.
 /// Based on Bitcoin Core's `Misbehaving()` pattern in `net_processing.cpp`
@@ -610,10 +616,10 @@ const MSG_RATE_LIMITS: &[(u8, u32)] = &[
     (62, 50), // MessageType::GetOutputDigests     — 5/sec (digest range req)
     (64, 20), // MessageType::GetFilterCheckpoints — 2/sec (zero-body, cheap to spam)
     (70, 50), // MessageType::GetKeyImageStatus    — 5/sec (DHT ki query)
-               // Responses (Headers, Blocks, Txs, Addr, BlockData, Filters, etc.)
-               // are intentionally NOT rate-limited here — we asked for them.
-               // Runaway response volume is caught elsewhere by MAX_MESSAGE_SIZE
-               // + per-shard framer caps.
+              // Responses (Headers, Blocks, Txs, Addr, BlockData, Filters, etc.)
+              // are intentionally NOT rate-limited here — we asked for them.
+              // Runaway response volume is caught elsewhere by MAX_MESSAGE_SIZE
+              // + per-shard framer caps.
 ];
 
 impl PeerMessageRateTracker {
@@ -757,10 +763,10 @@ impl PeerScore {
     /// - Block speed (15%): Higher is better
     pub fn composite_score(&self) -> f64 {
         // Normalize reputation to 0-1
-        let rep_normalized = (self.reputation + 100) as f64 / 200.0;
+        let rep_normalized = f64::from(self.reputation + 100) / 200.0;
 
         // Normalize latency (lower is better, cap at 5000ms)
-        let latency_capped = self.latency_ms.min(5000) as f64;
+        let latency_capped = f64::from(self.latency_ms.min(5000));
         let latency_normalized = 1.0 - (latency_capped / 5000.0);
 
         // Validity rate already 0-1
@@ -926,12 +932,19 @@ impl PeerScore {
     /// measurement replaces the 1000 ms placeholder outright; averaging with
     /// it would take about ten pings (20 minutes) to get near the real value.
     fn update_latency(&mut self, latency: Duration) {
-        let new_latency = latency.as_millis().min(u32::MAX as u128) as u32;
+        let new_latency =
+            u32::try_from(latency.as_millis().min(u128::from(u32::MAX))).unwrap_or(u32::MAX);
         if self.latency_samples == 0 {
             self.latency_ms = new_latency;
         } else {
             // EMA with alpha = 0.3 (more weight on recent)
-            self.latency_ms = ((self.latency_ms as f64 * 0.7) + (new_latency as f64 * 0.3)) as u32;
+            // EWMA of latency_ms: both terms are non-negative and bounded by the
+            // u32 inputs, so the f64->u32 result fits (documented, not a preimage).
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                self.latency_ms =
+                    ((f64::from(self.latency_ms) * 0.7) + (f64::from(new_latency) * 0.3)) as u32;
+            }
         }
         self.latency_samples = self.latency_samples.saturating_add(1);
     }
@@ -1218,7 +1231,7 @@ impl PeerScorer {
         let avg_latency = if total > 0 {
             self.scores
                 .values()
-                .map(|s| s.latency_ms as u64)
+                .map(|s| u64::from(s.latency_ms))
                 .sum::<u64>()
                 / total as u64
         } else {
@@ -1334,6 +1347,11 @@ pub struct ScorerStats {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -1368,7 +1386,7 @@ mod tests {
             .expect("matching nonce is accepted");
         assert_eq!(
             score.latency_ms,
-            rtt.as_millis() as u32,
+            u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX),
             "first sample replaces the placeholder"
         );
         assert!(
@@ -1715,7 +1733,10 @@ mod tests {
                 penalties += 1;
             }
         }
-        assert_eq!(over, 50, "every message past the 100 cap is over_limit (dropped)");
+        assert_eq!(
+            over, 50,
+            "every message past the 100 cap is over_limit (dropped)"
+        );
         assert_eq!(penalties, 1, "penalize exactly once per type per window");
     }
 
@@ -2378,7 +2399,10 @@ mod tests {
         for _ in 0..(EMPTY_BLOCKS_BAN_THRESHOLD - 1) {
             score.record_empty_blocks_response();
         }
-        assert_eq!(score.consecutive_empty_blocks, EMPTY_BLOCKS_BAN_THRESHOLD - 1);
+        assert_eq!(
+            score.consecutive_empty_blocks,
+            EMPTY_BLOCKS_BAN_THRESHOLD - 1
+        );
 
         score.record_block_success();
         assert_eq!(
@@ -2420,7 +2444,10 @@ mod tests {
         }
 
         let top = scorer.top_peers_for_download(10);
-        assert!(top.contains(&good), "validated, above-floor peer is included");
+        assert!(
+            top.contains(&good),
+            "validated, above-floor peer is included"
+        );
         assert!(
             !top.contains(&unvalidated),
             "unvalidated peer must be filtered even with a good score"
@@ -2509,7 +2536,10 @@ mod tests {
 
         assert_eq!(removed, 1, "only the disconnected neutral entry is dropped");
         assert!(scorer.get(&a).is_some(), "connected entry kept");
-        assert!(scorer.get(&b).is_none(), "disconnected neutral entry dropped");
+        assert!(
+            scorer.get(&b).is_none(),
+            "disconnected neutral entry dropped"
+        );
         assert!(
             scorer.get(&c).is_some(),
             "disconnected offender kept until it decays back to neutral"

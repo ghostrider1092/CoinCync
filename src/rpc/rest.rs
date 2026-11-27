@@ -17,6 +17,14 @@
 //! - CORS restricted to known origins
 //! - Rate limiting via X-RateLimit headers
 
+// Cast hygiene (modernization Tier-1c): this module is clean of unjustified
+// numeric casts. Any new intentional cast must carry a justified `#[allow]`.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use axum::{
     extract::{ws, ConnectInfo, Path, Query, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
@@ -768,7 +776,7 @@ fn parse_total_emitted_atomic(info: &Value) -> Result<u128, &'static str> {
 }
 
 fn format_atomic_supply_micro(atomic: u128) -> String {
-    let coin = crate::constants::COIN as u128;
+    let coin = u128::from(crate::constants::COIN);
     let micro_per_coin = coin / 1_000_000; // 12 atomic decimals → 6 display decimals
     let whole = atomic / coin;
     let frac_micro = (atomic % coin) / micro_per_coin;
@@ -875,9 +883,9 @@ async fn get_recent_blocks(
     let end_height = start_height.saturating_sub(limit.saturating_sub(1));
     let end_height = if start_height < limit { 0 } else { end_height };
 
-    let mut blocks = Vec::with_capacity(limit as usize);
+    let mut blocks = Vec::with_capacity(usize::try_from(limit).unwrap_or(usize::MAX));
     for h in (end_height..=start_height).rev() {
-        if blocks.len() >= limit as usize {
+        if blocks.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
             break;
         }
         match jsonrpc_call(
@@ -1207,7 +1215,7 @@ async fn get_chain_stats(
     let window_start = chain_height.saturating_sub(STATS_WINDOW);
     let window_size = chain_height - window_start;
 
-    let mut timestamps: Vec<u64> = Vec::with_capacity(window_size as usize + 1);
+    let mut timestamps: Vec<u64> = Vec::with_capacity(usize::try_from(window_size).unwrap_or(usize::MAX) + 1);
     let mut total_txs: u64 = 0;
     // CoinCync is RandomX-only (algorithm index 0); there are no other algorithms
     // on this chain, so we only tally RandomX blocks.
@@ -1347,7 +1355,7 @@ async fn get_emission(
     // request, an amplification-DoS. `calculate_block_reward(h)` is a pure
     // deterministic function of height and IS the per-block reward the chain
     // uses, so we compute it directly (no block fetch, works for any height).
-    let mut points = Vec::with_capacity(total_points as usize);
+    let mut points = Vec::with_capacity(usize::try_from(total_points).unwrap_or(usize::MAX));
     let mut cumulative: u64 = 0;
 
     let mut h = from;
@@ -1853,14 +1861,14 @@ mod tests {
     #[test]
     fn circulating_formatter_preserves_supply_above_u64() {
         let response = serde_json::json!({
-            "total_emitted": ((u64::MAX as u128) + 1).to_string()
+            "total_emitted": ((u128::from(u64::MAX)) + 1).to_string()
         });
         assert_eq!(
             parse_total_emitted_atomic(&response).unwrap(),
-            (u64::MAX as u128) + 1
+            (u128::from(u64::MAX)) + 1
         );
         assert_eq!(
-            format_atomic_supply_micro((u64::MAX as u128) + 1),
+            format_atomic_supply_micro((u128::from(u64::MAX)) + 1),
             "18446744.073709"
         );
         assert_eq!(

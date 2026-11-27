@@ -37,6 +37,12 @@
 //!   loop or reaching the wrong handler.
 //!   TESTS: `unknown_msg_type_returns_err_without_crashing`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -321,8 +327,10 @@ pub(super) async fn process_message(
         }
 
         MessageType::GetOutputDigests => {
-            query::handle_get_output_digests(peer_id, payload, magic, peers, scorer, chain, senders)
-                .await?;
+            query::handle_get_output_digests(
+                peer_id, payload, magic, peers, scorer, chain, senders,
+            )
+            .await?;
         }
 
         MessageType::GetFilterCheckpoints => {
@@ -510,7 +518,8 @@ mod router_tests {
         .into_iter()
         .enumerate()
         {
-            let addr: SocketAddr = format!("127.0.0.1:{}", 34100 + i as u16).parse().unwrap();
+            let addr: SocketAddr =
+                format!("127.0.0.1:{}", 34100 + u16::try_from(i).unwrap_or(0)).parse().unwrap();
             let (res, rep) = run_one([9u8; 32], addr, ty as u8, oversized.clone()).await;
             assert!(res.is_ok(), "{ty:?} dropped cleanly");
             assert!(

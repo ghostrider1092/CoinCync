@@ -58,6 +58,12 @@
 //!   cycle; concurrent readers + writer(s) never deadlock or panic. THREAT: a
 //!   lock-order cycle hanging block processing. TESTS: `stress_concurrent_read_write_load`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use parking_lot::RwLock;
 
 use crate::crypto::mw_cutthrough::MwKernel;
@@ -535,6 +541,11 @@ impl Default for KernelStore {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     fn kernel(excess_byte: u8, height: u64) -> MwKernel {
@@ -586,7 +597,13 @@ mod tests {
             .count();
         assert_eq!((ops.len(), inserts), (2, 2));
         let writes = KernelStore::staged_ops_to_writes(&ops);
-        assert_eq!(writes.iter().filter(|(t, _, v)| *t == 0 && v.is_some()).count(), 2);
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|(t, _, v)| *t == 0 && v.is_some())
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -646,7 +663,10 @@ mod tests {
             let empty_root = store.current_root();
             apply_block(&store, 1, &[kernel(0xA1, 1)]);
             apply_block(&store, 2, &[kernel(0xB1, 2)]);
-            assert!(store.len() > 0 && store.checkpoint_count() > 0, "non-empty before clear");
+            assert!(
+                store.len() > 0 && store.checkpoint_count() > 0,
+                "non-empty before clear"
+            );
             store.clear().unwrap();
             assert_eq!(store.len(), 0, "in-memory kernels wiped");
             assert_eq!(store.checkpoint_count(), 0, "checkpoint stack wiped");

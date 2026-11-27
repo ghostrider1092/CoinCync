@@ -2,6 +2,12 @@
 //!
 //! Common patterns and utilities for cleaner code.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::time::{Duration, Instant};
 
 /// Retry an operation with exponential backoff.
@@ -22,7 +28,8 @@ where
     use tokio_retry::Retry;
 
     let strategy =
-        ExponentialBackoff::from_millis(initial_delay.as_millis() as u64).take(max_retries);
+        ExponentialBackoff::from_millis(u64::try_from(initial_delay.as_millis()).unwrap_or(u64::MAX))
+            .take(max_retries);
 
     Retry::start(strategy, || operation()).await
 }
@@ -49,7 +56,7 @@ impl Timer {
 
     /// Get elapsed milliseconds
     pub fn elapsed_ms(&self) -> u64 {
-        self.start.elapsed().as_millis() as u64
+        u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 }
 
@@ -237,7 +244,7 @@ pub mod time_utils {
     pub fn now_millis() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0)
     }
 

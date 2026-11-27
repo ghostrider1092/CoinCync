@@ -21,10 +21,10 @@
 //!   THREAT: dust change output, or value silently lost.
 //!   TESTS: `legacy_create_transaction_produces_recipient_and_change_outputs`.
 
+use super::super::Balance;
 use super::fee::estimate_tx_size;
 use super::selection::select_utxos;
 use super::types::CoinSelection;
-use super::super::Balance;
 use crate::constants::{
     min_output_age_at_height, ring_size_at_height, MIN_FEE_PER_BYTE, MIN_OUTPUT_AMOUNT,
 };

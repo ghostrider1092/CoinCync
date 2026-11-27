@@ -106,7 +106,11 @@ impl Switchboard {
             return Err(DialError::Partitioned);
         }
         let pipe = inner.pipe_bytes;
-        let listener = inner.listeners.get(&to).ok_or(DialError::NoListener)?.clone();
+        let listener = inner
+            .listeners
+            .get(&to)
+            .ok_or(DialError::NoListener)?
+            .clone();
         // dialer_end.peer_addr() == to; listener_end.peer_addr() == from.
         let (dialer_end, listener_end) = NetStream::mem_pair(from, to, pipe);
         if listener.send(listener_end).is_err() {

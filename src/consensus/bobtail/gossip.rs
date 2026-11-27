@@ -40,9 +40,7 @@ pub const PROOF_SHARES_MSG_TYPE: u8 = 53;
 pub const MAX_SHARES_PER_MSG: usize = 256;
 
 /// The wire payload: a batch of proof-shares for one parent tip.
-#[derive(
-    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ProofShareBatch {
     /// The parent (tip) these shares extend — binds the batch to one chain tip
     /// so a receiver drops shares meant for a stale/forked parent.
@@ -241,8 +239,14 @@ mod tests {
     fn dedups_replayed_share() {
         let mut pool = SharePool::new(PARENT(), 20, 3);
         let tau = hb(0x80);
-        assert_eq!(pool.admit(sp(1, 0x10), PARENT(), &tau, mock), Admit::Accepted { relay: true });
-        assert_eq!(pool.admit(sp(1, 0x10), PARENT(), &tau, mock), Admit::Duplicate);
+        assert_eq!(
+            pool.admit(sp(1, 0x10), PARENT(), &tau, mock),
+            Admit::Accepted { relay: true }
+        );
+        assert_eq!(
+            pool.admit(sp(1, 0x10), PARENT(), &tau, mock),
+            Admit::Duplicate
+        );
         assert_eq!(pool.len(), 1);
     }
 
@@ -253,7 +257,10 @@ mod tests {
         let tau = hb(0x80);
         // 8 low shares (hashes 0x01..0x08), all accepted + relayed.
         for n in 1u64..=8 {
-            assert_eq!(pool.admit(sp(1, n), PARENT(), &tau, mock), Admit::Accepted { relay: true });
+            assert_eq!(
+                pool.admit(sp(1, n), PARENT(), &tau, mock),
+                Admit::Accepted { relay: true }
+            );
         }
         assert_eq!(pool.len(), 8, "at cap");
         // A 9th below threshold (0x7F) but higher than all retained → evicted,
@@ -303,7 +310,9 @@ mod tests {
         assert!(!empty.is_well_formed());
         let big = ProofShareBatch {
             prev_hash: PARENT(),
-            shares: (0..(MAX_SHARES_PER_MSG as u64 + 1)).map(|n| sp(1, n)).collect(),
+            shares: (0..(MAX_SHARES_PER_MSG as u64 + 1))
+                .map(|n| sp(1, n))
+                .collect(),
         };
         assert!(!big.is_well_formed());
     }

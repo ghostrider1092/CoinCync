@@ -1,5 +1,11 @@
 //! Chain queries, block serialization, supply, and synchronization RPCs.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use jsonrpsee::types::ErrorObjectOwned;
 use jsonrpsee::RpcModule;
 use serde_json::{json, Value};
@@ -241,6 +247,10 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             } else {
                 0.0
             };
+            // Computed f64 threshold → integer atomic units for JSON display;
+            // the truncation and the (always-non-negative) sign drop are intended.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let deflation_threshold_u64 = deflation_threshold as u64;
 
             Ok::<_, ErrorObjectOwned>(json!({
                 "active": is_active,
@@ -254,7 +264,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
                 "block_reward": reward,
                 "circulating_supply": supply,
                 "max_supply": supply_atomic_decimal(max_supply),
-                "deflation_threshold_fee_per_block": deflation_threshold as u64,
+                "deflation_threshold_fee_per_block": deflation_threshold_u64,
                 "congestion_threshold_pct": crate::constants::CONGESTION_THRESHOLD,
             }))
         })
@@ -347,7 +357,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             // the right semantics (no blocks exist that high anyway).
             let span = end.saturating_sub(start).saturating_add(1);
             let capped = span.min(MAX_RANGE);
-            let mut blocks = Vec::with_capacity(capped as usize);
+            let mut blocks = Vec::with_capacity(usize::try_from(capped).unwrap_or(usize::MAX));
             let loop_end = start.saturating_add(capped);
             for h in start..loop_end {
                 if let Some(block) = state.chain.get_block_by_height(h) {
@@ -400,10 +410,10 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             // the pre-clamp `end`). Use saturating math — matching the sibling
             // range handlers — so the capacity calc can't underflow. The
             // `start..=end` loop below is simply empty in that case.
-            let mut digests = Vec::with_capacity(
-                (end.saturating_sub(start).saturating_add(1) as usize)
-                    .min(MAX_DIGEST_BLOCKS as usize),
-            );
+            let cap = usize::try_from(end.saturating_sub(start).saturating_add(1))
+                .unwrap_or(usize::MAX)
+                .min(usize::try_from(MAX_DIGEST_BLOCKS).unwrap_or(100));
+            let mut digests = Vec::with_capacity(cap);
             for h in start..=end {
                 if let Some(block) = state.chain.get_block_by_height(h) {
                     digests.push(crate::wallet::lightsync::BlockDigest::from_block(&block));

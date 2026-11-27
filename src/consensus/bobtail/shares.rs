@@ -22,9 +22,7 @@ const BOBTAIL_LOTTERY_DOMAIN: &[u8] = b"coincync/bobtail/lottery/v1";
 /// The gossip unit: a RandomX sample's owner and nonce. `h` is recomputed by
 /// verifiers as `RandomX(prev_hash || miner_pubkey || nonce)`, so it is not
 /// carried on the wire (`bobtail-spec.md` §3).
-#[derive(
-    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ShareProof {
     pub miner_pubkey: PublicKey,
     pub nonce: u64,
@@ -202,7 +200,9 @@ pub const BOBTAIL_POOL_SAFETY: usize = 4;
 /// the spammer real sub-`tau_share` RandomX work to produce, so the flood is
 /// work-bounded and pointless.
 pub fn max_pool_size(k: usize, c_share: u64) -> usize {
-    BOBTAIL_POOL_SAFETY.saturating_mul(c_share as usize).saturating_mul(k)
+    BOBTAIL_POOL_SAFETY
+        .saturating_mul(c_share as usize)
+        .saturating_mul(k)
 }
 
 /// Evict all but the canonically-lowest `cap` shares from `pool` (deduplicating
@@ -335,7 +335,11 @@ mod tests {
         let b = rs(2, 0, 0x10, 0); // same hash, pubkey 2
         let pool = vec![a.clone(), b.clone()];
 
-        assert_eq!(canonical_k_lowest(&pool, 1), vec![a.clone()], "A is canonical");
+        assert_eq!(
+            canonical_k_lowest(&pool, 1),
+            vec![a.clone()],
+            "A is canonical"
+        );
         assert!(
             !omits_lower_share(&[a], &pool),
             "the canonical equal-hash share is accepted",
@@ -360,7 +364,12 @@ mod tests {
         let pool = vec![rs(1, 0, 0x05, 0), rs(2, 0, 0x08, 0), rs(3, 0, 0x30, 0)];
 
         // wrong length
-        assert!(!block_shares_valid(&canonical_k_lowest(&pool, 1), &pool, 2, &target));
+        assert!(!block_shares_valid(
+            &canonical_k_lowest(&pool, 1),
+            &pool,
+            2,
+            &target
+        ));
 
         // duplicate slot (same share twice)
         let dup = rs(1, 0, 0x05, 0);
@@ -426,8 +435,7 @@ mod tests {
 
     #[test]
     fn retain_lowest_keeps_the_k_lowest_and_caps() {
-        let mut pool: Vec<ResolvedShare> =
-            (0..50u8).map(|i| rs(i + 1, i as u64, i, 0)).collect();
+        let mut pool: Vec<ResolvedShare> = (0..50u8).map(|i| rs(i + 1, i as u64, i, 0)).collect();
         let cap = 10;
         retain_lowest(&mut pool, cap);
         assert_eq!(pool.len(), cap, "pool capped to `cap`");
@@ -452,7 +460,10 @@ mod tests {
         use super::super::{BOBTAIL_C_SHARE, BOBTAIL_K};
         let cap = max_pool_size(BOBTAIL_K, BOBTAIL_C_SHARE);
         let expected = BOBTAIL_C_SHARE as usize * BOBTAIL_K; // 3K
-        assert!(cap > expected, "cap must exceed the expected C_SHARE·K arrivals");
+        assert!(
+            cap > expected,
+            "cap must exceed the expected C_SHARE·K arrivals"
+        );
     }
 
     #[test]

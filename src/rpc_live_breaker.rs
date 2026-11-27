@@ -38,13 +38,22 @@ struct Window {
 static WINDOW: Mutex<Option<Window>> = Mutex::new(None);
 
 fn env_u32(name: &str, default: u32) -> u32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Called on every non-preflight RPC request with its declared body size
@@ -58,7 +67,11 @@ pub fn on_request(body_bytes: usize) -> BreakerState {
     let (requests, max_body_seen) = {
         let mut guard = WINDOW.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
-        let w = guard.get_or_insert_with(|| Window { start: now, requests: 0, max_body: 0 });
+        let w = guard.get_or_insert_with(|| Window {
+            start: now,
+            requests: 0,
+            max_body: 0,
+        });
         if now.duration_since(w.start).as_secs() >= interval_secs {
             // New window.
             w.start = now;

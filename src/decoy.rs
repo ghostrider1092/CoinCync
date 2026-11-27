@@ -1,3 +1,9 @@
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::primitives::{Hash, PublicKey};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -66,7 +72,7 @@ where
                 key,
                 OutputLocator {
                     height,
-                    ordinal: ordinal as u32,
+                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
                 },
             )
         })

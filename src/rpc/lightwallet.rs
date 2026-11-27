@@ -268,7 +268,10 @@ impl LightWalletServer {
         let chain_height = self.chain.height();
         // saturating: start_height is caller-controlled; a plain `+` wraps in
         // release / panics in debug on overflow (R-4).
-        let end_height = req.start_height.saturating_add(max_blocks).min(chain_height);
+        let end_height = req
+            .start_height
+            .saturating_add(max_blocks)
+            .min(chain_height);
 
         let mut detected = Vec::new();
         let mut blocks_scanned = 0u64;

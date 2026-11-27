@@ -10,6 +10,14 @@
 //! For each boundary, we test: H-1, H, H+1 with both old and new era
 //! transactions to ensure the gate is exact.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use borsh::{from_slice, to_vec};
 use coincync::consensus::{validate_block, Block, BlockHeader};
 use coincync::constants::{

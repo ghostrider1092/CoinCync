@@ -30,9 +30,9 @@ use crate::adaptor::{
     cync_adaptor_point, recover_secret_from_btc_sig, verify_pre_sig, AdaptorSecret, BtcAdaptorSig,
 };
 use crate::btc::{FundingUtxo, DUST_THRESHOLD_SATS};
+use crate::cross_curve_dleq::{verify, CrossCurveProof, CrossCurveStatement};
 use crate::cync::{compute_swap_lock_recipient, SwapLockRecipient};
 use crate::protocol::Swap;
-use crate::cross_curve_dleq::{verify, CrossCurveProof, CrossCurveStatement};
 use crate::{Error, Result};
 
 /// Fixed context for the pre-CYNC-lock cross-curve DLEQ. Both the prover (the
@@ -976,9 +976,9 @@ mod tests {
     use crate::adaptor::{
         create_pre_sig_bip340, cync_adaptor_point, decrypt_btc_adaptor, AdaptorSecret,
     };
+    use crate::cross_curve_dleq::prove;
     use crate::cync::public_share_from_secret;
     use crate::protocol::{Role, State, SwapParameters, Transition};
-    use crate::cross_curve_dleq::prove;
     use bitcoin::secp256k1::{Keypair, SecretKey};
     use curve25519_dalek::scalar::Scalar;
 

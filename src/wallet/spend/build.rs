@@ -47,7 +47,9 @@
 use super::super::decoy_selection::{
     allocate_unique_rings, build_covered_request, validate_covered_response,
 };
-use super::super::send::{build_prepared_privacy_transaction, prepare_privacy_transaction, SpendKeys};
+use super::super::send::{
+    build_prepared_privacy_transaction, prepare_privacy_transaction, SpendKeys,
+};
 use super::super::Balance;
 use super::{BuiltSpend, SpendCoordinator, SpendIntent, SpendSession};
 use crate::error::Result;

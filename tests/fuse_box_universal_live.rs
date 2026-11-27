@@ -26,7 +26,10 @@ fn addr(s: &str) -> SocketAddr {
 }
 
 fn state(surface: BreakerSurface) -> Option<BreakerState> {
-    fuse::snapshot().into_iter().find(|(s, _)| *s == surface).map(|(_, st)| st)
+    fuse::snapshot()
+        .into_iter()
+        .find(|(s, _)| *s == surface)
+        .map(|(_, st)| st)
 }
 
 #[test]
@@ -46,26 +49,52 @@ fn every_surface_flows_through_one_shared_box() {
     integrity::reset();
 
     let snap = fuse::snapshot();
-    assert_eq!(snap.len(), BreakerSurface::ALL.len(), "the box registers EVERY surface");
-    assert!(snap.iter().all(|(_, st)| *st == BreakerState::Closed), "all start Closed");
+    assert_eq!(
+        snap.len(),
+        BreakerSurface::ALL.len(),
+        "the box registers EVERY surface"
+    );
+    assert!(
+        snap.iter().all(|(_, st)| *st == BreakerState::Closed),
+        "all start Closed"
+    );
 
     println!("\n== UNIVERSAL FUSE BOX: tripping each surface through its real feed ==");
 
     // 1) Mempool — real admission feed, count over cap.
     mempool::on_admission(6, 0);
-    assert_eq!(state(BreakerSurface::Mempool), Some(BreakerState::Open), "mempool flood trips");
+    assert_eq!(
+        state(BreakerSurface::Mempool),
+        Some(BreakerState::Open),
+        "mempool flood trips"
+    );
 
     // 2) P2P — real heartbeat feed, a single peer (eclipse risk).
     p2p::observe_from_addrs(&[addr("1.2.3.4:28080")]);
-    assert_eq!(state(BreakerSurface::P2p), Some(BreakerState::Open), "too-few-peers trips");
+    assert_eq!(
+        state(BreakerSurface::P2p),
+        Some(BreakerState::Open),
+        "too-few-peers trips"
+    );
 
     // 3) RPC — real per-request feed, body over cap.
     rpc::on_request(100);
-    assert_eq!(state(BreakerSurface::Rpc), Some(BreakerState::Open), "oversize body trips");
+    assert_eq!(
+        state(BreakerSurface::Rpc),
+        Some(BreakerState::Open),
+        "oversize body trips"
+    );
 
     // 4) Reorg — real reorg-accept feed, depth over the safe max.
-    reorg::on_reorg(/*depth*/ 1000, /*max_safe*/ 100, /*fork_point*/ 50, /*finalized*/ 10, 200, 100);
-    assert_eq!(state(BreakerSurface::Reorg), Some(BreakerState::Open), "deep reorg trips");
+    reorg::on_reorg(
+        /*depth*/ 1000, /*max_safe*/ 100, /*fork_point*/ 50, /*finalized*/ 10,
+        200, 100,
+    );
+    assert_eq!(
+        state(BreakerSurface::Reorg),
+        Some(BreakerState::Open),
+        "deep reorg trips"
+    );
 
     // 5) Block-integrity — real connect feed, availability underflow (money/integrity → Latch).
     integrity::on_block_connected(/*ever*/ 5, /*disconnects*/ 10, /*live*/ 3);
@@ -77,9 +106,16 @@ fn every_surface_flows_through_one_shared_box() {
 
     // One box, five of seven compartments isolating at once (supply + shielded
     // are registered but fed only at the coordinated activation).
-    let isolating: Vec<_> = fuse::snapshot().into_iter().filter(|(_, st)| *st != BreakerState::Closed).collect();
+    let isolating: Vec<_> = fuse::snapshot()
+        .into_iter()
+        .filter(|(_, st)| *st != BreakerState::Closed)
+        .collect();
     println!("  isolating now: {isolating:?}");
-    assert_eq!(isolating.len(), 5, "exactly the five live-fed surfaces are isolating");
+    assert_eq!(
+        isolating.len(),
+        5,
+        "exactly the five live-fed surfaces are isolating"
+    );
 
     println!("== recovery: load surfaces reconnect on a healthy streak; integrity latches ==");
 
@@ -96,8 +132,17 @@ fn every_surface_flows_through_one_shared_box() {
         rpc::on_request(1); // small body, fresh window
         reorg::on_reorg(1, 100, 90, 10, 100, 100); // shallow, above finality
     }
-    for s in [BreakerSurface::Mempool, BreakerSurface::P2p, BreakerSurface::Rpc, BreakerSurface::Reorg] {
-        assert_eq!(state(s), Some(BreakerState::Closed), "{s:?} (AutoReset) reconnects after a healthy streak");
+    for s in [
+        BreakerSurface::Mempool,
+        BreakerSurface::P2p,
+        BreakerSurface::Rpc,
+        BreakerSurface::Reorg,
+    ] {
+        assert_eq!(
+            state(s),
+            Some(BreakerState::Closed),
+            "{s:?} (AutoReset) reconnects after a healthy streak"
+        );
     }
 
     // Latch surface: healthy connects do NOT reconnect it.
@@ -112,7 +157,11 @@ fn every_surface_flows_through_one_shared_box() {
 
     // Only an explicit operator rearm reconnects a latched surface.
     fuse::rearm(BreakerSurface::BlockIntegrity);
-    assert_eq!(state(BreakerSurface::BlockIntegrity), Some(BreakerState::Closed), "rearm reconnects");
+    assert_eq!(
+        state(BreakerSurface::BlockIntegrity),
+        Some(BreakerState::Closed),
+        "rearm reconnects"
+    );
 
     println!("  => one universal box: every surface fed through its real adapter, ");
     println!("     AutoReset surfaces self-healed, the integrity fuse latched until rearm.\n");

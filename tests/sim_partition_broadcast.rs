@@ -42,7 +42,10 @@ async fn partition_isolates_a_peer_then_heal_restores_delivery() {
     let mut a_framer = MessageFramer::new(ar, aw, MAGIC);
     let mut b_framer = MessageFramer::new(br, bw, MAGIC);
 
-    a_framer.write_message(PING, b"block-ann").await.expect("A writes");
+    a_framer
+        .write_message(PING, b"block-ann")
+        .await
+        .expect("A writes");
     let (ty, payload) = b_framer.read_message().await.expect("B reads");
     assert_eq!(ty, PING);
     assert_eq!(payload, b"block-ann");
@@ -66,7 +69,10 @@ async fn partition_isolates_a_peer_then_heal_restores_delivery() {
     let (ccr, ccw) = split(c_side);
     let mut a_c_framer = MessageFramer::new(acr, acw, MAGIC);
     let mut c_framer = MessageFramer::new(ccr, ccw, MAGIC);
-    a_c_framer.write_message(PING, b"catch-up").await.expect("A writes C");
+    a_c_framer
+        .write_message(PING, b"catch-up")
+        .await
+        .expect("A writes C");
     let (ty2, p2) = c_framer.read_message().await.expect("C reads");
     assert_eq!(ty2, PING);
     assert_eq!(p2, b"catch-up");

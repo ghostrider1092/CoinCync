@@ -123,10 +123,7 @@ impl NodeRpcClient {
 
     /// Resolve one typed covered request against the snapshot it was built
     /// from. Callers cannot accidentally pair locators with other metadata.
-    pub async fn resolve_outputs(
-        &self,
-        request: &CoveredRequest,
-    ) -> Result<ResolvedDecoySnapshot> {
+    pub async fn resolve_outputs(&self, request: &CoveredRequest) -> Result<ResolvedDecoySnapshot> {
         let snapshot = request.snapshot_id();
         self.call_typed(
             "get_outputs_by_locators",

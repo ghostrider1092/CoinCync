@@ -38,6 +38,16 @@
 //!   TESTS: `fee_tier_multipliers`, `fee_calculator_estimate_scales_by_tier_multiplier`,
 //!   `fee_calculator_distribute_matches_free_distribute_fee`.
 
+// Cast-lint hard gate (clippy cast grind, roadmap Tier-1c): every narrowing/lossy
+// cast below is a `From`/`try_from` conversion or a documented, guarded exception.
+// Single-file module — this reaches the in-file `#[cfg(test)]` module, which
+// carries its own scoped allow for throwaway test-value casts.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::primitives::Amount;
 // L-1 FIX: Removed dead imports FEE_PROTOCOL_*_PERCENT (protocol fee is always 0).
 use crate::constants::{
@@ -61,7 +71,9 @@ use serde::{Deserialize, Serialize};
 pub fn calculate_fee(tx_size: usize, congestion_pct: u64) -> Amount {
     let multiplier = congestion_multiplier(congestion_pct);
     // Use saturating arithmetic to prevent overflow.
-    let base_fee = (tx_size as u64).saturating_mul(MIN_FEE_PER_BYTE);
+    let base_fee = u64::try_from(tx_size)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(MIN_FEE_PER_BYTE);
     let fee = base_fee.saturating_mul(multiplier) / 100;
     Amount::from_atomic(fee)
 }
@@ -73,6 +85,9 @@ pub fn calculate_priority_fee(tx_size: usize, congestion_pct: u64, priority: f64
     // SECURITY (A5-FEE-01): Clamp priority and use saturating arithmetic to prevent
     // overflow when priority is very large (e.g. f64::MAX).
     let clamped_priority = priority.clamp(0.0, 100.0);
+    // Guarded f64->u64: priority is clamped to [0, 100], so `*100` then `.min(10000)`
+    // is an integer value in [0, 10000] — the cast is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let multiplier = ((clamped_priority * 100.0).min(10000.0)) as u64;
     let boost = base.as_atomic().saturating_mul(multiplier) / 100;
     Amount::from_atomic(base.as_atomic().saturating_add(boost))
@@ -109,9 +124,9 @@ pub fn calculate_congestion(recent_block_sizes: &[usize]) -> u64 {
     }
     let total: u64 = recent_block_sizes
         .iter()
-        .fold(0u64, |acc, &s| acc.saturating_add(s as u64));
-    let avg = total / recent_block_sizes.len() as u64;
-    ((avg * 100) / MAX_BLOCK_SIZE as u64).min(100)
+        .fold(0u64, |acc, &s| acc.saturating_add(u64::try_from(s).unwrap_or(u64::MAX)));
+    let avg = total / u64::try_from(recent_block_sizes.len()).unwrap_or(u64::MAX);
+    ((avg * 100) / u64::try_from(MAX_BLOCK_SIZE).unwrap_or(u64::MAX)).min(100)
 }
 
 /// Check if network is congested (congestion_pct is integer 0–100).
@@ -149,7 +164,7 @@ pub fn distribute_fee(total: Amount, congested: bool) -> FeeDistribution {
     // The result fits in u64 because `fee * pct / 100 ≤ fee` for pct ≤ 100.
     // We assert that explicitly via .min(fee) to make the invariant readable.
     let fee = total.as_atomic();
-    let fee_u128 = fee as u128;
+    let fee_u128 = u128::from(fee);
 
     let (miner_pct, _burn_pct) = if congested {
         (FEE_MINER_CONGESTED_PERCENT, FEE_BURN_CONGESTED_PERCENT)
@@ -164,7 +179,10 @@ pub fn distribute_fee(total: Amount, congested: bool) -> FeeDistribution {
     // assert on the burn side but not the miner side), the clamp
     // prevents the u128→u64 truncation from wrapping into a nonsense
     // value silently.
-    let to_miner = ((fee_u128 * miner_pct as u128 / 100) as u64).min(fee);
+    // Guarded u128->u64: `fee * pct / 100 ≤ fee ≤ u64::MAX` for pct ≤ 100, and the
+    // explicit `.min(fee)` clamps regardless, so the truncating cast is exact.
+    #[allow(clippy::cast_possible_truncation)]
+    let to_miner = ((fee_u128 * u128::from(miner_pct) / 100) as u64).min(fee);
     // Remainder goes to burn — guarantees exact sum with zero rounding loss.
     // No protocol fee (Constitution Article II: 0% dev tax).
     let burned = fee - to_miner;
@@ -186,10 +204,10 @@ impl FeeDistribution {
     /// tolerance of 3 masked bugs where all three buckets were truncated
     /// independently.  u128 arithmetic prevents wrapping overflow in release mode.
     pub fn is_valid(&self) -> bool {
-        let sum = self.to_miner.as_atomic() as u128
-            + self.burned.as_atomic() as u128
-            + self.to_protocol.as_atomic() as u128;
-        let total = self.total.as_atomic() as u128;
+        let sum = u128::from(self.to_miner.as_atomic())
+            + u128::from(self.burned.as_atomic())
+            + u128::from(self.to_protocol.as_atomic());
+        let total = u128::from(self.total.as_atomic());
         sum == total
     }
 }
@@ -258,26 +276,29 @@ pub struct ReservoirTransition {
 /// negative and never exceeds `CAP_ATOMIC`; the miner is never paid more than
 /// `fees + reservoir_before` (no minting); decay never increases the reservoir.
 #[cfg(feature = "fee-reservoir")]
+// Guarded u128->u64 outputs: to_miner ≤ fees+reservoir, r_after ≤ r1 ≤ CAP_ATOMIC,
+// burn ≤ r1 ≤ CAP_ATOMIC — all ≤ u64::MAX by the guarantees above, so exact.
+#[allow(clippy::cast_possible_truncation)]
 pub fn reservoir_step(
     reservoir_before: Amount,
     fees: Amount,
     congestion_pct: u64,
 ) -> ReservoirTransition {
     use reservoir::*;
-    let r0 = reservoir_before.as_atomic() as u128;
-    let f = fees.as_atomic() as u128;
+    let r0 = u128::from(reservoir_before.as_atomic());
+    let f = u128::from(fees.as_atomic());
 
     // Transition (pre-decay): (miner, reservoir').
     let (to_miner, r1) = if congestion_pct < LOW_WATER {
         // Charge: store up to CHARGE_BPS of fees, capped so r never exceeds CAP;
         // un-stored fees pay the miner.
-        let want = f * CHARGE_BPS as u128 / 10_000;
-        let headroom = (CAP_ATOMIC as u128).saturating_sub(r0);
+        let want = f * u128::from(CHARGE_BPS) / 10_000;
+        let headroom = u128::from(CAP_ATOMIC).saturating_sub(r0);
         let store = want.min(headroom);
         (f - store, r0 + store)
     } else if congestion_pct > HIGH_WATER {
         // Discharge: pay out up to DISCHARGE_BPS of fees, bounded by the balance.
-        let want = f * DISCHARGE_BPS as u128 / 10_000;
+        let want = f * u128::from(DISCHARGE_BPS) / 10_000;
         let draw = want.min(r0);
         (f + draw, r0 - draw)
     } else {
@@ -286,7 +307,7 @@ pub fn reservoir_step(
 
     // Decay burn (round-trip loss) on the post-transition reservoir. Taken as an
     // exact term so conservation holds with zero rounding loss.
-    let burn = r1 * DECAY_BPS as u128 / 10_000;
+    let burn = r1 * u128::from(DECAY_BPS) / 10_000;
     let r_after = r1 - burn;
 
     ReservoirTransition {
@@ -334,7 +355,7 @@ pub fn block_fee_stats(
         .fold(0u64, |acc, (f, _)| acc.saturating_add(f.as_atomic()));
     let total_size: u64 = tx_fees
         .iter()
-        .fold(0u64, |acc, (_, s)| acc.saturating_add(*s as u64));
+        .fold(0u64, |acc, (_, s)| acc.saturating_add(u64::try_from(*s).unwrap_or(u64::MAX)));
 
     let burn_pct = if congested {
         FEE_BURN_CONGESTED_PERCENT
@@ -346,7 +367,9 @@ pub fn block_fee_stats(
     // saturating_add for `total` above means total can be u64::MAX, and
     // `u64::MAX * 40` overflows in release mode causing a panic. With u128
     // intermediates, the multiplication is bounded by 2^70 << u128::MAX.
-    let total_burned = ((total as u128) * (burn_pct as u128) / 100) as u64;
+    // Guarded u128->u64: `total * pct / 100 ≤ total ≤ u64::MAX` for pct ≤ 100.
+    #[allow(clippy::cast_possible_truncation)]
+    let total_burned = (u128::from(total) * u128::from(burn_pct) / 100) as u64;
 
     BlockFeeStats {
         height,
@@ -422,6 +445,8 @@ impl FeeCalculator {
     pub fn estimate(&self, tx_size: usize, tier: FeeTier) -> FeeEstimate {
         let base = calculate_fee(tx_size, self.congestion_pct);
         let fee_f64 = base.as_atomic() as f64 * tier.multiplier();
+        // Guarded f64->u64: checked finite + non-negative and clamped to u64::MAX.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let fee_u64 = if fee_f64.is_finite() && fee_f64 >= 0.0 {
             (fee_f64.min(u64::MAX as f64)) as u64
         } else {
@@ -467,6 +492,13 @@ impl FeeCalculator {
 // =============================================================================
 #[cfg(test)]
 mod tests {
+    // Test-only casts (throwaway fixture values, f64 expected-value math): the
+    // file-level cast deny reaches this module, so scope an allow here.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     // ===== §1: CORE FEE CALCULATION — tests =====
@@ -635,7 +667,10 @@ mod tests {
             burned: Amount::from_atomic(40),
             to_protocol: Amount::from_atomic(0),
         };
-        assert!(!under.is_valid(), "buckets summing below total must be invalid");
+        assert!(
+            !under.is_valid(),
+            "buckets summing below total must be invalid"
+        );
 
         // Over-sum: 60 + 50 + 0 = 110 != 100.
         let over = FeeDistribution {
@@ -644,7 +679,10 @@ mod tests {
             burned: Amount::from_atomic(50),
             to_protocol: Amount::from_atomic(0),
         };
-        assert!(!over.is_valid(), "buckets summing above total must be invalid");
+        assert!(
+            !over.is_valid(),
+            "buckets summing above total must be invalid"
+        );
 
         // Exact: 70 + 30 + 0 = 100.
         let exact = FeeDistribution {
@@ -653,7 +691,10 @@ mod tests {
             burned: Amount::from_atomic(30),
             to_protocol: Amount::from_atomic(0),
         };
-        assert!(exact.is_valid(), "buckets summing exactly to total must be valid");
+        assert!(
+            exact.is_valid(),
+            "buckets summing exactly to total must be valid"
+        );
     }
 
     /// calculate_congestion: empty slice => 0; oversized inputs cap at 100.
@@ -682,7 +723,10 @@ mod tests {
         let zero_size = vec![(Amount::from_atomic(100), 0usize)];
         let stats2 = block_fee_stats(9, &zero_size, false);
         assert_eq!(stats2.tx_count, 1);
-        assert_eq!(stats2.avg_fee_per_byte, 0, "total_size==0 must guard the division");
+        assert_eq!(
+            stats2.avg_fee_per_byte, 0,
+            "total_size==0 must guard the division"
+        );
     }
 
     /// calculate_priority_fee: priority is clamped to [0,100], and non-finite /
@@ -706,7 +750,10 @@ mod tests {
 
         // NaN priority must not panic and must yield a finite, bounded fee.
         let nan_fee = calculate_priority_fee(1000, 0, f64::NAN).as_atomic();
-        assert!(nan_fee >= base, "NaN priority must saturate, not underflow/panic");
+        assert!(
+            nan_fee >= base,
+            "NaN priority must saturate, not underflow/panic"
+        );
 
         // Extreme size + priority: chained saturating ops must not panic and
         // stay within u64 (Amount is u64-backed).
@@ -779,7 +826,10 @@ mod tests {
                 via_free.burned.as_atomic(),
                 "burned mismatch at congestion {congestion_pct}"
             );
-            assert_eq!(via_calc.to_protocol.as_atomic(), via_free.to_protocol.as_atomic());
+            assert_eq!(
+                via_calc.to_protocol.as_atomic(),
+                via_free.to_protocol.as_atomic()
+            );
             assert_eq!(via_calc.total.as_atomic(), via_free.total.as_atomic());
         }
     }
@@ -787,6 +837,13 @@ mod tests {
 
 #[cfg(all(test, feature = "fee-reservoir"))]
 mod reservoir_tests {
+    // Test-only casts (conservation-check widening, f64 variance math): the
+    // file-level cast deny reaches this gated module too, so scope an allow here.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::reservoir::*;
     use super::*;
 
@@ -796,15 +853,31 @@ mod reservoir_tests {
 
     #[test]
     fn conserves_value_and_never_mints_in_all_regimes() {
-        for &(r0, f) in &[(0u64, 0u64), (0, 1_000), (500_000, 1_000), (10_000_000, 250_000)] {
-            for c in [0u64, LOW_WATER - 1, LOW_WATER, 50, HIGH_WATER, HIGH_WATER + 1, 100] {
+        for &(r0, f) in &[
+            (0u64, 0u64),
+            (0, 1_000),
+            (500_000, 1_000),
+            (10_000_000, 250_000),
+        ] {
+            for c in [
+                0u64,
+                LOW_WATER - 1,
+                LOW_WATER,
+                50,
+                HIGH_WATER,
+                HIGH_WATER + 1,
+                100,
+            ] {
                 let t = step(r0, f, c);
                 assert_eq!(
                     t.to_miner.as_atomic() + t.reservoir_after.as_atomic() + t.burned.as_atomic(),
                     r0 + f,
                     "value not conserved at r0={r0} f={f} c={c}"
                 );
-                assert!(t.to_miner.as_atomic() <= f + r0, "minted at r0={r0} f={f} c={c}");
+                assert!(
+                    t.to_miner.as_atomic() <= f + r0,
+                    "minted at r0={r0} f={f} c={c}"
+                );
             }
         }
     }
@@ -813,14 +886,23 @@ mod reservoir_tests {
     fn charges_when_uncongested() {
         let t = step(0, 10_000, 0);
         assert!(t.reservoir_after.as_atomic() > 0, "reservoir should charge");
-        assert!(t.to_miner.as_atomic() < 10_000, "miner paid less than fees while charging");
+        assert!(
+            t.to_miner.as_atomic() < 10_000,
+            "miner paid less than fees while charging"
+        );
     }
 
     #[test]
     fn discharges_when_congested_and_funded() {
         let t = step(1_000_000, 10_000, 100);
-        assert!(t.to_miner.as_atomic() > 10_000, "miner topped up from the reservoir");
-        assert!(t.reservoir_after.as_atomic() < 1_000_000, "reservoir drawn down");
+        assert!(
+            t.to_miner.as_atomic() > 10_000,
+            "miner topped up from the reservoir"
+        );
+        assert!(
+            t.reservoir_after.as_atomic() < 1_000_000,
+            "reservoir drawn down"
+        );
     }
 
     #[test]
@@ -835,7 +917,11 @@ mod reservoir_tests {
     fn never_exceeds_cap() {
         let t = step(CAP_ATOMIC, 1_000_000, 0);
         assert!(t.reservoir_after.as_atomic() <= CAP_ATOMIC, "cap respected");
-        assert_eq!(t.to_miner.as_atomic(), 1_000_000, "at cap, all fees go to the miner");
+        assert_eq!(
+            t.to_miner.as_atomic(),
+            1_000_000,
+            "at cap, all fees go to the miner"
+        );
     }
 
     #[test]
@@ -887,7 +973,10 @@ mod reservoir_tests {
 
         // Bounded, and issuance-neutral over the whole run (net consumer): all
         // fees end up with miners, in the reservoir, or burned — never minted.
-        assert!(reservoir.as_atomic() <= CAP_ATOMIC, "reservoir stayed within the cap");
+        assert!(
+            reservoir.as_atomic() <= CAP_ATOMIC,
+            "reservoir stayed within the cap"
+        );
         assert_eq!(
             miner_total + reservoir.as_atomic() as u128 + burned_total,
             fees_total,

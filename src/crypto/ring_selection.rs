@@ -79,6 +79,12 @@
 //!   under-constrained selector assemble low-anonymity rings.
 //!   TESTS: `test_ring_selection`, `select_decoys_rejects_ring_size_below_two`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::error::{Error, Result};
 use crate::primitives::PublicKey;
 use rand::seq::index;
@@ -314,6 +320,9 @@ impl RingSelector {
             // SECURITY (A4-CR-04): Handle age=0 explicitly since log2(0) = -infinity,
             // which causes undefined behavior when cast to usize.
             for age in &ages {
+                // Histogram bucket: `.max(0.0)` makes it non-negative and
+                // log2(age) ≤ 64, so the index is small and the cast is exact.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let bucket = if *age == 0 {
                     0
                 } else {
@@ -471,6 +480,11 @@ impl RingQualityReport {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use rand::{rngs::StdRng, SeedableRng};
 

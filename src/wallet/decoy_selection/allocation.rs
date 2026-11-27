@@ -38,9 +38,7 @@
 //!   `allocation_places_the_real_index_within_ring_bounds`.
 
 use super::error::{DecoySelectionError, DecoySelectionResult};
-use super::types::{
-    AllocatedRing, AllocatedRings, RealOutputIdentity, ValidatedCoveredResponse,
-};
+use super::types::{AllocatedRing, AllocatedRings, RealOutputIdentity, ValidatedCoveredResponse};
 use crate::transaction::DecoyOutput;
 use rand::seq::SliceRandom;
 use rand::{CryptoRng, Rng, RngCore};
@@ -66,9 +64,7 @@ pub fn allocate_unique_rings<R: RngCore + CryptoRng + ?Sized>(
         let resolved = response
             .resolved(&real.locator())
             .ok_or(DecoySelectionError::MissingRealOutput(real.locator()))?;
-        if resolved.public_key != real.public_key()
-            || resolved.commitment != real.commitment()
-        {
+        if resolved.public_key != real.public_key() || resolved.commitment != real.commitment() {
             return Err(DecoySelectionError::RealOutputIdentityMismatch(
                 real.locator(),
             ));
@@ -84,9 +80,7 @@ pub fn allocate_unique_rings<R: RngCore + CryptoRng + ?Sized>(
         .outputs()
         .iter()
         .filter(|output| !request.real_locator_set().contains(&output.locator))
-        .filter(|output| {
-            max_decoy_height.is_some_and(|height| output.locator.height <= height)
-        })
+        .filter(|output| max_decoy_height.is_some_and(|height| output.locator.height <= height))
         .filter(|output| {
             output
                 .lock_height
@@ -110,13 +104,12 @@ pub fn allocate_unique_rings<R: RngCore + CryptoRng + ?Sized>(
 
     let ring_size = request.ring_size();
     let decoys_per_ring = ring_size - 1;
-    let needed = real_outputs
-        .len()
-        .checked_mul(decoys_per_ring)
-        .ok_or(DecoySelectionError::RingAllocationSizeOverflow {
+    let needed = real_outputs.len().checked_mul(decoys_per_ring).ok_or(
+        DecoySelectionError::RingAllocationSizeOverflow {
             input_count: real_outputs.len(),
             ring_size,
-        })?;
+        },
+    )?;
     if candidates.len() < needed {
         return Err(DecoySelectionError::InsufficientDecoys {
             available: candidates.len(),
@@ -140,9 +133,5 @@ pub fn allocate_unique_rings<R: RngCore + CryptoRng + ?Sized>(
         })
         .collect();
 
-    Ok(AllocatedRings::new(
-        ring_size,
-        real_outputs.to_vec(),
-        rings,
-    ))
+    Ok(AllocatedRings::new(ring_size, real_outputs.to_vec(), rings))
 }

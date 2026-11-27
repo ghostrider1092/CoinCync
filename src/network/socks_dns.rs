@@ -107,6 +107,12 @@
 //!   returns at the first pointer rather than following it, so the bound proven
 //!   is the step/buffer guard on a runaway label walk, not pointer-cycle following.)
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -260,7 +266,9 @@ async fn query_one(
             query.len()
         )));
     }
-    let len = query.len() as u16;
+    // Guarded above to `(0, MAX_DNS_RESPONSE]` (= 4096), so this always fits
+    // u16; the `unwrap_or` is an unreachable, fail-safe clamp, not a wrap.
+    let len = u16::try_from(query.len()).unwrap_or(u16::MAX);
     stream
         .write_all(&len.to_be_bytes())
         .await
@@ -279,7 +287,7 @@ async fn query_one(
         .read_exact(&mut len_buf)
         .await
         .map_err(|e| Error::ConnectionFailed(format!("DNS-over-TCP read len: {}", e)))?;
-    let resp_len = u16::from_be_bytes(len_buf) as usize;
+    let resp_len = usize::from(u16::from_be_bytes(len_buf));
     if resp_len == 0 || resp_len > MAX_DNS_RESPONSE {
         return Err(Error::ConnectionFailed(format!(
             "DNS-over-TCP response length out of range: {}",
@@ -328,7 +336,12 @@ fn transaction_id() -> u16 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    (nanos as u16) ^ 0xC0FE
+    // Intentional: fold the low 16 bits of 32-bit nano entropy into the
+    // txid; discarding the high bits is the point (non-cryptographic, the
+    // TCP connection is the real spoofing barrier — see above).
+    #[allow(clippy::cast_possible_truncation)]
+    let nanos16 = nanos as u16;
+    nanos16 ^ 0xC0FE
 }
 
 fn build_query(id: u16, hostname: &str, qtype: QueryType) -> Result<Vec<u8>> {
@@ -360,7 +373,8 @@ fn build_query(id: u16, hostname: &str, qtype: QueryType) -> Result<Vec<u8>> {
                 label
             )));
         }
-        buf.push(label.len() as u8);
+        // Guarded to <= 63 just above, so this always fits u8.
+        buf.push(u8::try_from(label.len()).unwrap_or(u8::MAX));
         buf.extend_from_slice(label.as_bytes());
     }
     buf.push(0u8); // root label
@@ -396,8 +410,8 @@ fn parse_response(buf: &[u8], expected_id: u16, qtype: QueryType) -> Result<Vec<
         return Err(Error::ConnectionFailed(format!("DNS RCODE={}", rcode)));
     }
 
-    let qdcount = u16::from_be_bytes([buf[4], buf[5]]) as usize;
-    let ancount = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+    let qdcount = usize::from(u16::from_be_bytes([buf[4], buf[5]]));
+    let ancount = usize::from(u16::from_be_bytes([buf[6], buf[7]]));
 
     let mut pos = 12;
 
@@ -420,7 +434,7 @@ fn parse_response(buf: &[u8], expected_id: u16, qtype: QueryType) -> Result<Vec<
         }
         let rtype = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
         // class (2) + ttl (4) skipped
-        let rdlen = u16::from_be_bytes([buf[pos + 8], buf[pos + 9]]) as usize;
+        let rdlen = usize::from(u16::from_be_bytes([buf[pos + 8], buf[pos + 9]]));
         pos += 10;
         if pos + rdlen > buf.len() {
             return Err(Error::InvalidState("DNS RDATA truncated".into()));
@@ -475,7 +489,7 @@ fn skip_name(buf: &[u8], mut pos: usize) -> Result<usize> {
             return Ok(pos + 2);
         }
         // Uncompressed label: 1 length byte + N data bytes.
-        let len = b as usize;
+        let len = usize::from(b);
         if len > 63 {
             return Err(Error::InvalidState("DNS label length invalid".into()));
         }
@@ -539,8 +553,14 @@ mod tests {
 
     #[test]
     fn skip_name_rejects_truncated_pointer_and_buffer_overrun() {
-        assert!(skip_name(&[0xC0u8], 0).is_err(), "lone pointer high-byte is truncated");
-        assert!(skip_name(&[3u8, b'a'], 0).is_err(), "label claims 3 bytes, only 1 present");
+        assert!(
+            skip_name(&[0xC0u8], 0).is_err(),
+            "lone pointer high-byte is truncated"
+        );
+        assert!(
+            skip_name(&[3u8, b'a'], 0).is_err(),
+            "label claims 3 bytes, only 1 present"
+        );
     }
 
     #[test]
@@ -706,12 +726,8 @@ mod tests {
     async fn resolve_via_socks5_rejects_inactive_proxy() {
         let proxy = ProxyConfig::default(); // enabled = false → inactive
         assert!(!proxy.is_active());
-        let res = resolve_via_socks5(
-            "seed1.coincync.network",
-            &proxy,
-            Duration::from_secs(1),
-        )
-        .await;
+        let res =
+            resolve_via_socks5("seed1.coincync.network", &proxy, Duration::from_secs(1)).await;
         match res {
             Err(Error::ConfigError(_)) => {}
             other => panic!("inactive proxy must yield ConfigError, got {other:?}"),

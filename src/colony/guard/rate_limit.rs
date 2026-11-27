@@ -7,9 +7,9 @@
 //! based; no external state.
 
 use std::collections::HashMap;
-use std::time::Instant;
 #[cfg(test)]
 use std::time::Duration;
+use std::time::Instant;
 
 use super::ColonyActionKind;
 

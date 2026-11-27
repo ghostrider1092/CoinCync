@@ -440,7 +440,12 @@ fn kernel_scalar_from(tag: &[u8], parts: &[&[u8]]) -> Scalar {
 /// Fiat-Shamir challenge for a kernel signature. Binds the nonce point,
 /// the public key `P = excess - fee*H`, and the fee/height so a signature
 /// can never be lifted onto a kernel with a different fee or height.
-fn kernel_sig_challenge(r_point: &RistrettoPoint, pubkey: &RistrettoPoint, fee: u64, height: u64) -> Scalar {
+fn kernel_sig_challenge(
+    r_point: &RistrettoPoint,
+    pubkey: &RistrettoPoint,
+    fee: u64,
+    height: u64,
+) -> Scalar {
     kernel_scalar_from(
         KERNEL_SIG_CHALLENGE_TAG,
         &[

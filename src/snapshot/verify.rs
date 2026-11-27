@@ -246,8 +246,8 @@ mod tests {
     }
 
     fn scratch_db(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir()
-            .join(format!("cync-snap-verify-{}-{}", tag, std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("cync-snap-verify-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }
@@ -275,11 +275,12 @@ mod tests {
 
         let tip = h(0);
         let m = manifest_at(0, &tip);
-        let err =
-            verify_installed_db(&chaindata, NetworkType::Testnet, &m, &[]).unwrap_err();
+        let err = verify_installed_db(&chaindata, NetworkType::Testnet, &m, &[]).unwrap_err();
         assert!(matches!(err, Error::InvalidState(_)));
         assert!(
-            format!("{:?}", err).to_lowercase().contains("no chain state"),
+            format!("{:?}", err)
+                .to_lowercase()
+                .contains("no chain state"),
             "expected a no-chain-state refusal, got: {:?}",
             err
         );
@@ -299,8 +300,7 @@ mod tests {
 
         let tip = h(0);
         let m = manifest_at(0, &tip);
-        let err =
-            verify_installed_db(&not_a_db, NetworkType::Testnet, &m, &[]).unwrap_err();
+        let err = verify_installed_db(&not_a_db, NetworkType::Testnet, &m, &[]).unwrap_err();
         assert!(matches!(err, Error::InvalidState(_)));
         assert!(
             format!("{:?}", err)

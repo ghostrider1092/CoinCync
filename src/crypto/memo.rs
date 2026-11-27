@@ -378,9 +378,6 @@ mod tests {
         // 0xFF..FF does not decompress to a valid curve point.
         let bad_tx_public = [0xFFu8; 32];
         let result = decrypt_memo(&encrypted, &view_secret, &bad_tx_public);
-        assert!(
-            result.is_err(),
-            "non-curve tx public key must be rejected"
-        );
+        assert!(result.is_err(), "non-curve tx public key must be rejected");
     }
 }

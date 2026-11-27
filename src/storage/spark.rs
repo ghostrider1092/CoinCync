@@ -71,6 +71,12 @@
 //!   nothing panics or corrupts. THREAT: a deadlock edge that would hang block
 //!   processing under RPC read load. TESTS: `stress_concurrent_read_write_load`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -364,7 +370,10 @@ impl SparkStore {
                          Consensus storage is unavailable. Halting.",
                         coin_id
                     );
-                    panic!("R-61: spark_coins write failed at coin_id {}: {}", coin_id, e);
+                    panic!(
+                        "R-61: spark_coins write failed at coin_id {}: {}",
+                        coin_id, e
+                    );
                 }
                 true
             }
@@ -379,7 +388,10 @@ impl SparkStore {
                          Consensus storage is unavailable. Halting.",
                         height
                     );
-                    panic!("R-61: spark_serials write failed at height {}: {}", height, e);
+                    panic!(
+                        "R-61: spark_serials write failed at height {}: {}",
+                        height, e
+                    );
                 }
                 true
             }
@@ -660,7 +672,7 @@ impl SparkStore {
         let mut out = Vec::with_capacity(indices.len());
         for &idx in indices {
             let entry = coins
-                .get(idx as usize)
+                .get(usize::try_from(idx).unwrap_or(usize::MAX))
                 .ok_or(Error::SparkVerifyFailed)?;
             if entry.coin_id != idx {
                 return Err(Error::SparkVerifyFailed);
@@ -703,6 +715,11 @@ impl Default for SparkStore {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     fn coin(coin_id: u64, height: u64, commitment_byte: u8) -> SparkCoinEntry {
@@ -740,7 +757,11 @@ mod tests {
         };
         // Reopen WITHOUT the chain having flushed the staged ops: disk is empty.
         let reopened = SparkStore::open_with_db(&db).unwrap();
-        assert_eq!(reopened.coins.read().len(), 0, "staged coins were not persisted");
+        assert_eq!(
+            reopened.coins.read().len(),
+            0,
+            "staged coins were not persisted"
+        );
         assert!(
             !reopened.is_serial_spent(&[0x55; 32]),
             "staged serial not persisted"
@@ -758,8 +779,20 @@ mod tests {
             .count();
         assert_eq!((ops.len(), coins, serials), (3, 2, 1));
         let writes = SparkStore::staged_ops_to_writes(&ops);
-        assert_eq!(writes.iter().filter(|(t, _, v)| *t == 0 && v.is_some()).count(), 2);
-        assert_eq!(writes.iter().filter(|(t, _, v)| *t == 1 && v.is_some()).count(), 1);
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|(t, _, v)| *t == 0 && v.is_some())
+                .count(),
+            2
+        );
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|(t, _, v)| *t == 1 && v.is_some())
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -779,7 +812,11 @@ mod tests {
             );
         }
         let reopened = SparkStore::open_with_db(&db).unwrap();
-        assert_eq!(reopened.coins.read().len(), 1, "immediate-mode coin persisted");
+        assert_eq!(
+            reopened.coins.read().len(),
+            1,
+            "immediate-mode coin persisted"
+        );
         assert!(
             reopened.is_serial_spent(&[0x55; 32]),
             "immediate-mode serial persisted"
@@ -845,7 +882,10 @@ mod tests {
             let empty_root = store.current_root();
             apply_block(&store, 1, &[coin(0, 1, 0xA1)], &[[0x11; 32]]);
             apply_block(&store, 2, &[coin(1, 2, 0xB1)], &[[0x22; 32]]);
-            assert!(store.size() > 0 && store.checkpoint_count() > 0, "non-empty before clear");
+            assert!(
+                store.size() > 0 && store.checkpoint_count() > 0,
+                "non-empty before clear"
+            );
             store.clear().unwrap();
             assert_eq!(store.size(), 0, "in-memory coins wiped");
             assert_eq!(store.checkpoint_count(), 0, "checkpoint stack wiped");
@@ -856,7 +896,10 @@ mod tests {
         // Persisted coins + serials cleared too: a reopen sees nothing.
         let reopened = SparkStore::open_with_db(&db).unwrap();
         assert_eq!(reopened.size(), 0, "persisted coins cleared across reopen");
-        assert!(!reopened.is_serial_spent(&[0x22; 32]), "persisted serials cleared");
+        assert!(
+            !reopened.is_serial_spent(&[0x22; 32]),
+            "persisted serials cleared"
+        );
         assert_eq!(reopened.current_root(), empty_root);
     }
 

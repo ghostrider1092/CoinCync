@@ -124,8 +124,7 @@ pub(super) fn input_key_image_outpoint(prepared: &PreparedInput) -> Result<Vec<u
     let ki = SoftwareSigner.key_image(&OneTimeKeyRef::from_secret(
         prepared.input.one_time_secret.clone(),
     ))?;
-    borsh::to_vec(&ki)
-        .map_err(|e| Error::SerializationError(format!("key image outpoint: {e}")))
+    borsh::to_vec(&ki).map_err(|e| Error::SerializationError(format!("key image outpoint: {e}")))
 }
 
 /// Phase 1: select transparent UTXOs funding `amount + fee`, derive their key
@@ -171,8 +170,18 @@ pub fn prepare_shield_in<R: RngCore + CryptoRng>(
     };
     let mut required = amount.saturating_add(fee_for(1));
     let (selected, fee, input_sum) = loop {
-        ensure_spendable(balance, current_height, min_age, Amount::from_atomic(required))?;
-        let selected = select_utxos(&utxos, Amount::from_atomic(required), CoinSelection::OldestFirst, rng)?;
+        ensure_spendable(
+            balance,
+            current_height,
+            min_age,
+            Amount::from_atomic(required),
+        )?;
+        let selected = select_utxos(
+            &utxos,
+            Amount::from_atomic(required),
+            CoinSelection::OldestFirst,
+            rng,
+        )?;
         let fee = fee_for(selected.len());
         let input_sum: u64 = selected
             .iter()
@@ -244,7 +253,13 @@ pub fn build_shield_in_transaction<R: RngCore + CryptoRng>(
     // range proof + balance have something to bind, exactly like the transparent
     // UniformStandard path).
     let final_fee = if change_amount >= MIN_OUTPUT_AMOUNT {
-        builder.add_change(&spend_public, &view_public, Amount::from_atomic(change_amount), 0, rng)?;
+        builder.add_change(
+            &spend_public,
+            &view_public,
+            Amount::from_atomic(change_amount),
+            0,
+            rng,
+        )?;
         fee
     } else {
         builder.add_dummy_output(rng)?;

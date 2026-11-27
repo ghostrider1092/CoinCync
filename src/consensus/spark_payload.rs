@@ -13,6 +13,17 @@
 //! whatever `SparkBackend` the caller passes (the fail-closed `StubBackend`
 //! without `libspark-ffi`, the real libspark backend with it).
 
+// Cast-lint discipline: length prefixes hashed into preimages stay
+// `len() as u64` (usize->u64, platform-lossless and byte-exact — clippy does
+// not lint them); the `vout as u32` that feeds the outpoint preimage is a
+// bounded, documented-exact truncation; pool-index lookups use `try_from`.
+// Deny the lossy casts so new ones can't slip in; the test module opts out.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use spark_connector::{CoinBytes, Nullifier, SparkBackend, SpendBytes};
 
@@ -243,12 +254,18 @@ pub fn apply_spark_payload(
     for tag in tags {
         if !store.mark_tag_spent(tag, height) {
             return Err(Error::CryptoError(
-                "spark v2 apply: linking tag already spent (validation should have rejected)".into(),
+                "spark v2 apply: linking tag already spent (validation should have rejected)"
+                    .into(),
             ));
         }
     }
     // Then mints: each coin keyed by its deterministic outpoint.
     for (vout, coin) in payload.outputs.iter().enumerate() {
+        // `vout` is the output index within this tx (≤ outputs.len(), itself
+        // far below u32::MAX) and feeds the outpoint PREIMAGE via
+        // derive_outpoint — the width must stay exact (clamp-vs-wrap would
+        // change the derived outpoint), so keep the cast, don't try_from.
+        #[allow(clippy::cast_possible_truncation)]
         let outpoint = derive_outpoint(input_outpoints, vout as u32);
         if store
             .add_coin(
@@ -388,8 +405,8 @@ pub fn verify_mint_shield_in(mint_bundle: &[u8], value_balance: i64) -> Result<(
     }
     let (total, _coins) = spark_connector::ffi::verify_mint_bundle(mint_bundle)
         .ok_or_else(|| Error::CryptoError("mint bundle failed value-proof verification".into()))?;
-    let shield_in = (value_balance as i128).unsigned_abs();
-    if (total as u128) != shield_in {
+    let shield_in = i128::from(value_balance).unsigned_abs();
+    if u128::from(total) != shield_in {
         return Err(Error::CryptoError(format!(
             "mint total {total} != shield-in amount {shield_in} (value_balance {value_balance})"
         )));
@@ -516,7 +533,7 @@ pub mod build {
     ) -> Option<SparkPayload> {
         let cover = store.cover_set_at(cover_set_id, anchor_height);
         let ctx = store.context_for(owned_outpoint)?;
-        let idx = store.index_of(owned_outpoint)? as usize;
+        let idx = usize::try_from(store.index_of(owned_outpoint)?).unwrap_or(usize::MAX);
         if idx >= cover.len() {
             return None; // owned coin not inside the anchored cover set
         }
@@ -540,6 +557,14 @@ pub mod build {
 
 #[cfg(test)]
 mod tests {
+    // Proptests cast perturbation/seed values (i128/usize) freely to build
+    // balance-check fixtures; not consensus data, so opt out of the file-level
+    // cast denies.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     /// Shielded-engine FUZZ coverage (closes the "shielded-specific fuzz coverage
@@ -692,13 +717,10 @@ mod tests {
         )
         .is_err());
         // Identity pseudo-output is rejected (balance-collapse guard).
-        assert!(verify_transparent_shielded_balance(
-            &[[0u8; 32]],
-            &[commit_bytes(50, r)],
-            0,
-            -100,
-        )
-        .is_err());
+        assert!(
+            verify_transparent_shielded_balance(&[[0u8; 32]], &[commit_bytes(50, r)], 0, -100,)
+                .is_err()
+        );
     }
 
     #[test]
@@ -732,7 +754,11 @@ mod tests {
         let o1 = derive_outpoint(&[a.clone(), b.clone()], 0);
         let o2 = derive_outpoint(&[b.clone(), a.clone()], 0); // reversed order
         assert_eq!(o1, o2, "input order must not change the outpoint");
-        assert_ne!(o1, derive_outpoint(&[a.clone(), b.clone()], 1), "vout distinguishes");
+        assert_ne!(
+            o1,
+            derive_outpoint(&[a.clone(), b.clone()], 1),
+            "vout distinguishes"
+        );
         assert_eq!(o1.len(), 32);
     }
 
@@ -795,9 +821,7 @@ mod tests {
         };
         match verify_spark_payload(&store, &StubBackend, &p, 0) {
             Err(Error::SparkVerifyFailed) => {} // guard fired before the backend ✓
-            other => panic!(
-                "expected SparkVerifyFailed from the empty-cover guard, got {other:?}"
-            ),
+            other => panic!("expected SparkVerifyFailed from the empty-cover guard, got {other:?}"),
         }
     }
 
@@ -818,7 +842,10 @@ mod tests {
         let tags = vec![Nullifier(vec![0x55u8; 34])];
         apply_spark_payload(&store, &payload, &inputs, &ctxs, &tags, 10).unwrap();
         assert_eq!(store.coin_count(), 2, "both mints added");
-        assert!(store.is_tag_spent(&Nullifier(vec![0x55u8; 34])), "tag marked spent");
+        assert!(
+            store.is_tag_spent(&Nullifier(vec![0x55u8; 34])),
+            "tag marked spent"
+        );
 
         // Re-applying the same tag → double-spend error.
         let empty = SparkPayload {
@@ -844,7 +871,7 @@ mod tests {
         let store = SparkPoolStore::new();
         let seed = b"v2-payload-seed";
         let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
-        // Seed the pool with N coins at height 1 (each keyed by a synthetic outpoint).
+                        // Seed the pool with N coins at height 1 (each keyed by a synthetic outpoint).
         for i in 0..n {
             let outpoint = format!("v2:seed:{i}").into_bytes();
             let ctx = serial_context(&outpoint).unwrap();
@@ -904,7 +931,9 @@ mod tests {
         let (_total, coins) = spark_connector::ffi::verify_mint_bundle(mint).unwrap();
         for (i, coin) in coins.iter().enumerate() {
             let op = derive_outpoint(&inputs, i as u32);
-            store.add_coin(op, coin.clone(), contexts[0].clone(), 1).unwrap();
+            store
+                .add_coin(op, coin.clone(), contexts[0].clone(), 1)
+                .unwrap();
         }
         let owned_op = derive_outpoint(&inputs, 2);
         let spend = build_spend_payload(seed, &store, &owned_op, 3_000, 0, 1).unwrap();
@@ -965,13 +994,18 @@ mod tests {
         // `outputs`), fed with the shared tx-level serial context — exactly as
         // the chain's apply hook does (the FFI extraction lives at the edge;
         // `apply_spark_payload` stays pure). `contexts` holds that shared ctx.
-        let mint = mint_payload.mint.as_ref().expect("authenticated mint bundle");
+        let mint = mint_payload
+            .mint
+            .as_ref()
+            .expect("authenticated mint bundle");
         let (_total, coins) =
             spark_connector::ffi::verify_mint_bundle(mint).expect("verify mint bundle");
         let shared_ctx = contexts[0].clone();
         for (i, coin) in coins.iter().enumerate() {
             let op = derive_outpoint(&mint_inputs, i as u32);
-            assert!(store.add_coin(op, coin.clone(), shared_ctx.clone(), 1).is_some());
+            assert!(store
+                .add_coin(op, coin.clone(), shared_ctx.clone(), 1)
+                .is_some());
         }
         assert_eq!(store.coin_count(), n);
 

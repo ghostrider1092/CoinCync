@@ -18,7 +18,8 @@ fn simkit_wires_up_and_invariants_hold_on_genesis() {
     let sim = Sim::new(3)
         .with_invariant("supply_conservation", invariants::supply_conservation)
         .with_invariant("work_positive", invariants::work_positive);
-    sim.check_invariants().expect("genesis invariants must hold");
+    sim.check_invariants()
+        .expect("genesis invariants must hold");
     sim.assert_converged();
     assert_eq!(sim.first_divergence(0, 1), None, "genesis nodes must agree");
     assert_eq!(sim.height(0), 0);
@@ -43,7 +44,10 @@ fn simkit_partition_heals_to_the_heavier_chain() {
     for _ in 0..3 {
         sim.mine_on(1);
     }
-    assert!(sim.first_divergence(0, 1).is_some(), "partition must diverge");
+    assert!(
+        sim.first_divergence(0, 1).is_some(),
+        "partition must diverge"
+    );
     assert!(sim.work(1) > sim.work(0), "node 1's fork must be heavier");
 
     sim.heal();

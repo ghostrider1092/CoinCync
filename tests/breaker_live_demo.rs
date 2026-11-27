@@ -120,19 +120,26 @@ fn breaker_live_demo() {
     let extra = sr::embed_in_extra(Vec::new(), &real_root);
     let recovered = sr::extract_from_extra(&extra);
     let good = sr::check(
-        sr::StateRootPolicy::Enforce { activation_height: height },
+        sr::StateRootPolicy::Enforce {
+            activation_height: height,
+        },
         height,
         recovered,
         real_root,
     );
     let tampered = sr::check(
-        sr::StateRootPolicy::Enforce { activation_height: height },
+        sr::StateRootPolicy::Enforce {
+            activation_height: height,
+        },
         height,
         recovered,
         Hash::from_bytes([0xEE; 32]),
     );
     let root_hex = real_root.to_hex();
-    println!("  real UTXO commitment @tip: {}…", &root_hex[..root_hex.len().min(24)]);
+    println!(
+        "  real UTXO commitment @tip: {}…",
+        &root_hex[..root_hex.len().min(24)]
+    );
     println!("  committed root enforced   -> {good:?}");
     println!("  tampered root enforced    -> {tampered:?}");
     assert_eq!(good, sr::StateRootCheck::Match);

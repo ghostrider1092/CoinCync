@@ -14,6 +14,14 @@
 //! 8. Reorg handling
 //! 9. Amount overflow / underflow + structural validation
 
+// Test-only numeric casts: fixed-pattern bytes, loop indices, and
+// test-ledger arithmetic. Not consensus-output; intentional for fixtures.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::constants::*;
 use coincync::primitives::{Amount, Hash, KeyImage, PublicKey};
 use coincync::transaction::validate_transaction;

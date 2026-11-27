@@ -350,8 +350,8 @@ fn test_regression_subaddress_scanner_detection() {
     let view_sk = SecretKey::from_bytes(view_secret.to_bytes());
 
     // Generate a subaddress
-    let subaddr =
-        Subaddress::generate(&spend_pk, &view_sk, 0, 0).expect("subaddress generation must succeed");
+    let subaddr = Subaddress::generate(&spend_pk, &view_sk, 0, 0)
+        .expect("subaddress generation must succeed");
 
     // Create a stealth address targeting the SUBADDRESS (not the primary address)
     let output_idx = 0u8;

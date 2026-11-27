@@ -234,7 +234,10 @@ mod tests {
         b.record_failure(); // 2 → open
         assert!(b.is_open());
         b.record_success();
-        assert!(b.is_open(), "a tripped breaker only closes on explicit reset");
+        assert!(
+            b.is_open(),
+            "a tripped breaker only closes on explicit reset"
+        );
     }
 
     #[test]

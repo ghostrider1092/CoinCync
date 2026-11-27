@@ -34,6 +34,12 @@
 //!   TESTS: `small_excess_flows_to_fee`, `excess_equal_to_send_is_allowed_boundary`,
 //!   `large_excess_is_rejected_not_silently_burned`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use super::super::decoy_selection::AllocatedRings;
 use super::inputs::add_prepared_inputs;
 use super::types::{PreparedPrivacyTransaction, TransferShape};
@@ -43,6 +49,10 @@ use crate::primitives::Amount;
 use crate::transaction::{Recipient, Transaction, TransactionBuilder};
 use rand::{CryptoRng, Rng, RngCore};
 
+// The `index as u8` / `payments.len() as u8` casts below are output-slot
+// indices, bounded by MAX_TX_OUTPUTS (<= 16): they fit u8 exactly and feed
+// one-time-address derivation, so they stay byte-exact.
+#[allow(clippy::cast_possible_truncation)]
 pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
     prepared: PreparedPrivacyTransaction,
     rings: AllocatedRings,
@@ -62,8 +72,7 @@ pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
         payment_id,
     } = prepared;
 
-    let mut builder =
-        TransactionBuilder::transfer().with_target_height(context.target_height());
+    let mut builder = TransactionBuilder::transfer().with_target_height(context.target_height());
     if let Some(memo) = memo.as_deref() {
         builder = builder.with_memo(memo);
     }
@@ -145,11 +154,7 @@ pub fn build_prepared_privacy_transaction<R: RngCore + CryptoRng>(
 /// more to fee than we pay the recipient is never intended, and silently
 /// destroying that value would be a fund-loss footgun. The error is actionable
 /// (consolidate, or use a standard send). Small excesses still flow to fee.
-fn drip_pair_final_fee(
-    estimated_fee: u64,
-    change_amount: u64,
-    total_send: u64,
-) -> Result<Amount> {
+fn drip_pair_final_fee(estimated_fee: u64, change_amount: u64, total_send: u64) -> Result<Amount> {
     if change_amount > total_send {
         return Err(crate::error::Error::InvalidTransaction(format!(
             "drip-pair (--split-output) would burn {} atomic to fee — more than the {} atomic \
@@ -157,7 +162,9 @@ fn drip_pair_final_fee(
             change_amount, total_send
         )));
     }
-    Ok(Amount::from_atomic(estimated_fee.saturating_add(change_amount)))
+    Ok(Amount::from_atomic(
+        estimated_fee.saturating_add(change_amount),
+    ))
 }
 
 #[cfg(test)]
@@ -170,7 +177,11 @@ mod drip_guard_tests {
         // Excess (change) below the amount sent is the intended behaviour:
         // it folds into the fee and the tx is built.
         let fee = drip_pair_final_fee(1_000, 500, 1_000_000).expect("small excess ok");
-        assert_eq!(fee.as_atomic(), 1_500, "fee = estimated_fee + folded excess");
+        assert_eq!(
+            fee.as_atomic(),
+            1_500,
+            "fee = estimated_fee + folded excess"
+        );
     }
 
     #[test]

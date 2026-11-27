@@ -68,6 +68,12 @@
 //!   silent liveness gap.
 //!   TESTS: `test_dht_state`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::config::NetworkTierConfig;
 use crate::network::peer::PeerId;
 use crate::primitives::{hash_domain, KeyImage};
@@ -128,7 +134,7 @@ impl DhtState {
             "DHT initialized: stripe {}/{} (node stores ~{:.1}% of key images)",
             our_stripe,
             stripe_count,
-            100.0 / stripe_count as f64
+            100.0 / f64::from(stripe_count)
         );
 
         DhtState {
@@ -176,15 +182,22 @@ impl DhtState {
             .peers_by_stripe
             .iter()
             .filter(|peers| !peers.is_empty())
-            .count() as u32;
+            .count();
         let total_peers: usize = self.peers_by_stripe.iter().map(|peers| peers.len()).sum();
+        let stripes_covered = u32::try_from(covered).unwrap_or(u32::MAX);
+        // coverage_pct is a percentage in [0, 100]: finite and non-negative
+        // (stripe_count >= 1 by construction), so truncating the f64 to a whole
+        // percent is intentional, always in range, and never loses a sign.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let coverage_pct =
+            (f64::from(stripes_covered) / f64::from(self.stripe_count) * 100.0) as u32;
 
         DhtCoverageStats {
             our_stripe: self.our_stripe,
             stripe_count: self.stripe_count,
-            stripes_covered: covered,
+            stripes_covered,
             total_peers,
-            coverage_pct: (covered as f64 / self.stripe_count as f64 * 100.0) as u32,
+            coverage_pct,
         }
     }
 }

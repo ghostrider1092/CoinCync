@@ -98,7 +98,11 @@ mod tests {
     fn rs(owner: u8, nonce: u64, b0: u8) -> ResolvedShare {
         let mut b = [0u8; 32];
         b[0] = b0;
-        ResolvedShare::new(PublicKey::from_bytes([owner; 32]), nonce, Hash::from_bytes(b))
+        ResolvedShare::new(
+            PublicKey::from_bytes([owner; 32]),
+            nonce,
+            Hash::from_bytes(b),
+        )
     }
     fn target(b0: u8) -> Hash {
         let mut b = [0u8; 32];
@@ -149,7 +153,10 @@ mod tests {
         let block = vec![rs(2, 0, 0x10), rs(3, 0, 0x20)];
         let d = view_divergence(&pool, &block, 2);
         assert!(!d.agrees);
-        assert_eq!(d.omitted_lower, 1, "0x05 is a lower share the block dropped");
+        assert_eq!(
+            d.omitted_lower, 1,
+            "0x05 is a lower share the block dropped"
+        );
         assert_eq!(d.unseen_in_pool, 0, "the node had both block shares");
     }
 

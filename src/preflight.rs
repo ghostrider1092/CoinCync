@@ -55,7 +55,11 @@ pub fn check_compiled_network(runtime: NetworkType) -> Result<()> {
 /// compiled feature. `compiled_testnet` is what [`compiled_network_is_testnet`]
 /// would return.
 fn classify(compiled_testnet: bool, runtime: NetworkType) -> Result<()> {
-    let compiled_label = if compiled_testnet { "testnet" } else { "mainnet" };
+    let compiled_label = if compiled_testnet {
+        "testnet"
+    } else {
+        "mainnet"
+    };
     match runtime {
         NetworkType::Mainnet if compiled_testnet => Err(Error::ConfigError(format!(
             "network mismatch: this binary was built with `--features testnet` (a {compiled} \

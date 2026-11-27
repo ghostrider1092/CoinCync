@@ -11,6 +11,15 @@
 //! This module is the format + verification core (no I/O). The `release-attest`
 //! binary wraps it for hashing artifacts, signing, and verifying.
 
+// Cast hygiene (modernization Tier-1c): this module is clean of unjustified
+// numeric casts. The signing-preimage length prefixes carry an inline `#[allow]`
+// with a signature warning; any NEW cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -50,6 +59,11 @@ impl ReleaseManifest {
     /// Canonical bytes maintainers sign. Length-prefixed + domain-tagged so it
     /// is deterministic and unambiguous (no field-boundary collisions), and
     /// order-independent because `new` sorts the artifacts.
+    // Each `.len() as u32` below is a length prefix in the SIGNED release-manifest
+    // preimage; the cast is intentional and truncation cannot occur for real
+    // metadata (lengths far below u32::MAX). Do NOT change it — the signed bytes
+    // must stay byte-for-byte identical, or existing signatures fail to verify.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn signing_bytes(&self) -> [u8; 32] {
         let mut h = Sha256::new();
         h.update(RELEASE_MANIFEST_DOMAIN);
@@ -149,8 +163,16 @@ mod tests {
             "2.0.0".into(),
             "cfb979a1".into(),
             vec![
-                ArtifactHash { name: "coincync-node".into(), sha256: sha256_hex(b"node-bytes"), size: 10 },
-                ArtifactHash { name: "coincync-wallet".into(), sha256: sha256_hex(b"wallet-bytes"), size: 12 },
+                ArtifactHash {
+                    name: "coincync-node".into(),
+                    sha256: sha256_hex(b"node-bytes"),
+                    size: 10,
+                },
+                ArtifactHash {
+                    name: "coincync-wallet".into(),
+                    sha256: sha256_hex(b"wallet-bytes"),
+                    size: 12,
+                },
             ],
         )
     }
@@ -161,19 +183,39 @@ mod tests {
             "1".into(),
             "c".into(),
             vec![
-                ArtifactHash { name: "b".into(), sha256: "x".into(), size: 1 },
-                ArtifactHash { name: "a".into(), sha256: "y".into(), size: 2 },
+                ArtifactHash {
+                    name: "b".into(),
+                    sha256: "x".into(),
+                    size: 1,
+                },
+                ArtifactHash {
+                    name: "a".into(),
+                    sha256: "y".into(),
+                    size: 2,
+                },
             ],
         );
         let b = ReleaseManifest::new(
             "1".into(),
             "c".into(),
             vec![
-                ArtifactHash { name: "a".into(), sha256: "y".into(), size: 2 },
-                ArtifactHash { name: "b".into(), sha256: "x".into(), size: 1 },
+                ArtifactHash {
+                    name: "a".into(),
+                    sha256: "y".into(),
+                    size: 2,
+                },
+                ArtifactHash {
+                    name: "b".into(),
+                    sha256: "x".into(),
+                    size: 1,
+                },
             ],
         );
-        assert_eq!(a.signing_bytes(), b.signing_bytes(), "artifact order must not affect the preimage");
+        assert_eq!(
+            a.signing_bytes(),
+            b.signing_bytes(),
+            "artifact order must not affect the preimage"
+        );
         assert_eq!(a.signing_bytes(), a.signing_bytes());
     }
 
@@ -190,7 +232,10 @@ mod tests {
         assert!(verify_signatures(&m, &sigs1, &maintainers, 2).is_err());
 
         // Two distinct maintainers: meets 2-of-3.
-        let sigs2 = vec![(k1.verifying_key(), m.sign(&k1)), (k2.verifying_key(), m.sign(&k2))];
+        let sigs2 = vec![
+            (k1.verifying_key(), m.sign(&k1)),
+            (k2.verifying_key(), m.sign(&k2)),
+        ];
         assert_eq!(verify_signatures(&m, &sigs2, &maintainers, 2).unwrap(), 2);
     }
 
@@ -221,7 +266,9 @@ mod tests {
         // Same signature against a manifest with a changed version must fail.
         let mut tampered = m.clone();
         tampered.version = "2.0.1".into();
-        assert!(verify_signatures(&tampered, &[(k1.verifying_key(), sig)], &maintainers, 1).is_err());
+        assert!(
+            verify_signatures(&tampered, &[(k1.verifying_key(), sig)], &maintainers, 1).is_err()
+        );
     }
 
     #[test]

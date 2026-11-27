@@ -76,11 +76,19 @@
 //!   `load_from_file_accepts_empty_array`,
 //!   `load_from_file_rejects_too_many_entries`.
 
+// Cast hygiene (modernization Tier-1c): clean of unjustified numeric casts.
+// Any new cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::time::Duration;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use tokio::time::timeout;
 use tracing::{info, warn};
 
@@ -367,7 +375,7 @@ impl PeerAddress {
     pub fn new(addr: SocketAddr) -> Self {
         PeerAddress {
             addr,
-            last_seen: chrono::Utc::now().timestamp() as u64,
+            last_seen: u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0),
             services: 0,
         }
     }
@@ -479,11 +487,11 @@ impl AddressManager {
         match addr.ip() {
             std::net::IpAddr::V4(v4) => {
                 let o = v4.octets();
-                ((o[0] as u64) << 8) | (o[1] as u64)
+                (u64::from(o[0]) << 8) | u64::from(o[1])
             }
             std::net::IpAddr::V6(v6) => {
                 let s = v6.segments();
-                0x1_0000_0000 | ((s[0] as u64) << 16) | (s[1] as u64)
+                0x1_0000_0000 | (u64::from(s[0]) << 16) | u64::from(s[1])
             }
         }
     }
@@ -620,16 +628,13 @@ impl AddressManager {
     pub fn select_feeler_candidate(&mut self) -> Option<SocketAddr> {
         self.addresses
             .sort_by_key(|a| std::cmp::Reverse(a.last_seen));
-        self.addresses
-            .iter()
-            .map(|a| a.addr)
-            .find(|addr| {
-                !self.good.contains(addr)
-                    && !self.tried.contains(addr)
-                    && !self.self_addresses.contains(addr)
-                    && !self.manual.contains(addr)
-                    && !self.anchors.contains(addr)
-            })
+        self.addresses.iter().map(|a| a.addr).find(|addr| {
+            !self.good.contains(addr)
+                && !self.tried.contains(addr)
+                && !self.self_addresses.contains(addr)
+                && !self.manual.contains(addr)
+                && !self.anchors.contains(addr)
+        })
     }
 
     /// Number of proven-good ("tried"-table) addresses. Observability/tests.
@@ -769,7 +774,7 @@ impl AddressManager {
 
         // Update last_seen
         if let Some(peer) = self.addresses.iter_mut().find(|a| a.addr == addr) {
-            peer.last_seen = chrono::Utc::now().timestamp() as u64;
+            peer.last_seen = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
         }
     }
 
@@ -932,6 +937,13 @@ pub async fn setup_upnp(internal_port: u16, external_port: u16) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // Test-only casts (bounded fixtures / indices) are low-risk; the module deny
+    // still enforces production code.
+    #![allow(
+        clippy::cast_lossless,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     use super::*;
 
     #[test]
@@ -1015,7 +1027,9 @@ mod tests {
         let diverse = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 18080);
         am.add(PeerAddress::new(diverse));
         assert!(
-            am.get_for_exchange(10_000).iter().any(|a| a.addr == diverse),
+            am.get_for_exchange(10_000)
+                .iter()
+                .any(|a| a.addr == diverse),
             "an address from an unsaturated netgroup must still be admitted"
         );
     }
@@ -1024,7 +1038,7 @@ mod tests {
     fn manual_peers_bypass_netgroup_quota() {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         let mut am = AddressManager::new(1000); // quota 125 per /16
-        // Saturate 10.20/16 with discovered addresses.
+                                                // Saturate 10.20/16 with discovered addresses.
         for i in 0..300u32 {
             let ip = Ipv4Addr::new(10, 20, (i / 256) as u8, (i % 256) as u8);
             am.add(PeerAddress::new(SocketAddr::new(IpAddr::V4(ip), 18080)));
@@ -1061,8 +1075,14 @@ mod tests {
         am.add_manual(manual);
 
         let gossiped: Vec<SocketAddr> = am.get_for_gossip(100).iter().map(|e| e.addr).collect();
-        assert!(gossiped.contains(&good), "verified-good address must be gossiped");
-        assert!(gossiped.contains(&manual), "operator manual address must be gossiped");
+        assert!(
+            gossiped.contains(&good),
+            "verified-good address must be gossiped"
+        );
+        assert!(
+            gossiped.contains(&manual),
+            "operator manual address must be gossiped"
+        );
         assert!(
             !gossiped.contains(&untried),
             "#303: an untried/unverified address must NOT be gossiped (no IP leak)"
@@ -1071,7 +1091,9 @@ mod tests {
         // It stays in the raw book so the dialer can still try it — only the
         // WIRE announcement is withheld until it becomes good.
         assert!(
-            am.get_for_exchange(10_000).iter().any(|e| e.addr == untried),
+            am.get_for_exchange(10_000)
+                .iter()
+                .any(|e| e.addr == untried),
             "untried address remains in the book for dialing"
         );
     }
@@ -1088,7 +1110,12 @@ mod tests {
         assert!(!m.dns_seeds.is_empty(), "mainnet must have DNS seeds");
         // Decommissioned Vultr IPs must never ship as mainnet seeds, and every
         // hardcoded seed must be on the mainnet port.
-        let dead = ["66.135.23.193", "140.82.57.168", "207.148.111.76", "45.32.251.6"];
+        let dead = [
+            "66.135.23.193",
+            "140.82.57.168",
+            "207.148.111.76",
+            "45.32.251.6",
+        ];
         for s in &m.seed_nodes {
             assert!(
                 !dead.contains(&s.ip().to_string().as_str()),
@@ -1193,7 +1220,11 @@ mod tests {
         for _ in 0..FAILURE_PURGE_THRESHOLD {
             mgr.mark_tried(discovered);
         }
-        assert_eq!(mgr.len(), 0, "discovered peer should be purged at threshold");
+        assert_eq!(
+            mgr.len(),
+            0,
+            "discovered peer should be purged at threshold"
+        );
     }
 
     #[test]
@@ -1640,7 +1671,10 @@ mod tests {
         mgr.mark_tried(second);
         // 3) discovered book last.
         let third = mgr.get_next().unwrap();
-        assert_eq!(third, book, "discovered book dialed only after manual + anchors");
+        assert_eq!(
+            third, book,
+            "discovered book dialed only after manual + anchors"
+        );
     }
 
     /// At capacity, `add` evicts the OLDEST entry by `last_seen` to seat a
@@ -1696,7 +1730,10 @@ mod tests {
         mgr.add_manual(manual);
 
         let first = mgr.get_next().unwrap();
-        assert_eq!(first, manual, "manual peer must not be starved by a large book");
+        assert_eq!(
+            first, manual,
+            "manual peer must not be starved by a large book"
+        );
         mgr.mark_tried(first);
         let second = mgr.get_next().unwrap();
         assert_eq!(second, anchor, "anchor must not be starved by a large book");

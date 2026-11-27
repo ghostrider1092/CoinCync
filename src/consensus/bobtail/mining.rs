@@ -59,7 +59,9 @@ mod tests {
         // Budget 0x20 nonces from 0 → nonces 0x00..=0x10 clear (≤ 0x10), 0x11.. fail.
         let shares = collect_shares(&hb(0xAA), pk, 0, 0x20, &tau, mock);
         assert_eq!(shares.len(), 0x11, "nonces 0x00..=0x10 are below tau");
-        assert!(shares.iter().all(|s| mock(s, &hb(0xAA)).meets_difficulty(&tau)));
+        assert!(shares
+            .iter()
+            .all(|s| mock(s, &hb(0xAA)).meets_difficulty(&tau)));
         assert!(shares.iter().all(|s| s.miner_pubkey == pk));
     }
 

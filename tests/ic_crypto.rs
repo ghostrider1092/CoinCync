@@ -1,5 +1,13 @@
 //! IC-084 through IC-102: Cryptographic Layer Integration Tests
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::crypto::{
     compute_one_time_secret, generate_stealth_address_checked, is_output_ours, scan_outputs,
     ViewKey, ViewKeyScope,

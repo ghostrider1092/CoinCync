@@ -137,7 +137,11 @@ pub(super) async fn handle_get_filters(
     // Request contains (start_height: u64, end_height: u64).
     if payload.len() < 16 {
         // Malformed (too short) — score it like every sibling handler does.
-        warn!("GetFilters: short payload ({} bytes) from peer {:?}", payload.len(), &peer_id[..4]);
+        warn!(
+            "GetFilters: short payload ({} bytes) from peer {:?}",
+            payload.len(),
+            &peer_id[..4]
+        );
         score_query_violation(peers, scorer, &peer_id).await;
         return Ok(());
     }
@@ -508,7 +512,10 @@ mod handler_tests {
             .await
             .unwrap();
 
-        assert!(srx.try_recv().is_err(), "oversized KI query dropped, no response");
+        assert!(
+            srx.try_recv().is_err(),
+            "oversized KI query dropped, no response"
+        );
     }
 
     // multi-thread: the handler uses tokio::task::block_in_place for the DB read.
@@ -553,6 +560,9 @@ mod query_scoring_tests {
             .get(&addr)
             .map(|s| s.reputation)
             .expect("peer was scored");
-        assert!(after < before, "a malformed light-query must cost the peer reputation");
+        assert!(
+            after < before,
+            "a malformed light-query must cost the peer reputation"
+        );
     }
 }

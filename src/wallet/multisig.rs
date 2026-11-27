@@ -75,6 +75,12 @@
 //!   THREAT: a threshold spend that fails to verify (funds stuck) or leaks the
 //!   transiently-held group key. TESTS: `clsag_sign_multisig_produces_verifiable_signature`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use frost_ed25519 as frost;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -140,7 +146,7 @@ pub fn generate_shares(threshold: u16, total: u16) -> Result<KeyGenResult> {
     let mut key_shares = Vec::new();
     for (id, secret_share) in &shares_map {
         let id_bytes = id.serialize();
-        let participant_id = id_bytes[0] as u16;
+        let participant_id = u16::from(id_bytes[0]);
 
         // Verify share and get verifying share
         let (verifying_share, _group_key) = secret_share
@@ -471,7 +477,7 @@ pub fn reconstruct_group_secret(shares: &[KeyShare]) -> Result<crate::crypto::Se
     let mut signing_scalars: Vec<Scalar> = Vec::new();
 
     for share in active {
-        let id_scalar = Scalar::from(share.participant_id as u64);
+        let id_scalar = Scalar::from(u64::from(share.participant_id));
         ids.push(id_scalar);
 
         // Deserialize the signing share scalar.
@@ -684,7 +690,9 @@ mod tests {
     /// total — a `t-of-n` scheme is nonsensical when `t > n`.
     #[test]
     fn generate_shares_rejects_threshold_greater_than_total() {
-        let err = generate_shares(3, 2).err().expect("threshold>total must be rejected");
+        let err = generate_shares(3, 2)
+            .err()
+            .expect("threshold>total must be rejected");
         let msg = format!("{}", err);
         assert!(
             msg.contains("total must be >= threshold"),
@@ -699,13 +707,17 @@ mod tests {
     #[test]
     fn generate_shares_rejects_threshold_below_two() {
         // threshold 0
-        let err0 = generate_shares(0, 3).err().expect("threshold 0 must be rejected");
+        let err0 = generate_shares(0, 3)
+            .err()
+            .expect("threshold 0 must be rejected");
         assert!(
             format!("{}", err0).contains("threshold must be >= 2"),
             "threshold 0 must be rejected"
         );
         // 1-of-1 boundary
-        let err1 = generate_shares(1, 1).err().expect("1-of-1 must be rejected");
+        let err1 = generate_shares(1, 1)
+            .err()
+            .expect("1-of-1 must be rejected");
         assert!(
             format!("{}", err1).contains("threshold must be >= 2"),
             "1-of-1 must be rejected"
@@ -851,8 +863,7 @@ mod tests {
         let all_commitments = vec![o1.clone(), o2.clone()];
 
         let bad = signing_round2(&keygen.shares[0], s1b, &all_commitments, message);
-        let good2 =
-            signing_round2(&keygen.shares[1], s2, &all_commitments, message).unwrap();
+        let good2 = signing_round2(&keygen.shares[1], s2, &all_commitments, message).unwrap();
 
         match bad {
             // Rejected outright at round 2 — acceptable.
@@ -947,8 +958,7 @@ mod tests {
         let real_commitment = EcCommitment::commit(value, &z_real);
         let z_pseudo = SecretScalar::random(&mut OsRng);
         let pseudo_output = EcCommitment::commit(value, &z_pseudo);
-        let blinding_diff =
-            SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
+        let blinding_diff = SecretScalar::from_scalar(z_real.as_scalar() - z_pseudo.as_scalar());
 
         let decoy1 = SecretScalar::random(&mut OsRng);
         let decoy2 = SecretScalar::random(&mut OsRng);

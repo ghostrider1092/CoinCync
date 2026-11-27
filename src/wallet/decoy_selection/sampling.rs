@@ -35,12 +35,15 @@
 //!   `covered_lookup_allocates_transaction_wide_unique_decoys`,
 //!   `gamma_sampling_is_conditioned_and_unique`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use super::error::{DecoySelectionError, DecoySelectionResult};
 use super::types::{CoveredRequest, RingPolicy, ValidatedDecoySnapshot};
-use super::{
-    COVERED_LOOKUP_SIZE, DECOY_GAMMA_MAX_RESAMPLES, DECOY_GAMMA_SCALE,
-    DECOY_GAMMA_SHAPE,
-};
+use super::{COVERED_LOOKUP_SIZE, DECOY_GAMMA_MAX_RESAMPLES, DECOY_GAMMA_SCALE, DECOY_GAMMA_SHAPE};
 use crate::decoy::{HeightOutputCount, OutputLocator};
 use rand::distributions::WeightedIndex;
 use rand::seq::SliceRandom;
@@ -101,6 +104,9 @@ pub fn sample_candidate_locators<R: Rng + ?Sized>(
             if !seconds.is_finite() {
                 return None;
             }
+            // seconds is a finite (checked above), positive gamma-sampled
+            // interval; blocks is its floor in block-time units: non-negative.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let blocks = (seconds / block_time) as u64;
             (youngest_age..=oldest_age)
                 .contains(&blocks)
@@ -113,8 +119,7 @@ pub fn sample_candidate_locators<R: Rng + ?Sized>(
             });
         };
         let target_height = spend_height - age;
-        let Some(locator) =
-            pick_nearest_locator(target_height, eligible, excluded, &selected, rng)
+        let Some(locator) = pick_nearest_locator(target_height, eligible, excluded, &selected, rng)
         else {
             return Err(DecoySelectionError::InsufficientDecoys {
                 available: result.len(),
@@ -242,13 +247,12 @@ pub fn build_covered_request<R: RngCore + CryptoRng + ?Sized>(
         }
     }
 
-    let required_slots = real_locators
-        .len()
-        .checked_mul(ring_size)
-        .ok_or(DecoySelectionError::CoveredLookupSizeOverflow {
+    let required_slots = real_locators.len().checked_mul(ring_size).ok_or(
+        DecoySelectionError::CoveredLookupSizeOverflow {
             input_count: real_locators.len(),
             ring_size,
-        })?;
+        },
+    )?;
     if required_slots > COVERED_LOOKUP_SIZE {
         return Err(DecoySelectionError::CoveredLookupCapacityExceeded {
             input_count: real_locators.len(),

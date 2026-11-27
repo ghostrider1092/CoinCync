@@ -61,8 +61,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashmap::DashMap;
 use crate::network::transport::NetStream;
+use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, info, warn};
@@ -302,7 +302,11 @@ fn cleanup_connection(
 /// and both directions, so they compute the same survivor. Equal keys (a
 /// self-connection, which the connector already prevents) never "win" either
 /// side, so the connection is dropped — the safe default.
-fn connection_wins_duplicate_tiebreak(outbound: bool, our_key: &[u8; 32], their_key: &[u8; 32]) -> bool {
+fn connection_wins_duplicate_tiebreak(
+    outbound: bool,
+    our_key: &[u8; 32],
+    their_key: &[u8; 32],
+) -> bool {
     if outbound {
         our_key > their_key
     } else {
@@ -518,9 +522,9 @@ pub(super) async fn handle_connection(
     // its own direction and drop the other's, killing both. The loser direction
     // returns Err here (and, outbound, backs off via record_connect_backoff).
     if info.encrypted {
-        let is_duplicate = peers
-            .get(&peer_id)
-            .is_some_and(|existing| !Arc::ptr_eq(&existing.connection_token, &info.connection_token));
+        let is_duplicate = peers.get(&peer_id).is_some_and(|existing| {
+            !Arc::ptr_eq(&existing.connection_token, &info.connection_token)
+        });
         if is_duplicate {
             // #245: compare like with like. `peer_id` is blake3(remote static
             // key) (see NodeIdentity::peer_id), so our side of the tie-break must
@@ -710,8 +714,14 @@ mod tests {
             let b_keeps_ab = connection_wins_duplicate_tiebreak(false, &kb, &ka);
 
             // Each node keeps exactly one of the two directions.
-            assert!(a_keeps_ab ^ a_keeps_ba, "node A must keep exactly one direction");
-            assert!(b_keeps_ab ^ b_keeps_ba, "node B must keep exactly one direction");
+            assert!(
+                a_keeps_ab ^ a_keeps_ba,
+                "node A must keep exactly one direction"
+            );
+            assert!(
+                b_keeps_ab ^ b_keeps_ba,
+                "node B must keep exactly one direction"
+            );
             // And both nodes agree on WHICH physical connection survives.
             assert_eq!(a_keeps_ab, b_keeps_ab, "both ends must keep A→B or neither");
             assert_eq!(a_keeps_ba, b_keeps_ba, "both ends must keep B→A or neither");
@@ -737,18 +747,19 @@ mod tests {
         use crate::network::noise::NodeIdentity;
 
         // Does a given (our, their) mapping make both ends agree on one survivor?
-        let converges = |a_our: &[u8; 32], a_their: &[u8; 32], b_our: &[u8; 32], b_their: &[u8; 32]| {
-            // A's view: A→B outbound, B→A inbound.
-            let a_keeps_ab = connection_wins_duplicate_tiebreak(true, a_our, a_their);
-            let a_keeps_ba = connection_wins_duplicate_tiebreak(false, a_our, a_their);
-            // B's view: B→A outbound, A→B inbound.
-            let b_keeps_ba = connection_wins_duplicate_tiebreak(true, b_our, b_their);
-            let b_keeps_ab = connection_wins_duplicate_tiebreak(false, b_our, b_their);
-            (a_keeps_ab ^ a_keeps_ba)
-                && (b_keeps_ab ^ b_keeps_ba)
-                && a_keeps_ab == b_keeps_ab
-                && a_keeps_ba == b_keeps_ba
-        };
+        let converges =
+            |a_our: &[u8; 32], a_their: &[u8; 32], b_our: &[u8; 32], b_their: &[u8; 32]| {
+                // A's view: A→B outbound, B→A inbound.
+                let a_keeps_ab = connection_wins_duplicate_tiebreak(true, a_our, a_their);
+                let a_keeps_ba = connection_wins_duplicate_tiebreak(false, a_our, a_their);
+                // B's view: B→A outbound, A→B inbound.
+                let b_keeps_ba = connection_wins_duplicate_tiebreak(true, b_our, b_their);
+                let b_keeps_ab = connection_wins_duplicate_tiebreak(false, b_our, b_their);
+                (a_keeps_ab ^ a_keeps_ba)
+                    && (b_keeps_ab ^ b_keeps_ba)
+                    && a_keeps_ab == b_keeps_ab
+                    && a_keeps_ba == b_keeps_ba
+            };
 
         // Find a pair whose raw-key ordering and hashed-id ordering disagree, so
         // the OLD mapping (raw our_key vs hashed their_key) diverges.
@@ -768,7 +779,10 @@ mod tests {
             let new_converges = converges(&a_id, &b_id, &b_id, &a_id);
 
             // The fix must ALWAYS converge (shared ordering on peer_id).
-            assert!(new_converges, "fixed mapping (peer_id both ends) must converge");
+            assert!(
+                new_converges,
+                "fixed mapping (peer_id both ends) must converge"
+            );
 
             if !old_converges {
                 found_buggy_divergence = true;

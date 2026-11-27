@@ -56,9 +56,10 @@ impl Blockchain {
 
             inner.stats.height = 0;
             inner.stats.total_blocks = 1;
-            inner.stats.total_transactions = genesis.transactions.len() as u64;
+            inner.stats.total_transactions =
+                u64::try_from(genesis.transactions.len()).unwrap_or(u64::MAX);
             inner.stats.tip_hash = hash;
-            inner.stats.total_supply = calculate_block_reward(0).as_atomic() as u128;
+            inner.stats.total_supply = u128::from(calculate_block_reward(0).as_atomic());
             // Canonical cumulative-work base at genesis. This MUST be set here so a
             // freshly initialised node reports the same total_difficulty (1) that
             // it would report after a restart (the saved DB state below is 1, and
@@ -101,7 +102,7 @@ impl Blockchain {
                 tip_hash: hash,
                 height: 0,
                 total_difficulty: 1,
-                total_supply: calculate_block_reward(0).as_atomic() as u128,
+                total_supply: u128::from(calculate_block_reward(0).as_atomic()),
                 total_burned: 0,
                 last_checkpoint: 0,
             };
@@ -243,7 +244,8 @@ impl Blockchain {
                     if tip_block.header.height.as_u64() != state.height {
                         return Err(Error::DatabaseError(format!(
                             "chain state height {} does not match tip block height {}",
-                            state.height, tip_block.header.height.as_u64(),
+                            state.height,
+                            tip_block.header.height.as_u64(),
                         )));
                     }
                     let difficulty = calculate_difficulty_from_target(&tip_block.header.target);
@@ -261,7 +263,7 @@ impl Blockchain {
                         // ChainStateData.total_burned is `u64` on disk; the
                         // in-memory accumulator is `u128` for parity with
                         // total_supply — widen on load.
-                        inner.stats.total_burned = state.total_burned as u128;
+                        inner.stats.total_burned = u128::from(state.total_burned);
                         inner.stats.tip_hash = state.tip_hash;
                         inner.stats.total_difficulty = state.total_difficulty;
                         // Sync stats.difficulty with the loaded tip. Without this,
@@ -333,8 +335,13 @@ impl Blockchain {
                             for h in 0..=state.height {
                                 if let Some(block) = self.get_block_by_height(h) {
                                     for (idx, tx) in block.transactions.iter().enumerate() {
+                                        // `idx as u32`: tx index within a block,
+                                        // bounded by MAX_TXS_PER_BLOCK ≪ u32::MAX —
+                                        // kept exact (DB tx-index key).
+                                        #[allow(clippy::cast_possible_truncation)]
+                                        let idx_u32 = idx as u32;
                                         if let Err(e) =
-                                            db.index_tx(tx.hash().as_bytes(), h, idx as u32)
+                                            db.index_tx(tx.hash().as_bytes(), h, idx_u32)
                                         {
                                             failed += 1;
                                             // Log per-failure at DEBUG to avoid log
@@ -507,11 +514,11 @@ impl Blockchain {
         let cache_start = tip_height.saturating_sub(cache_depth);
 
         let mut prev_hash = Hash::zero(); // genesis prev_hash
-        // Reconstruct the block/tx counters from the actual persisted chain.
-        // ChainStateData does NOT persist total_blocks/total_transactions, so
-        // without this they reload as 0 and undercount forever after a restart
-        // (same "stats field not reconstructed on load" class as the difficulty=0
-        // fix above; surfaced by the L8 db-reopen determinism test 2026-08-18).
+                                          // Reconstruct the block/tx counters from the actual persisted chain.
+                                          // ChainStateData does NOT persist total_blocks/total_transactions, so
+                                          // without this they reload as 0 and undercount forever after a restart
+                                          // (same "stats field not reconstructed on load" class as the difficulty=0
+                                          // fix above; surfaced by the L8 db-reopen determinism test 2026-08-18).
         let mut blocks_applied: u64 = 0;
         let mut txs_applied: u64 = 0;
         for height in 0..=tip_height {
@@ -576,6 +583,9 @@ impl Blockchain {
                         // for good_height (Σ rewards/burns over 0..=good_height);
                         // deferred because this branch is reachable only via on-disk
                         // corruption and a naive recompute risks a worse supply error.
+                        // `total_burned as u64`: persisted-state snapshot; u128 value
+                        // ≤ total_supply ≪ u64::MAX. Kept exact (persistence output).
+                        #[allow(clippy::cast_possible_truncation)]
                         let state = crate::db::ChainStateData {
                             tip_hash: inner.stats.tip_hash,
                             height: good_height,
@@ -623,7 +633,7 @@ impl Blockchain {
                     // reconstructed counters (the truncation path `break`s above,
                     // so post-corruption blocks are correctly excluded).
                     blocks_applied += 1;
-                    txs_applied += block.transactions.len() as u64;
+                    txs_applied += u64::try_from(block.transactions.len()).unwrap_or(u64::MAX);
 
                     // Cache recent blocks in memory for fast access
                     if height >= cache_start {

@@ -49,7 +49,11 @@ pub fn on_block_connected(
 ) -> BreakerState {
     let prev = PREV_EVER.load(Ordering::Relaxed);
     // First observation: seed prev = current so the monotonic check is a no-op.
-    let prev_total_outputs_ever = if prev == u64::MAX { total_outputs_ever } else { prev };
+    let prev_total_outputs_ever = if prev == u64::MAX {
+        total_outputs_ever
+    } else {
+        prev
+    };
 
     let obs = IntegrityObservation {
         prev_total_outputs_ever,
@@ -77,7 +81,10 @@ pub fn on_block_connected(
 
     // Remember the max ever-seen (monotonic) so a transient backwards reading
     // trips once rather than being silently adopted as the new baseline.
-    PREV_EVER.store(prev_total_outputs_ever.max(total_outputs_ever), Ordering::Relaxed);
+    PREV_EVER.store(
+        prev_total_outputs_ever.max(total_outputs_ever),
+        Ordering::Relaxed,
+    );
 
     fuse::observe(BreakerSurface::BlockIntegrity, &report)
 }

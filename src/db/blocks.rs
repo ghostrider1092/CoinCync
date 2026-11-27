@@ -473,6 +473,11 @@ impl BlockDb {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
     use crate::chain::create_genesis_block;
     use tempfile::tempdir;
@@ -602,10 +607,7 @@ mod tests {
         block_db
             .set_height_hash(0, &Hash::from_bytes([7u8; 32]))
             .unwrap();
-        assert!(
-            block_db.is_empty(),
-            "is_empty tracks the blocks tree only"
-        );
+        assert!(block_db.is_empty(), "is_empty tracks the blocks tree only");
         assert!(
             block_db.has_any_chain_data(),
             "has_any_chain_data sees the height index"
@@ -626,7 +628,9 @@ mod tests {
         let (_dir, block_db) = fresh_block_db();
 
         assert!(!block_db.has_pruned_header(9));
-        block_db.store_pruned_header(9, b"compact-header-bytes").unwrap();
+        block_db
+            .store_pruned_header(9, b"compact-header-bytes")
+            .unwrap();
         assert!(block_db.has_pruned_header(9));
         assert_eq!(
             block_db.get_pruned_header(9).unwrap().as_deref(),

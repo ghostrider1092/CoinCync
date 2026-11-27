@@ -40,6 +40,14 @@
 //! - `broadcast_notice` local no-op keeps the "personal-node emits
 //!   nothing" invariant even during the not-yet-wired phase.
 
+// Cast hygiene (modernization Tier-1c): this module is clean of unjustified
+// numeric casts. Any new cast must be justified the same way.
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -271,6 +279,9 @@ mod agg_thresholds {
 ///
 /// PURE — no I/O. Extracted so tests can exercise the math without
 /// standing up mock HTTP servers.
+// The `.count() as u16` casts below count fleet nodes (tips) — bounded by the
+// fleet size, far below u16::MAX, so the truncation cannot occur in practice.
+#[allow(clippy::cast_possible_truncation)]
 fn aggregate_from_tips<Id>(
     tips: &[ChainTipState<Id>],
     unreachable_count: u16,
@@ -308,7 +319,7 @@ fn aggregate_from_tips<Id>(
                     median_difficulty - t.difficulty
                 };
                 let pct_u128 = (diff.saturating_mul(100)) / median_difficulty;
-                pct_u128 >= agg_thresholds::DIVERGENT_PCT as u128
+                pct_u128 >= u128::from(agg_thresholds::DIVERGENT_PCT)
             })
             .count() as u16
     };
@@ -570,7 +581,11 @@ impl ChainAdapter for CoincyncAdapter {
                 Err(_) => unreachable += 1,
             }
         }
-        Ok(aggregate_from_tips(&tips, unreachable, peers.len() as u16))
+        Ok(aggregate_from_tips(
+            &tips,
+            unreachable,
+            u16::try_from(peers.len()).unwrap_or(u16::MAX),
+        ))
     }
 
     // ── Privacy contract — real impls (conservative defaults) ──────

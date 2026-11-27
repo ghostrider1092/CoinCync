@@ -13,6 +13,14 @@
 //! Uses only the crate's public API (no access to internals, no consensus files
 //! touched), so it is an integration test with zero hash-locked-file churn.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::consensus::{calculate_difficulty, target_to_difficulty, DifficultyBlock};
 use coincync::constants::{DIFFICULTY_LONG_WINDOW, TARGET_BLOCK_TIME};
 use coincync::primitives::Hash;
@@ -93,7 +101,10 @@ fn asert_converges_to_target_block_time_across_hashrate_regimes() {
     // Warm up well past the long window so both ASERT anchors are populated.
     let mut sim = Sim::warmed_up(DIFFICULTY_LONG_WINDOW + 8);
     let d0 = sim.tip_difficulty();
-    assert!(d0 > 1_000, "sanity: starting difficulty {d0} well above the floor");
+    assert!(
+        d0 > 1_000,
+        "sanity: starting difficulty {d0} well above the floor"
+    );
 
     const REGIME: usize = 600;
     const TAIL: usize = 150; // window over which we judge the settled state

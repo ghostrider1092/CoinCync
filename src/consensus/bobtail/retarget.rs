@@ -75,7 +75,11 @@ mod tests {
     #[test]
     fn blend_zero_is_asert_unchanged() {
         let a = Hash::from_difficulty(5_000);
-        assert_eq!(retarget_blend(&a, 1234.0, 0, 4), a, "0 blend ⇒ ASERT unchanged");
+        assert_eq!(
+            retarget_blend(&a, 1234.0, 0, 4),
+            a,
+            "0 blend ⇒ ASERT unchanged"
+        );
         // The settled (gated) blend is 0, so share_informed_target == ASERT now.
         assert_eq!(share_informed_target(&a, 1234.0), a);
     }
@@ -84,7 +88,11 @@ mod tests {
     fn blend_full_is_the_shadow_target() {
         let a = Hash::from_difficulty(5_000);
         let full = retarget_blend(&a, 9_999.0, 4, 4);
-        assert_eq!(full, shadow_target(9_999.0), "den/den ⇒ pure share-informed");
+        assert_eq!(
+            full,
+            shadow_target(9_999.0),
+            "den/den ⇒ pure share-informed"
+        );
     }
 
     #[test]
@@ -93,9 +101,15 @@ mod tests {
         let a = Hash::from_difficulty(100); // easier ⇒ larger target
         let hr = 1_000_000.0; // high hashrate ⇒ hard shadow target (small)
         let s = shadow_target(hr);
-        assert!(s < a, "high hashrate ⇒ harder (smaller) shadow target than easy ASERT");
+        assert!(
+            s < a,
+            "high hashrate ⇒ harder (smaller) shadow target than easy ASERT"
+        );
         let mid = retarget_blend(&a, hr, 2, 4);
-        assert!(mid < a && mid > s, "half blend sits strictly between ASERT and shadow");
+        assert!(
+            mid < a && mid > s,
+            "half blend sits strictly between ASERT and shadow"
+        );
     }
 
     #[test]

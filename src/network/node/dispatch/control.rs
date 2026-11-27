@@ -61,6 +61,12 @@
 //!   accidental ban.
 //!   TESTS: `handle_reject_adjusts_reputation_only`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, info, trace, warn};
@@ -227,7 +233,11 @@ pub(super) async fn handle_version(
             // by VersionMessage::validate (MAX_USER_AGENT_LENGTH). Client UIs
             // still HTML-escape at render (esc()); this protects EVERY consumer
             // of get_peers (other UIs, scripts, monitors) that might not.
-            peer.user_agent = version.user_agent.chars().filter(|c| !c.is_control()).collect();
+            peer.user_agent = version
+                .user_agent
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect();
             peer.height = version.start_height;
             peer.tip_hash = version.best_hash;
             peer.state = PeerState::VersionReceived;
@@ -397,7 +407,10 @@ pub(super) async fn handle_consensus_fingerprint(
             hex::encode(local),
         );
     } else {
-        trace!("Peer {:?} consensus-fingerprint matches ours", &peer_id[..4]);
+        trace!(
+            "Peer {:?} consensus-fingerprint matches ours",
+            &peer_id[..4]
+        );
     }
     Ok(())
 }
@@ -540,7 +553,7 @@ pub(super) async fn handle_verack(
     if peer_height > our_height {
         let locator = build_locator(our_height, |h| chain.get_block_hash(h));
         if !locator.is_empty() {
-            let now = chrono::Utc::now().timestamp() as u64;
+            let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
             if let Some(nonce) = sync.write().await.begin_headers_request(peer_id, now) {
                 let sent =
                     match Message::get_headers_with_nonce(magic, locator, Hash::zero(), nonce) {
@@ -952,7 +965,10 @@ mod handler_tests {
             .unwrap();
 
         assert_eq!(peers.get(&peer_id).unwrap().capabilities, CAP_CHAINWORK);
-        assert!(srx.try_recv().is_ok(), "ChainWork sent to CAP_CHAINWORK peer");
+        assert!(
+            srx.try_recv().is_ok(),
+            "ChainWork sent to CAP_CHAINWORK peer"
+        );
     }
 
     #[tokio::test]
@@ -1160,7 +1176,10 @@ mod handler_tests {
             .await
             .unwrap();
 
-        assert!(sync.read().await.headers_request_pending(), "GetHeaders issued");
+        assert!(
+            sync.read().await.headers_request_pending(),
+            "GetHeaders issued"
+        );
         assert!(srx.try_recv().is_ok(), "GetAddr sent");
         assert!(srx.try_recv().is_ok(), "GetHeaders sent");
         assert!(srx.try_recv().is_err());

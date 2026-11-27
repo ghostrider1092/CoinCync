@@ -13,16 +13,16 @@ pub mod signer;
 mod types;
 mod validator;
 
+/// Value-revealing (zero-blinding, public-amount) output builder — used by the
+/// unshield assembly to materialize pool-exit value on the transparent side.
+#[cfg(feature = "libspark-ffi")]
+pub use builder::build_revealed_output;
 #[allow(deprecated)]
 // SimpleTransactionBuilder is itself deprecated; re-export kept for the deprecated send.rs path
 pub use builder::{
     decrypt_amount, DecoyOutput, Recipient, SimpleTransactionBuilder, SpendableInput,
     TransactionBuilder,
 };
-/// Value-revealing (zero-blinding, public-amount) output builder — used by the
-/// unshield assembly to materialize pool-exit value on the transparent side.
-#[cfg(feature = "libspark-ffi")]
-pub use builder::build_revealed_output;
 pub use recovery::{validate_recovery_extra, RecoveryMeta};
 pub use signer::{ClsagSignRequest, OneTimeKeyRef, SoftwareSigner, TxSigner};
 pub use types::{RingMemberRef, SigningInputView, Transaction, TxInput, TxOutput, TxType};

@@ -177,8 +177,14 @@ mod tests {
     #[test]
     fn healthy_pool_passes_in_both_modes() {
         assert!(detect(&healthy()).is_empty());
-        assert_eq!(evaluate(BreakerPolicy::Observe, &healthy()), BreakerAction::AllowShielded);
-        assert_eq!(evaluate(BreakerPolicy::Armed, &healthy()), BreakerAction::AllowShielded);
+        assert_eq!(
+            evaluate(BreakerPolicy::Observe, &healthy()),
+            BreakerAction::AllowShielded
+        );
+        assert_eq!(
+            evaluate(BreakerPolicy::Armed, &healthy()),
+            BreakerAction::AllowShielded
+        );
     }
 
     #[test]
@@ -187,7 +193,10 @@ mod tests {
         o.pool_value = 5_000; // > total_shielded_in (1000) AND != expected
         assert!(detect(&o).contains(&PoolFault::InflationCeiling));
         // Observe: logs the fault, keeps sailing (consensus-neutral).
-        assert_eq!(evaluate(BreakerPolicy::Observe, &o), BreakerAction::AllowShielded);
+        assert_eq!(
+            evaluate(BreakerPolicy::Observe, &o),
+            BreakerAction::AllowShielded
+        );
     }
 
     #[test]

@@ -10,6 +10,12 @@
 //! | nanocync  | 0.000000001       | nCYNC  | 1,000               |
 //! | sync      | 0.000000000001    | sync   | 1                   |
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::constants::{ATOMIC_UNITS, MICROCYNC, MILLICYNC, NANOCYNC};
 use crate::error::{Error, Result};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -109,7 +115,12 @@ impl Amount {
         if cync > u64::MAX as f64 / ATOMIC_UNITS as f64 {
             return Err(Error::AmountOverflow);
         }
-        Ok(Amount((cync * ATOMIC_UNITS as f64).round() as u64))
+        // Guards above reject NaN/±inf, negatives, and values above u64::MAX;
+        // `.round()` yields a finite, non-negative integer that fits in u64, so the
+        // narrowing is exact (money conversion — must stay byte-identical).
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let atomic = (cync * ATOMIC_UNITS as f64).round() as u64;
+        Ok(Amount(atomic))
     }
 
     pub const fn as_atomic(&self) -> u64 {
@@ -172,11 +183,11 @@ impl Amount {
     /// ```
     pub fn percentage(&self, basis_points: u64) -> Amount {
         // Use u128 to prevent overflow during calculation
-        let numerator = self.0 as u128 * basis_points as u128;
+        let numerator = u128::from(self.0) * u128::from(basis_points);
         // Add half of divisor for proper rounding (5000 = 10000 / 2)
         let rounded = (numerator + 5000) / 10000;
         // Clamp to u64::MAX to prevent overflow on cast
-        Amount(rounded.min(u64::MAX as u128) as u64)
+        Amount(u64::try_from(rounded.min(u128::from(u64::MAX))).unwrap_or(u64::MAX))
     }
 
     /// Calculate percentage without rounding (truncates toward zero)
@@ -184,8 +195,8 @@ impl Amount {
     /// with other systems or when rounding could cause issues
     pub fn percentage_truncate(&self, basis_points: u64) -> Amount {
         // SECURITY (L-5): Clamp u128 result to u64::MAX to prevent silent wrapping.
-        let result = self.0 as u128 * basis_points as u128 / 10000;
-        Amount(result.min(u64::MAX as u128) as u64)
+        let result = u128::from(self.0) * u128::from(basis_points) / 10000;
+        Amount(u64::try_from(result.min(u128::from(u64::MAX))).unwrap_or(u64::MAX))
     }
 
     pub fn format(&self, decimals: usize) -> String {
@@ -266,7 +277,11 @@ impl Amount {
         if mcync > u64::MAX as f64 / MILLICYNC as f64 {
             return Err(Error::AmountOverflow);
         }
-        Ok(Amount((mcync * MILLICYNC as f64).round() as u64))
+        // Guards above match from_float_cync; the rounded product is finite,
+        // non-negative, and ≤ u64::MAX, so the narrowing is exact (money math).
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let atomic = (mcync * MILLICYNC as f64).round() as u64;
+        Ok(Amount(atomic))
     }
 
     /// Create amount from microcync
@@ -281,7 +296,11 @@ impl Amount {
         if ucync > u64::MAX as f64 / MICROCYNC as f64 {
             return Err(Error::AmountOverflow);
         }
-        Ok(Amount((ucync * MICROCYNC as f64).round() as u64))
+        // Guards above match from_float_cync; the rounded product is finite,
+        // non-negative, and ≤ u64::MAX, so the narrowing is exact (money math).
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let atomic = (ucync * MICROCYNC as f64).round() as u64;
+        Ok(Amount(atomic))
     }
 
     /// Parse amount from string
@@ -322,11 +341,11 @@ impl FromStr for Amount {
         let int_part: u128 = int_str
             .parse()
             .map_err(|_| Error::InvalidAddress(format!("invalid amount: {}", s)))?;
-        let max_int = u64::MAX as u128 / ATOMIC_UNITS as u128;
+        let max_int = u128::from(u64::MAX) / u128::from(ATOMIC_UNITS);
         if int_part > max_int {
             return Err(Error::AmountOverflow);
         }
-        let int_syncs = int_part * ATOMIC_UNITS as u128;
+        let int_syncs = int_part * u128::from(ATOMIC_UNITS);
 
         let frac_syncs: u128 = if let Some(frac_str) = frac_opt {
             if frac_str.is_empty() {
@@ -346,10 +365,10 @@ impl FromStr for Amount {
         let total = int_syncs
             .checked_add(frac_syncs)
             .ok_or(Error::AmountOverflow)?;
-        if total > u64::MAX as u128 {
+        if total > u128::from(u64::MAX) {
             return Err(Error::AmountOverflow);
         }
-        Ok(Amount(total as u64))
+        Ok(Amount(u64::try_from(total).unwrap_or(u64::MAX)))
     }
 }
 
@@ -531,7 +550,10 @@ mod tests {
         assert!(matches!(max.checked_mul(2), Err(Error::AmountOverflow)));
         // A non-overflowing multiply is exact.
         assert_eq!(
-            Amount::from_atomic(1000).checked_mul(3).unwrap().as_atomic(),
+            Amount::from_atomic(1000)
+                .checked_mul(3)
+                .unwrap()
+                .as_atomic(),
             3000
         );
     }

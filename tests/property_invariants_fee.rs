@@ -20,6 +20,14 @@
 
 #![cfg(not(miri))]
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use proptest::prelude::*;
 
 use coincync::consensus::fee_market::distribute_fee;
@@ -27,7 +35,9 @@ use coincync::primitives::Amount;
 
 fn total_atomic(total: u64, congested: bool) -> u128 {
     let d = distribute_fee(Amount::from_atomic(total), congested);
-    d.to_miner.as_atomic() as u128 + d.burned.as_atomic() as u128 + d.to_protocol.as_atomic() as u128
+    d.to_miner.as_atomic() as u128
+        + d.burned.as_atomic() as u128
+        + d.to_protocol.as_atomic() as u128
 }
 
 proptest! {

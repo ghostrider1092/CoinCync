@@ -116,6 +116,12 @@
 //!   `test_disclosure_expiry`, `test_proofs_domain_separated`,
 //!   `test_expired_proof_rejected`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use curve25519_dalek::{ristretto::CompressedRistretto, scalar::Scalar};
 use rand::rngs::OsRng;
@@ -137,10 +143,10 @@ use crate::crypto::bulletproofs::{blinding_generator, value_generator};
 use crate::crypto::groth_kohlweiss::{
     prove_one_of_many_gen_ctx, verify_one_of_many_gen_ctx, GkOneOfManyProof,
 };
-#[cfg(feature = "sketch-gk-proof")]
-use curve25519_dalek::ristretto::RistrettoPoint;
 use crate::error::{Error, Result};
 use crate::primitives::{hash_domain, Hash, PublicKey, SecretKey};
+#[cfg(feature = "sketch-gk-proof")]
+use curve25519_dalek::ristretto::RistrettoPoint;
 use subtle::ConstantTimeEq;
 
 // =============================================================================
@@ -323,7 +329,9 @@ pub fn verify_balance_proof(proof: &BalanceProof) -> Result<bool> {
     // identity nonce points have no legitimate use in these Fiat-Shamir Schnorr
     // proofs). Matches the scalar-side PeerScalar migration.
     let r_point = *crate::crypto::PeerPoint::decode_non_identity(proof.schnorr_r)
-        .map_err(|_| Error::CryptoError("Invalid Schnorr R point (non-canonical or identity)".into()))?
+        .map_err(|_| {
+            Error::CryptoError("Invalid Schnorr R point (non-canonical or identity)".into())
+        })?
         .as_point();
 
     // Compute delta = C - threshold*H
@@ -636,14 +644,20 @@ pub fn create_multi_unlinkable_solvency_proof(
 ) -> Result<MultiUnlinkableSolvencyProof> {
     let k = treasury_values.len();
     if k == 0 {
-        return Err(Error::CryptoError("multi solvency: no treasury outputs".into()));
+        return Err(Error::CryptoError(
+            "multi solvency: no treasury outputs".into(),
+        ));
     }
     if treasury_blindings.len() != k || anonymity_sets.len() != k || treasury_indices.len() != k {
-        return Err(Error::CryptoError("multi solvency: mismatched input lengths".into()));
+        return Err(Error::CryptoError(
+            "multi solvency: mismatched input lengths".into(),
+        ));
     }
-    let total: u128 = treasury_values.iter().map(|v| *v as u128).sum();
-    if total < threshold as u128 {
-        return Err(Error::CryptoError("multi solvency: sum is below the threshold".into()));
+    let total: u128 = treasury_values.iter().map(|v| u128::from(*v)).sum();
+    if total < u128::from(threshold) {
+        return Err(Error::CryptoError(
+            "multi solvency: sum is below the threshold".into(),
+        ));
     }
     if !sets_are_pairwise_disjoint(anonymity_sets.iter()) {
         return Err(Error::CryptoError(
@@ -669,7 +683,9 @@ pub fn create_multi_unlinkable_solvency_proof(
             ));
         }
         if l >= n {
-            return Err(Error::CryptoError("multi solvency: treasury index out of range".into()));
+            return Err(Error::CryptoError(
+                "multi solvency: treasury index out of range".into(),
+            ));
         }
         if PedersenCommitment::commit(v, tb).to_bytes() != set[l] {
             return Err(Error::CryptoError(
@@ -1009,7 +1025,11 @@ fn sum_proof_challenge(
     transcript.push(version);
     transcript.extend_from_slice(&claimed_total.to_le_bytes());
     transcript.extend_from_slice(sum_blinding);
-    transcript.extend_from_slice(&(output_refs.len() as u32).to_le_bytes());
+    // Transcript length-prefix (hash preimage): output_refs.len() is bounded far
+    // below u32::MAX; this cast must stay byte-exact.
+    #[allow(clippy::cast_possible_truncation)]
+    let n_refs = output_refs.len() as u32;
+    transcript.extend_from_slice(&n_refs.to_le_bytes());
     for output_ref in output_refs {
         transcript.extend_from_slice(output_ref.tx_hash.as_bytes());
         transcript.push(output_ref.output_index);
@@ -1508,11 +1528,9 @@ impl DisclosureProof {
     /// the obvious entry point, this now hard-fails and directs the caller to an
     /// anchored verifier. If you genuinely only need the offline crypto check,
     /// call [`DisclosureProof::verify_internal_consistency`] explicitly.
-    #[deprecated(
-        note = "unanchored verification is not a sound trust decision (H1); \
+    #[deprecated(note = "unanchored verification is not a sound trust decision (H1); \
                 use verify_*_anchored with a ChainAnchor, or \
-                verify_internal_consistency() for the offline check only"
-    )]
+                verify_internal_consistency() for the offline check only")]
     pub fn verify(&self) -> Result<bool> {
         Err(Error::CryptoError(
             "DisclosureProof::verify() is unanchored and is not a sound trust \
@@ -1757,7 +1775,8 @@ mod tests {
         let threshold = 3_000_000u64;
 
         let proof =
-            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, l, threshold, 1000).unwrap();
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, l, threshold, 1000)
+                .unwrap();
         assert!(
             verify_unlinkable_solvency_proof(&proof).unwrap(),
             "honest unlinkable solvency proof must verify"
@@ -1768,12 +1787,14 @@ mod tests {
 
         // Can't prove a threshold above the actual value.
         assert!(
-            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, l, 6_000_000, 1000).is_err(),
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, l, 6_000_000, 1000)
+                .is_err(),
             "threshold above value must be refused"
         );
         // Can't claim the treasury is an output you don't open (wrong index).
         assert!(
-            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, 0, threshold, 1000).is_err(),
+            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set, 0, threshold, 1000)
+                .is_err(),
             "opening must match anonymity_set[l]"
         );
 
@@ -1797,8 +1818,15 @@ mod tests {
 
         // A non-power-of-two set is refused at creation.
         assert!(
-            create_unlinkable_solvency_proof(vals[l], &blindings[l], &set[..3], l.min(2), threshold, 1000)
-                .is_err(),
+            create_unlinkable_solvency_proof(
+                vals[l],
+                &blindings[l],
+                &set[..3],
+                l.min(2),
+                threshold,
+                1000
+            )
+            .is_err(),
             "non-power-of-two set refused"
         );
     }
@@ -1811,9 +1839,16 @@ mod tests {
         let threshold = 5_000_000u64;
         let mk = |treasury_val: u64| {
             let vals: Vec<u64> = (0..n)
-                .map(|i| if i == l { treasury_val } else { 1_000_000 + (i as u64) * 111 })
+                .map(|i| {
+                    if i == l {
+                        treasury_val
+                    } else {
+                        1_000_000 + (i as u64) * 111
+                    }
+                })
                 .collect();
-            let bs: Vec<BlindingFactor> = (0..n).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+            let bs: Vec<BlindingFactor> =
+                (0..n).map(|_| BlindingFactor::random(&mut OsRng)).collect();
             let set: Vec<[u8; 32]> = vals
                 .iter()
                 .zip(&bs)
@@ -1822,50 +1857,73 @@ mod tests {
             (vals, bs, set)
         };
         let (vals, bs, set) = mk(8_000_000);
-        let proof = create_unlinkable_solvency_proof(vals[l], &bs[l], &set, l, threshold, 1000).unwrap();
+        let proof =
+            create_unlinkable_solvency_proof(vals[l], &bs[l], &set, l, threshold, 1000).unwrap();
         assert!(verify_unlinkable_solvency_proof(&proof).unwrap());
 
         // A second, independent proof over a different set — for splicing attacks.
         let (v2, b2, set2) = mk(7_000_000);
-        let proof2 = create_unlinkable_solvency_proof(v2[l], &b2[l], &set2, l, threshold, 1000).unwrap();
+        let proof2 =
+            create_unlinkable_solvency_proof(v2[l], &b2[l], &set2, l, threshold, 1000).unwrap();
 
         // (a) Inflate the claimed threshold above the real value: the range proof
         // and the membership context both no longer hold.
         let mut hi = proof.clone();
         hi.threshold = 9_000_000;
         hi.balance.threshold = 9_000_000;
-        assert!(!verify_unlinkable_solvency_proof(&hi).unwrap(), "cannot inflate threshold");
+        assert!(
+            !verify_unlinkable_solvency_proof(&hi).unwrap(),
+            "cannot inflate threshold"
+        );
 
         // (b) Threshold/balance mismatch.
         let mut mm = proof.clone();
         mm.threshold = 4_000_000;
-        assert!(!verify_unlinkable_solvency_proof(&mm).unwrap(), "threshold mismatch rejected");
+        assert!(
+            !verify_unlinkable_solvency_proof(&mm).unwrap(),
+            "threshold mismatch rejected"
+        );
 
         // (c) Splice a foreign membership proof onto this V/set.
         let mut spliced = proof.clone();
         spliced.membership = proof2.membership.clone();
-        assert!(!verify_unlinkable_solvency_proof(&spliced).unwrap(), "spliced membership rejected");
+        assert!(
+            !verify_unlinkable_solvency_proof(&spliced).unwrap(),
+            "spliced membership rejected"
+        );
 
         // (d) Swap the value commitment V from another proof.
         let mut swapv = proof.clone();
         swapv.value_commitment = proof2.value_commitment;
-        assert!(!verify_unlinkable_solvency_proof(&swapv).unwrap(), "swapped V rejected");
+        assert!(
+            !verify_unlinkable_solvency_proof(&swapv).unwrap(),
+            "swapped V rejected"
+        );
 
         // (e) Verify a valid proof against a foreign anonymity set.
         let mut foreign = proof.clone();
         foreign.anonymity_set = set2.clone();
-        assert!(!verify_unlinkable_solvency_proof(&foreign).unwrap(), "foreign set rejected");
+        assert!(
+            !verify_unlinkable_solvency_proof(&foreign).unwrap(),
+            "foreign set rejected"
+        );
 
         // (f) A non-canonical set member (cannot decompress).
         let mut malformed = proof.clone();
         malformed.anonymity_set[0] = [0xFFu8; 32];
-        assert!(!verify_unlinkable_solvency_proof(&malformed).unwrap(), "malformed member rejected");
+        assert!(
+            !verify_unlinkable_solvency_proof(&malformed).unwrap(),
+            "malformed member rejected"
+        );
 
         // (i) The "as of" height is bound into the challenge — changing it breaks
         // the membership proof (a stale claim cannot be re-dated).
         let mut redated = proof.clone();
         redated.as_of_height += 1;
-        assert!(!verify_unlinkable_solvency_proof(&redated).unwrap(), "re-dated height rejected");
+        assert!(
+            !verify_unlinkable_solvency_proof(&redated).unwrap(),
+            "re-dated height rejected"
+        );
 
         // (g) Cannot create a proof claiming more than the treasury holds.
         assert!(
@@ -1874,7 +1932,8 @@ mod tests {
         );
         // (h) Cannot create a proof whose (value, blinding) do not open set[l].
         assert!(
-            create_unlinkable_solvency_proof(vals[l] + 1, &bs[l], &set, l, threshold, 1000).is_err(),
+            create_unlinkable_solvency_proof(vals[l] + 1, &bs[l], &set, l, threshold, 1000)
+                .is_err(),
             "opening must match the on-chain commitment"
         );
     }
@@ -1887,9 +1946,16 @@ mod tests {
         // disjoint (distinct decoy values => distinct commitments).
         let mk = |treasury_val: u64, base: u64, tl: usize| {
             let vals: Vec<u64> = (0..n)
-                .map(|i| if i == tl { treasury_val } else { base + i as u64 })
+                .map(|i| {
+                    if i == tl {
+                        treasury_val
+                    } else {
+                        base + i as u64
+                    }
+                })
                 .collect();
-            let bs: Vec<BlindingFactor> = (0..n).map(|_| BlindingFactor::random(&mut OsRng)).collect();
+            let bs: Vec<BlindingFactor> =
+                (0..n).map(|_| BlindingFactor::random(&mut OsRng)).collect();
             let set: Vec<[u8; 32]> = vals
                 .iter()
                 .zip(&bs)
@@ -1948,7 +2014,10 @@ mod tests {
         let mut hi = proof.clone();
         hi.threshold = 8_000_000;
         hi.balance.threshold = 8_000_000;
-        assert!(!verify_multi_unlinkable_solvency_proof(&hi).unwrap(), "inflated threshold rejected");
+        assert!(
+            !verify_multi_unlinkable_solvency_proof(&hi).unwrap(),
+            "inflated threshold rejected"
+        );
 
         // Making two sets overlap after the fact is rejected at verify.
         let mut overlap = proof.clone();

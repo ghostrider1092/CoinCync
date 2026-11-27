@@ -8,6 +8,14 @@
 //!
 //! Run with: `cargo test --test property_invariants_reorg_rewind --features "randomx testnet"`
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::primitives::{Hash, KeyImage};
 use coincync::wallet::scanner::{BlockApplyDiff, RewindError, WalletScanner};
 use proptest::prelude::*;

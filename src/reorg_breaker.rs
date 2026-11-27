@@ -143,8 +143,14 @@ mod tests {
     #[test]
     fn shallow_honest_reorg_is_accepted_both_modes() {
         assert!(detect(&healthy()).is_empty());
-        assert_eq!(evaluate(BreakerPolicy::Observe, &healthy()), BreakerAction::AcceptReorg);
-        assert_eq!(evaluate(BreakerPolicy::Armed, &healthy()), BreakerAction::AcceptReorg);
+        assert_eq!(
+            evaluate(BreakerPolicy::Observe, &healthy()),
+            BreakerAction::AcceptReorg
+        );
+        assert_eq!(
+            evaluate(BreakerPolicy::Armed, &healthy()),
+            BreakerAction::AcceptReorg
+        );
     }
 
     #[test]

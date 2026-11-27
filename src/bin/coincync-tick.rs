@@ -29,6 +29,12 @@
 //! With no `--config`, the built-in `CoincyncAdapterConfig` defaults apply
 //! (loopback RPC, personal deployment mode).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -266,7 +272,13 @@ mod metrics_endpoint {
 
     /// Publish the host + local-node portion of a tick (after a successful
     /// `health_snapshot()`).
-    pub fn publish_health(state: &Arc<Mutex<Snapshot>>, ram: u8, swap: u8, uptime: u64, mempool: u64) {
+    pub fn publish_health(
+        state: &Arc<Mutex<Snapshot>>,
+        ram: u8,
+        swap: u8,
+        uptime: u64,
+        mempool: u64,
+    ) {
         if let Ok(mut s) = state.lock() {
             s.host_present = true;
             s.ram_used_pct = ram;
@@ -278,7 +290,13 @@ mod metrics_endpoint {
     }
 
     /// Publish the fleet-aggregate portion of a tick.
-    pub fn publish_fleet(state: &Arc<Mutex<Snapshot>>, stalled: u16, low_peer: u16, divergent: u16, median: u128) {
+    pub fn publish_fleet(
+        state: &Arc<Mutex<Snapshot>>,
+        stalled: u16,
+        low_peer: u16,
+        divergent: u16,
+        median: u128,
+    ) {
         if let Ok(mut s) = state.lock() {
             s.fleet_present = true;
             s.fleet_stalled = stalled;
@@ -325,18 +343,50 @@ mod metrics_endpoint {
             out.push('\n');
         };
         if s.host_present {
-            gauge("coincync_node_ram_usage_percent", "Host RAM in use (percent).", s.ram_used_pct.to_string());
-            gauge("coincync_node_swap_usage_percent", "Host swap in use (percent).", s.swap_used_pct.to_string());
-            gauge("coincync_node_uptime_seconds", "Host uptime (seconds).", s.uptime_secs.to_string());
+            gauge(
+                "coincync_node_ram_usage_percent",
+                "Host RAM in use (percent).",
+                s.ram_used_pct.to_string(),
+            );
+            gauge(
+                "coincync_node_swap_usage_percent",
+                "Host swap in use (percent).",
+                s.swap_used_pct.to_string(),
+            );
+            gauge(
+                "coincync_node_uptime_seconds",
+                "Host uptime (seconds).",
+                s.uptime_secs.to_string(),
+            );
         }
         if s.mempool_present {
-            gauge("coincync_node_mempool_transactions", "Local node mempool transaction count.", s.mempool_txs.to_string());
+            gauge(
+                "coincync_node_mempool_transactions",
+                "Local node mempool transaction count.",
+                s.mempool_txs.to_string(),
+            );
         }
         if s.fleet_present {
-            gauge("coincync_fleet_stalled_nodes", "Fleet nodes whose tip is stalled.", s.fleet_stalled.to_string());
-            gauge("coincync_fleet_low_peer_nodes", "Fleet nodes below the low-peer threshold.", s.fleet_low_peer.to_string());
-            gauge("coincync_fleet_divergent_nodes", "Fleet nodes diverging from the median difficulty.", s.fleet_divergent.to_string());
-            gauge("coincync_fleet_median_difficulty", "Median difficulty across the fleet.", s.fleet_median_difficulty.to_string());
+            gauge(
+                "coincync_fleet_stalled_nodes",
+                "Fleet nodes whose tip is stalled.",
+                s.fleet_stalled.to_string(),
+            );
+            gauge(
+                "coincync_fleet_low_peer_nodes",
+                "Fleet nodes below the low-peer threshold.",
+                s.fleet_low_peer.to_string(),
+            );
+            gauge(
+                "coincync_fleet_divergent_nodes",
+                "Fleet nodes diverging from the median difficulty.",
+                s.fleet_divergent.to_string(),
+            );
+            gauge(
+                "coincync_fleet_median_difficulty",
+                "Median difficulty across the fleet.",
+                s.fleet_median_difficulty.to_string(),
+            );
         }
         out
     }
@@ -479,7 +529,11 @@ mod metrics_endpoint {
             let listener = match TcpListener::bind(&addr) {
                 Ok(l) => l,
                 Err(e) => {
-                    tracing::warn!("metrics: failed to bind {}: {} (endpoint disabled)", addr, e);
+                    tracing::warn!(
+                        "metrics: failed to bind {}: {} (endpoint disabled)",
+                        addr,
+                        e
+                    );
                     return;
                 }
             };
@@ -964,7 +1018,7 @@ fn colony_act_round(
     // Fuel the forager's internal pheromone map with this round's public probe
     // deposits (probe → Untrusted → sanitize → deposit). Read-only.
     let deposits = probe_deposits(adapter);
-    let peers_scored = deposits.len() as u32;
+    let peers_scored = u32::try_from(deposits.len()).unwrap_or(u32::MAX);
     actor.observe_peers(&deposits);
 
     let peers = adapter.fleet_peers();
@@ -1035,9 +1089,12 @@ fn colony_act_round(
     }
 
     let vitals = RoundVitals {
-        ram_pct: health.as_ref().map(|h| h.ram_used_pct as u16).unwrap_or(0),
-        swap_pct: health.as_ref().map(|h| h.swap_used_pct as u16).unwrap_or(0),
-        mempool: health.as_ref().map(|h| h.mempool_txs as u32).unwrap_or(0),
+        ram_pct: health.as_ref().map(|h| u16::from(h.ram_used_pct)).unwrap_or(0),
+        swap_pct: health.as_ref().map(|h| u16::from(h.swap_used_pct)).unwrap_or(0),
+        mempool: health
+            .as_ref()
+            .map(|h| u32::try_from(h.mempool_txs).unwrap_or(u32::MAX))
+            .unwrap_or(0),
         peers_scored,
         relay_mode,
         next_housekeeping_s,
@@ -1261,7 +1318,9 @@ fn main() -> anyhow::Result<()> {
     // the `metrics` feature; `maintainer_hash == None` keeps `/colony` disabled.
     #[cfg(feature = "metrics")]
     let colony_state: std::sync::Arc<std::sync::Mutex<metrics_endpoint::ColonyStatus>> =
-        std::sync::Arc::new(std::sync::Mutex::new(metrics_endpoint::ColonyStatus::default()));
+        std::sync::Arc::new(std::sync::Mutex::new(
+            metrics_endpoint::ColonyStatus::default(),
+        ));
     #[cfg(feature = "metrics")]
     let maintainer_hash: Option<[u8; 32]> =
         load_maintainer_token_hash(cli.maintainer_token_file.as_deref());
@@ -1459,7 +1518,10 @@ mod tests {
             "coincync_fleet_divergent_nodes",
             "coincync_fleet_median_difficulty",
         ] {
-            assert!(out.contains(&format!("# TYPE {name} gauge")), "missing TYPE for {name}");
+            assert!(
+                out.contains(&format!("# TYPE {name} gauge")),
+                "missing TYPE for {name}"
+            );
         }
         assert!(out.contains("coincync_node_ram_usage_percent 42\n"));
         assert!(out.contains("coincync_fleet_median_difficulty 100000\n"));

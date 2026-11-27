@@ -54,11 +54,7 @@ pub fn validate_covered_response(
     }
 
     let mut output_index = HashMap::with_capacity(response.outputs.len());
-    for (index, (expected, output)) in request
-        .locators()
-        .iter()
-        .zip(&response.outputs)
-        .enumerate()
+    for (index, (expected, output)) in request.locators().iter().zip(&response.outputs).enumerate()
     {
         if output.locator != *expected {
             return Err(DecoySelectionError::ResponseLocatorMismatch {

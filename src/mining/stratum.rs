@@ -134,6 +134,12 @@
 //!   `vardiff_sizes_difficulty_to_the_measured_rate_within_bounds`,
 //!   `share_work_is_the_power_of_two_target_difficulty`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -489,7 +495,7 @@ impl Share {
         let pow_hash = match compute_pow_hash(
             PowAlgorithm::RandomX,
             &job.anchor,
-            self.nonce as u64,
+            u64::from(self.nonce),
             &job.tx_root,
             job.height,
         ) {
@@ -518,7 +524,9 @@ impl Share {
 /// Convert compact `nbits` into a full 256-bit target (big-endian).
 // Retained for the legacy Bitcoin-style wire (format_mining_notify sends nbits)
 // and its unit tests; the CoinCync PoW path uses the job's full `target`.
-#[allow(dead_code)]
+// The compact-target mantissa bytes are masked to 0xff before each u8 cast, so
+// the narrowings are exact (Bitcoin-style nBits encoding — must stay byte-exact).
+#[allow(dead_code, clippy::cast_possible_truncation)]
 fn nbits_to_target(nbits: u32) -> Hash {
     let exponent = ((nbits >> 24) & 0xff) as usize;
     let mantissa = nbits & 0x007f_ffff;
@@ -1000,7 +1008,7 @@ impl StratumServer {
                     let height = chain.height() + 1;
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as u32)
+                        .map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX))
                         .unwrap_or(0);
 
                     // Build the real candidate block if payout keys are set. The
@@ -1129,7 +1137,11 @@ impl StratumServer {
                 retarget_ms: 0,
                 authorized: false,
                 last_submit_ms: 0,
-                invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
+                invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new(
+                    "stratum_worker",
+                    "CYNC-GUARD-STRATUM",
+                    u64::from(MAX_INVALID_STREAK),
+                ),
                 last_activity: timestamp_now(),
                 connected_at: timestamp_now(),
                 tx: tx.clone(),
@@ -1256,7 +1268,10 @@ async fn submit_and_broadcast(
             let block_for_broadcast = p2p.map(|_| block.clone());
             match block_builder::submit_mined_block(chain, mempool, block) {
                 Ok(status) => {
-                    info!("stratum: block from worker {} submitted — {:?}", worker_id, status);
+                    info!(
+                        "stratum: block from worker {} submitted — {:?}",
+                        worker_id, status
+                    );
                     let accepted = matches!(
                         status,
                         crate::chain::BlockStatus::Accepted
@@ -1450,7 +1465,10 @@ async fn handle_stratum_message(
     match method {
         // ===== CoinCync-native protocol: login / job / submit / keepalived =====
         "login" => {
-            let login_name = params.get("login").and_then(|v| v.as_str()).unwrap_or("cync");
+            let login_name = params
+                .get("login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("cync");
             let pass = params.get("pass").and_then(|v| v.as_str()).unwrap_or("");
             if let Some(expected) = required_password {
                 if pass.len() != expected.len()
@@ -1722,10 +1740,20 @@ async fn handle_stratum_message(
                 // A PoW solution is a "hit"; whether it becomes a chain-accepted
                 // block is reported separately (issue #42).
                 stats.write().await.block_pow_hits += 1;
-                info!("submit: PoW block solution by worker {} (job {})", worker_id, sub_job_id);
-                let accepted =
-                    submit_and_broadcast(candidates, chain, mempool, p2p, &job.job_id, nonce, worker_id)
-                        .await;
+                info!(
+                    "submit: PoW block solution by worker {} (job {})",
+                    worker_id, sub_job_id
+                );
+                let accepted = submit_and_broadcast(
+                    candidates,
+                    chain,
+                    mempool,
+                    p2p,
+                    &job.job_id,
+                    nonce,
+                    worker_id,
+                )
+                .await;
                 if accepted {
                     stats.write().await.blocks_found += 1;
                 }
@@ -1903,7 +1931,9 @@ async fn handle_stratum_message(
             // Worker's extranonce1 (for share verification only).
             let extranonce1 = {
                 let wr = workers.read().await;
-                wr.get(&worker_id).map(|w| w.extranonce1.clone()).unwrap_or_default()
+                wr.get(&worker_id)
+                    .map(|w| w.extranonce1.clone())
+                    .unwrap_or_default()
             };
 
             // Server-owned per-canonical-job dedup. Rejects a stale/non-current
@@ -1912,7 +1942,7 @@ async fn handle_stratum_message(
             // connections before verify() recomputes the PoW. Dedup is on the
             // PoW nonce — the extranonce fields are not part of the CoinCync PoW.
             let (claim, canonical_job) =
-                claim_canonical_nonce(current_job, nonce_dedup, job_id, nonce as u64).await;
+                claim_canonical_nonce(current_job, nonce_dedup, job_id, u64::from(nonce)).await;
 
             // Build share struct
             let share = Share {
@@ -1970,7 +2000,8 @@ async fn handle_stratum_message(
                         worker.authorized = false;
                         warn!(
                             "Worker {} exceeded invalid share streak {}; deauthorizing",
-                            worker_id, worker.invalid_breaker.failures()
+                            worker_id,
+                            worker.invalid_breaker.failures()
                         );
                         should_strike_for_invalid_streak = true;
                     }
@@ -2013,7 +2044,7 @@ async fn handle_stratum_message(
                         mempool,
                         p2p,
                         job_id,
-                        share.nonce as u64,
+                        u64::from(share.nonce),
                         worker_id,
                     )
                     .await;
@@ -2167,6 +2198,8 @@ fn difficulty_to_nbits(difficulty: u64) -> u32 {
     // Calculate target from difficulty
     // target = max_target / difficulty
     let leading_zeros = (64 - difficulty.leading_zeros()) / 8;
+    // exponent is 0..=32 here, so the u8 narrowing is exact (compact-bits encode).
+    #[allow(clippy::cast_possible_truncation)]
     let exponent = (32 - leading_zeros) as u8;
     // SECURITY (A6-SHIFT): Guard against shift >= 24 on the mantissa mask,
     // which causes UB/panic for difficulty >= 2^32.
@@ -2177,7 +2210,7 @@ fn difficulty_to_nbits(difficulty: u64) -> u32 {
         0xFFFFFF >> shift_amount
     };
 
-    ((exponent as u32) << 24) | mantissa
+    (u32::from(exponent) << 24) | mantissa
 }
 
 /// Get current timestamp
@@ -2191,7 +2224,7 @@ fn timestamp_now() -> u64 {
 fn timestamp_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }
 
@@ -2336,6 +2369,11 @@ async fn register_stratum_strike(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
     use super::*;
 
     #[test]
@@ -2563,7 +2601,12 @@ mod tests {
             authorized: true,
             // Force immediate throttle path.
             last_submit_ms: timestamp_now_ms(),
-            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::preloaded("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64, (MAX_INVALID_STREAK - 1) as u64),
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::preloaded(
+                "stratum_worker",
+                "CYNC-GUARD-STRATUM",
+                u64::from(MAX_INVALID_STREAK),
+                (MAX_INVALID_STREAK - 1) as u64,
+            ),
             last_activity: timestamp_now(),
             connected_at: timestamp_now(),
             tx,
@@ -2668,12 +2711,20 @@ mod tests {
         // Mine a u32 nonce meeting the block target (floor difficulty on a fresh chain).
         let mut nonce: u32 = 0;
         let winning = loop {
-            let h = compute_pow_hash(PowAlgorithm::RandomX, &anchor, nonce as u64, &tx_root, height)
-                .expect("hash");
+            let h = compute_pow_hash(
+                PowAlgorithm::RandomX,
+                &anchor,
+                nonce as u64,
+                &tx_root,
+                height,
+            )
+            .expect("hash");
             if h.meets_difficulty(&target) {
                 break nonce;
             }
-            nonce = nonce.checked_add(1).expect("nonce found within u32 at floor difficulty");
+            nonce = nonce
+                .checked_add(1)
+                .expect("nonce found within u32 at floor difficulty");
         };
 
         // Stash candidate + job.
@@ -2717,7 +2768,11 @@ mod tests {
             retarget_ms: 0,
             authorized: true,
             last_submit_ms: 0,
-            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new(
+                "stratum_worker",
+                "CYNC-GUARD-STRATUM",
+                u64::from(MAX_INVALID_STREAK),
+            ),
             last_activity: timestamp_now(),
             connected_at: timestamp_now(),
             tx,
@@ -2839,7 +2894,11 @@ mod tests {
             retarget_ms: 0,
             authorized: false,
             last_submit_ms: 0,
-            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new(
+                "stratum_worker",
+                "CYNC-GUARD-STRATUM",
+                u64::from(MAX_INVALID_STREAK),
+            ),
             last_activity: timestamp_now(),
             connected_at: timestamp_now(),
             tx,
@@ -2851,10 +2910,24 @@ mod tests {
         let bans = Arc::new(RwLock::new(HashMap::<String, PersistedBanEntry>::new()));
 
         // login
-        let login = r#"{"id":1,"method":"login","params":{"login":"pool.w","pass":"","algo":["cync/rx"]}}"#;
+        let login =
+            r#"{"id":1,"method":"login","params":{"login":"pool.w","pass":"","algo":["cync/rx"]}}"#;
         let resp = handle_stratum_message(
-            login, worker_id, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool, None,
-            1000, None, "127.0.0.1", &bans, None,
+            login,
+            worker_id,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("login response");
@@ -2867,13 +2940,30 @@ mod tests {
             job_id, winning
         );
         let resp2 = handle_stratum_message(
-            &submit, worker_id, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool, None,
-            1000, None, "127.0.0.1", &bans, None,
+            &submit,
+            worker_id,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("submit response");
         assert!(resp2.contains("\"status\":\"OK\""), "submit OK: {resp2}");
-        assert_eq!(chain.height(), 1, "native submit produced a block; tip advanced");
+        assert_eq!(
+            chain.height(),
+            1,
+            "native submit produced a block; tip advanced"
+        );
         assert_eq!(stats.read().await.blocks_found, 1, "one block found");
         assert_eq!(
             stats.read().await.share_tally.get("pool.w").copied(),
@@ -2958,14 +3048,26 @@ mod tests {
         let cur = Arc::new(RwLock::new(Some(mk_job("j1"))));
         let led = Arc::new(RwLock::new(JobNonceLedger::default()));
 
-        assert_eq!(claim_canonical_nonce(&cur, &led, "j1", 1).await.0, NonceClaim::Accepted);
-        assert_eq!(claim_canonical_nonce(&cur, &led, "j1", 1).await.0, NonceClaim::Duplicate);
+        assert_eq!(
+            claim_canonical_nonce(&cur, &led, "j1", 1).await.0,
+            NonceClaim::Accepted
+        );
+        assert_eq!(
+            claim_canonical_nonce(&cur, &led, "j1", 1).await.0,
+            NonceClaim::Duplicate
+        );
 
         *cur.write().await = Some(mk_job("j2"));
         // Same nonce, new canonical job → accepted again.
-        assert_eq!(claim_canonical_nonce(&cur, &led, "j2", 1).await.0, NonceClaim::Accepted);
+        assert_eq!(
+            claim_canonical_nonce(&cur, &led, "j2", 1).await.0,
+            NonceClaim::Accepted
+        );
         // Stale id for the old job is rejected.
-        assert_eq!(claim_canonical_nonce(&cur, &led, "j1", 2).await.0, NonceClaim::StaleJob);
+        assert_eq!(
+            claim_canonical_nonce(&cur, &led, "j1", 2).await.0,
+            NonceClaim::StaleJob
+        );
     }
 
     /// Post-hash revalidation catches a job that rotated during hashing.
@@ -3002,7 +3104,11 @@ mod tests {
             retarget_ms: 0,
             authorized,
             last_submit_ms: 0,
-            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new("stratum_worker", "CYNC-GUARD-STRATUM", MAX_INVALID_STREAK as u64),
+            invalid_breaker: crate::colony::guard::breaker::CircuitBreaker::new(
+                "stratum_worker",
+                "CYNC-GUARD-STRATUM",
+                u64::from(MAX_INVALID_STREAK),
+            ),
             last_activity: timestamp_now(),
             connected_at: timestamp_now(),
             tx,
@@ -3033,7 +3139,11 @@ mod tests {
         // difficulty >= 2^32: shift_amount reaches 32 (>=24) so the mantissa
         // mask must not be shifted out of range; it is forced to 0.
         let nbits = difficulty_to_nbits(1u64 << 32);
-        assert_eq!(nbits & 0x00ff_ffff, 0, "over-wide difficulty zeroes mantissa");
+        assert_eq!(
+            nbits & 0x00ff_ffff,
+            0,
+            "over-wide difficulty zeroes mantissa"
+        );
     }
 
     /// The coinbase suffix layout: sequence, output-count, value, script-length,
@@ -3103,7 +3213,10 @@ mod tests {
     #[tokio::test]
     async fn login_wrong_password_strikes_and_returns_unauthorized() {
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
-        workers.write().await.insert(1, mk_worker(false, vec![0, 0, 0, 0]));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(false, vec![0, 0, 0, 0]));
         let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
         let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
@@ -3115,8 +3228,21 @@ mod tests {
         // "sacred" and "secret" are the same length → forces the ct_eq compare.
         let msg = r#"{"id":1,"method":"login","params":{"login":"pool.w","pass":"sacred"}}"#;
         let resp = handle_stratum_message(
-            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
-            &mempool, None, 1000, Some("secret"), "198.51.100.10", &bans, None,
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            Some("secret"),
+            "198.51.100.10",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3303,7 +3429,10 @@ mod tests {
     #[tokio::test]
     async fn native_submit_unauthenticated_rejected() {
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
-        workers.write().await.insert(1, mk_worker(false, vec![0, 0, 0, 0]));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(false, vec![0, 0, 0, 0]));
         let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
         let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
@@ -3314,8 +3443,21 @@ mod tests {
 
         let msg = r#"{"id":1,"method":"submit","params":{"id":"s","job_id":"cur","nonce":"01"}}"#;
         let resp = handle_stratum_message(
-            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
-            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3326,7 +3468,10 @@ mod tests {
     #[tokio::test]
     async fn native_submit_bad_nonce_hex_rejected() {
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
-        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(true, vec![0, 0, 0, 0]));
         let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
         let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
@@ -3337,8 +3482,21 @@ mod tests {
 
         let msg = r#"{"id":1,"method":"submit","params":{"id":"s","job_id":"cur","nonce":"zzzz"}}"#;
         let resp = handle_stratum_message(
-            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
-            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3350,7 +3508,10 @@ mod tests {
     #[tokio::test]
     async fn native_submit_stale_job_rejected_before_pow() {
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
-        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(true, vec![0, 0, 0, 0]));
         // Canonical job is "cur"; the worker submits against the old "gone" id.
         let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
@@ -3362,8 +3523,21 @@ mod tests {
 
         let msg = r#"{"id":1,"method":"submit","params":{"id":"s","job_id":"gone","nonce":"01"}}"#;
         let resp = handle_stratum_message(
-            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
-            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3375,7 +3549,10 @@ mod tests {
     #[tokio::test]
     async fn native_submit_duplicate_nonce_rejected_before_pow() {
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
-        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(true, vec![0, 0, 0, 0]));
         let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
         // Pre-seed the canonical ledger so nonce 5 is already credited for "cur".
@@ -3390,8 +3567,21 @@ mod tests {
 
         let msg = r#"{"id":1,"method":"submit","params":{"id":"s","job_id":"cur","nonce":"5"}}"#;
         let resp = handle_stratum_message(
-            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
-            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3409,7 +3599,10 @@ mod tests {
         crate::consensus::bind_randomx_genesis_for_network(crate::config::NetworkType::Testnet);
 
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
-        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(true, vec![0, 0, 0, 0]));
         // Impossibly hard block target → the (clamped) share target is just as
         // hard, so nonce 0 will not meet it.
         let hard_diff = 1u64 << 40;
@@ -3425,8 +3618,21 @@ mod tests {
 
         let msg = r#"{"id":1,"method":"submit","params":{"id":"s","job_id":"cur","nonce":"0"}}"#;
         let resp = handle_stratum_message(
-            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
-            &mempool, None, hard_diff, None, "127.0.0.1", &bans, None,
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            hard_diff,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3452,8 +3658,21 @@ mod tests {
 
         let msg = r#"{"id":7,"method":"mining.subscribe","params":[]}"#;
         let resp = handle_stratum_message(
-            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
-            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3466,7 +3685,10 @@ mod tests {
     #[tokio::test]
     async fn mining_authorize_wrong_password_strikes_and_unauthorized() {
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
-        workers.write().await.insert(1, mk_worker(false, vec![0, 0, 0, 0]));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(false, vec![0, 0, 0, 0]));
         let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
         let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
@@ -3477,8 +3699,21 @@ mod tests {
 
         let msg = r#"{"id":3,"method":"mining.authorize","params":["worker1","sacred"]}"#;
         let resp = handle_stratum_message(
-            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
-            &mempool, None, 1000, Some("secret"), "198.51.100.20", &bans, None,
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            Some("secret"),
+            "198.51.100.20",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3492,7 +3727,10 @@ mod tests {
     #[tokio::test]
     async fn legacy_mining_submit_invalid_hex_fields_rejected() {
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
-        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(true, vec![0, 0, 0, 0]));
         let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
         let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
@@ -3515,8 +3753,21 @@ mod tests {
             // Reset the submit throttle so each call reaches the parse stage.
             workers.write().await.get_mut(&1).unwrap().last_submit_ms = 0;
             handle_stratum_message(
-                msg, 1, workers, current_job, nonce_dedup, candidates, stats, chain, mempool,
-                None, 1000, None, "127.0.0.1", bans, None,
+                msg,
+                1,
+                workers,
+                current_job,
+                nonce_dedup,
+                candidates,
+                stats,
+                chain,
+                mempool,
+                None,
+                1000,
+                None,
+                "127.0.0.1",
+                bans,
+                None,
             )
             .await
             .expect("response")
@@ -3525,7 +3776,14 @@ mod tests {
         // Bad extranonce2.
         let r = call(
             r#"{"id":1,"method":"mining.submit","params":["w","cur","zz","00000000","00000000"]}"#,
-            &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool, &bans,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            &bans,
         )
         .await;
         assert!(r.contains("[20,\"Invalid extranonce2\""), "resp: {r}");
@@ -3533,7 +3791,14 @@ mod tests {
         // Bad ntime (extranonce2 valid).
         let r = call(
             r#"{"id":1,"method":"mining.submit","params":["w","cur","00","zz","00000000"]}"#,
-            &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool, &bans,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            &bans,
         )
         .await;
         assert!(r.contains("[20,\"Invalid ntime\""), "resp: {r}");
@@ -3541,7 +3806,14 @@ mod tests {
         // Bad nonce (extranonce2 + ntime valid).
         let r = call(
             r#"{"id":1,"method":"mining.submit","params":["w","cur","00","00000000","zz"]}"#,
-            &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool, &bans,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            &bans,
         )
         .await;
         assert!(r.contains("[20,\"Invalid nonce\""), "resp: {r}");
@@ -3551,7 +3823,10 @@ mod tests {
     #[tokio::test]
     async fn legacy_mining_submit_unauthorized_worker_rejected() {
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
-        workers.write().await.insert(1, mk_worker(false, vec![0, 0, 0, 0]));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(false, vec![0, 0, 0, 0]));
         let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
         let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
@@ -3560,10 +3835,24 @@ mod tests {
         let mempool = crate::mempool::SharedMempool::new();
         let candidates = Arc::new(RwLock::new(HashMap::<String, CandidateBlock>::new()));
 
-        let msg = r#"{"id":1,"method":"mining.submit","params":["w","cur","00","00000000","00000000"]}"#;
+        let msg =
+            r#"{"id":1,"method":"mining.submit","params":["w","cur","00","00000000","00000000"]}"#;
         let resp = handle_stratum_message(
-            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
-            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3574,7 +3863,10 @@ mod tests {
     #[tokio::test]
     async fn keepalived_and_extranonce_subscribe_return_ok() {
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
-        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(true, vec![0, 0, 0, 0]));
         let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
         let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
@@ -3585,8 +3877,20 @@ mod tests {
 
         let ka = handle_stratum_message(
             r#"{"id":1,"method":"keepalived","params":{}}"#,
-            1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool,
-            None, 1000, None, "127.0.0.1", &bans, None,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3594,8 +3898,20 @@ mod tests {
 
         let ex = handle_stratum_message(
             r#"{"id":2,"method":"mining.extranonce.subscribe","params":[]}"#,
-            1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain, &mempool,
-            None, 1000, None, "127.0.0.1", &bans, None,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3606,7 +3922,10 @@ mod tests {
     #[tokio::test]
     async fn unknown_method_returns_unknown_method_error() {
         let workers = Arc::new(RwLock::new(HashMap::<u64, Worker>::new()));
-        workers.write().await.insert(1, mk_worker(true, vec![0, 0, 0, 0]));
+        workers
+            .write()
+            .await
+            .insert(1, mk_worker(true, vec![0, 0, 0, 0]));
         let current_job = Arc::new(RwLock::new(Some(mk_job("cur"))));
         let stats = Arc::new(RwLock::new(StratumStats::default()));
         let nonce_dedup = Arc::new(RwLock::new(JobNonceLedger::default()));
@@ -3617,8 +3936,21 @@ mod tests {
 
         let msg = r#"{"id":9,"method":"frobnicate","params":[]}"#;
         let resp = handle_stratum_message(
-            msg, 1, &workers, &current_job, &nonce_dedup, &candidates, &stats, &chain,
-            &mempool, None, 1000, None, "127.0.0.1", &bans, None,
+            msg,
+            1,
+            &workers,
+            &current_job,
+            &nonce_dedup,
+            &candidates,
+            &stats,
+            &chain,
+            &mempool,
+            None,
+            1000,
+            None,
+            "127.0.0.1",
+            &bans,
+            None,
         )
         .await
         .expect("response");
@@ -3961,10 +4293,7 @@ mod tests {
         let mut hard = mk_job("cur");
         hard.target = Hash::from_difficulty(1u64 << 40);
         assert!(
-            matches!(
-                share.verify(&hard, 1u64 << 40, &[]),
-                ShareResult::Invalid
-            ),
+            matches!(share.verify(&hard, 1u64 << 40, &[]), ShareResult::Invalid),
             "hard share target → invalid"
         );
 
@@ -3976,8 +4305,14 @@ mod tests {
             Hash::from_difficulty(effective_share_difficulty(share_diff, &hard.target));
         let mut n: u32 = 0;
         let winning = loop {
-            let h = compute_pow_hash(PowAlgorithm::RandomX, &hard.anchor, n as u64, &hard.tx_root, hard.height)
-                .expect("hash");
+            let h = compute_pow_hash(
+                PowAlgorithm::RandomX,
+                &hard.anchor,
+                n as u64,
+                &hard.tx_root,
+                hard.height,
+            )
+            .expect("hash");
             if h.meets_difficulty(&share_target) {
                 break n;
             }

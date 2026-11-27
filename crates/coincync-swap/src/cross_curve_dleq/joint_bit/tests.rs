@@ -193,7 +193,10 @@ fn honest_prover_announcements_match_verifier_reconstruction_for_both_bits() {
                 assert_eq!(commitment.commitment_btc, blind_btc);
                 assert_eq!(commitment.commitment_cync, blind_cync);
             } else {
-                assert_eq!(commitment.commitment_btc, blind_btc.combine(&btc_weight).unwrap());
+                assert_eq!(
+                    commitment.commitment_btc,
+                    blind_btc.combine(&btc_weight).unwrap()
+                );
                 assert_eq!(commitment.commitment_cync, blind_cync + cync_weight);
             }
 

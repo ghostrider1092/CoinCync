@@ -32,6 +32,12 @@
 //! Gated `sketch-gk-proof`, **unaudited**, and unwired: the consensus spend
 //! verifier does not yet call this, and shielded stays gated off.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::crypto::spark_generators::{gen_gv, gen_k};
 use crate::crypto::{PeerPoint, PeerScalar};
 use crate::error::{Error, Result};
@@ -118,7 +124,7 @@ pub fn prove_balance<R: CryptoRng + RngCore>(
 fn public_value_scalar(fee: u64, value_balance: i64) -> Scalar {
     let f = Scalar::from(fee);
     if value_balance >= 0 {
-        f + Scalar::from(value_balance as u64)
+        f + Scalar::from(value_balance.unsigned_abs())
     } else {
         f - Scalar::from(value_balance.unsigned_abs())
     }
@@ -139,13 +145,15 @@ pub fn prove_balance_with_delta<R: CryptoRng + RngCore>(
 ) -> Result<BalanceProof> {
     if input_values.len() != input_blindings.len() || output_values.len() != output_blindings.len()
     {
-        return Err(Error::CryptoError("balance: values/blindings length mismatch".into()));
+        return Err(Error::CryptoError(
+            "balance: values/blindings length mismatch".into(),
+        ));
     }
     // Value conservation (i128, signed): Σ in − Σ out − fee − value_balance = 0.
     // The caller's range proofs keep each value in [0,2^64) so this is meaningful.
-    let sin: i128 = input_values.iter().map(|&v| v as i128).sum();
-    let sout: i128 = output_values.iter().map(|&v| v as i128).sum();
-    if sin - sout - fee as i128 - value_balance as i128 != 0 {
+    let sin: i128 = input_values.iter().map(|&v| i128::from(v)).sum();
+    let sout: i128 = output_values.iter().map(|&v| i128::from(v)).sum();
+    if sin - sout - i128::from(fee) - i128::from(value_balance) != 0 {
         return Err(Error::CryptoError("balance: values do not conserve".into()));
     }
     // Δ = Σ b_in − Σ b_out ; when balanced, the excess is E = Δ·K.
@@ -178,7 +186,14 @@ pub fn verify_balance(
     proof: &BalanceProof,
     context: &[u8],
 ) -> Result<()> {
-    verify_balance_with_delta(input_commitments, output_commitments, fee, 0, proof, context)
+    verify_balance_with_delta(
+        input_commitments,
+        output_commitments,
+        fee,
+        0,
+        proof,
+        context,
+    )
 }
 
 /// As [`verify_balance`], but with the public `value_balance` crossing the
@@ -305,9 +320,17 @@ mod tests {
         // output of 10, no shielded inputs.
         let ob = Scalar::random(&mut rng);
         let out = commits(&[10], std::slice::from_ref(&ob));
-        let proof =
-            prove_balance_with_delta(&[], &[], &[10], std::slice::from_ref(&ob), 0, -10, b"shield", &mut rng)
-                .unwrap();
+        let proof = prove_balance_with_delta(
+            &[],
+            &[],
+            &[10],
+            std::slice::from_ref(&ob),
+            0,
+            -10,
+            b"shield",
+            &mut rng,
+        )
+        .unwrap();
         assert!(verify_balance_with_delta(&[], &out, 0, -10, &proof, b"shield").is_ok());
         // A wrong declared value_balance is rejected.
         assert!(verify_balance_with_delta(&[], &out, 0, -9, &proof, b"shield").is_err());
@@ -315,14 +338,31 @@ mod tests {
         // Unshield: 7 leaves the pool (value_balance = +7). One shielded input of 7.
         let ib = Scalar::random(&mut rng);
         let inp = commits(&[7], std::slice::from_ref(&ib));
-        let p2 =
-            prove_balance_with_delta(&[7], std::slice::from_ref(&ib), &[], &[], 0, 7, b"unshield", &mut rng)
-                .unwrap();
+        let p2 = prove_balance_with_delta(
+            &[7],
+            std::slice::from_ref(&ib),
+            &[],
+            &[],
+            0,
+            7,
+            b"unshield",
+            &mut rng,
+        )
+        .unwrap();
         assert!(verify_balance_with_delta(&inp, &[], 0, 7, &p2, b"unshield").is_ok());
 
         // Prover refuses an inconsistent value_balance.
-        assert!(prove_balance_with_delta(&[7], std::slice::from_ref(&ib), &[], &[], 0, 5, b"x", &mut rng)
-            .is_err());
+        assert!(prove_balance_with_delta(
+            &[7],
+            std::slice::from_ref(&ib),
+            &[],
+            &[],
+            0,
+            5,
+            b"x",
+            &mut rng
+        )
+        .is_err());
     }
 
     #[test]

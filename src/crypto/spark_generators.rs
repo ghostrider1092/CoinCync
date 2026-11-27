@@ -64,7 +64,10 @@ mod tests {
     fn generators_are_deterministic_distinct_and_nonidentity() {
         let gens = [gen_g(), gen_h(), gen_k(), gen_gv(), gen_kv(), gen_u()];
         // deterministic
-        assert_eq!(gens, [gen_g(), gen_h(), gen_k(), gen_gv(), gen_kv(), gen_u()]);
+        assert_eq!(
+            gens,
+            [gen_g(), gen_h(), gen_k(), gen_gv(), gen_kv(), gen_u()]
+        );
         // pairwise distinct
         for i in 0..gens.len() {
             for j in (i + 1)..gens.len() {

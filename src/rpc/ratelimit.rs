@@ -5,6 +5,12 @@
 //! SECURITY: Implements LRU eviction to prevent memory exhaustion attacks.
 //! Attackers cannot exhaust memory by connecting from many different IPs.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -238,7 +244,7 @@ impl RateLimiter {
 
         // Check rate limit
         let total_allowed = self.config.max_requests + self.config.burst;
-        if ip_state.requests.len().min(u32::MAX as usize) as u32 >= total_allowed {
+        if u32::try_from(ip_state.requests.len()).unwrap_or(u32::MAX) >= total_allowed {
             // Rate limited - apply ban
             ip_state.ban_count += 1;
             ip_state.banned_until = Some(now + self.config.ban_duration);
@@ -332,7 +338,7 @@ impl RateLimiter {
         ip_state.requests.retain(|&t| t > window_start);
 
         let total_allowed = self.config.max_requests + self.config.burst;
-        if ip_state.requests.len().min(u32::MAX as usize) as u32 >= total_allowed {
+        if u32::try_from(ip_state.requests.len()).unwrap_or(u32::MAX) >= total_allowed {
             ip_state.ban_count += 1;
             ip_state.banned_until = Some(now + self.config.ban_duration);
             return RateLimitResult::RateLimited {
@@ -356,12 +362,14 @@ impl RateLimiter {
         match state.get(&ip) {
             Some(ip_state) => {
                 let window_start = now - self.config.window;
-                let recent_requests = ip_state
-                    .requests
-                    .iter()
-                    .filter(|&&t| t > window_start)
-                    .count()
-                    .min(u32::MAX as usize) as u32;
+                let recent_requests = u32::try_from(
+                    ip_state
+                        .requests
+                        .iter()
+                        .filter(|&&t| t > window_start)
+                        .count(),
+                )
+                .unwrap_or(u32::MAX);
 
                 self.config.max_requests.saturating_sub(recent_requests)
             }

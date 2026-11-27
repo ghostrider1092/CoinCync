@@ -200,7 +200,13 @@ impl SparkBackend for StubBackend {
     fn build_spend(&self, _c: &[CoinBytes], _m: &[u8], _f: u64, _vb: i64) -> Result<SpendBytes> {
         Err(ConnectorError::NotWired)
     }
-    fn verify_spend(&self, _c: &[CoinBytes], _s: &SpendBytes, _f: u64, _vb: i64) -> Result<Vec<Nullifier>> {
+    fn verify_spend(
+        &self,
+        _c: &[CoinBytes],
+        _s: &SpendBytes,
+        _f: u64,
+        _vb: i64,
+    ) -> Result<Vec<Nullifier>> {
         Err(ConnectorError::NotWired)
     }
     fn identify(&self, _v: &[u8], _c: &CoinBytes, _ctx: &[u8]) -> Result<Option<IdentifiedCoin>> {
@@ -354,7 +360,12 @@ pub mod ffi {
             out: *mut u8,
             cap: c_int,
         ) -> c_int;
-        fn spark_ffi_address_from_seed(seed: *const u8, seed_len: c_int, out: *mut u8, cap: c_int) -> c_int;
+        fn spark_ffi_address_from_seed(
+            seed: *const u8,
+            seed_len: c_int,
+            out: *mut u8,
+            cap: c_int,
+        ) -> c_int;
         fn spark_ffi_identify(
             seed: *const u8,
             seed_len: c_int,
@@ -500,7 +511,12 @@ pub mod ffi {
     pub fn address_from_seed(seed: &[u8]) -> Option<Vec<u8>> {
         let mut buf = vec![0u8; 1024];
         let len = unsafe {
-            spark_ffi_address_from_seed(seed.as_ptr(), seed.len() as c_int, buf.as_mut_ptr(), buf.len() as c_int)
+            spark_ffi_address_from_seed(
+                seed.as_ptr(),
+                seed.len() as c_int,
+                buf.as_mut_ptr(),
+                buf.len() as c_int,
+            )
         };
         if len <= 0 {
             return None;
@@ -527,7 +543,9 @@ pub mod ffi {
     pub fn create_recover_roundtrip(value: u64) -> bool {
         let mut recovered: u64 = 0;
         // Safety: shim writes only to `recovered`.
-        unsafe { spark_ffi_create_recover_roundtrip(value, &mut recovered) == 1 && recovered == value }
+        unsafe {
+            spark_ffi_create_recover_roundtrip(value, &mut recovered) == 1 && recovered == value
+        }
     }
 
     /// Marshal a cover set to the flat FFI wire form
@@ -944,7 +962,14 @@ pub mod ffi {
         if recipient_addr.is_empty() {
             return None; // a transfer must name a recipient
         }
-        build_spend_inner(seed, cover_set, spend_index, context, output_value, recipient_addr)
+        build_spend_inner(
+            seed,
+            cover_set,
+            spend_index,
+            context,
+            output_value,
+            recipient_addr,
+        )
     }
 
     /// Build a shielded→shielded transfer that pays `output_value` to
@@ -971,7 +996,8 @@ pub mod ffi {
             return None; // a transfer must name a recipient
         }
         // Marshal the cover set: [u32 count][ (u32 len)(bytes) ]...
-        let mut set = Vec::with_capacity(4 + cover_set.iter().map(|c| 4 + c.0.len()).sum::<usize>());
+        let mut set =
+            Vec::with_capacity(4 + cover_set.iter().map(|c| 4 + c.0.len()).sum::<usize>());
         set.extend_from_slice(&(cover_set.len() as u32).to_le_bytes());
         for c in cover_set {
             set.extend_from_slice(&(c.0.len() as u32).to_le_bytes());
@@ -1013,7 +1039,8 @@ pub mod ffi {
         recipient_addr: &[u8],
     ) -> Option<SpendBytes> {
         // Marshal the cover set: [u32 count][ (u32 len)(bytes) ]...
-        let mut set = Vec::with_capacity(4 + cover_set.iter().map(|c| 4 + c.0.len()).sum::<usize>());
+        let mut set =
+            Vec::with_capacity(4 + cover_set.iter().map(|c| 4 + c.0.len()).sum::<usize>());
         set.extend_from_slice(&(cover_set.len() as u32).to_le_bytes());
         for c in cover_set {
             set.extend_from_slice(&(c.0.len() as u32).to_le_bytes());
@@ -1071,7 +1098,9 @@ pub mod ffi {
                 )
             };
             if len <= 0 {
-                return Err(ConnectorError::Rejected("libspark create_output failed".into()));
+                return Err(ConnectorError::Rejected(
+                    "libspark create_output failed".into(),
+                ));
             }
             out.truncate(len as usize);
             Ok(CoinBytes(out))
@@ -1081,16 +1110,28 @@ pub mod ffi {
         /// (u64 LE) for this first functional cut; wiring real selected-note /
         /// cover-set marshalling (over `cover_set`) is the wallet-integration
         /// follow-up. Fails closed on an invalid request (e.g. over-spend).
-        fn build_spend(&self, _cover_set: &[CoinBytes], spend_material: &[u8], _f: u64, _vb: i64) -> Result<SpendBytes> {
+        fn build_spend(
+            &self,
+            _cover_set: &[CoinBytes],
+            spend_material: &[u8],
+            _f: u64,
+            _vb: i64,
+        ) -> Result<SpendBytes> {
             if spend_material.len() < 8 {
-                return Err(ConnectorError::Marshalling("spend_material must carry output value (u64 LE)".into()));
+                return Err(ConnectorError::Marshalling(
+                    "spend_material must carry output value (u64 LE)".into(),
+                ));
             }
             let output_value = u64::from_le_bytes(spend_material[..8].try_into().unwrap());
             let mut out = vec![0u8; 1 << 16];
             // Safety: shim writes <= cap into `out`, returns the length.
-            let len = unsafe { spark_ffi_build_spend(output_value, out.as_mut_ptr(), out.len() as c_int) };
+            let len = unsafe {
+                spark_ffi_build_spend(output_value, out.as_mut_ptr(), out.len() as c_int)
+            };
             if len <= 0 {
-                return Err(ConnectorError::Rejected("libspark build_spend failed (invalid request?)".into()));
+                return Err(ConnectorError::Rejected(
+                    "libspark build_spend failed (invalid request?)".into(),
+                ));
             }
             out.truncate(len as usize);
             Ok(SpendBytes(out))
@@ -1100,7 +1141,13 @@ pub mod ffi {
         /// verifier-side context libspark needs (cover set, its representation,
         /// output coins, block hash). Returns the linking-tag nullifiers on a
         /// valid spend; fail-closed otherwise.
-        fn verify_spend(&self, cover_set: &[CoinBytes], spend: &SpendBytes, _fee: u64, _value_balance: i64) -> Result<Vec<Nullifier>> {
+        fn verify_spend(
+            &self,
+            cover_set: &[CoinBytes],
+            spend: &SpendBytes,
+            _fee: u64,
+            _value_balance: i64,
+        ) -> Result<Vec<Nullifier>> {
             // #258: when a NODE-RESOLVED cover set is supplied it is authoritative
             // (the shim verifies the Grootle proof against it, not the spender's
             // bundle). An empty set keeps the legacy stateless (permissive) admit.
@@ -1131,7 +1178,9 @@ pub mod ffi {
                 )
             };
             if rc != 1 {
-                return Err(ConnectorError::Rejected("shielded spend failed verification".into()));
+                return Err(ConnectorError::Rejected(
+                    "shielded spend failed verification".into(),
+                ));
             }
             let tl = tags_len.max(0) as usize;
             if tl < 4 {
@@ -1142,7 +1191,9 @@ pub mod ffi {
             let mut off = 4usize;
             for _ in 0..count {
                 if off + 34 > tl {
-                    return Err(ConnectorError::Marshalling("truncated nullifier tags".into()));
+                    return Err(ConnectorError::Marshalling(
+                        "truncated nullifier tags".into(),
+                    ));
                 }
                 out.push(Nullifier(tags[off..off + 34].to_vec()));
                 off += 34;
@@ -1210,7 +1261,9 @@ pub mod ffi {
             // Parse [u32 k][34-byte tag]... — one tag per single-input v2 spend.
             let tl = tags_len.max(0) as usize;
             if tl < 4 {
-                return Err(ConnectorError::Marshalling("batch tag buffer too short".into()));
+                return Err(ConnectorError::Marshalling(
+                    "batch tag buffer too short".into(),
+                ));
             }
             let count = u32::from_le_bytes([tags[0], tags[1], tags[2], tags[3]]) as usize;
             if count != k {
@@ -1310,7 +1363,11 @@ pub mod ffi {
             let nullifiers = b
                 .verify_spend(&[], &SpendBytes(bundle), 0, 0)
                 .expect("valid bundle must verify");
-            assert_eq!(nullifiers.len(), 1, "one input => one linking-tag nullifier");
+            assert_eq!(
+                nullifiers.len(),
+                1,
+                "one input => one linking-tag nullifier"
+            );
             assert_eq!(nullifiers[0].0.len(), 34, "tag is a 34-byte group element");
         }
 
@@ -1318,9 +1375,12 @@ pub mod ffi {
         // `base + i`, all under `ctx`), spend the coin at `index` paying
         // `out_value`. Returns (bundle, cover_set, fee).
         #[cfg(test)]
-        fn build_strict_spend(seed: &[u8], base: u64, index: usize, out_value: u64)
-            -> (SpendBytes, Vec<CoinBytes>, u64)
-        {
+        fn build_strict_spend(
+            seed: &[u8],
+            base: u64,
+            index: usize,
+            out_value: u64,
+        ) -> (SpendBytes, Vec<CoinBytes>, u64) {
             let n = 8usize; // #259: small cover set for the fixture (Grootle pads; real N=512)
             let ctx = serial_context(b"strict:tx:0").expect("ctx");
             let mut cover_set = Vec::with_capacity(n);
@@ -1329,7 +1389,8 @@ pub mod ffi {
                     cover_set.push(mint_to_seed(seed, base + i as u64, &ctx).expect("owned"));
                 } else {
                     let s = format!("strict-decoy-{i}");
-                    cover_set.push(mint_to_seed(s.as_bytes(), base + i as u64, &ctx).expect("decoy"));
+                    cover_set
+                        .push(mint_to_seed(s.as_bytes(), base + i as u64, &ctx).expect("decoy"));
                 }
             }
             let bundle = build_spend_over_set(seed, &cover_set, index, &ctx, out_value)
@@ -1411,13 +1472,19 @@ pub mod ffi {
                 .verify_spend(&[], &SpendBytes(bundle.clone()), 24, 0)
                 .expect("valid bundle verifies");
             let stateless = spend_ltags(&bundle).expect("stateless tag extraction");
-            assert_eq!(stateless, verified, "stateless tags must equal verified tags");
+            assert_eq!(
+                stateless, verified,
+                "stateless tags must equal verified tags"
+            );
             assert_eq!(stateless.len(), 1, "one input => one linking tag");
             assert_eq!(stateless[0].0.len(), 34, "tag is a 34-byte group element");
 
             // Fail-closed on garbage / truncated input — no panic, no large alloc.
             assert!(spend_ltags(&[]).is_none(), "empty bundle rejected");
-            assert!(spend_ltags(&[0xFFu8; 16]).is_none(), "garbage bundle rejected");
+            assert!(
+                spend_ltags(&[0xFFu8; 16]).is_none(),
+                "garbage bundle rejected"
+            );
             assert!(
                 spend_ltags(&bundle[..bundle.len() / 2]).is_none(),
                 "truncated bundle rejected"
@@ -1426,7 +1493,10 @@ pub mod ffi {
 
         #[test]
         fn created_coin_value_round_trips_through_recovery() {
-            assert!(create_recover_roundtrip(4242), "created coin must recover its value");
+            assert!(
+                create_recover_roundtrip(4242),
+                "created coin must recover its value"
+            );
         }
 
         #[test]
@@ -1437,7 +1507,9 @@ pub mod ffi {
             let material = 50u64.to_le_bytes().to_vec();
             let spend = b.build_spend(&[], &material, 0, 0).expect("build_spend");
             // Fixture spend: input 124 - output 50 => fee 74, vout 0 (stateless).
-            let nullifiers = b.verify_spend(&[], &spend, 74, 0).expect("built spend must verify");
+            let nullifiers = b
+                .verify_spend(&[], &spend, 74, 0)
+                .expect("built spend must verify");
             assert_eq!(nullifiers.len(), 1, "one input => one nullifier");
         }
 
@@ -1446,16 +1518,23 @@ pub mod ffi {
             let b = LibsparkBackend;
             let seed = b"wallet-seed-alpha";
             let addr = address_from_seed(seed).expect("address from seed");
-            let coin = b.create_output(&addr, 777, b"hello").expect("create_output");
+            let coin = b
+                .create_output(&addr, 777, b"hello")
+                .expect("create_output");
 
             // Owner scans -> recovers value + memo.
-            let owned = b.identify(seed, &coin, &[]).expect("identify call").expect("coin is ours");
+            let owned = b
+                .identify(seed, &coin, &[])
+                .expect("identify call")
+                .expect("coin is ours");
             assert_eq!(owned.value, 777);
             assert_eq!(owned.memo, b"hello");
 
             // A different wallet does not recognize it.
             assert!(
-                b.identify(b"wallet-seed-beta", &coin, &[]).unwrap().is_none(),
+                b.identify(b"wallet-seed-beta", &coin, &[])
+                    .unwrap()
+                    .is_none(),
                 "a foreign wallet must not identify the coin"
             );
         }
@@ -1489,8 +1568,14 @@ pub mod ffi {
 
             // View-only recovery matches seed-based recovery (same value).
             let b = LibsparkBackend;
-            let via_seed = b.identify(seed_a, &coin, &ctx).unwrap().expect("seed identifies");
-            assert_eq!(via_seed.value, owned.value, "view-only sees the same value as the seed");
+            let via_seed = b
+                .identify(seed_a, &coin, &ctx)
+                .unwrap()
+                .expect("seed identifies");
+            assert_eq!(
+                via_seed.value, owned.value,
+                "view-only sees the same value as the seed"
+            );
         }
 
         /// B1 CONFIRMATION (perf; #[ignore]). Confirms the per-coin secp256k1
@@ -1553,7 +1638,10 @@ pub mod ffi {
             let b = LibsparkBackend;
             // Output far exceeds the input note's value => build fails closed.
             let material = u64::MAX.to_le_bytes().to_vec();
-            assert!(b.build_spend(&[], &material, 0, 0).is_err(), "over-spend must fail");
+            assert!(
+                b.build_spend(&[], &material, 0, 0).is_err(),
+                "over-spend must fail"
+            );
         }
 
         #[test]
@@ -1594,7 +1682,10 @@ pub mod ffi {
             let mut bad = bundle.clone();
             let n = bad.len();
             bad[n - 8] ^= 0x01;
-            assert!(verify_mint_bundle(&bad).is_none(), "tampered mint bundle rejected");
+            assert!(
+                verify_mint_bundle(&bad).is_none(),
+                "tampered mint bundle rejected"
+            );
         }
 
         #[test]
@@ -1664,7 +1755,9 @@ pub mod ffi {
 
             let backend = LibsparkBackend;
             // coins[2] = 5002, paid 3000 to B => fee 2002, vout 0 (strict).
-            let tags = backend.verify_spend(&coins, &bundle, 2002, 0).expect("transfer verifies");
+            let tags = backend
+                .verify_spend(&coins, &bundle, 2002, 0)
+                .expect("transfer verifies");
             assert_eq!(tags.len(), 1, "one input → one nullifier");
 
             // The output coin re-enters the pool with its recoverable context.
@@ -1678,7 +1771,10 @@ pub mod ffi {
                 .expect("B owns the transfer output");
             assert_eq!(recovered.value, 3_000, "B receives the transferred value");
             assert!(
-                backend.identify(a, &out_coins[0], &out_ctx).unwrap().is_none(),
+                backend
+                    .identify(a, &out_coins[0], &out_ctx)
+                    .unwrap()
+                    .is_none(),
                 "the sender must NOT be able to recover a coin paid to the recipient"
             );
 
@@ -1688,7 +1784,10 @@ pub mod ffi {
                     .expect("self-spend builds");
             let (self_out, self_ctx) = spend_outputs(&self_bundle.0).expect("self outputs");
             assert!(
-                backend.identify(a, &self_out[0], &self_ctx).unwrap().is_some(),
+                backend
+                    .identify(a, &self_out[0], &self_ctx)
+                    .unwrap()
+                    .is_some(),
                 "a self-spend's change is recoverable by the spender"
             );
         }
@@ -1748,17 +1847,30 @@ pub mod ffi {
 
             // Two output coins: the recipient's payment and the sender's change.
             let (out_coins, out_ctx) = spend_outputs(&bundle.0).expect("extract spend outputs");
-            assert_eq!(out_coins.len(), 2, "recipient output + sender change output");
+            assert_eq!(
+                out_coins.len(),
+                2,
+                "recipient output + sender change output"
+            );
 
             // Exactly one output is B's (value 2000); exactly one is A's change (2902).
             let mut b_value = None;
             let mut a_value = None;
             for coin in &out_coins {
-                if let Some(rec) = backend.identify(b_seed, coin, &out_ctx).expect("identify B") {
-                    assert!(b_value.replace(rec.value).is_none(), "B owns at most one output");
+                if let Some(rec) = backend
+                    .identify(b_seed, coin, &out_ctx)
+                    .expect("identify B")
+                {
+                    assert!(
+                        b_value.replace(rec.value).is_none(),
+                        "B owns at most one output"
+                    );
                 }
                 if let Some(rec) = backend.identify(a, coin, &out_ctx).expect("identify A") {
-                    assert!(a_value.replace(rec.value).is_none(), "A owns at most one output");
+                    assert!(
+                        a_value.replace(rec.value).is_none(),
+                        "A owns at most one output"
+                    );
                 }
             }
             assert_eq!(b_value, Some(amount), "recipient receives the sent amount");
@@ -1792,7 +1904,9 @@ pub mod ffi {
             let b = LibsparkBackend;
             // coins[spend_index] = 2000 + spend_index, paid 300 => fee = value - 300.
             let fee = (2_000 + spend_index as u64) - 300;
-            let tags = b.verify_spend(&coins, &bundle, fee, 0).expect("partial-set spend verifies");
+            let tags = b
+                .verify_spend(&coins, &bundle, fee, 0)
+                .expect("partial-set spend verifies");
             assert_eq!(tags.len(), 1);
         }
 
@@ -1809,7 +1923,11 @@ pub mod ffi {
             let outpoint = b"tx:abcd1234:vout:1";
             let ctx = serial_context(outpoint).expect("derive ctx");
             assert_eq!(ctx, serial_context(outpoint).expect("derive ctx again"));
-            assert_ne!(ctx, serial_context(b"tx:abcd1234:vout:2").unwrap(), "distinct outpoints differ");
+            assert_ne!(
+                ctx,
+                serial_context(b"tx:abcd1234:vout:2").unwrap(),
+                "distinct outpoints differ"
+            );
 
             // Mint the whole cover set; the owned coin uses the outpoint-derived ctx.
             let spend_index = 2usize;
@@ -1944,13 +2062,22 @@ mod tests {
     #[test]
     fn stub_is_fail_closed_on_every_operation() {
         let b = StubBackend;
-        assert_eq!(b.create_output(&[], 1, &[]).unwrap_err(), ConnectorError::NotWired);
-        assert_eq!(b.build_spend(&[], &[], 0, 0).unwrap_err(), ConnectorError::NotWired);
+        assert_eq!(
+            b.create_output(&[], 1, &[]).unwrap_err(),
+            ConnectorError::NotWired
+        );
+        assert_eq!(
+            b.build_spend(&[], &[], 0, 0).unwrap_err(),
+            ConnectorError::NotWired
+        );
         assert_eq!(
             b.verify_spend(&[], &SpendBytes(vec![]), 0, 0).unwrap_err(),
             ConnectorError::NotWired
         );
-        assert_eq!(b.identify(&[], &CoinBytes(vec![]), &[]).unwrap_err(), ConnectorError::NotWired);
+        assert_eq!(
+            b.identify(&[], &CoinBytes(vec![]), &[]).unwrap_err(),
+            ConnectorError::NotWired
+        );
     }
 
     #[test]
@@ -1963,6 +2090,9 @@ mod tests {
 
     #[test]
     fn error_display_is_stable() {
-        assert_eq!(ConnectorError::NotWired.to_string(), "spark backend not wired (fail-closed)");
+        assert_eq!(
+            ConnectorError::NotWired.to_string(),
+            "spark backend not wired (fail-closed)"
+        );
     }
 }

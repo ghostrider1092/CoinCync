@@ -36,6 +36,12 @@
 //!   rolling silently no-ops → miner cannot search the space. TESTS:
 //!   `block_template_update_nonce_and_timestamp_mutate_header`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::consensus::BlockHeader;
 use crate::primitives::{Amount, Hash};
 use crate::transaction::Transaction;
@@ -89,7 +95,8 @@ impl BlockTemplate {
 /// u128 math). Kept here so the builder and validator agree by construction.
 #[inline]
 fn congestion_pct_for_size(block_size: usize) -> u64 {
-    ((block_size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128) as u64
+    u64::try_from((block_size as u128 * 100) / crate::constants::MAX_BLOCK_SIZE as u128)
+        .unwrap_or(u64::MAX)
 }
 
 /// The validator's per-tx minimum fee at a given congestion percentage —
@@ -269,6 +276,8 @@ pub fn build_template_json(
 
 #[cfg(test)]
 mod congestion_packing_tests {
+    // Test mirrors the validator's u128 percent formula, narrowed to u64.
+    #![allow(clippy::cast_possible_truncation)]
     use super::{build_template_json, congestion_pct_for_size, dynamic_min_fee, BlockTemplate};
     use crate::config::NetworkType;
     use crate::consensus::BlockHeader;
@@ -288,7 +297,11 @@ mod congestion_packing_tests {
                         v.checked_mul(crate::consensus::fee_market::congestion_multiplier(cong))
                     })
                     .map(|v| v / 100);
-                assert_eq!(dynamic_min_fee(tx_size, cong), expected, "cong={cong} size={tx_size}");
+                assert_eq!(
+                    dynamic_min_fee(tx_size, cong),
+                    expected,
+                    "cong={cong} size={tx_size}"
+                );
             }
         }
     }
@@ -343,8 +356,12 @@ mod congestion_packing_tests {
     #[test]
     fn block_template_new_copies_header_sub_fields() {
         let header = make_header();
-        let template =
-            BlockTemplate::new(header, Vec::new(), Amount::from_atomic(11), Amount::from_atomic(22));
+        let template = BlockTemplate::new(
+            header,
+            Vec::new(),
+            Amount::from_atomic(11),
+            Amount::from_atomic(22),
+        );
 
         assert_eq!(template.supply_commitment, [7u8; 32]);
         assert_eq!(template.spark_set_root, [8u8; 32]);
@@ -369,7 +386,8 @@ mod congestion_packing_tests {
 
     #[test]
     fn block_template_update_nonce_and_timestamp_mutate_header() {
-        let mut template = BlockTemplate::new(make_header(), Vec::new(), Amount::ZERO, Amount::ZERO);
+        let mut template =
+            BlockTemplate::new(make_header(), Vec::new(), Amount::ZERO, Amount::ZERO);
         assert_eq!(template.header.nonce, 0);
 
         template.update_nonce(99);
