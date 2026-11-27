@@ -18,6 +18,12 @@
 //! harness can drive wall time and elapsed-time forward together and reproduce
 //! timeout-driven behavior (partition stalls, retry backoff, eviction) exactly.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -32,7 +38,7 @@ static SIM_UNIX_SECS: AtomicI64 = AtomicI64::new(-1);
 pub fn unix_now() -> u64 {
     let v = SIM_UNIX_SECS.load(Ordering::Relaxed);
     if v >= 0 {
-        return v as u64;
+        return u64::try_from(v).unwrap_or(0);
     }
     real_unix_now()
 }
@@ -142,7 +148,7 @@ impl std::ops::Sub<Duration> for MonoInstant {
 pub fn mono_now() -> MonoInstant {
     let v = SIM_MONO_NANOS.load(Ordering::Relaxed);
     if v >= 0 {
-        return MonoInstant(Duration::from_nanos(v as u64));
+        return MonoInstant(Duration::from_nanos(u64::try_from(v).unwrap_or(0)));
     }
     MonoInstant(process_start().elapsed())
 }
@@ -155,7 +161,7 @@ pub fn is_mono_overridden() -> bool {
 /// Pin the virtual monotonic clock to `elapsed` since the virtual epoch. For the
 /// simulation harness and tests only.
 pub fn set_sim_mono(elapsed: Duration) {
-    let nanos = elapsed.as_nanos().min(i64::MAX as u128) as i64;
+    let nanos = i64::try_from(elapsed.as_nanos().min(i64::MAX as u128)).unwrap_or(i64::MAX);
     SIM_MONO_NANOS.store(nanos, Ordering::Relaxed);
 }
 
@@ -164,7 +170,7 @@ pub fn set_sim_mono(elapsed: Duration) {
 /// harness's "tick elapsed-time forward" primitive — the thing that fires a
 /// pending timeout deterministically.
 pub fn advance_sim_mono(by: Duration) -> MonoInstant {
-    let add = by.as_nanos().min(i64::MAX as u128) as i64;
+    let add = i64::try_from(by.as_nanos().min(i64::MAX as u128)).unwrap_or(i64::MAX);
     loop {
         let cur = SIM_MONO_NANOS.load(Ordering::Relaxed);
         let base = cur.max(0); // real mode (-1) advances from 0
@@ -173,7 +179,7 @@ pub fn advance_sim_mono(by: Duration) -> MonoInstant {
             .compare_exchange(cur, next, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
-            return MonoInstant(Duration::from_nanos(next as u64));
+            return MonoInstant(Duration::from_nanos(u64::try_from(next).unwrap_or(0)));
         }
     }
 }

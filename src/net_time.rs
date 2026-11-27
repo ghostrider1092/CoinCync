@@ -26,6 +26,12 @@
 //! book) are sampled — inbound connections are attacker-chosen, so their clocks
 //! are not trusted for consensus-relevant time.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
@@ -78,11 +84,11 @@ pub fn netgroup_key(addr: &SocketAddr) -> u64 {
     match addr.ip() {
         std::net::IpAddr::V4(v4) => {
             let o = v4.octets();
-            ((o[0] as u64) << 8) | (o[1] as u64)
+            (u64::from(o[0]) << 8) | u64::from(o[1])
         }
         std::net::IpAddr::V6(v6) => {
             let s = v6.segments();
-            0x1_0000_0000 | ((s[0] as u64) << 16) | (s[1] as u64)
+            0x1_0000_0000 | (u64::from(s[0]) << 16) | u64::from(s[1])
         }
     }
 }
@@ -160,6 +166,14 @@ pub fn reset_for_test() {
 
 #[cfg(test)]
 mod tests {
+    // Test-only numeric casts: small loop-index counts cast to u8 for synthetic
+    // peer addresses. Bounded by MIN_TIME_PEERS; intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
 
     // These tests mutate the process-global sample map, so they must not run
