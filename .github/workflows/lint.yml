@@ -5,7 +5,8 @@ name: Lint
 # none of which ran rustfmt or clippy — this was the one real gap in the lint
 # surface.
 #
-# rustfmt is now a HARD gate; clippy is still an informational ratchet.
+# rustfmt is a HARD gate; the cast-lint ratchet is now a HARD gate too; the
+# broad clippy `-D warnings` job is still an informational ratchet.
 #
 #   - rustfmt: the one-time reformat has landed (the non-locked workspace is
 #     rustfmt-clean). The gate runs `scripts/fmt.sh --check`, NOT a plain
@@ -15,6 +16,13 @@ name: Lint
 #     then fails on any other drift. See scripts/fmt.sh + docs/design/modernization-roadmap.md.
 #   - clippy: still `continue-on-error: true` — a warning backlog remains. Clear it
 #     surface-by-surface, then delete that line (the `-D warnings` gate is wired).
+#   - cast-ratchet: a HARD gate (scripts/clippy-ratchet.sh). The non-locked workspace
+#     has been swept for lossy integer casts surface-by-surface; each swept file
+#     carries a file-level #![deny(clippy::cast_*)]. Because the workspace sets
+#     clippy::all = allow, a PLAIN clippy fails only on a NEW lossy cast in an
+#     already-swept file — so this gate passes today and catches regressions,
+#     without waiting on the broad backlog. The lock-protected consensus core is
+#     excluded (its casts move only in a planned fingerprint-moving release).
 
 on:
   pull_request:
@@ -84,3 +92,33 @@ jobs:
         # deleting this line.
         continue-on-error: true
         run: cargo clippy --workspace --all-targets --features "randomx testnet" -- -D warnings
+
+  cast-ratchet:
+    name: cast-ratchet
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (1.88.0 + clippy)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+          components: clippy
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint-clippy-v1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libssl-dev pkg-config
+
+      - name: cast-lint ratchet gate (HARD)
+        # Plain clippy fails ONLY on a new lossy cast in a file that already
+        # carries #![deny(clippy::cast_*)] (clippy::all = allow workspace-wide),
+        # plus a floor guard that those deny blocks are not removed. Unlike the
+        # informational clippy job above, this is a hard gate: it passes today and
+        # fails only on a regression. See scripts/clippy-ratchet.sh.
+        run: bash scripts/clippy-ratchet.sh
