@@ -32,6 +32,12 @@
 //! Gated `sketch-gk-proof`, **unaudited**, and unwired: the consensus spend
 //! verifier does not yet call this, and shielded stays gated off.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::crypto::spark_generators::{gen_gv, gen_k};
 use crate::crypto::{PeerPoint, PeerScalar};
 use crate::error::{Error, Result};
@@ -118,7 +124,7 @@ pub fn prove_balance<R: CryptoRng + RngCore>(
 fn public_value_scalar(fee: u64, value_balance: i64) -> Scalar {
     let f = Scalar::from(fee);
     if value_balance >= 0 {
-        f + Scalar::from(value_balance as u64)
+        f + Scalar::from(value_balance.unsigned_abs())
     } else {
         f - Scalar::from(value_balance.unsigned_abs())
     }
@@ -145,9 +151,9 @@ pub fn prove_balance_with_delta<R: CryptoRng + RngCore>(
     }
     // Value conservation (i128, signed): Σ in − Σ out − fee − value_balance = 0.
     // The caller's range proofs keep each value in [0,2^64) so this is meaningful.
-    let sin: i128 = input_values.iter().map(|&v| v as i128).sum();
-    let sout: i128 = output_values.iter().map(|&v| v as i128).sum();
-    if sin - sout - fee as i128 - value_balance as i128 != 0 {
+    let sin: i128 = input_values.iter().map(|&v| i128::from(v)).sum();
+    let sout: i128 = output_values.iter().map(|&v| i128::from(v)).sum();
+    if sin - sout - i128::from(fee) - i128::from(value_balance) != 0 {
         return Err(Error::CryptoError("balance: values do not conserve".into()));
     }
     // Δ = Σ b_in − Σ b_out ; when balanced, the excess is E = Δ·K.

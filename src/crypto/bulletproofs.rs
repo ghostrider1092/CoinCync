@@ -55,6 +55,12 @@
 //!   unchecked point op panics the node from the consensus path (crash DoS).
 //!   TESTS: `commitment_from_bytes_checked_accepts_valid_rejects_noncanonical`, `checked_add_sub_return_none_on_invalid_point`, `add_operator_returns_identity_on_invalid_point`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use merlin::Transcript;
 use once_cell::sync::Lazy;
@@ -934,6 +940,14 @@ pub fn verify_range_proofs_dispatch(
 
 #[cfg(test)]
 mod tests {
+    // Test-only numeric casts: bench iteration counts widened to u128 for timing
+    // averages. Intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
     use rand::rngs::OsRng;
 

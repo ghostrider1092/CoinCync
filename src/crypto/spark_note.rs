@@ -39,6 +39,12 @@
 //! spend-secret binding** (the spend rail) is deliberately NOT in this file — it
 //! is the audit-critical fill-in pinned to the Lelantus-Spark paper.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::crypto::peer_scalars::{PeerPoint, PeerScalar};
 use crate::crypto::spark_generators::{gen_gv, gen_h, gen_k};
 use crate::error::{Error, Result};
@@ -472,6 +478,14 @@ pub fn verify_tag(
 
 #[cfg(test)]
 mod tests {
+    // Test-only numeric casts: seed byte cast to u8 for a fixture diversifier.
+    // Intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
     use crate::crypto::groth_kohlweiss::bound_coin_commitment;
     use rand::SeedableRng;

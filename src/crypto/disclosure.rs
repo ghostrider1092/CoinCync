@@ -116,6 +116,12 @@
 //!   `test_disclosure_expiry`, `test_proofs_domain_separated`,
 //!   `test_expired_proof_rejected`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use curve25519_dalek::{ristretto::CompressedRistretto, scalar::Scalar};
 use rand::rngs::OsRng;
@@ -647,8 +653,8 @@ pub fn create_multi_unlinkable_solvency_proof(
             "multi solvency: mismatched input lengths".into(),
         ));
     }
-    let total: u128 = treasury_values.iter().map(|v| *v as u128).sum();
-    if total < threshold as u128 {
+    let total: u128 = treasury_values.iter().map(|v| u128::from(*v)).sum();
+    if total < u128::from(threshold) {
         return Err(Error::CryptoError(
             "multi solvency: sum is below the threshold".into(),
         ));
@@ -1019,7 +1025,11 @@ fn sum_proof_challenge(
     transcript.push(version);
     transcript.extend_from_slice(&claimed_total.to_le_bytes());
     transcript.extend_from_slice(sum_blinding);
-    transcript.extend_from_slice(&(output_refs.len() as u32).to_le_bytes());
+    // Transcript length-prefix (hash preimage): output_refs.len() is bounded far
+    // below u32::MAX; this cast must stay byte-exact.
+    #[allow(clippy::cast_possible_truncation)]
+    let n_refs = output_refs.len() as u32;
+    transcript.extend_from_slice(&n_refs.to_le_bytes());
     for output_ref in output_refs {
         transcript.extend_from_slice(output_ref.tx_hash.as_bytes());
         transcript.push(output_ref.output_index);

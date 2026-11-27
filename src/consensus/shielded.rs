@@ -19,6 +19,12 @@
 //! before apply is ever reached. This is the reviewed, tested apply architecture
 //! the real verifier plugs into. See docs/design/cip-shielded-txtype.md.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::error::{Error, Result};
 use crate::storage::shielded::{NoteCommitmentEntry, ShieldedStore};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -108,7 +114,7 @@ impl ShieldedPoolValue {
     /// more value than the pool holds.
     pub fn apply(&mut self, value_balance: i64) -> Result<()> {
         // total_after = total − value_balance (value_balance>0 removes from pool).
-        let after = self.0 - value_balance as i128;
+        let after = self.0 - i128::from(value_balance);
         if after < 0 {
             return Err(Error::InvalidTransaction(format!(
                 "shielded pool underflow: total {} − value_balance {} = {} < 0 \

@@ -130,6 +130,12 @@
 //!   `stealth_from_bytes_checked_rejects_invalid_point`,
 //!   `stealth_from_hex_rejects_wrong_length`, `stealth_to_bytes_from_bytes_roundtrip`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use super::curve::{hash_to_scalar, PublicPoint, SecretScalar};
 use super::secure::ct_eq;
 use crate::error::{Error, Result};
@@ -1259,7 +1265,14 @@ pub fn generate_stealth_outputs<R: RngCore + CryptoRng>(
     recipients
         .iter()
         .enumerate()
-        .map(|(idx, addr)| generate_stealth_address_for(addr, idx as u8, rng))
+        .map(|(idx, addr)| {
+            // idx < 256 (guarded by the recipients.len() > 255 check above), so
+            // the cast is exact; it indexes stealth-address derivation and must
+            // stay byte-exact.
+            #[allow(clippy::cast_possible_truncation)]
+            let idx = idx as u8;
+            generate_stealth_address_for(addr, idx, rng)
+        })
         .collect()
 }
 

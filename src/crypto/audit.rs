@@ -41,6 +41,12 @@
 //!   so corruption is visible. THREAT: a silent `i64` clamp masking upstream input corruption of emission/burn.
 //!   TESTS: (gap — the clamp/log path has no dedicated regression test).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::constants::{FEE_BURN_CONGESTED_PERCENT, FEE_BURN_NORMAL_PERCENT};
 use crate::primitives::{hash_domain, Amount, Hash};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -310,8 +316,8 @@ impl BlockSupplyDelta {
     /// hides the underlying corruption. Log an error on clamp so
     /// ops see the event.
     pub fn new(height: u64, emission: Amount, burned: Amount) -> Self {
-        let net_i128 = (emission.as_atomic() as i128) - (burned.as_atomic() as i128);
-        let clamped = net_i128.clamp(i64::MIN as i128, i64::MAX as i128);
+        let net_i128 = i128::from(emission.as_atomic()) - i128::from(burned.as_atomic());
+        let clamped = net_i128.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
         if clamped != net_i128 {
             tracing::error!(
                 target: "audit_supply",
@@ -325,11 +331,15 @@ impl BlockSupplyDelta {
                 net_i128, height,
             );
         }
+        // clamped is already within [i64::MIN, i64::MAX] (clamp above), so this
+        // narrowing is exact; keep it byte-stable for the supply-audit delta.
+        #[allow(clippy::cast_possible_truncation)]
+        let net_change = clamped as i64;
         BlockSupplyDelta {
             height,
             emission: emission.as_atomic(),
             burned: burned.as_atomic(),
-            net_change: clamped as i64,
+            net_change,
         }
     }
 }
