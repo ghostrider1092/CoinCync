@@ -1,3 +1,6 @@
+// Test-only: gamma-sampled f64 ages floored to u64 block counts (non-negative).
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+
 use super::*;
 use crate::decoy::{
     DecoyDistributionSnapshot, HeightOutputCount, OutputLocator, ResolvedDecoyOutput,

@@ -5,6 +5,12 @@
 //! required by the next stage, preventing snapshot, request, response and ring
 //! metadata from being recombined arbitrarily.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 pub const COVERED_LOOKUP_SIZE: usize = 128;
 pub const DECOY_GAMMA_SHAPE: f64 = 19.28;
 pub const DECOY_GAMMA_SCALE: f64 = 1.0 / 1.61;
@@ -47,7 +53,9 @@ pub fn audit_ring_ages(member_heights: &[u64], spend_height: u64) -> RingAudit {
     let age_spread = max - min;
     let mut decades = std::collections::BTreeSet::new();
     for a in &ages {
-        // Order-of-magnitude bucket of the age (age 0 → bucket 0).
+        // Order-of-magnitude bucket of the age (age 0 → bucket 0). log10 of a
+        // (u64 + 1) lies in [0, ~19.3]: non-negative and far under u32, floored.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         decades.insert((*a as f64 + 1.0).log10() as u32);
     }
     let distinct_age_decades = decades.len();

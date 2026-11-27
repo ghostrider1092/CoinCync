@@ -35,6 +35,12 @@
 //!   `covered_lookup_allocates_transaction_wide_unique_decoys`,
 //!   `gamma_sampling_is_conditioned_and_unique`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use super::error::{DecoySelectionError, DecoySelectionResult};
 use super::types::{CoveredRequest, RingPolicy, ValidatedDecoySnapshot};
 use super::{COVERED_LOOKUP_SIZE, DECOY_GAMMA_MAX_RESAMPLES, DECOY_GAMMA_SCALE, DECOY_GAMMA_SHAPE};
@@ -98,6 +104,9 @@ pub fn sample_candidate_locators<R: Rng + ?Sized>(
             if !seconds.is_finite() {
                 return None;
             }
+            // seconds is a finite (checked above), positive gamma-sampled
+            // interval; blocks is its floor in block-time units: non-negative.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let blocks = (seconds / block_time) as u64;
             (youngest_age..=oldest_age)
                 .contains(&blocks)
