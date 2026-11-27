@@ -29,6 +29,12 @@
 //! With no `--config`, the built-in `CoincyncAdapterConfig` defaults apply
 //! (loopback RPC, personal deployment mode).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1012,7 +1018,7 @@ fn colony_act_round(
     // Fuel the forager's internal pheromone map with this round's public probe
     // deposits (probe → Untrusted → sanitize → deposit). Read-only.
     let deposits = probe_deposits(adapter);
-    let peers_scored = deposits.len() as u32;
+    let peers_scored = u32::try_from(deposits.len()).unwrap_or(u32::MAX);
     actor.observe_peers(&deposits);
 
     let peers = adapter.fleet_peers();
@@ -1083,9 +1089,12 @@ fn colony_act_round(
     }
 
     let vitals = RoundVitals {
-        ram_pct: health.as_ref().map(|h| h.ram_used_pct as u16).unwrap_or(0),
-        swap_pct: health.as_ref().map(|h| h.swap_used_pct as u16).unwrap_or(0),
-        mempool: health.as_ref().map(|h| h.mempool_txs as u32).unwrap_or(0),
+        ram_pct: health.as_ref().map(|h| u16::from(h.ram_used_pct)).unwrap_or(0),
+        swap_pct: health.as_ref().map(|h| u16::from(h.swap_used_pct)).unwrap_or(0),
+        mempool: health
+            .as_ref()
+            .map(|h| u32::try_from(h.mempool_txs).unwrap_or(u32::MAX))
+            .unwrap_or(0),
         peers_scored,
         relay_mode,
         next_housekeeping_s,

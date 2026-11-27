@@ -7,6 +7,12 @@
 //! Ported from the standalone `colony-dashboard` demo crate; the render layer is
 //! unchanged (ratatui 0.30, same API the coincync-rig TUI uses).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::VecDeque;
 
 use coincync::colony::act::ActReport;
@@ -207,7 +213,7 @@ impl Snapshot {
                     let density = if mode == Mode::Calm {
                         0
                     } else {
-                        (20 + tick % 70) as u32
+                        u32::try_from(20 + tick % 70).unwrap_or(u32::MAX)
                     };
                     format!("{}  density {}%", relay, density)
                 }
@@ -314,7 +320,7 @@ impl Snapshot {
         self.ram_pct = if self.mode == Mode::Calm {
             0
         } else {
-            (8 + (self.tick * 7) % 60) as u16
+            u16::try_from(8 + (self.tick * 7) % 60).unwrap_or(u16::MAX)
         };
         self.mempool = match self.mode {
             Mode::Flood => ((40 + self.tick * 13) % 400) as u32,
@@ -471,7 +477,7 @@ fn header(f: &mut Frame, area: Rect, s: &Snapshot) {
 
     let cut = Layout::horizontal([
         Constraint::Min(0),
-        Constraint::Length(right.len() as u16 + 1),
+        Constraint::Length(u16::try_from(right.len().saturating_add(1)).unwrap_or(u16::MAX)),
     ])
     .split(inner);
     f.render_widget(Paragraph::new(Line::from(spans)), cut[0]);
@@ -516,7 +522,9 @@ fn vitals(f: &mut Frame, area: Rect, s: &Snapshot) {
             .use_unicode(true),
         rows[0],
     );
-    let mem_pct = ((s.mempool as f64 / 400.0) * 100.0).min(100.0) as u16;
+    // f64 percentage in [0,100] truncated to a gauge u16: intentional, non-negative.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let mem_pct = ((f64::from(s.mempool) / 400.0) * 100.0).min(100.0) as u16;
     f.render_widget(
         Gauge::default()
             .gauge_style(gstyle(mem_pct))
