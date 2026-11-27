@@ -56,6 +56,14 @@
 //! real PoW and is `#[ignore]`d exactly like the sibling e2e tests. Run:
 //!   cargo test --features testnet --test chain_differential_and_crash -- --ignored --nocapture
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::chain::{BlockStatus, Blockchain, ChainLoadOutcome};
 use coincync::config::NetworkType;
 use coincync::consensus::block::Block;

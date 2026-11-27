@@ -10,6 +10,14 @@
 //!
 //! Pure arithmetic — runs in milliseconds, no PoW.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::config::NetworkType;
 use coincync::consensus::{calculate_difficulty, DifficultyBlock};
 use coincync::constants::{MAX_SUPPLY, TARGET_BLOCK_TIME};

@@ -13,6 +13,14 @@
 //! Uses only the crate's public API (no access to internals, no consensus files
 //! touched), so it is an integration test with zero hash-locked-file churn.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::consensus::{calculate_difficulty, target_to_difficulty, DifficultyBlock};
 use coincync::constants::{DIFFICULTY_LONG_WINDOW, TARGET_BLOCK_TIME};
 use coincync::primitives::Hash;

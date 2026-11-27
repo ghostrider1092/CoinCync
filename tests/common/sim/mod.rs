@@ -13,6 +13,14 @@
 //! and the consensus-invariant-registry hook layer on in later phases
 //! (see docs/testing/L3-byzantine-simulator.md).
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 #[path = "../mining.rs"]
 mod mining;
 

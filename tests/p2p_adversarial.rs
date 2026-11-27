@@ -10,6 +10,14 @@
 //! T3.1 — Eclipse attack: subnet monopolization resistance
 //! T3.5 — Selfish mining profitability threshold estimation
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::consensus::Block;
 use coincync::network::connection_tracker::ConnectionTracker;
 use coincync::network::scoring::{MisbehaviorType, PeerScorer};

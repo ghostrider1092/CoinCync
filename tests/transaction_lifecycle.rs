@@ -15,6 +15,14 @@
 //! the admission pipeline from raw `Transaction` input through the
 //! real `Mempool` state transitions.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::constants::{BOOTSTRAP_MIN_RING_SIZE, MIN_FEE_PER_BYTE};
 use coincync::crypto::{ClsagSignature, KeyImage as CryptoKeyImage, SecretScalar};
 use coincync::mempool::Mempool;

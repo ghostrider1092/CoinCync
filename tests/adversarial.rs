@@ -32,6 +32,14 @@
 //! 6. **Bad prev_hash** — child block whose `prev_hash` does not match
 //!    the parent header. Standard chain-integrity check.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::consensus::{validate_block, Block, BlockHeader};
 use coincync::constants::{BOOTSTRAP_MIN_RING_SIZE, MAX_TIMESTAMP_DRIFT, MIN_FEE_PER_BYTE};
 use coincync::crypto::{ClsagSignature, KeyImage as CryptoKeyImage, SecretScalar};

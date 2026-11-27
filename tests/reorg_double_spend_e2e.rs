@@ -42,6 +42,14 @@
 //! advances to `F13` at height 13 with inflated supply), and to PASS with
 //! the fix in place.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::chain::{BlockStatus, Blockchain};
 use coincync::config::NetworkType;
 use coincync::consensus::block::Block;

@@ -14,6 +14,14 @@
 //! validator, so it is a genuine oracle. No mining / no CLSAG / no range-proof
 //! crypto is exercised — this is fast and runs in normal CI.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::consensus::validate_transaction_basic;
 use coincync::constants::{
     BOOTSTRAP_MIN_RING_SIZE, MAX_TX_INPUTS, MAX_TX_OUTPUTS, MAX_TX_SIZE, MIN_FEE_PER_BYTE,

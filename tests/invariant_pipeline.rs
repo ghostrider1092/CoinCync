@@ -11,6 +11,14 @@
 //!
 //! One source of truth for "what must always be true" → test + monitor + audit.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 #[path = "common/mining.rs"]
 mod mining;
 #[path = "common/simkit.rs"]

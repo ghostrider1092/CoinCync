@@ -43,6 +43,14 @@
 //! Run (real PoW, slow):
 //!   cargo test --features testnet --test chain_statemachine -- --ignored --nocapture
 
+// Test-only numeric casts: loop-index heights used as slice indices and
+// test-ledger arithmetic over a bounded fixture chain. Not consensus-output.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::chain::{BlockStatus, Blockchain};
 use coincync::config::NetworkType;
 use coincync::consensus::block::Block;

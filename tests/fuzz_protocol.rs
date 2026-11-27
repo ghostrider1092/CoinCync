@@ -24,6 +24,14 @@
 //!
 //! None of these should panic. All should return `Err`.
 
+// Test-only numeric casts: deliberate byte-truncation of fuzz inputs to
+// synthesize malformed wire payloads. Not consensus-output; intentional.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use borsh::BorshDeserialize;
 use coincync::consensus::Block;
 use coincync::network::{MessageHeader, MAX_MESSAGE_SIZE};

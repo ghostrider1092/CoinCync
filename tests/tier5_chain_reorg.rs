@@ -5,6 +5,14 @@
 //!
 //! NO MOCKS. Uses real Blockchain + Block + Transaction types.
 
+// Test-only numeric casts: loop-index block tags and seed bytes for
+// deterministic fixtures. Not consensus-output; intentional for fixtures.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::chain::{BlockStatus, Blockchain};
 use coincync::consensus::{Block, BlockHeader};
 use coincync::crypto::{BlindingFactor, PedersenCommitment, SecretScalar};

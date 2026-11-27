@@ -15,6 +15,14 @@
 //! competing fork. This file fills the complementary gap on the
 //! wallet-state-after-rewind side.
 
+// Test-only numeric casts: fixtures, loop indices, and test-ledger math.
+// Not consensus-output; intentional for deterministic test vectors.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use coincync::primitives::{Amount, Hash, KeyImage, PublicKey};
 use coincync::wallet::balance::{Balance, UTXO};
 use coincync::wallet::history::{TransactionHistory, TransactionRecord, TxStatus};
