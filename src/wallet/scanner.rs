@@ -616,6 +616,9 @@ impl WalletScanner {
     /// will wire it into the orchestrator path. Until then, callers
     /// invoke it directly when they detect a reorg via the warn-log
     /// from Task #2a.
+    // The sole expect() (journal pop_back, guarded by a back()==Some check just
+    // above) is a logic invariant, not a recoverable error.
+    #[allow(clippy::unwrap_in_result)]
     pub fn rewind_to_height(
         &mut self,
         target_height: u64,

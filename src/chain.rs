@@ -2437,6 +2437,11 @@ impl Blockchain {
     }
 
     /// Add block to chain
+    // The sole expect() in the reorg-disconnect path (the block is still in the
+    // cache under `oh`, its txs having just been read) is a deliberate FAIL-FAST
+    // on consensus-state corruption — a panic is the correct response and must
+    // never be softened into a propagated error.
+    #[allow(clippy::unwrap_in_result)]
     pub fn add_block(&self, block: Block) -> Result<BlockStatus> {
         // Serialize the ENTIRE block-application operation against other writers
         // (see `apply_lock` doc). Held for the whole read→decide→mutate→persist

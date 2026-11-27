@@ -388,6 +388,9 @@ impl Sim {
 
     /// SAFETY: no two honest nodes disagree on any block at or below the finality
     /// floor (min honest height − finality_depth).
+    // `honest.len() < 2` returns above, so .min() on the non-empty iterator is
+    // infallible.
+    #[allow(clippy::unwrap_in_result)]
     pub fn check_safety(&self) -> Result<(), String> {
         let honest = self.honest();
         if honest.len() < 2 {

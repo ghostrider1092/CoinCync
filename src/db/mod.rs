@@ -911,8 +911,8 @@ impl Database {
     pub fn get_tx_location(&self, tx_hash: &[u8]) -> Option<(u64, u32)> {
         match self.tx_index.get(tx_hash) {
             Ok(Some(data)) if data.len() >= 12 => {
-                let height = u64::from_le_bytes(data[..8].try_into().unwrap());
-                let tx_idx = u32::from_le_bytes(data[8..12].try_into().unwrap());
+                let height = u64::from_le_bytes(data[..8].try_into().ok()?);
+                let tx_idx = u32::from_le_bytes(data[8..12].try_into().ok()?);
                 Some((height, tx_idx))
             }
             _ => None,

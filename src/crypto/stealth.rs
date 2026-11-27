@@ -707,6 +707,10 @@ impl SubaddressManager {
     }
 
     /// Get or generate a specific subaddress
+    // The map is populated for `index` directly above when missing, so the
+    // get().expect() is a logic invariant, not a fallible op — propagating it
+    // would be unreachable dead code.
+    #[allow(clippy::unwrap_in_result)]
     pub fn get_or_generate(&mut self, index: u32) -> Result<&Subaddress> {
         if !self.generated.contains_key(&index) {
             // Flat legacy manager — account 0. Account-aware generation lives in
