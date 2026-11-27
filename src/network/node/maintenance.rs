@@ -86,6 +86,12 @@
 //!   TESTS: `self_heal_*` in `self_heal_tests` cover healthy/synced,
 //!   behind-but-progressing, nobody-ahead, stalled→recover, and the rate-limit.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -438,7 +444,7 @@ async fn run_dandelion_tick(
     event_tx: &broadcast::Sender<NodeEvent>,
     magic: [u8; 4],
 ) {
-    let now = chrono::Utc::now().timestamp() as u64;
+    let now = crate::clock::real_unix_now();
     while let Ok(transaction) = broadcast_rx.try_recv() {
         debug!(
             "STEM: Local transaction {} entering Dandelion++",
@@ -907,6 +913,14 @@ async fn run_self_heal_tick(
 
 #[cfg(test)]
 mod mesh_floor_tests {
+    // Test-only numeric casts: small loop-index counts cast to u16 for
+    // synthetic peer ports. Intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1145,6 +1159,14 @@ mod self_heal_tests {
 
 #[cfg(test)]
 mod discovery_tests {
+    // Test-only numeric casts: small loop-index counts cast to u16 for
+    // synthetic peer ports. Intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
     use crate::network::bootstrap::AddressManager;
     use std::net::{IpAddr, Ipv4Addr};

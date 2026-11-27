@@ -82,6 +82,12 @@
 //!   quasi-4-regular graph, making stem-path tracing tractable.
 //!   TESTS: `has_adequate_privacy_requires_min_outbound_peers`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::constants::{
     DANDELION_EMBARGO_MAX_SECS, DANDELION_EMBARGO_MEAN_SECS, DANDELION_EPOCH_BASE_SECS,
     DANDELION_EPOCH_JITTER_SECS, DANDELION_FLUFF_PROBABILITY, DANDELION_STEMS,
@@ -555,6 +561,10 @@ impl DandelionRouter {
         let mut rng = rand::rngs::OsRng;
         // Exponential distribution: -ln(U) / lambda, where lambda = 1/mean
         let u: f64 = rng.gen_range(0.001..1.0); // avoid ln(0)
+        // -ln(u) with u in (0.001, 1.0) is finite and positive; the result is a
+        // delay in seconds, capped below by .min(MAX) on the next line. Truncating
+        // to whole seconds is intentional.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let delay = (-u.ln() * DANDELION_EMBARGO_MEAN_SECS as f64) as u64;
         let capped = delay.min(DANDELION_EMBARGO_MAX_SECS);
         now + capped.max(5) // minimum 5 seconds
@@ -568,6 +578,10 @@ impl DandelionRouter {
         // SECURITY: forward-time jitter fingerprints the originator if predictable.
         let mut rng = rand::rngs::OsRng;
         let u: f64 = rng.gen_range(0.001..1.0);
+        // -ln(u) with u in (0.001, 1.0) is finite and positive; the result is a
+        // delay in seconds, capped below by .min(30) on the next line. Truncating
+        // to whole seconds is intentional.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let delay = (-u.ln() * STEM_FORWARD_MEAN_SECS) as u64;
         let capped = delay.min(30); // cap at 30 seconds
         now + capped.max(1) // minimum 1 second
@@ -689,6 +703,14 @@ pub struct DandelionStats {
 
 #[cfg(test)]
 mod tests {
+    // Test-only numeric casts: a loop index cast to u32 for synthetic tx
+    // `extra` bytes. Intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
     use crate::primitives::Amount;
     use crate::transaction::TxType;

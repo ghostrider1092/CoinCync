@@ -92,6 +92,12 @@
 //!   keep encrypted peers biases eviction against low-cost plaintext bots.
 //!   TESTS: `within_attacker_group_picks_youngest`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
@@ -264,7 +270,7 @@ where
         a.connected_at
             .cmp(&b.connected_at)
             .then_with(|| b.reputation.cmp(&a.reputation)) // lower rep first
-            .then_with(|| (a.encrypted as u8).cmp(&(b.encrypted as u8)))
+            .then_with(|| u8::from(a.encrypted).cmp(&u8::from(b.encrypted)))
         // a.encrypted < b.encrypted means a is plaintext → larger = b → keep b
     })?;
 
@@ -273,6 +279,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    // Test-only numeric casts: small loop-index counts cast to u64 for
+    // synthetic peer connection times. Intentional for fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
     use crate::primitives::Hash;
     use std::time::Duration;
