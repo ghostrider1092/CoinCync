@@ -1,5 +1,11 @@
 //! Privacy-store and wallet decoy snapshot RPCs.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use jsonrpsee::types::ErrorObjectOwned;
 use jsonrpsee::RpcModule;
 use serde_json::{json, Value};
@@ -46,7 +52,7 @@ const MAX_SPENT_TAGS_PAGE: usize = 50_000;
 #[cfg(feature = "sketch-gk-proof")]
 fn clamp_spent_tags_limit(requested: Option<u64>) -> usize {
     match requested {
-        Some(l) => (l as usize).clamp(1, MAX_SPENT_TAGS_PAGE),
+        Some(l) => usize::try_from(l).unwrap_or(usize::MAX).clamp(1, MAX_SPENT_TAGS_PAGE),
         None => MAX_SPENT_TAGS_PAGE,
     }
 }
@@ -398,7 +404,7 @@ pub(super) fn register(module: &mut RpcModule<RpcState>) -> Result<()> {
             use std::collections::HashSet;
             // Optional positional params [offset, limit]; tolerate none/partial.
             let args: Vec<u64> = params.parse().unwrap_or_default();
-            let offset = args.first().copied().unwrap_or(0) as usize;
+            let offset = usize::try_from(args.first().copied().unwrap_or(0)).unwrap_or(usize::MAX);
             // Per-response cap bounds the serialized size; a larger request is
             // clamped and the wallet pages through the remainder.
             let limit = clamp_spent_tags_limit(args.get(1).copied());

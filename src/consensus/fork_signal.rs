@@ -64,6 +64,12 @@
 //!   `state_and_record_persists_lock_in_across_window_boundary`,
 //!   `state_and_record_is_idempotent`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::constants::{SIGNAL_THRESHOLD, SIGNAL_WINDOW};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -414,7 +420,7 @@ impl ForkSignaler {
         // produce a nonsensical >100% pct. `.min(100)` clamps the
         // UI-facing value so explorers/dashboards never see "500%
         // signaling" briefly during window transitions.
-        let pct = ((count * 100 / total) as u32).min(100);
+        let pct = u32::try_from((count * 100 / total).min(100)).unwrap_or(100);
 
         if count >= SIGNAL_THRESHOLD {
             DeploymentState::LockedIn {
@@ -478,6 +484,14 @@ impl ForkSignaler {
 
 #[cfg(test)]
 mod tests {
+    // Tests build signal bit patterns via `i as u8` over tiny ranges; the
+    // truncation/sign casts are legitimate in-test fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
 
     #[test]

@@ -18,6 +18,12 @@
 //!   set + spent-key-image index): Balance/Ownership/Sum resolve on-chain
 //!   anchors, Source checks key-image spentness. Covers all four proof types.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::crypto::{
     create_balance_proof, create_ownership_proof, create_source_proof, create_sum_proof,
     verify_balance_proof_anchored, verify_ownership_proof_anchored, verify_source_proof_anchored,
@@ -869,7 +875,7 @@ impl CustodyAttestation {
         signers: &[KeyShare],
     ) -> Result<Self> {
         let org = org.into();
-        if (signers.len() as u16) < config.threshold {
+        if signers.len() < usize::from(config.threshold) {
             return Err(Error::InvalidState(format!(
                 "custody attestation needs >= {} signers, got {}",
                 config.threshold,
@@ -1308,6 +1314,14 @@ impl PayrollRun {
 
 #[cfg(test)]
 mod tests {
+    // Test vectors mint small output refs via `i as u8` over tiny ranges; the
+    // truncation/sign casts are legitimate in-test fixtures.
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_lossless
+    )]
+
     use super::*;
     use crate::crypto::{
         create_balance_proof, BlindingFactor, KeyImage, PedersenCommitment, SecretScalar,
