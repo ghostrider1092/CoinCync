@@ -41,6 +41,12 @@
 //!   interaction is a gap — needs a real `Blockchain` reorg across a pruned
 //!   fork_point.)
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::consensus::Block;
 use crate::primitives::Hash;
 use std::collections::HashSet;
@@ -306,7 +312,7 @@ impl PrunedBlockData {
             tx_root: block.header.tx_root,
             timestamp: block.header.timestamp.as_secs(),
             target: block.header.target,
-            tx_count: block.transactions.len() as u32,
+            tx_count: u32::try_from(block.transactions.len()).unwrap_or(u32::MAX),
         }
     }
 }

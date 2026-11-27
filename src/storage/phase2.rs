@@ -16,6 +16,12 @@
 //! calls the store's own `rewind`, never this trait method — the
 //! `mock_store_*`/`real_stores_*` tests would stack-overflow if that regressed).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::storage::{KernelStore, ShieldedStore, SparkStore};
 
 /// The common reorg + accumulator surface every Phase-2 store exposes.
@@ -327,6 +333,8 @@ pub fn rewind_all(stores: &[&dyn Phase2Store]) -> Vec<(&'static str, RewindOutco
 
 #[cfg(test)]
 mod tests {
+    // Test block heights (u64) compared against usize checkpoint depths.
+    #![allow(clippy::cast_possible_truncation)]
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

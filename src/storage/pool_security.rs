@@ -24,6 +24,12 @@
 //! only. Wiring `guard` into a block-apply assertion (halt on violation) is an
 //! operator choice left to the caller.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use spark_connector::Nullifier;
 
 use crate::storage::spark_pool::SparkPoolStore;
@@ -190,7 +196,8 @@ impl SecretService {
             });
         }
         if coin_count > 0 {
-            let ratio_pct = (spent_tag_count as u128 * 100 / coin_count as u128) as u64;
+            let ratio_pct =
+                u64::try_from(spent_tag_count as u128 * 100 / coin_count as u128).unwrap_or(u64::MAX);
             if ratio_pct >= self.thresholds.spend_ratio_pct {
                 anomalies.push(Anomaly::HighSpendRatio {
                     spent: spent_tag_count,
