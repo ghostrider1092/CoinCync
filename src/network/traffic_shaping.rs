@@ -54,6 +54,12 @@
 //!   THREAT: unbounded queue growth (memory DoS) or dropped real messages.
 //!   TESTS: `pacer_bounded_queue_signals_caller_to_direct_send`.
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use crate::colony::stick_insect::{padded_len, SIZE_BUCKETS};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -198,7 +204,7 @@ impl TrafficShaper {
         let target_size = target_total.saturating_sub(outer_overhead).max(encoded_len);
 
         let mut padded = Vec::with_capacity(target_size);
-        let encoded_length = (raw_len as u32) | NORMALIZED_LENGTH_FLAG;
+        let encoded_length = u32::try_from(raw_len).unwrap_or(u32::MAX) | NORMALIZED_LENGTH_FLAG;
         padded.extend_from_slice(&encoded_length.to_le_bytes());
         padded.extend_from_slice(data);
 
@@ -565,7 +571,7 @@ impl ConstantRatePacer {
     /// constant-rate whether the node is transacting or idle.
     pub async fn run(self: Arc<Self>, sender: mpsc::Sender<Vec<u8>>, shutdown: Arc<AtomicBool>) {
         debug!(
-            slot_ms = self.slot.as_millis() as u64,
+            slot_ms = u64::try_from(self.slot.as_millis()).unwrap_or(u64::MAX),
             "constant-rate origination pacer started"
         );
         while !shutdown.load(Ordering::Relaxed) {

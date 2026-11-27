@@ -112,6 +112,12 @@
 //!   TESTS: (gap — no test in this crate exercises multi-gateway fallback;
 //!   coverage here is limited to the pure signature/validation helpers).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -448,7 +454,7 @@ async fn fetch_bounded(
     // Length-check via Content-Length header first; cheap rejection
     // before we buffer any body bytes.
     if let Some(len) = resp.content_length() {
-        if (len as usize) > max_bytes {
+        if len > max_bytes as u64 {
             return Err(format!("content-length {} exceeds cap {}", len, max_bytes));
         }
     }

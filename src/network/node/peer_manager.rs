@@ -72,6 +72,12 @@
 //!   TESTS: (gap — no test drives `pick_scored_peer`'s weighted-random
 //!   selection or its zero-weight/lock-contention fallback path).
 
+#![deny(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -839,7 +845,7 @@ async fn observe_outbound_health(
     let pretty: Vec<String> = snapshot
         .iter()
         .map(|(subnet, count)| {
-            let hi = (*subnet >> 8) as u8;
+            let hi = ((*subnet >> 8) & 0xff) as u8;
             let lo = (*subnet & 0xff) as u8;
             format!("{}.{}/16={}", hi, lo, count)
         })
