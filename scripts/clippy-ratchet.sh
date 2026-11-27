@@ -11,13 +11,15 @@
 #         clippy::cast_lossless
 #     )]
 #
-# The workspace baseline (Cargo.toml `[lints.clippy]`) sets `clippy::all = allow`,
-# so these three cast lints fire ONLY in files that opted in via that `#![deny]`.
-# That makes a PLAIN `cargo clippy` (no `-D warnings`) exit non-zero EXACTLY when
-# a ratcheted file gains a new truncating / sign-losing / needless-lossless cast,
-# while staying green on the pre-existing warn-level backlog elsewhere. This gate
-# runs that plain clippy, and additionally guards the `#![deny]` blocks themselves
-# from being silently removed.
+# The workspace baseline (Cargo.toml `[lints.clippy]`) sets `clippy::all = allow`
+# but promotes these three cast lints to `warn`. So a PLAIN `cargo clippy` emits a
+# WARNING for every remaining cast (including the not-yet-swept locked core) yet
+# still EXITS 0 — warnings do not fail the exit code. A file's own
+# `#![deny(clippy::cast_*)]` escalates those three to hard ERRORS within that file,
+# so plain clippy exits non-zero EXACTLY when an already-swept (deny'd) file gains
+# a new truncating / sign-losing / needless-lossless cast. That is the ratchet; the
+# remaining warn-level backlog does NOT fail this gate. This script runs that plain
+# clippy and additionally guards the `#![deny]` blocks themselves from removal.
 #
 # It deliberately does NOT touch the lock-protected consensus/emission core
 # (critical_files.lock): those files carry no `#![deny]` yet and their casts are

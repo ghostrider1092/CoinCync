@@ -18,11 +18,13 @@ name: Lint
 #     surface-by-surface, then delete that line (the `-D warnings` gate is wired).
 #   - cast-ratchet: a HARD gate (scripts/clippy-ratchet.sh). The non-locked workspace
 #     has been swept for lossy integer casts surface-by-surface; each swept file
-#     carries a file-level #![deny(clippy::cast_*)]. Because the workspace sets
-#     clippy::all = allow, a PLAIN clippy fails only on a NEW lossy cast in an
-#     already-swept file — so this gate passes today and catches regressions,
-#     without waiting on the broad backlog. The lock-protected consensus core is
-#     excluded (its casts move only in a planned fingerprint-moving release).
+#     carries a file-level #![deny(clippy::cast_*)]. The three cast lints are `warn`
+#     (not deny) workspace-wide, so a PLAIN clippy warns on remaining casts but
+#     exits 0; a swept file's #![deny] promotes them to errors there, so plain
+#     clippy fails only on a NEW lossy cast in an already-swept file. This gate
+#     passes today and catches regressions without waiting on the broad backlog.
+#     The lock-protected consensus core is excluded (its casts move only in a
+#     planned fingerprint-moving release).
 
 on:
   pull_request:
@@ -117,8 +119,9 @@ jobs:
 
       - name: cast-lint ratchet gate (HARD)
         # Plain clippy fails ONLY on a new lossy cast in a file that already
-        # carries #![deny(clippy::cast_*)] (clippy::all = allow workspace-wide),
-        # plus a floor guard that those deny blocks are not removed. Unlike the
+        # carries #![deny(clippy::cast_*)] — the cast lints are warn workspace-wide,
+        # so warnings don't fail the exit, but a file's #![deny] makes them errors.
+        # Plus a floor guard that those deny blocks are not removed. Unlike the
         # informational clippy job above, this is a hard gate: it passes today and
         # fails only on a regression. See scripts/clippy-ratchet.sh.
         run: bash scripts/clippy-ratchet.sh
